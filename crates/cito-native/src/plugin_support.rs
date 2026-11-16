@@ -878,13 +878,22 @@ pub fn remember_process(mut caller: Value) -> Value {
     }
     caller
 }
-// Concrete plugins supply their own process-command predicate and session hint.
-// The host owns cache storage and passes a previously successful caller unchanged.
+pub fn has_generic_session_mismatch(req: &Value, actual_sid: &str) -> bool {
+    ["meta", "_meta"]
+        .iter()
+        .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
+        && ["meta", "_meta"]
+            .iter()
+            .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid))
+}
+// Concrete plugins validate their own session binding after the shared cache and
+// process checks, before request metadata fences. The host owns cache storage.
 pub fn cached_caller(
     req: &Value,
     harness: &str,
     session_hint: Option<&str>,
     matches_command: impl FnOnce(&str) -> bool,
+    check_binding: impl FnOnce(&Value) -> std::result::Result<(), Value>,
 ) -> std::result::Result<Option<Value>, Value> {
     if req["require_open"] != false || req["cached_caller"].is_null() {
         return Ok(None);
@@ -931,16 +940,10 @@ pub fn cached_caller(
             "Cached endpoint process command or start time changed",
         ));
     }
+    check_binding(cached)?;
     // A generic session fence can name another provider. Stale process bindings
     // and unfenced cache misses must let the host continue provider discovery.
-    if session_hint.is_none()
-        && ["meta", "_meta"]
-            .iter()
-            .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
-        && ["meta", "_meta"]
-            .iter()
-            .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != session))
-    {
+    if session_hint.is_none() && has_generic_session_mismatch(req, session) {
         return Err(error("BINDING_REQUIRED", "Caller session mismatch"));
     }
     verify(cached, req).map_err(|e| error("INVALID_INPUT", e))?;

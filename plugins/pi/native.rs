@@ -414,7 +414,7 @@ pub fn handle(input: &Value) -> Result<Value> {
                 ));
             }
             if cs.is_empty() {
-                match cached_caller(req, "pi", None, matches_process) {
+                match cached_caller(req, "pi", None, matches_process, |_| Ok(())) {
                     Ok(Some(c)) => {
                         if !allow_process_only(req)
                             && !pid(&c).is_some_and(|p| {

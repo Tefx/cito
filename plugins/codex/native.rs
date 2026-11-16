@@ -490,7 +490,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
     }
-    for source in [&req["meta"], &req["headers"]] {
+    for source in [&req["meta"], &req["_meta"], &req["headers"]] {
         let turn = &source["x-codex-turn-metadata"];
         let fragments = turn
             .as_array()
@@ -509,16 +509,21 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
     }
-    if caller_supplied_pid(req)?.is_none()
-        && str_at(&req["meta"], "expected_harness").is_none_or(|id| id == "codex")
-    {
-        if let Some(s) = str_at(req, "explicit_session_id") {
-            ids.push(s.into())
+    if caller_supplied_pid(req)?.is_none() {
+        if [&req["meta"], &req["_meta"]]
+            .iter()
+            .all(|source| str_at(source, "expected_harness").is_none_or(|id| id == "codex"))
+        {
+            if let Some(s) = str_at(req, "explicit_session_id") {
+                ids.push(s.into())
+            }
         }
-    }
-    if caller_supplied_pid(req)?.is_none() && req["meta"]["expected_harness"] == "codex" {
-        if let Some(s) = str_at(&req["meta"], "expected_session_id") {
-            ids.push(s.into())
+        for source in [&req["meta"], &req["_meta"]] {
+            if source["expected_harness"] == "codex" {
+                if let Some(s) = str_at(source, "expected_session_id") {
+                    ids.push(s.into())
+                }
+            }
         }
     }
     if let Some(s) = env_value(req, "CODEX_THREAD_ID") {
@@ -626,7 +631,9 @@ pub fn handle(req: &Value) -> Result<Value> {
                 || (explicit.is_none()
                     && ((!transport_pid && str_at(req, "cli_cmd").is_none()) || all.is_empty()));
             if needs_cached_pid && (!transport_pid || req["cached_caller"].is_object()) {
-                match cached_caller(req, "codex", explicit.as_deref(), matches_process) {
+                match cached_caller(req, "codex", explicit.as_deref(), matches_process, |_| {
+                    Ok(())
+                }) {
                     Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),
                     Ok(None) => {}
@@ -647,9 +654,13 @@ pub fn handle(req: &Value) -> Result<Value> {
             } else if str_at(req, "cli_cmd").is_some()
                 || transport_pid
                 || (pid(req).is_none()
-                    && (req["meta"]["expected_harness"] == "codex"
+                    && ([&req["meta"], &req["_meta"]]
+                        .iter()
+                        .any(|source| source["expected_harness"] == "codex")
                         || (req["http_transport"] != true
-                            && req["meta"]["http_transport"] != true)))
+                            && [&req["meta"], &req["_meta"]]
+                                .iter()
+                                .all(|source| source["http_transport"] != true))))
             {
                 match all
                     .iter()
@@ -674,12 +685,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             // A generic session fence cannot turn an inferred thread into an
             // authoritative cross-provider conflict. Let other providers resolve it.
             if explicit.is_none()
-                && ["meta", "_meta"]
-                    .iter()
-                    .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
-                && ["meta", "_meta"].iter().any(|key| {
-                    str_at(&req[key], "expected_session_id").is_some_and(|id| c["session_id"] != id)
-                })
+                && has_generic_session_mismatch(req, str_at(&c, "session_id").unwrap_or(""))
             {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
             }

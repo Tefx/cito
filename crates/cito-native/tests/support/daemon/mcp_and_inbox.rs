@@ -295,11 +295,56 @@ fn cached_generic_session_fences_allow_all_providers_to_continue() {
                 unchanged["caller"]["session_id"], "cached-session",
                 "{unchanged}"
             );
+            for key in ["meta", "_meta"] {
+                for metadata in [
+                    json!({"claudeSessionId":"resumed-session"}),
+                    json!({"expected_harness":"claude","expected_session_id":"resumed-session"}),
+                ] {
+                    let mut fenced = req.clone();
+                    fenced[key] = metadata;
+                    let conflict = f.plugin(bin, fenced);
+                    assert_eq!(conflict["error_code"], "INVALID_INPUT", "{conflict}");
+                }
+            }
             let mut changed: Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
             changed["session_id"] = json!("resumed-session");
             fs::write(&binding, changed.to_string()).unwrap();
             let switched = f.plugin(bin, req.clone());
             assert_eq!(switched["error_code"], "BINDING_REQUIRED", "{switched}");
+            for key in ["meta", "_meta"] {
+                for metadata in [
+                    json!({"claudeSessionId":"resumed-session"}),
+                    json!({"expected_harness":"claude","expected_session_id":"resumed-session"}),
+                ] {
+                    let mut fenced = req.clone();
+                    fenced[key] = metadata;
+                    let switched = f.plugin(bin, fenced.clone());
+                    assert_eq!(switched["error_code"], "BINDING_REQUIRED", "{switched}");
+                    assert_eq!(
+                        switched["message"], "Endpoint session binding changed",
+                        "{switched}"
+                    );
+                    let mut malformed = fenced.clone();
+                    malformed["cached_caller"]["session_id"] = json!("");
+                    let rejected = f.plugin(bin, malformed);
+                    assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+                    let mut stale = fenced.clone();
+                    stale["cached_caller"]["process_identity"]["started_at"] =
+                        json!("old-invocation");
+                    let rejected = f.plugin(bin, stale);
+                    assert_eq!(rejected["error_code"], "BINDING_REQUIRED", "{rejected}");
+                    assert_ne!(
+                        rejected["message"], "Endpoint session binding changed",
+                        "{rejected}"
+                    );
+                    fenced["cached_caller"] = Value::Null;
+                    let resolved = f.plugin(bin, fenced);
+                    assert_eq!(
+                        resolved["caller"]["session_id"], "resumed-session",
+                        "{resolved}"
+                    );
+                }
+            }
             changed["start"] = json!("old-invocation");
             fs::write(&binding, changed.to_string()).unwrap();
             let obsolete = f.plugin(bin, req);
@@ -309,6 +354,64 @@ fn cached_generic_session_fences_allow_all_providers_to_continue() {
             );
         }
         f.stop(endpoint);
+    }
+}
+
+#[test]
+fn provider_session_metadata_has_envelope_parity() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    for (bin, harness, keys) in [
+        (
+            CLAUDE,
+            "claude",
+            &["claudeSessionId", "sessionId", "claude_session_id"][..],
+        ),
+        (
+            CODEX,
+            "codex",
+            &["openai/threadId", "threadId", "codexThreadId"][..],
+        ),
+    ] {
+        let mut metadata: Vec<Value> = keys
+            .iter()
+            .map(|key| json!({*key:"selected-session"}))
+            .collect();
+        metadata.push(json!({"expected_harness":harness,"expected_session_id":"selected-session"}));
+        if harness == "codex" {
+            metadata.push(json!({"x-codex-turn-metadata":"{\"thread_id\":\"selected-session\"}"}));
+        }
+        for envelope in ["meta", "_meta"] {
+            for fields in &metadata {
+                let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
+                req[envelope] = fields.clone();
+                let resolved = f.plugin(bin, req.clone());
+                assert_eq!(
+                    resolved["caller"]["session_id"], "selected-session",
+                    "{harness}/{envelope}/{fields}: {resolved}"
+                );
+                let other = if envelope == "meta" { "_meta" } else { "meta" };
+                req[other] = json!({keys[0]:"conflicting-session"});
+                let rejected = f.plugin(bin, req);
+                assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+            }
+        }
+    }
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER); INSERT INTO threads VALUES('indexed-session','/repo',0)", &[]).unwrap();
+    let req =
+        json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
+    let unfenced = f.plugin(CODEX, req.clone());
+    assert_eq!(unfenced["error_code"], "BINDING_REQUIRED", "{unfenced}");
+    for envelope in ["meta", "_meta"] {
+        let mut fenced = req.clone();
+        fenced[envelope] = json!({"expected_harness":"codex"});
+        let resolved = f.plugin(CODEX, fenced);
+        assert_eq!(
+            resolved["caller"]["session_id"], "indexed-session",
+            "{resolved}"
+        );
     }
 }
 

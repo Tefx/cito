@@ -432,20 +432,24 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
     let mut explicit = vec![];
     for s in [
         str_at(req, "explicit_session_id"),
-        str_at(&req["meta"], "claudeSessionId"),
-        str_at(&req["meta"], "sessionId"),
-        str_at(&req["meta"], "claude_session_id"),
         str_at(&req["headers"], "x-claude-session-id"),
-        if req["meta"]["expected_harness"] == "claude" {
-            str_at(&req["meta"], "expected_session_id")
-        } else {
-            None
-        },
     ]
     .into_iter()
     .flatten()
     {
         explicit.push(validate_session(s)?)
+    }
+    for source in [&req["meta"], &req["_meta"]] {
+        for key in ["claudeSessionId", "sessionId", "claude_session_id"] {
+            if let Some(s) = str_at(source, key) {
+                explicit.push(validate_session(s)?);
+            }
+        }
+        if source["expected_harness"] == "claude" {
+            if let Some(s) = str_at(source, "expected_session_id") {
+                explicit.push(validate_session(s)?);
+            }
+        }
     }
     if let Some(s) = env_value(req, "CLAUDE_SESSION_ID") {
         if !s.trim().is_empty() {
@@ -689,25 +693,24 @@ pub fn handle(req: &Value) -> Result<Value> {
                 && req["cached_caller"].is_object()
                 && !req["cli_cmd"].is_string()
             {
-                match cached_caller(req, "claude", hint.as_deref(), matches_process) {
-                    Ok(Some(c)) => {
-                        if let Some(p) = pid(req) {
-                            if let Ok(binding) = read_json(&binding_path(req, p)) {
-                                if str_at(&binding, "start").is_some()
-                                    && str_at(&binding, "start").map(str::to_owned)
-                                        == process_start(p)
-                                    && str_at(&binding, "session_id")
-                                        .is_some_and(|sid| c["session_id"] != sid)
-                                {
-                                    return Ok(error(
-                                        "BINDING_REQUIRED",
-                                        "Endpoint session binding changed",
-                                    ));
-                                }
+                match cached_caller(req, "claude", hint.as_deref(), matches_process, |c| {
+                    if let Some(p) = pid(req) {
+                        if let Ok(binding) = read_json(&binding_path(req, p)) {
+                            if str_at(&binding, "start").is_some()
+                                && str_at(&binding, "start").map(str::to_owned) == process_start(p)
+                                && str_at(&binding, "session_id")
+                                    .is_some_and(|sid| c["session_id"] != sid)
+                            {
+                                return Err(error(
+                                    "BINDING_REQUIRED",
+                                    "Endpoint session binding changed",
+                                ));
                             }
                         }
-                        return Ok(json!({"ok":true,"caller":c}));
                     }
+                    Ok(())
+                }) {
+                    Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),
                     Ok(None) => {}
                 }
@@ -755,15 +758,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     })
                 });
             let c = caller(req, "claude", &sid, cwd, endpoint, t.as_deref());
-            if live.is_none()
-                && hint.is_none()
-                && ["meta", "_meta"]
-                    .iter()
-                    .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
-                && ["meta", "_meta"]
-                    .iter()
-                    .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != sid))
-            {
+            if live.is_none() && hint.is_none() && has_generic_session_mismatch(req, &sid) {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
             }
             if let Err(e) = verify(&c, req) {
