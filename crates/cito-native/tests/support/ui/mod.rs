@@ -259,6 +259,7 @@ mod capabilities;
 mod directory;
 mod lazy_rendering;
 mod menu;
+mod oidc_settlement;
 mod oracle_e2e;
 mod render_stability;
 mod settings_channels;

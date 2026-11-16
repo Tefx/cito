@@ -54,7 +54,7 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
         // Address chips reserve copy feedback space; scope toggles keep a uniform width.
         let reservedWidth = control.feedbackTimer?.isValid == true || id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
         let pairedWidth = MenuControl.toggleWidth(id, title:control.label.stringValue, font: control.label.font ?? .systemFont(ofSize:11,weight:.medium))
-        control.frame.size.width = min(control.maximumWidth, max(reservedWidth, pairedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
+        control.frame.size.width = min(control.maximumWidth, max(control.pendingWidth, reservedWidth, pairedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
             leadingDot:control.leadingDotView?.isHidden == false,
@@ -345,6 +345,8 @@ final class MenuControl: NSControl {
     var pressed: (() -> Void)?
     var style: Style = .neutral { didSet { layoutContents(); applyVisualState() } }
     var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
+    // Reserve the resting title while pending so draft edits can restore it in place.
+    var pendingWidth: CGFloat = 0
     var maximumWidth: CGFloat = .greatestFiniteMagnitude
     var feedbackTimer: Timer?
     var restingTitle: String?

@@ -3,10 +3,26 @@ import AppKit
 extension Companion {
     func pendingLabel(_ control: MenuControl, _ pending: Bool, _ title: String) {
         guard pending else { return }
+        control.feedbackTimer?.invalidate(); control.feedbackTimer=nil
         control.isEnabled = false; control.setLeadingSymbol(nil)
         control.label.stringValue = title; control.setAccessibilityLabel(title); control.toolTip = title
-        control.frame.size.width = MenuControl.intrinsicWidth(title)
+        let right = control.frame.maxX
+        control.pendingWidth = max(control.frame.width,MenuControl.intrinsicWidth(title))
+        control.frame.size.width = control.pendingWidth
+        control.frame.origin.x = right - control.pendingWidth
     }
+    func channelSavePending(_ op: String, hub: String, channel: String, scope: String) -> Bool {
+        pendingControls.contains { request, pending in
+            guard pending.op == op && pending.hub == hub && pending.target == channel,
+                  let sent = pendingChannelValues[request] else { return false }
+            let fields = channelSettingsByHub[hub]?.first { $0.id == channel }?.fields ?? []
+            let drafts = channelUiStates["\(hub)|\(channel)"]?.drafts ?? [:]
+            return fields.filter { $0.scope == scope }.allSatisfy { field in
+                (drafts[field.key] ?? field.value ?? "") == (sent.values[field.key] ?? field.value ?? "")
+            }
+        }
+    }
+
     func rebuildFeedbackAfter(_ seconds: Double) {
         RunLoop.main.add(Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
             self?.rebuildSettingsPanel(preservingEditor: true)
@@ -39,11 +55,11 @@ extension Companion {
             hostHubPortError = nil
             if hostHubPortSaved && Int((hostHubPortDraft ?? "").trimmingCharacters(in:.whitespacesAndNewlines)) == submittedHostHubPort { hostHubPortDraft = nil }
         }
-        if confirmHubSave, let pending = pendingHubSave, savedRequest == pending.requestId,
-           let saved = value.hubs.first(where: { $0.name == pending.name }) {
+        if confirmHubSave, let pending = pendingHubSave, savedRequest == pending.requestId {
+            let saved = value.hubs.first(where: { $0.name == pending.name })
             pendingHubSave = nil
-            addHubError = saved.error
-            if saved.error == nil {
+            addHubError = saved?.error
+            if saved?.error == nil {
                 if addHubDraftGeneration == pending.generation {
                     addHubFormOpen = false; addHubToken = ""
                 } else if editingExistingHub || proposedHubName(addHubName,url:addHubUrl,existing:value.hubs,creating:false,original:pending.name) == pending.name {
@@ -113,9 +129,11 @@ extension Companion {
     @discardableResult
     func settleChannelReceipt(_ frame: Frame) -> Bool {
         let operation = frame.source_op ?? frame.action ?? (frame.op == "pair_code" ? "channel_pair" : frame.op == "channel_test_result" ? "channel_test" : "")
-        guard let request = frame.request_id, let hub = frame.hub,
+        guard let request = frame.request_id,
               let pending = pendingControls[request], pending.op == operation,
-              pending.hub == hub, pending.target == (frame.channel_id ?? frame.channel ?? "") else { return false }
+              frame.hub == nil || pending.hub == frame.hub,
+              pending.target == (frame.channel_id ?? frame.channel ?? "") else { return false }
+        let hub = pending.hub
         pendingControls.removeValue(forKey: request)
         let key = "\(hub)|\(pending.target)"
         if let reset = pendingChannelResets.removeValue(forKey: request),
@@ -152,6 +170,39 @@ extension Companion {
         }
         if let warning = frame.warning { settingsBannerError = warning }
         return true
+    }
+
+    @discardableResult
+    func settleReceiptOnly(_ frame: Frame) -> Bool {
+        var settled = settleChannelReceipt(frame)
+        guard let request = frame.request_id else { return settled }
+        let operation = frame.source_op ?? frame.action ?? ""
+        let failed = frame.ok == false || frame.op == "error"
+        let message = frame.warning ?? frame.error
+        if let pending = pendingHubSave, request == pending.requestId,
+           operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation) {
+            pendingHubSave = nil
+            if failed { addHubError = message ?? "Hub save failed." }
+            else if frame.authority_changed != true && addHubDraftGeneration == pending.generation {
+                addHubFormOpen = false; addHubToken = ""
+            }
+            settled = true
+        }
+        if request == hubInviteRequest && (operation.isEmpty || operation == "paste_hub_invite") {
+            hubInvitePending = false; settled = true
+        }
+        if request == submittedHostHubRequestId && (operation.isEmpty || operation == "set_host_hub") {
+            hostHubPortPending = false; submittedHostHubRequestId = ""; settled = true
+        }
+        if (operation.isEmpty || operation == "setup_apply"), pendingAppChecks.removeValue(forKey: request) != nil { settled = true }
+        if let pending = pendingControls[request], pending.op == operation || operation.isEmpty,
+           frame.hub == nil || frame.hub == pending.hub,
+           frame.channel_id == nil || frame.channel_id == pending.target,
+           frame.channel == nil || frame.channel == pending.target {
+            pendingControls.removeValue(forKey: request); settled = true
+        }
+        if settled, let message = message { settingsBannerError = message }
+        return settled
     }
 
     func updateInbox(paused: Bool? = nil, hub: String, scope: String? = nil) {
@@ -202,7 +253,7 @@ extension Companion {
         case "command-w": closeSettingsPanel(emitAction:true)
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
-            else if settingsActiveTab == "hubs" && addHubFormOpen { addHubFormOpen = false; inviteParseRequest=""; rebuildSettingsPanel() }
+            else if settingsActiveTab == "hubs" && addHubFormOpen { addHubFormOpen = false; inviteParseRequest=""; pendingHubSave=nil; rebuildSettingsPanel() }
             else if settingsActiveTab == "channels" && (channelSettingsByHub[effectiveChannelHub] ?? []).contains(where: { channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.editingGateway == true }) {
                 for (hub, channels) in channelSettingsByHub where hub == effectiveChannelHub {
                     for ch in channels where channelUiStates["\(hub)|\(ch.id)"]?.editingGateway == true {
@@ -248,6 +299,7 @@ extension Companion {
         if let userField = settingsFieldControls["settings_hub_user"] { addHubUser = userField.stringValue }
         if let issuerField = settingsFieldControls["settings_hub_issuer"] { addHubIssuer = issuerField.stringValue }
         if let clientField = settingsFieldControls["settings_hub_client_id"] { addHubClientId = clientField.stringValue }
+        if let portField = settingsFieldControls["settings_hub_redirect_port"] { addHubRedirectPort = portField.stringValue }
     }
 
     func makeEditableField(_ id: String, frame: NSRect, placeholder: String, value: String, secret: Bool = false, accessibilityLabel: String) -> NSTextField {
@@ -320,7 +372,7 @@ extension Companion {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false) {
+    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false, syncFields: Bool = true) {
         settingsDirty = true
         guard settingsVisible || renderingForInspection, let window = settingsPanel else { return }
         if preservingEditor, settingsFieldControls.values.contains(where: { $0.currentEditor() === window.firstResponder && $0.currentEditor() != nil }) {
@@ -333,7 +385,7 @@ extension Companion {
         let focused = settingsFieldControls.first { $0.value.currentEditor() != nil && $0.value.currentEditor() === window.firstResponder }
         let focusedId = focused?.key
         let selectedRange = (focused?.value.currentEditor() as? NSTextView)?.selectedRange()
-        syncAddHubFieldsFromControls()
+        if syncFields { syncAddHubFieldsFromControls() }
         MenuControl.clearHoverWhere { $0.window === window }
         for case let scroll as NSScrollView in window.contentView?.subviews ?? [] {
             if let id = scroll.identifier?.rawValue {
@@ -702,6 +754,7 @@ extension Companion {
                 clear.style = .destructiveHover
                 clear.identifier=NSUserInterfaceItemIdentifier("clear_channel_service:\(ch.id)")
                 clear.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
+                pendingLabel(clear,isPending("disconnect_human_channel",hub:effectiveChannelHub,target:ch.id) || isPending("clear_channel_service",hub:effectiveChannelHub,target:ch.id),"Clearing…")
                 hubStratum.addSubview(clear)
                 if hubGatewayExpanded { gatewayLeading.append(clear) } else { gatewayTop.append(clear) }
             }
@@ -774,6 +827,7 @@ extension Companion {
                     let save = MenuControl("Save Gateway Token",frame:NSRect(x:304,y:6,width:140,height:24))
                     save.identifier=NSUserInterfaceItemIdentifier("save_hub_service:\(ch.id)"); save.style = .prominent
                     save.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"save_hub_service","hub":self.effectiveChannelHub,"channel_id":ch.id,"scope":"hub","values":collectValues("hub")]) }
+                    pendingLabel(save,channelSavePending("save_hub_service",hub:effectiveChannelHub,channel:ch.id,scope:"hub"),"Saving…")
                     hubStratum.addSubview(save); gatewayTrailing.append(save)
                     if gatewayActive {
                         let cancel=MenuControl("Cancel",frame:NSRect(x:232,y:6,width:66,height:24))
@@ -830,6 +884,7 @@ extension Companion {
                     guard let self=self else{return}
                     self.emit(["op":"channel_cancel_pair","hub":self.effectiveChannelHub,"channel_id":chId])
                 }
+                pendingLabel(cancel,isPending("channel_cancel_pair",hub:effectiveChannelHub,target:ch.id),"Cancelling…")
                 userStratum.addSubview(cancel); pairingActions.append(cancel)
             }
             if ch.configured {
@@ -840,12 +895,14 @@ extension Companion {
                 toggle.maximumWidth=170
                 toggle.style = ch.enabled ? .neutral : .prominent
                 toggle.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_toggle","hub":self.effectiveChannelHub,"channel_id":chId,"enabled":!ch.enabled]) }
+                pendingLabel(toggle,isPending("channel_toggle",hub:effectiveChannelHub,target:ch.id),ch.enabled ? "Pausing…" : "Resuming…")
                 userStratum.addSubview(toggle); personalActions.append(toggle)
                 let unpair=MenuControl("Unpair",frame:NSRect(x:196,y:6,width:MenuControl.intrinsicWidth("Unpair"),height:24),radius:6)
                 unpair.style = .destructiveHover
                 unpair.identifier=NSUserInterfaceItemIdentifier("unpair_channel:\(ch.id)")
                 unpair.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":chId,"reset_user":true]) }
                 unpair.isHidden = ch.can_unpair != true
+                pendingLabel(unpair,isPending("channel_unpair",hub:effectiveChannelHub,target:ch.id),"Unpairing…")
                 userStratum.addSubview(unpair); personalActions.append(unpair)
             }
             let testBtn = MenuControl("Send Test", frame: NSRect(x: 290, y: 6, width: MenuControl.intrinsicWidth("Send Test"), height: 24), radius: 6)
@@ -856,10 +913,12 @@ extension Companion {
             }
             testBtn.isHidden = ch.can_test != true || (ch.status == "error" && !ch.configured) || (disclosure && !ch.configured && !manualExpanded)
             testBtn.isEnabled = ch.canSendTest(drafts:channelUi.drafts,visibleFields:formFields)
+            pendingLabel(testBtn,isPending("channel_test",hub:effectiveChannelHub,target:ch.id),"Testing…")
             userStratum.addSubview(testBtn)
 
             let saveBtn = MenuControl("Save", frame: NSRect(x: 376, y: 6, width: 68, height: 24), radius: 6)
             saveBtn.identifier = NSUserInterfaceItemIdentifier("save_channel:\(ch.id)")
+            saveBtn.pendingWidth = MenuControl.intrinsicWidth("Saving…")
             saveBtn.style = .prominent
             saveBtn.pressed = { [weak self] in
                 guard let self = self else { return }
@@ -869,6 +928,7 @@ extension Companion {
             gate(saveBtn)
             if ch.can_edit_personal == true && !personalCollapsed && gatewayActive && (!disclosure || manualExpanded) { userStratum.addSubview(saveBtn) } else { saveBtn.isHidden=true }
             if Date() < (channelUi.savedUntil["user"] ?? .distantPast) { saveBtn.copied("✓ Saved") }
+            pendingLabel(saveBtn,channelSavePending("channel_save",hub:effectiveChannelHub,channel:ch.id,scope:"user"),"Saving…")
 
             layoutBar(in: hubStratum, y: hubStratumH-29, height: 22, flexible: hubTitle, trailing: [gatewayStatus] + gatewayTop)
             if hubGatewayExpanded { layoutBar(in: hubStratum, y: 8, height: 24, leading: gatewayLeading, trailing: gatewayTrailing) }
@@ -960,6 +1020,7 @@ extension Companion {
             guard let port = self.validHostPort(fallback:hostHub.port, fallbackOnInvalid:!nextHostEnabled) else { return }
             self.emit(["op": "set_host_hub", "enabled": nextHostEnabled, "port": port])
         }
+        pendingLabel(toggleHostBtn,isPending("set_host_hub",target:"sharing"),hostHub.enabled ? "Stopping…" : "Starting…")
         hostCard.addSubview(toggleHostBtn)
         layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:hostExpanded ? hostHeight-34 : 11,height:24,flexible:hostTitle,trailing:[hostStatus,toggleHostBtn])
 
@@ -1014,11 +1075,13 @@ extension Companion {
             guard let port = self.validHostPort(fallback:hostHub.port) else { return }
             self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"auth_mode":authMode=="none" ? "token" : "none"])
         }
+        pendingLabel(auth,isPending("set_host_hub",target:"access"),"Applying…")
         hostCard.addSubview(auth)
         let apply=MenuControl("Apply",frame:NSRect(x:394,y:12,width:72,height:24),radius:6)
         apply.identifier=NSUserInterfaceItemIdentifier("apply_host_hub_port")
         apply.isEnabled = !hostHubPortPending && Int((hostHubPortDraft ?? "\(hostHub.port)").trimmingCharacters(in: .whitespacesAndNewlines)) != hostHub.port
         if hostHubPortSaved && Date() < hostHubPortSavedUntil { apply.copied("✓ Saved") }
+        pendingLabel(apply,hostHubPortPending,"Applying…")
         apply.pressed={ [weak self] in
             guard let self=self else{return}
             let raw=(self.settingsFieldControls["host_hub_port"]?.stringValue ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
@@ -1062,7 +1125,7 @@ extension Companion {
             let wasEditing = self.editingExistingHub
             self.editingExistingHub=false
             self.editingOriginalHub=""
-            self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubAuth="none"
+            self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubRedirectPort=""; self.addHubAuth="none"; self.addHubAuthExplicit=false
             self.addHubDraftGeneration += 1
             self.addHubError=nil; self.pendingHubSave=nil; self.inviteParseRequest=""
             self.addHubFormOpen = wasEditing ? true : !self.addHubFormOpen
@@ -1077,7 +1140,7 @@ extension Companion {
             let errorText = addHubError.map(presentationError)
             let errorHeight: CGFloat = errorText.map { ceil(($0 as NSString).boundingRect(with:NSSize(width:452,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height) + 4 } ?? 0
             let errorSpace: CGFloat = errorText == nil ? 0 : errorHeight + 6
-            let formHeight: CGFloat = (editingLocalHub ? 124 : 252) + errorSpace
+            let formHeight: CGFloat = (editingLocalHub ? 124 : addHubAuth == "oidc" ? 298 : 252) + errorSpace
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
@@ -1108,7 +1171,7 @@ extension Companion {
                         guard let self=self else{return}
                         self.syncAddHubFieldsFromControls()
                         if self.addHubAuth != mode { self.addHubDraftGeneration += 1 }
-                        self.addHubAuth=mode; self.rebuildSettingsPanel()
+                        self.addHubAuth=mode; self.addHubAuthExplicit=true; self.rebuildSettingsPanel()
                     }
                     authTrack.addSubview(pill); authPills.append(pill)
                 }
@@ -1124,10 +1187,13 @@ extension Companion {
                     form.addSubview(makeEditableField("settings_hub_token",frame:NSRect(x:14,y:71,width:274,height:24),placeholder:editingExistingHub ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac",value:addHubToken,secret:true,accessibilityLabel:"Hub token"))
                     form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:296,y:71,width:170,height:24),placeholder:"e.g. alice",value:addHubUser,accessibilityLabel:"Hub username"))
                 } else if addHubAuth == "oidc" {
-                    fieldLabel("OIDC Issuer URL",NSRect(x:14,y:97,width:260,height:14))
-                    fieldLabel("OIDC Client ID",NSRect(x:282,y:97,width:184,height:14))
-                    form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:71,width:260,height:24),placeholder:"https://id.example.com",value:addHubIssuer,accessibilityLabel:"OIDC issuer URL"))
-                    form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:282,y:71,width:184,height:24),placeholder:"cito",value:addHubClientId,accessibilityLabel:"OIDC client ID"))
+                    for control in form.subviews { control.frame.origin.y += 46 }
+                    fieldLabel("OIDC Issuer URL",NSRect(x:14,y:143,width:452,height:14))
+                    form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:117,width:452,height:24),placeholder:"Auto-discovered",value:addHubIssuer,accessibilityLabel:"OIDC issuer URL"))
+                    fieldLabel("OIDC Client ID",NSRect(x:14,y:97,width:222,height:14))
+                    fieldLabel("Redirect Port",NSRect(x:244,y:97,width:222,height:14))
+                    form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:14,y:71,width:222,height:24),placeholder:"Auto-discovered",value:addHubClientId,accessibilityLabel:"OIDC client ID"))
+                    form.addSubview(makeEditableField("settings_hub_redirect_port",frame:NSRect(x:244,y:71,width:222,height:24),placeholder:"Auto-discovered",value:addHubRedirectPort,accessibilityLabel:"OIDC redirect port"))
                 }
             }
 
@@ -1161,7 +1227,7 @@ extension Companion {
             let submitBtn = MenuControl(editingExistingHub ? (editingBuiltinHub ? "Save" : "Save Hub") : "Join Hub", frame: NSRect(x: 386, y: 12, width: 80, height: 24), radius: 6)
             submitBtn.identifier = NSUserInterfaceItemIdentifier("submit_add_hub")
             submitBtn.style = .prominent
-            pendingLabel(submitBtn,pendingHubSave != nil,"Adding…")
+            pendingLabel(submitBtn,pendingHubSave != nil,editingExistingHub ? "Saving…" : "Adding…")
             submitBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.syncAddHubFieldsFromControls()
@@ -1173,7 +1239,7 @@ extension Companion {
                 else if !self.editingExistingHub && knownHubs.contains(where:{$0.name == name && ($0.is_builtin == true || $0.url != url)}) { validation="Hub name already exists. Choose a different name." }
                 else if !["http://","https://","local://"].contains(where:{url.hasPrefix($0)}) { validation="Hub URL must start with http:// or https://." }
                 else if !self.editingExistingHub && self.addHubAuth == "token" && self.addHubToken.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { validation="Shared access token is required." }
-                else if self.addHubAuth == "oidc" && (self.addHubIssuer.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || self.addHubClientId.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) { validation="OIDC issuer and client ID are required." }
+                else if self.addHubAuth == "oidc" && !self.addHubRedirectPort.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !(Int(self.addHubRedirectPort.trimmingCharacters(in:.whitespacesAndNewlines)).map { (0...65535).contains($0) } ?? false) { validation="Redirect port must be an integer from 0 to 65535." }
                 else { validation=nil }
                 if let error=validation { self.addHubError=error; self.rebuildSettingsPanel(); return }
                 var action: [String: Any] = [
@@ -1183,6 +1249,7 @@ extension Companion {
                     "auth_mode": self.addHubAuth,
                     "set_default": !self.editingExistingHub
                 ]
+                if !self.editingExistingHub && !self.addHubAuthExplicit && self.addHubAuth == "none" { action.removeValue(forKey:"auth_mode") }
                 if self.editingExistingHub { action["edit"]=true; action["original_name"]=self.editingOriginalHub; action.removeValue(forKey:"set_default") }
                 let tok = self.addHubToken.trimmingCharacters(in: .whitespacesAndNewlines)
                 let usr = self.addHubUser.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1191,8 +1258,10 @@ extension Companion {
                 if self.addHubAuth == "token", !tok.isEmpty { action["token"] = tok }
                 if self.addHubAuth == "none" || self.addHubAuth == "token" { if !usr.isEmpty { action["user"]=usr } else if self.editingExistingHub { action["user"]=NSNull() } }
                 if self.addHubAuth == "oidc" {
-                    if !iss.isEmpty { action["issuer"] = iss }
-                    if !cid.isEmpty { action["client_id"] = cid }
+                    if !iss.isEmpty { action["issuer"] = iss } else if self.editingExistingHub { action["issuer"] = NSNull() }
+                    if !cid.isEmpty { action["client_id"] = cid } else if self.editingExistingHub { action["client_id"] = NSNull() }
+                    if let port = Int(self.addHubRedirectPort.trimmingCharacters(in:.whitespacesAndNewlines)) { action["redirect_port"] = port }
+                    else if self.editingExistingHub { action["redirect_port"] = NSNull() }
                 }
                 let pending = PendingHubSave(name:name, requestId:UUID().uuidString, generation:self.addHubDraftGeneration)
                 self.pendingHubSave=pending; self.addHubError=nil
@@ -1237,8 +1306,8 @@ extension Companion {
                 edit.style = .neutral
                 edit.pressed={ [weak self] in
                     guard let self=self else{return}
-                    self.addHubName=hub.name; self.addHubUrl=hub.url; self.addHubAuth=hub.auth_mode
-                    self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubToken=""
+                    self.addHubName=hub.name; self.addHubUrl=hub.url; self.addHubAuth=hub.auth_mode; self.addHubAuthExplicit=true
+                    self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubRedirectPort=hub.redirect_port.map(String.init) ?? ""; self.addHubToken=""
                     self.addHubDraftGeneration += 1
                     self.pendingHubSave=nil; self.addHubError=nil; self.inviteParseRequest=""
                     self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.addHubFormOpen=true

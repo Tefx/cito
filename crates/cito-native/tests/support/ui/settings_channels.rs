@@ -1191,6 +1191,14 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
                 "Account Not Paired"
             }
         );
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["request_id"].is_string() && a["channel_id"] == "channel")
+            .unwrap();
+        f.send(p, json!({"op":"settings","source_op":request["op"],"request_id":request["request_id"],"hub":"personal","channel_id":"channel","committed":true}));
+        inspect(&f, p);
     }
 
     cfg["channels"][0]["configured"] = json!(true);
@@ -1259,6 +1267,16 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
                     "Not Set Up"
                 }
             );
+            // Finish this mutation before the next loop iteration submits the
+            // same values; pending controls intentionally reject duplicate clicks.
+            let request = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == "save_hub_service" || a["op"] == "disconnect_human_channel")
+                .unwrap();
+            f.send(p, json!({"op":"settings","source_op":request["op"],"request_id":request["request_id"],"hub":"personal","channel_id":"channel","committed":true}));
+            inspect(&f, p);
         }
     }
 }

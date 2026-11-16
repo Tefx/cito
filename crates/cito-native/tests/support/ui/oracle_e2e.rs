@@ -406,7 +406,16 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
             "public clipboard"
         );
     }
-    save_secret("replacement secure value + punctuation");
+    let unchanged = inspect(&f, p);
+    assert_eq!(
+        node(&unchanged, "settings_items", "save_hub_service:channel")["enabled"],
+        false,
+        "Clipboard shortcuts cannot resubmit an unchanged pending secret"
+    );
+    assert_eq!(
+        node(&unchanged, "settings_items", "channel_field:channel:secret")["text"],
+        "••••"
+    );
 
     for (id, op, surface) in [
         (
@@ -848,7 +857,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             "Missing real daemon frame: {op}"
         );
     }
-    // Both Apply submissions own identities; the sharing toggle only uses the active port.
+    // Both Apply submissions and the sharing toggle own correlated receipts.
     assert_eq!(
         l.results
             .iter()
@@ -856,7 +865,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
                 |(action, _, _)| action["op"] == "set_host_hub" && action["request_id"].is_string()
             )
             .count(),
-        2
+        3
     );
     // Command-specific results and generic failures must retain the UI's identity.
     for (action, status, _) in &l.results {
@@ -1524,7 +1533,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         );
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-            "Apply",
+            "Applying…",
             "An uncorrelated {op} snapshot cannot acknowledge the save"
         );
         cfg["host_hub"]["port"] = json!(draft);
@@ -1569,8 +1578,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert_eq!(action["op"], "set_host_hub");
         assert_eq!(action["port"], 5302);
         assert!(
-            action["request_id"].is_null(),
-            "Toggles cannot own the port save"
+            action["request_id"].is_string() && action["request_id"] != submitted["request_id"],
+            "Toggles own distinct receipts without replacing the port save"
         );
     }
     // Neither untagged errors nor refreshes may release Apply's pending identity.
@@ -1586,7 +1595,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "Apply"
+        "Applying…"
     );
     f.send(
         p,
@@ -1641,7 +1650,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     );
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "Apply"
+        "Applying…"
     );
     cfg["host_hub"]["error"] = Value::Null;
     cfg["host_hub"]["port"] = json!(5303);
@@ -2654,7 +2663,7 @@ fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
             .unwrap_or_default()
             .is_empty()
     });
-    f.db("state.sqlite").execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','crash-state','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED')", &[json!(cito_native::plugins::now_ms()+60_000)]).unwrap();
+    f.db("state.sqlite").execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) SELECT hub,'crash-state',listener_id,1,1,'bob','host','Sender','Work','now',?,'RECEIVED',hub_url,principal_id FROM local_listeners WHERE hub='local' AND harness='human' AND status='ACTIVE'", &[json!(cito_native::plugins::now_ms()+60_000)]).unwrap();
     let mut frame = Value::Null;
     wait(|| {
         frame = fs::read_to_string(f.home.join("ui-frames"))

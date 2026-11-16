@@ -1503,6 +1503,15 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     let meta = f.provider("delivered_unconfirmed");
     let mut l = ClosedLoop::new(&f);
     l.until(|s| node(s, "items", "header").is_object());
+    // Cache a complete listener collection before long activity previews mark
+    // subsequent passive snapshots truncated.
+    let listening = f.tool("cito_listen", json!({"about":"Copy fixture"}), meta.clone());
+    assert_eq!(listening["ok"], true, "{listening}");
+    l.until(|s| {
+        nodes(&s["items"])
+            .iter()
+            .any(|n| n["id"].as_str().is_some_and(|id| id.starts_with("copy:")))
+    });
     let message = "😀 ".repeat(32_768);
     let sent = f.tool("cito_send", json!({"to":"@self","message":message}), meta);
     assert_eq!(sent["ok"], true, "{sent}");
@@ -1642,7 +1651,11 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         l.control(address["id"].as_str().unwrap());
         assert_eq!(inspect(&f, l.ui)["clipboard"], expected);
     }
-    let mut state = f.action(json!({"op":"get_snapshot"})).1;
+    // This final clipboard arbitration section uses a complete synthetic menu
+    // snapshot; the daemon snapshot includes intentionally truncated activity.
+    let mut state = super::state();
+    state["listeners"] = json!([]);
+    state["settings"] = f.action(json!({"op":"get_snapshot"})).1["settings"].clone();
     state["settings"]["host_hub"]["enabled"] = json!(true);
     state["settings"]["host_hub"]["running"] = json!(true);
     state["settings"]["host_hub"]["token"] = json!("fixture-token");

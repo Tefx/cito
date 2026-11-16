@@ -269,6 +269,7 @@ struct HubConfigItem: Decodable, Equatable {
     var is_builtin: Bool? = nil
     var supports_workspace_scope: Bool? = nil
     var can_login: Bool? = nil
+    var redirect_port: Int? = nil
 }
 struct SettingsPayload: Decodable, Equatable {
     let apps: [AppSetupItem]
@@ -281,6 +282,7 @@ struct SettingsPayload: Decodable, Equatable {
     let launch_at_login: Bool
 }
 struct Frame: Decodable {
+    let truncated: Bool?
     let op: String
     let hub: String?
     let ok: Bool?

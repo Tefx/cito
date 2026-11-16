@@ -165,10 +165,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var addHubUrl = ""
     var addHubDraftGeneration = 0
     var addHubAuth = "none"
+    var addHubAuthExplicit = false
     var addHubToken = ""
     var addHubUser = ""
     var addHubIssuer = ""
     var addHubClientId = ""
+    var addHubRedirectPort = ""
     var settingsFieldControls: [String: NSTextField] = [:]
     var channelUiStates: [String: ChannelUiState] = [:]
     var appCheckedUntil: [String: Date] = [:]
@@ -365,18 +367,28 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             inviteParseRequest=""; addHubError=nil
             addHubUrl=cfg["url"] as? String ?? ""; addHubName=cfg["name"] as? String ?? ""
             addHubAuth=cfg["authMode"] as? String ?? cfg["auth_mode"] as? String ?? "none"
+            addHubAuthExplicit = cfg["authMode"] != nil || cfg["auth_mode"] != nil
             addHubToken=cfg["token"] as? String ?? ""; addHubUser=cfg["user"] as? String ?? ""
             addHubIssuer=cfg["issuer"] as? String ?? cfg["oidcIssuer"] as? String ?? ""; addHubClientId=cfg["clientId"] as? String ?? cfg["client_id"] as? String ?? cfg["oidcClientId"] as? String ?? ""
-            settingsFieldControls.removeAll(); rebuildSettingsPanel(); return
+            let port = cfg["redirect_port"] ?? cfg["redirectPort"] ?? cfg["oidcRedirectPort"]
+            addHubRedirectPort = (port as? Int).map(String.init) ?? port as? String ?? ""
+            rebuildSettingsPanel(syncFields: false); return
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         // Receipt-only settlements never project settings or results from an
         // obsolete authority. They still own the matching request's pending UI.
-        if (frame.op == "settings" && frame.settings == nil && (frame.ok == true || frame.committed == true || frame.warning != nil)) ||
+        if (frame.op == "settings" && frame.settings == nil) ||
            (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
-            if settleChannelReceipt(frame) && settingsVisible { rebuildSettingsPanel(preservingEditor: true) }
+            let settled = settleReceiptOnly(frame)
+            if settled && settingsVisible { rebuildSettingsPanel() }
             return
         }
+        // A truncated snapshot is an incomplete projection, never a replacement cache.
+        if frame.truncated == true && ((frame.op == "state" && hasRenderedState) || (frame.op == "settings" && settings != nil) || (frame.op == "directory" && frame.request_id == nil)) {
+            if settleReceiptOnly(frame) && settingsVisible { rebuildSettingsPanel() }
+            return
+        }
+        let receiptHub = frame.hub ?? frame.request_id.flatMap { pendingControls[$0]?.hub }
         var settledControl = frame.op == "pair_code" ? false : settleChannelReceipt(frame)
         if let request = frame.request_id, let pending = pendingControls[request],
            frame.op != "pair_code" && frame.op != "channel_test_result",
@@ -432,7 +444,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         let activityPresenceChanged = frame.activity_has_any.map { $0 != activityHasAny } ?? false
-        if frame.op == "error" || actionFailure {
+        if frame.op == "error" || actionFailure || (frame.op == "settings" && frame.ok == false) {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
             if sourceOp == "paste_hub_invite", let request = frame.request_id {
@@ -457,7 +469,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             } else {
                 isAddHubError = addHubFormOpen && isAddHubOp
             }
-            let error = frame.error ?? "Unknown daemon error"
+            let error = frame.error ?? frame.warning ?? "Unknown daemon error"
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
             if (sourceOp == "set_host_hub" || sourceOp.isEmpty) &&
                frame.request_id == submittedHostHubRequestId {
@@ -484,29 +496,29 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild()
-            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
         if frame.op == "settings", let value = frame.settings {
             let target = value.settings_hub ?? value.channel_hub ?? frame.hub ?? effectiveChannelHub
             let changed = value != settings || channelSettingsByHub[target] != (value.channels ?? [])
-            let receipt = settledControl || (frame.request_id != nil && frame.source_op != nil)
+            let receipt = settledControl || frame.request_id != nil || frame.source_op != nil
             if let request = frame.request_id, let app = pendingAppChecks.removeValue(forKey: request),
                frame.ok == true && frame.source_op == "setup_apply" {
                 appCheckedUntil[app] = Date().addingTimeInterval(1.5)
                 rebuildFeedbackAfter(1.5)
             }
-            if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? "") {
+            if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? "") {
                 hubInvitePending=false; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
             let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil
-            let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? ""))
+            let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? ""))
             if let warning = frame.warning { settingsBannerError = warning }
-            if changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId { rebuildSettingsPanel(preservingEditor: true) }
+            if changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId { rebuildSettingsPanel(preservingEditor: !receipt) }
             return
         }
         if frame.op == "pair_code", frame.authority_changed != true, let id = frame.channel_id {
-            let hub = frame.hub ?? effectiveChannelHub
+            let hub = receiptHub ?? effectiveChannelHub
             let key="\(hub)|\(id)"
             guard let request = frame.request_id, var ui = channelUiStates[key], ui.pendingPairRequest == request else { return }
             pendingControls.removeValue(forKey: request)
@@ -516,14 +528,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             ui.pairingURL = frame.pairing_url
             if let command = frame.pairing_command { copyText(command); ui.pairCopiedUntil = Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2) }
             channelUiStates[key] = ui
-            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
         if frame.op == "channel_test_result", frame.authority_changed != true, let id = frame.channel_id {
-            let key = "\(frame.hub ?? effectiveChannelHub)|\(id)"
+            let key = "\(receiptHub ?? effectiveChannelHub)|\(id)"
             channelUiStates[key, default: ChannelUiState()].testResult = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
             channelUiStates[key, default: ChannelUiState()].testResultIsLatest = true
-            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
         if frame.op == "state", let h = frame.hubs, let l = frame.listeners {
@@ -549,7 +561,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let nextHarnesses = frame.harnesses ?? harnesses
             let harnessesChanged = nextHarnesses != harnesses
             if harnessesChanged { harnesses = nextHarnesses }
-            let nextSettings = frame.settings ?? settings
+            let nextSettings = frame.truncated == true && settings != nil ? settings : frame.settings ?? settings
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings != settings || (hostHubPortPending && frame.request_id == submittedHostHubRequestId)
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name, savedRequest: frame.request_id) }
@@ -564,7 +576,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 refreshDirectoryViews()
                 if directoryVisible && directoryMembershipChanged { queryDirectory() }
                 if settingsChanged || settledControl || directoryMembershipChanged {
-                    rebuildSettingsPanel(preservingEditor: true)
+                    rebuildSettingsPanel(preservingEditor: frame.request_id == nil && frame.source_op == nil)
                 }
             }
             if !hasCheckedFirstLaunchOnboarding, let s = settings, !s.apps.isEmpty {
@@ -624,6 +636,13 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let passive = ["query_directory", "refresh_available"].contains(operation)
         if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild() }
         var outgoing = action
+        if operation == "set_host_hub" {
+            let request = outgoing["request_id"] as? String ?? UUID().uuidString
+            outgoing["request_id"] = request
+            if action["request_id"] == nil {
+                pendingControls[request] = PendingControl(op: operation, hub: "", target: action["auth_mode"] == nil ? "sharing" : "access")
+            }
+        }
         if directoryActionOps.contains(operation) {
             // Full-message copy already owns this ID through its multipart buffer.
             let request = (action["request_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
@@ -670,7 +689,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if ["channel_unpair", "channel_cancel_pair", "clear_channel_service", "disconnect_human_channel"].contains(operation) {
                 pendingChannelResets[request] = (all: operation == "clear_channel_service" || outgoing["reset_hub"] as? Bool == true, submitted: channelUiStates["\(hub)|\(id)"] ?? ChannelUiState())
             }
-            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            if ["channel_save", "save_hub_service"].contains(operation),
+               let root = settingsPanel?.contentView,
+               let save = findControl(in:root,id:operation == "channel_save" ? "save_channel:\(id)" : "save_hub_service:\(id)") {
+                // Pending feedback changes no fields; retain the editor's undo stack.
+                pendingLabel(save,true,"Saving…"); save.layoutContents()
+            } else if settingsPanel != nil { rebuildSettingsPanel() }
         }
         if ["human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app"].contains(operation) {
             let request = outgoing["request_id"] as? String ?? UUID().uuidString
@@ -679,6 +703,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settingsPanel != nil { rebuildSettingsPanel() }
             rebuild()
         }
+        if operation == "set_host_hub", settingsPanel != nil { rebuildSettingsPanel() }
         guard let data = try? JSONSerialization.data(withJSONObject: outgoing, options: [.sortedKeys]) else { return }
         FileHandle.standardOutput.write(data + Data([10]))
     }
@@ -711,6 +736,21 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                let schema=ch.fields.first(where:{id == "channel_field:\(ch.id):\($0.key)"}) {
                 let key = "\(effectiveChannelHub)|\(ch.id)"
                 channelUiStates[key, default: ChannelUiState()].drafts[schema.key] = field.stringValue
+                if let root = settingsPanel?.contentView {
+                    let op = schema.scope == "hub" ? "save_hub_service" : "channel_save"
+                    let id = schema.scope == "hub" ? "save_hub_service:\(ch.id)" : "save_channel:\(ch.id)"
+                    if let save = findControl(in:root,id:id) {
+                        if channelSavePending(op,hub:effectiveChannelHub,channel:ch.id,scope:schema.scope) {
+                            pendingLabel(save,true,"Saving…")
+                        } else {
+                            save.feedbackTimer?.invalidate(); save.feedbackTimer=nil
+                            save.isEnabled = true
+                            let title = schema.scope == "hub" ? "Save Gateway Token" : "Save"
+                            save.label.stringValue=title; save.setAccessibilityLabel(title); save.toolTip=title
+                        }
+                        save.layoutContents()
+                    }
+                }
                 if let root=settingsPanel?.contentView, let test=findControl(in:root,id:"test_channel:\(ch.id)") {
                     let visibleFields = ch.fields.filter { $0.hidden != true && $0.scope != "hub" && settingsFieldControls["channel_field:\(ch.id):\($0.key)"] != nil }
                     test.isEnabled = !isPending("channel_test",hub:effectiveChannelHub,target:ch.id) && ch.canSendTest(drafts:channelUiStates[key]?.drafts ?? [:],visibleFields:visibleFields)

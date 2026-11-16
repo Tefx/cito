@@ -63,7 +63,7 @@ fn v41_start_sharing_and_auth_validate_ports_without_blocking_stop() {
 }
 
 #[test]
-fn v41_hub_save_settles_by_name_and_request_not_url_spelling() {
+fn v49_hub_save_settles_by_request_even_without_a_matching_projected_name() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -89,10 +89,9 @@ fn v41_hub_save_settles_by_name_and_request_not_url_spelling() {
         .find(|a| a["op"] == "setup_save_hub")
         .unwrap();
     f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":request["request_id"],"settings":cfg}));
-    assert_eq!(
-        node(&inspect(&f, p), "settings_items", "submit_add_hub")["enabled"],
-        false,
-        "A matching request without the saved Hub cannot settle"
+    assert!(
+        node(&inspect(&f, p), "settings_items", "add_hub_form").is_null(),
+        "A matching explicit success settles even when its projection omits the saved Hub"
     );
     cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"shared","url":"https://example.com/","auth_mode":"none","enabled":true,"is_default":false,"status":"connected"}));
     f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":request["request_id"],"settings":cfg}));
@@ -546,7 +545,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
         assert_eq!(action["name"], expected);
         let canonical_url = url.trim().trim_end_matches('/');
         assert_eq!(action["url"], canonical_url);
-        let saved = json!({"name":expected,"url":canonical_url,"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
+        let saved = json!({"name":expected,"url":canonical_url,"auth_mode":action.get("auth_mode").cloned().unwrap_or(json!("none")),"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
         let hubs = cfg["hubs"].as_array_mut().unwrap();
         if let Some(hub) = hubs.iter_mut().find(|hub| hub["name"] == expected) {
             *hub = saved;
