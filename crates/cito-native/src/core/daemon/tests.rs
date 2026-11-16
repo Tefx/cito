@@ -519,7 +519,22 @@ print(json.dumps(v))
             "UPDATE local_signals SET delivered_at_ms=? WHERE signal_id='grace'",
             &[json!(now_ms() - 300_001)],
         )?;
+        service.state.db.execute(
+            "INSERT OR REPLACE INTO wake_retries VALUES('local',?,?)",
+            &[json!(id), json!(now_ms() + 30_000)],
+        )?;
         service.auto_listen()?;
+        assert!(
+            service
+                .state
+                .db
+                .query(
+                    "SELECT * FROM wake_retries WHERE hub='local' AND listener_id=?",
+                    &[json!(id)]
+                )?
+                .is_empty(),
+            "Idle retirement must clear scheduling left by prior work"
+        );
         let retired = service
             .state
             .listener("local", &id)?

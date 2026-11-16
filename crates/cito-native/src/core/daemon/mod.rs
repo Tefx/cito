@@ -108,6 +108,7 @@ pub struct DaemonService {
     pub state: LocalState,
     pub local: Arc<HubEngine>,
     pub slots: HashMap<String, HubClient>,
+    configured_hubs: HashSet<String>,
     events: Vec<thread::JoinHandle<()>>,
     receivers: HashMap<String, thread::JoinHandle<()>>,
     caller_cache: Mutex<HashMap<u64, Value>>,
@@ -429,6 +430,7 @@ impl DaemonService {
             state,
             local,
             slots: HashMap::new(),
+            configured_hubs: HashSet::new(),
             events: Vec::new(),
             receivers: HashMap::new(),
             caller_cache: Mutex::new(HashMap::new()),
@@ -595,49 +597,18 @@ impl DaemonService {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or(default);
-        // External config edits (including CLI removal) share the same purge
-        // authority as UI removal. Disabled profiles remain configured and retained.
-        let mut known: HashSet<String> = self
-            .slots
-            .keys()
-            .chain(self.last_hub_errors.keys())
-            .chain(self.auth_backoff.keys())
-            .chain(self.channel_inventories.keys())
-            .chain(self.logins.keys())
+        // Only a previously configured profile proves removal. Unconfigured
+        // legacy recovery rows are retained; disabled profiles remain configured.
+        let configured_hubs: HashSet<String> = hubs.keys().cloned().collect();
+        let removed: Vec<_> = self
+            .configured_hubs
+            .difference(&configured_hubs)
             .cloned()
             .collect();
-        for table in [
-            "local_signals",
-            "local_listeners",
-            "pending_hub_acks",
-            "pending_hub_detaches",
-            "local_sent_idempotency",
-        ] {
-            // Retry rows are listener-owned; never make optional retry maintenance
-            // a prerequisite for loading otherwise usable Hub configuration.
-            for row in self
-                .state
-                .db
-                .query(&format!("SELECT DISTINCT hub FROM {table}"), &[])?
-            {
-                known.insert(string(&row, "hub").to_owned());
-            }
+        for name in removed {
+            self.purge_hub_state(&name)?;
         }
-        if let Ok(entries) = fs::read_dir(&self.config.state_dir) {
-            for entry in entries.flatten() {
-                let filename = entry.file_name();
-                if let Some(name) = filename
-                    .to_str()
-                    .and_then(|name| name.strip_prefix("oidc-token-"))
-                    .and_then(|name| name.strip_suffix(".json"))
-                {
-                    known.insert(name.to_owned());
-                }
-            }
-        }
-        for removed in known.into_iter().filter(|name| !hubs.contains_key(name)) {
-            self.purge_hub_state(&removed)?;
-        }
+        self.configured_hubs = configured_hubs;
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
             crate::plugins::apply_hub_url_override(&name, &self.config.default_hub, &mut hub)?;
@@ -1524,6 +1495,7 @@ impl DaemonService {
                 let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='idle',retired_activity_revision=last_activity_revision,updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND status='ACTIVE' AND listen_mode='auto' AND ?1-COALESCE(last_activity_at_ms,?1)>?4 AND lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND ((s.state IN ('RECEIVED','DISPATCHING') AND s.held_reason IS NULL AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>?1) OR s.delivered_at_ms+300000>?1))", &[json!(now),json!(hub),row["listener_id"].clone(),json!(timeout)])?;
                 if changed > 0 {
                     c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),row["listener_id"].clone(),row["hub_url"].clone()])?;
+                    super::state::reconcile_wake_retry(c, hub, string(&row, "listener_id"))?;
                 }
                 Ok(changed > 0)
             })?;

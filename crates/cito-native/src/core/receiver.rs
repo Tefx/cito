@@ -563,6 +563,7 @@ fn dispatch_listener(
                         let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
                         if changed>0 {
                             c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
+                            super::state::reconcile_wake_retry(c, hub, id)?;
                         }
                         Ok(changed)
                     })?;

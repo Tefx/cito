@@ -659,7 +659,24 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
         .db
         .execute("UPDATE local_listeners SET updated_at=1", &[])?;
     let dispatched_at = now_ms();
-    f.dispatch(&f.plugin("print(json.dumps({'ok':True,'outcome':'session_switched'}))"))?;
+    let worker = f.worker(f.plugin(&WAIT.replace("'delivered'", "'session_switched'")));
+    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    f.seed("unread-survivor")?;
+    std::fs::write(f.dir.join("release"), b"complete").map_err(|e| e.to_string())?;
+    worker.join()??;
+    assert!(
+        f.state
+            .db
+            .query("SELECT * FROM wake_retries", &[])?
+            .is_empty(),
+        "Session retirement must stop scheduling, including newly admitted work"
+    );
+    assert!(f
+        .rows()?
+        .iter()
+        .find(|row| row["signal_id"] == "unread-survivor")
+        .ok_or("Missing unread survivor")?["acknowledged_at_ms"]
+        .is_null());
     let revoked = f
         .state
         .listener("local", string(&f.row, "listener_id"))?
