@@ -79,7 +79,7 @@ struct EndpointProbe {
     due: Instant,
     calm: u32,
     bindings: Vec<String>,
-    worker: Option<thread::JoinHandle<bool>>,
+    worker: Option<thread::JoinHandle<Option<Value>>>,
 }
 
 type SetupResult = Result<(bool, bool, Vec<String>), String>;
@@ -595,6 +595,49 @@ impl DaemonService {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or(default);
+        // External config edits (including CLI removal) share the same purge
+        // authority as UI removal. Disabled profiles remain configured and retained.
+        let mut known: HashSet<String> = self
+            .slots
+            .keys()
+            .chain(self.last_hub_errors.keys())
+            .chain(self.auth_backoff.keys())
+            .chain(self.channel_inventories.keys())
+            .chain(self.logins.keys())
+            .cloned()
+            .collect();
+        for table in [
+            "local_signals",
+            "local_listeners",
+            "pending_hub_acks",
+            "pending_hub_detaches",
+            "local_sent_idempotency",
+        ] {
+            // Retry rows are listener-owned; never make optional retry maintenance
+            // a prerequisite for loading otherwise usable Hub configuration.
+            for row in self
+                .state
+                .db
+                .query(&format!("SELECT DISTINCT hub FROM {table}"), &[])?
+            {
+                known.insert(string(&row, "hub").to_owned());
+            }
+        }
+        if let Ok(entries) = fs::read_dir(&self.config.state_dir) {
+            for entry in entries.flatten() {
+                let filename = entry.file_name();
+                if let Some(name) = filename
+                    .to_str()
+                    .and_then(|name| name.strip_prefix("oidc-token-"))
+                    .and_then(|name| name.strip_suffix(".json"))
+                {
+                    known.insert(name.to_owned());
+                }
+            }
+        }
+        for removed in known.into_iter().filter(|name| !hubs.contains_key(name)) {
+            self.purge_hub_state(&removed)?;
+        }
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
             crate::plugins::apply_hub_url_override(&name, &self.config.default_hub, &mut hub)?;
@@ -1298,10 +1341,16 @@ impl DaemonService {
                 .as_ref()
                 .is_some_and(|worker| worker.is_finished())
             {
-                let quiet = probe
+                let observation = probe
                     .worker
                     .take()
-                    .is_some_and(|worker| worker.join().unwrap_or(false));
+                    .and_then(|worker| worker.join().ok().flatten());
+                let quiet = observation.is_some();
+                if let (Some(activity), Some(observation)) =
+                    (&mut self.session_activity, observation)
+                {
+                    activity.observe_badge(&observation);
+                }
                 probe.calm = if quiet {
                     probe.calm.saturating_add(1).min(5)
                 } else {
@@ -1350,11 +1399,15 @@ impl DaemonService {
                     .as_ref()
                     .is_ok_and(|result| result["ok"] == true && result["status"] == "alive");
                 let result = result.unwrap_or_else(|error| json!({"ok":false,"error":error}));
+                let mut observation = targets[0].0.clone();
+                if let Some(badge) = result.get("badge") {
+                    observation["badge"] = badge.clone();
+                }
                 for (row, client) in targets {
                     let _ = super::receiver::apply_probe(&state, &client, &row, &result);
                 }
                 wake_daemon();
-                quiet
+                quiet.then_some(observation)
             }));
         }
         Ok(())

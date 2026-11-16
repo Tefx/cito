@@ -836,6 +836,13 @@ pub fn handle(req: &Value) -> Result<Value> {
                 Ok(reply) if req["badge"].is_null() && reply["error"] == "SESSION_MISMATCH" => {
                     Ok(json!({"ok":true}))
                 }
+                Err(_)
+                    if req["badge"].is_null()
+                        && !process_command(p).is_ok_and(|command| matches_process(&command)) =>
+                {
+                    let _ = fs::remove_file(&path);
+                    Ok(json!({"ok":true}))
+                }
                 reply => reply,
             }
         }

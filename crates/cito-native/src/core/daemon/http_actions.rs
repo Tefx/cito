@@ -316,8 +316,10 @@ fn dispatch_action_inner(
         s.state.fence_listener_for(&row, "fenced_before_dispatch")?;
     }
     s.reload_slots()?;
-    s.push_ui();
-    Ok(json!({"ok":true,"user":identity["owner_user"],"authenticated":!token.is_empty()}))
+    s.push_ui_result(Some(action));
+    Ok(
+        json!({"ok":true,"committed":true,"user":identity["owner_user"],"authenticated":!token.is_empty()}),
+    )
 }
 
 pub(super) fn handle_http(
@@ -527,6 +529,13 @@ pub(super) fn mutating_action(action: &Value) -> bool {
             | "set_auto_listen"
             | "set_scope"
             | "set_listen_mode"
+            | "human_inbox_update"
+            | "listen_session"
+            | "unlisten"
+            | "rename_session"
+            | "cli_rename"
+            | "cli_human_device"
+            | "login_hub"
             | "unlisten_session"
             | "unlisten_all"
             | "ack_signals"
@@ -538,10 +547,20 @@ pub(super) fn mutating_action(action: &Value) -> bool {
 
 impl DaemonService {
     pub(super) fn purge_hub_state(&mut self, hub: &str) -> Result<(), String> {
+        if let Some(attempt) = self.logins.remove(hub) {
+            attempt.cancelled.store(true, Ordering::SeqCst);
+            drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
+        }
         if let Some(slot) = self.slots.remove(hub) {
             slot.close();
         }
         if let Some(pending) = self.oidc_recoveries.remove(hub) {
+            pending.cancelled.store(true, Ordering::SeqCst);
+            let _ = pending.worker.join();
+        }
+        // Retired recoveries were cancelled when their profile changed. Join
+        // them before credential deletion so a final publication cannot outlive purge.
+        for pending in self.retired_auth.drain(..) {
             pending.cancelled.store(true, Ordering::SeqCst);
             let _ = pending.worker.join();
         }
@@ -647,7 +666,8 @@ impl DaemonService {
         let result = self
             .action_inner(action, &mut resolved_hub, precondition)
             .map(|mut value| {
-                if mutating_action(action) && value["ok"] == true {
+                if mutating_action(action) && value["ok"] != false {
+                    value["ok"] = json!(true);
                     value["committed"] = json!(true);
                 }
                 if let Some(name) = &resolved_hub {
@@ -663,14 +683,12 @@ impl DaemonService {
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
             self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
         }
-        if result.is_ok()
-            && matches!(
+        if result
+            .as_ref()
+            .is_ok_and(|value| value["committed"] == true)
+            && !matches!(
                 string(action, "op"),
-                "clear_activity_history"
-                    | "unlisten_all"
-                    | "ack_signals"
-                    | "mark_activity_read"
-                    | "mark_all_activity_read"
+                "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
             )
         {
             self.push_ui_result(Some(action));
@@ -762,6 +780,7 @@ impl DaemonService {
             }
             if let Some(cancelled) = self.logins.remove(&hub) {
                 cancelled.cancelled.store(true, Ordering::SeqCst);
+                drop(cancelled.serial.lock().map_err(|_| "Login lock poisoned")?);
             }
         }
         self.reload_slots()?;
@@ -825,7 +844,6 @@ impl DaemonService {
                 }
                 let result = slot.human_request("human_inbox_update", &params)?;
                 Self::reconcile_human_scope(&self.state, slot, &self.host_id, &result["record"])?;
-                self.push_ui_result(Some(action));
                 return Ok(result);
             }
             "cli_rename" => {
@@ -993,20 +1011,6 @@ impl DaemonService {
                     .cloned()
                     .map(Value::Object)
                     .unwrap_or_else(|| action.clone());
-                // Normalize submitted aliases before merging with existing canonical keys.
-                for (canonical, aliases) in [
-                    ("authMode", &["auth_mode", "auth"][..]),
-                    ("clientId", &["client_id", "oidcClientId"][..]),
-                    ("issuer", &["oidcIssuer"][..]),
-                    ("redirectPort", &["redirect_port", "oidcRedirectPort"][..]),
-                    ("scopes", &["oidcScopes"][..]),
-                ] {
-                    if cfg.get(canonical).is_none() {
-                        if let Some(value) = aliases.iter().find_map(|key| cfg.get(*key)).cloned() {
-                            cfg[canonical] = value;
-                        }
-                    }
-                }
                 let editing = action["edit"] == true;
                 let original = action["original_name"].as_str().unwrap_or(&hub).to_string();
                 let mut rename_before = Value::Null;
@@ -1036,6 +1040,7 @@ impl DaemonService {
                             cfg = base;
                         }
                     }
+                    cfg = crate::core::config::merge_hub_config(&Value::Null, &cfg);
                     cfg["url"] = json!(crate::plugins::validate_nats_url(
                         string(&cfg, "url").trim()
                     )
@@ -1085,8 +1090,6 @@ impl DaemonService {
                     }
                     let auth = cfg
                         .get("authMode")
-                        .or_else(|| cfg.get("auth_mode"))
-                        .or_else(|| cfg.get("auth"))
                         .and_then(Value::as_str)
                         .unwrap_or_else(|| {
                             if !string(&cfg, "token").is_empty() {
@@ -1130,18 +1133,10 @@ impl DaemonService {
                             "op",
                             "name",
                             "hub",
-                            "auth",
-                            "auth_mode",
                             "set_default",
                             "edit",
                             "original_name",
                             "request_id",
-                            "client_id",
-                            "oidcIssuer",
-                            "oidcClientId",
-                            "redirect_port",
-                            "oidcRedirectPort",
-                            "oidcScopes",
                         ] {
                             m.remove(k);
                         }
@@ -1511,6 +1506,7 @@ impl DaemonService {
                         if !crate::core::state::joined_signal_is_current(&row) || !crate::core::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { return Ok(true); }
                         if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES(?,?,?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms()),row["hub_url"].clone(),row["principal_id"].clone()])?; }
                         c.execute("UPDATE local_signals SET activity_hidden=1,acknowledged_at_ms=CASE WHEN ?='human' THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END WHERE hub=? AND signal_id=?", &[row["target_harness"].clone(),json!(now_ms()),row["hub"].clone(),row["signal_id"].clone()])?;
+                        crate::core::state::reconcile_wake_retry(c, string(&row, "hub"), string(&row, "listener_id"))?;
                         Ok(true)
                     })?;
                     Ok(())
@@ -1818,7 +1814,7 @@ impl DaemonService {
                 self.applied_host_config =
                     self.raw_config().ok().map(|raw| raw["host_hub"].clone());
                 self.last_host_hub_error = None;
-                self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
+                self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
             "set_launch_at_login" => {
                 set_launch_at_login(
@@ -2010,15 +2006,9 @@ impl DaemonService {
         self.reload_slots()?;
         // Setup receipts require the refreshed inspection, which dispatch_action
         // awaits without holding service. Passive cached projections remain usable.
-        if !matches!(
-            op,
-            "setup_apply"
-                | "setup_remove_app"
-                | "setup_disconnect_all"
-                | "close_menu"
-                | "close_settings"
-                | "close_directory"
-        ) {
+        if !mutating_action(action)
+            && !matches!(op, "close_menu" | "close_settings" | "close_directory")
+        {
             self.push_ui_result(Some(action));
         }
         Ok(json!({"ok":true}))

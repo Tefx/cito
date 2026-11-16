@@ -154,6 +154,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var hubInvitePastedUntil = Date.distantPast
     var editingExistingHub = false
     var editingOriginalHub = ""
+    var editingInitialHub: HubConfigItem?
     var hostHubPortPending = false
     var hostHubPortSaved = false
     var hostHubPortSavedUntil = Date.distantPast
@@ -383,9 +384,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settled && settingsVisible { rebuildSettingsPanel() }
             return
         }
-        // A truncated snapshot is an incomplete projection, never a replacement cache.
-        if frame.truncated == true && ((frame.op == "state" && hasRenderedState) || (frame.op == "settings" && settings != nil) || (frame.op == "directory" && frame.request_id == nil)) {
-            if settleReceiptOnly(frame) && settingsVisible { rebuildSettingsPanel() }
+        // Passive collection shedding cannot replace a complete cache. Scalar
+        // observations and correlated receipts still advance independently.
+        let preserveCollections = frame.truncated == true && frame.request_id == nil
+        if preserveCollections && ((frame.op == "settings" && settings != nil) || frame.op == "directory") {
+            if let unread = frame.unread_count { unreadCount = unread }
+            if let unread = frame.activity_unread_count { activityUnreadCount = unread }
+            if let online = frame.online_count { directoryOnlineCount = online }
+            if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
+            rebuild()
+            refreshDirectoryViews()
             return
         }
         let receiptHub = frame.hub ?? frame.request_id.flatMap { pendingControls[$0]?.hub }
@@ -538,15 +546,18 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
-        if frame.op == "state", let h = frame.hubs, let l = frame.listeners {
+        if frame.op == "state", let observedHubs = frame.hubs, let observedListeners = frame.listeners {
+            let h = preserveCollections && hasRenderedState ? hubs.map { old in observedHubs.first { $0.name == old.name } ?? old } : observedHubs
+            let l = preserveCollections && hasRenderedState ? listeners : observedListeners
             if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
-            let a = frame.available ?? []
-            let discoveryChanged = discovery != (frame.discovery ?? discovery)
-            discovery = frame.discovery ?? discovery
-            let r = (frame.my_remote_listeners ?? []).filter { $0.harness != "human" }
+            let a = preserveCollections && hasRenderedState ? available : frame.available ?? []
+            let nextDiscovery = preserveCollections && hasRenderedState ? discovery : frame.discovery ?? discovery
+            let discoveryChanged = discovery != nextDiscovery
+            discovery = nextDiscovery
+            let r = preserveCollections && hasRenderedState ? myRemote : (frame.my_remote_listeners ?? []).filter { $0.harness != "human" }
             let onlineCount = frame.directory_online_count ?? max(directoryOnlineCount, r.count)
             let nextUnread = frame.unread_count ?? unreadCount
-            let nextActivity = frame.activity ?? activityAllItems
+            let nextActivity = preserveCollections ? activityAllItems : frame.activity ?? activityAllItems
             let activityChanged = activityPresenceChanged || nextUnread != unreadCount || nextActivity != activityAllItems ||
                 (frame.activity_total != nil && frame.activity_total != activityTotal) ||
                 (frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount) != activityUnreadCount ||
@@ -558,10 +569,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             unreadCount = nextUnread
             activityAllItems = nextActivity
             let directoryMembershipChanged = h != hubs || l != listeners
-            let nextHarnesses = frame.harnesses ?? harnesses
+            let nextHarnesses = preserveCollections && hasRenderedState ? harnesses : frame.harnesses ?? harnesses
             let harnessesChanged = nextHarnesses != harnesses
             if harnessesChanged { harnesses = nextHarnesses }
-            let nextSettings = frame.truncated == true && settings != nil ? settings : frame.settings ?? settings
+            let nextSettings = preserveCollections && settings != nil ? settings : frame.settings ?? settings
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings != settings || (hostHubPortPending && frame.request_id == submittedHostHubRequestId)
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name, savedRequest: frame.request_id) }
@@ -595,7 +606,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 }
             }
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
-        } else if frame.op == "directory", let peers = frame.peers {
+        } else if frame.op == "directory", let observedPeers = frame.peers {
+            let peers = preserveCollections ? directoryAllPeers : observedPeers
             guard frame.request_id == directoryRequestId && frame.query == directoryQuery && frame.scope == directoryScopeFilter && frame.harness == directoryHarnessFilter else { return }
             if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
             let menuChanged = activityPresenceChanged || (frame.unread_count ?? unreadCount) != unreadCount ||
@@ -623,7 +635,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             serverDirectoryHarness = directoryHarnessFilter
             serverDirectoryMatchedCount = frame.matched_count ?? peers.count
             directoryOnlineCount = frame.online_count ?? peers.count
-            if let act = frame.activity { activityAllItems = act }
+            if !preserveCollections, let act = frame.activity { activityAllItems = act }
             if let u = frame.unread_count { unreadCount = u }
             if rowsChanged { refreshDirectoryViews() }
             if hasRenderedState && (menuChanged || settledControl) { rebuild() }

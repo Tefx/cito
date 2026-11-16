@@ -36,12 +36,10 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
                 return;
             }
             if key == "title" {
-                *truncated |= s.len() > 512;
                 *s = cap_text(s, 512);
                 return;
             }
             if key == "from_title" {
-                *truncated |= s.len() > 128;
                 *s = cap_text(s, 128);
                 return;
             }
@@ -51,7 +49,6 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
                 "cwd" | "summary" => 128,
                 _ => 4096,
             };
-            *truncated |= s.len() > cap;
             *s = cap_text(s, cap);
         }
         Value::Array(a) => {

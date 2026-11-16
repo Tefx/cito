@@ -114,17 +114,17 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
 }
 
 #[test]
-fn ipc_marks_early_collection_and_text_truncation() {
+fn ipc_marks_collection_shedding_but_not_display_previews() {
     for frame in [
         json!({"op":"state","activity":vec![json!({"message":"short"});81]}),
-        json!({"op":"state","activity":[{"message":"x".repeat(513)}]}),
+        json!({"op":"state","listeners":vec![json!({});65]}),
     ] {
         let bytes = ui_ipc::bounded_frame(frame).unwrap();
         let bounded: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(bounded["truncated"], true);
     }
     let bounded: Value = serde_json::from_slice(
-        &ui_ipc::bounded_frame(json!({"op":"state","activity":[]})).unwrap(),
+        &ui_ipc::bounded_frame(json!({"op":"state","activity":[{"message":"x".repeat(513)}],"listeners":[{"cwd":"x".repeat(129),"title":"x".repeat(513),"about":"x".repeat(257)}]})).unwrap(),
     )
     .unwrap();
     assert!(bounded.get("truncated").is_none());
@@ -141,6 +141,192 @@ fn settle_setup_inspections(service: &mut DaemonService) {
         service.refresh_setup_inspections();
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[test]
+fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profiles(
+) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-removed-hub-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(
+        &config.config_path,
+        r#"{"hubs":{"local":{"url":"local://"},"work":{"url":"local://","enabled":false}}}"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let plugins = LoadedPlugins {
+        plugins: vec![],
+        rejected_ids: HashSet::new(),
+    };
+    let mut service = DaemonService::open(&config, &plugins)?;
+    let result = (|| -> Result<(), String> {
+        for hub in ["local", "work"] {
+            service
+                .last_hub_errors
+                .insert(hub.into(), ("Retained error".into(), false));
+            service.auth_backoff.insert(hub.into(), Default::default());
+            service
+                .observations
+                .insert(format!("{hub}:node"), (1, Instant::now()));
+            service.channel_inventories.insert(
+                hub.into(),
+                Arc::new(ChannelInventory::new(json!({"hub":hub}))),
+            );
+            fs::write(
+                config.state_dir.join(format!("oidc-token-{hub}.json")),
+                "credential",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        service.reload_slots()?;
+        assert!(service.last_hub_errors.contains_key("work"));
+        assert!(config.state_dir.join("oidc-token-work.json").exists());
+        service.mutate_config(|raw| {
+            raw["hubs"].as_object_mut().unwrap().remove("work");
+            Ok(())
+        })?;
+        service.reload_slots()?;
+        assert!(!service.last_hub_errors.contains_key("work"));
+        assert!(!service.auth_backoff.contains_key("work"));
+        assert!(!service.observations.contains_key("work:node"));
+        assert!(!service.channel_inventories.contains_key("work"));
+        assert!(!config.state_dir.join("oidc-token-work.json").exists());
+        assert!(service.last_hub_errors.contains_key("local"));
+        assert!(service.auth_backoff.contains_key("local"));
+        assert!(service.observations.contains_key("local:node"));
+        assert!(service.channel_inventories.contains_key("local"));
+        assert!(config.state_dir.join("oidc-token-local.json").exists());
+        Ok(())
+    })();
+    service.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
+fn targeted_probe_restores_manual_badge_with_closed_surfaces_and_no_auto_listen(
+) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-probe-badge-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(
+        &config.config_path,
+        r#"{"hubs":{"local":{"url":"local://","autoListen":false}}}"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let script = dir.join("provider.py");
+    fs::write(&script, r#"import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+req = json.loads(sys.stdin.readline())
+op = req['op']
+result = dict(ok=True)
+if op == 'setup_inspect': result.update(installed=True, configured=True, paths=[])
+elif op == 'discover_sessions':
+    (root/'discovered').touch()
+    result['sessions'] = []
+elif op == 'probe':
+    result.update(status='alive', current_session_id=req['session_id'], badge=json.loads((root/'badge.json').read_text()) if (root/'badge.json').exists() else None)
+elif op == 'update_badge':
+    (root/'badge.json').write_text(json.dumps(req['badge']))
+    with (root/'effects').open('a') as log: log.write(json.dumps(req['badge'])+'\n')
+print(json.dumps(result))
+"#).map_err(|e| e.to_string())?;
+    let plugin = crate::plugins::PluginDescriptor {
+        id: "fixture".into(),
+        kind: "agent".into(),
+        display_name: "Fixture".into(),
+        tier: "test".into(),
+        order: 0,
+        sf_symbol: "terminal".into(),
+        tint: "blue".into(),
+        cli_flag: false,
+        pid_bound: false,
+        auto_listen: Default::default(),
+        plugin_dir: dir.clone(),
+        is_builtin: false,
+        command: vec![
+            "/usr/bin/python3".into(),
+            script.to_string_lossy().into_owned(),
+        ],
+        channel_env: None,
+        fields: vec![],
+        post_setup_hint: None,
+        post_disconnect_hint: None,
+    };
+    let plugins = LoadedPlugins {
+        plugins: vec![plugin],
+        rejected_ids: HashSet::new(),
+    };
+    let mut service = DaemonService::open(&config, &plugins)?;
+    service.local.set_plugin_roots(&[])?;
+    let result = (|| -> Result<(), String> {
+        settle_setup_inspections(&mut service);
+        service.listen(
+            "local",
+            &json!({"about":"Manual"}),
+            &json!({"harness":"fixture","session_id":"session","title":"Work","cwd":dir}),
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            service.poll()?;
+            if fs::read_to_string(dir.join("badge.json"))
+                .ok()
+                .is_some_and(|s| s.contains("Cito"))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Initial badge did not arrive");
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Let the original effect and targeted probe settle before modeling reload.
+        for probe in service.probes.values_mut() {
+            if let Some(worker) = probe.worker.take() {
+                let _ = worker.join();
+            }
+            probe.due = Instant::now();
+        }
+        let expected = fs::read_to_string(dir.join("badge.json")).map_err(|e| e.to_string())?;
+        fs::write(dir.join("badge.json"), "null").map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            service.poll()?;
+            if fs::read_to_string(dir.join("badge.json")).ok().as_deref() == Some(expected.as_str())
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Targeted observation did not restore badge"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !service.menu_open && !service.directory_open && service.active_settings_hub.is_none()
+        );
+        assert_eq!(service.slot("local")?.config["autoListen"], false);
+        assert!(
+            !dir.join("discovered").exists(),
+            "The daemon's real demand must keep background discovery off"
+        );
+        Ok(())
+    })();
+    service.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
 }
 
 #[test]
@@ -687,6 +873,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         );
         let updated=service.action(&json!({"op":"human_inbox_update","hub":"local","paused":true,"expected_control_revision":1,"about":"Release approvals","scope":"self"}))?;
         assert_eq!(updated["record"]["human_paused"], true);
+        assert_eq!(updated["committed"], true);
         assert_eq!(
             service.snapshot()?["hubs"][0]["human_about"],
             "Release approvals"
@@ -2530,6 +2717,19 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             now_ms() + 60_000,
             &Value::Null,
         )?;
+        assert!(
+            service
+                .state
+                .db
+                .query("SELECT * FROM wake_retries", &[])?
+                .is_empty(),
+            "Human admission must not schedule wake work"
+        );
+        // Clear must also reconcile a retained legacy retry row.
+        service.state.db.execute(
+            "INSERT INTO wake_retries VALUES('local',?,0)",
+            &[row["listener_id"].clone()],
+        )?;
         service.state.db.execute(
             "UPDATE local_signals SET dispatcher_token='secret-dispatcher'",
             &[],
@@ -2543,6 +2743,15 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             activity[0]["can_reply"].is_boolean(),
             "Activity DTOs retain reply authority"
         );
+        let cleared = service.action(
+            &json!({"op":"clear_activity_history","hub":"local","signal_id":"dto-signal"}),
+        )?;
+        assert_eq!(cleared["committed"], true);
+        assert!(service
+            .state
+            .db
+            .query("SELECT * FROM wake_retries", &[])?
+            .is_empty());
         service.reload_slots()?;
         service.state.db.execute("DROP TABLE wake_retries", &[])?;
         let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;

@@ -1698,6 +1698,14 @@ pub fn run_setup_cli(args: &[String]) {
             }
         })?;
 
+        if !dry_run && !remove_hubs.is_empty() {
+            let (config, _) = crate::plugins::load_native_config()?;
+            crate::plugins::ensure_daemon(&config)?;
+            for hub in &remove_hubs {
+                super::cli::control_request(&config, &json!({"op":"setup_remove_hub","hub":hub}))?;
+            }
+        }
+
         let bare_setup = enable_harnesses.is_empty()
             && disable_harnesses.is_empty()
             && hub_name.is_none()

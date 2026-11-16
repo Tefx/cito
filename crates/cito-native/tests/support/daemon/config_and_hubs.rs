@@ -656,6 +656,154 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
     }
 }
 #[test]
+fn peer_mutations_return_committed_receipts_only_after_success() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    let human = f
+        .rows("SELECT * FROM local_listeners WHERE harness='human'")
+        .remove(0);
+    let mut actions = [
+        json!({"op":"human_inbox_update","paused":true}),
+        json!({"op":"set_scope","listener_id":human["listener_id"],"scope":"workspace"}),
+        json!({"op":"cli_human_device","attach":false}),
+        json!({"op":"cli_human_device","attach":true}),
+        json!({"op":"listen_session","harness":"fixture","session_id":"session-1"}),
+        json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"Renamed"}),
+        json!({"op":"cli_rename","meta":meta,"title":"CLI renamed"}),
+    ];
+    for (index, action) in actions.iter_mut().enumerate() {
+        let request = format!("mutation-{index}");
+        action["request_id"] = json!(request);
+        let (status, result) = f.action(action.clone());
+        assert_eq!(status, 200, "{action}: {result}");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["committed"], true, "{action}: {result}");
+        wait(|| {
+            fs::read_to_string(f.home.join("ui-frames"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|frame| {
+                    frame["request_id"] == request
+                        && frame["source_op"] == action["op"]
+                        && frame["ok"] == true
+                        && frame["committed"] == true
+                })
+        });
+    }
+    let agent = f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture'")
+        .remove(0);
+    assert_eq!(agent["title"], "CLI renamed");
+    let (status, result) = f.action(json!({"op":"unlisten","listener_id":agent["listener_id"]}));
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["committed"], true);
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0]["status"],
+        "UNLISTENED"
+    );
+    let (status, failed) = f.action(
+        json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":""}),
+    );
+    assert_eq!(status, 400, "{failed}");
+    assert_ne!(failed["committed"], true);
+}
+
+#[test]
+fn cli_removal_purges_only_removed_hub_across_reload_and_restart() {
+    let _lock = serial();
+    let f = Fixture::new(
+        json!({"default_hub":"local","hubs":{"local":{"url":"local://","enabled":false},"work":{"url":"local://","enabled":false}}}),
+    );
+    let daemon = f.daemon(&[]);
+    let db = f.db("state.sqlite");
+    for hub in ["local", "work"] {
+        db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES(?,'c_0123456789abcdef','none#alice','alice','host','desktop','fixture','session','','Work','Work','workspace','UNLISTENED','local://')", &[json!(hub)]).unwrap();
+        db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES(?,'signal','c_0123456789abcdef',1,0,'alice','desktop','Sender','Retained history','',?,'STORED_PASSIVE','local://','none#alice')", &[json!(hub),json!(u64::MAX / 2)]).unwrap();
+        db.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES(?,'node','signal','channel',1)", &[json!(hub)]).unwrap();
+        db.execute(
+            "INSERT INTO pending_hub_detaches VALUES(?,'node','local://')",
+            &[json!(hub)],
+        )
+        .unwrap();
+        db.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,'dedup','hash','signal','node','wake_accepted','',?)", &[json!(hub),json!(u64::MAX / 2)]).unwrap();
+        db.execute(
+            "INSERT INTO wake_retries VALUES(?,'node',?)",
+            &[json!(hub), json!(u64::MAX / 2)],
+        )
+        .unwrap();
+        fs::write(
+            f.state.join(format!("oidc-token-{hub}.json")),
+            "retained credential",
+        )
+        .unwrap();
+    }
+    let tables = [
+        "local_listeners",
+        "local_signals",
+        "pending_hub_acks",
+        "pending_hub_detaches",
+        "local_sent_idempotency",
+        "wake_retries",
+    ];
+    let surviving: Vec<_> = tables
+        .iter()
+        .map(|table| {
+            db.query(&format!("SELECT * FROM {table} WHERE hub='local'"), &[])
+                .unwrap()
+        })
+        .collect();
+    // A disabled Hub retains data; reload must distinguish it from removal.
+    assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+    for table in tables {
+        assert_eq!(
+            db.query(&format!("SELECT * FROM {table} WHERE hub='work'"), &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &["setup", "--remove-hub", "work", "--no-login-item", "--json"],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    for restart in [false, true] {
+        if restart {
+            f.stop(daemon);
+            f.daemon(&[]);
+        }
+        assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+        for (table, expected) in tables.iter().zip(&surviving) {
+            assert!(
+                db.query(&format!("SELECT * FROM {table} WHERE hub='work'"), &[])
+                    .unwrap()
+                    .is_empty(),
+                "{table}"
+            );
+            assert_eq!(
+                &db.query(&format!("SELECT * FROM {table} WHERE hub='local'"), &[])
+                    .unwrap(),
+                expected,
+                "{table}"
+            );
+        }
+        assert!(!f.state.join("oidc-token-work.json").exists());
+        assert_eq!(
+            fs::read_to_string(f.state.join("oidc-token-local.json")).unwrap(),
+            "retained credential"
+        );
+    }
+}
+
+#[test]
 fn dual_default_hub_aliases_allow_cli_removal_and_restart() {
     let _lock = serial();
     let f = Fixture::new(json!({

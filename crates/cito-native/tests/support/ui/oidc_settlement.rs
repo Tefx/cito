@@ -25,6 +25,179 @@ fn focus(f: &Fixture, p: usize, id: &str) {
 }
 
 #[test]
+fn bounded_previews_preserve_updates_and_incomplete_passive_collections_keep_caches() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    open(&f, p, &settings(), "hubs");
+    let mut frame = state();
+    frame["listeners"][0]["cwd"] = json!(format!("/tmp/{}", "long-path/".repeat(20)));
+    frame["activity"] = json!([{"hub":"personal","signal_id":"signal","listener_id":"c_abcdefghijkl","from_user":"bob","from_host_name":"laptop","from_title":"Sender","target_harness":"fixture","target_title":"Target","target_scoped_id":"personal:c_abcdefghijkl","unread":true,"for_me":true,"message":"message ".repeat(100),"state":"RECEIVED","created_at":"2026-01-01T00:00:00Z"}]);
+    frame["unread_count"] = json!(7);
+    frame["hubs"][0]["status"] = json!("disconnected");
+    let bounded: Value =
+        serde_json::from_slice(&cito_native::core::daemon::bounded_frame(frame.clone()).unwrap())
+            .unwrap();
+    assert!(bounded.get("truncated").is_none());
+    f.send(p, bounded);
+    let observed = inspect(&f, p);
+    assert_eq!(observed["unread_count"], 7);
+    assert_eq!(observed["count"], 1);
+
+    frame["listeners"] = json!([]);
+    frame["hubs"] = json!([]);
+    frame["activity"] = json!([]);
+    frame["truncated"] = json!(true);
+    frame["unread_count"] = json!(3);
+    f.send(p, frame.clone());
+    let passive = inspect(&f, p);
+    assert_eq!(passive["count"], 1);
+    assert_eq!(passive["unread_count"], 3);
+
+    frame["request_id"] = json!("correlated-stop");
+    frame["source_op"] = json!("unlisten_all");
+    f.send(p, frame);
+    assert_eq!(inspect(&f, p)["count"], 0);
+}
+
+#[test]
+fn real_host_and_nested_invite_receipts_settle_pending_controls_after_bounding() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    let p = start(&f);
+    f.send(p, f.action(json!({"op":"get_snapshot"})).1);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    inspect(&f, p);
+    for operation in ["set_host_hub", "paste_hub_invite"] {
+        if operation == "set_host_hub" {
+            control(&f, p, "toggle_host_hub");
+        } else {
+            f.send(
+                p,
+                json!({"op":"test_clipboard","text":"http://127.0.0.1:1"}),
+            );
+            control(&f, p, "paste_hub_invite");
+        }
+        let request = latest(&f, p, operation);
+        let (status, response) = f.action(request.clone());
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["committed"], true);
+        let mut receipt = Value::Null;
+        wait(|| {
+            receipt = fs::read_to_string(f.home.join("ui-frames"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|frame| {
+                    frame["op"] == "settings"
+                        && frame["request_id"] == request["request_id"]
+                        && frame["ok"] == true
+                })
+                .unwrap_or(Value::Null);
+            !receipt.is_null()
+        });
+        assert_eq!(receipt["committed"], true);
+        // Nested invite dispatch produces the save operation's real receipt.
+        assert_eq!(
+            receipt["source_op"],
+            if operation == "paste_hub_invite" {
+                "setup_save_hub"
+            } else {
+                operation
+            }
+        );
+        if operation == "paste_hub_invite" {
+            receipt["settings"]["hubs"][0]["url"] = json!(format!(
+                "https://hub.example.com/{}",
+                "x".repeat(cito_native::core::daemon::FRAME_LIMIT)
+            ));
+        }
+        let bounded: Value =
+            serde_json::from_slice(&cito_native::core::daemon::bounded_frame(receipt).unwrap())
+                .unwrap();
+        if operation == "paste_hub_invite" {
+            assert!(bounded.get("settings").is_none());
+        }
+        f.send(p, bounded.clone());
+        let settled = inspect(&f, p);
+        assert_eq!(settled["pending_controls"], json!([]));
+        if operation == "paste_hub_invite" {
+            assert_eq!(settled["hub_invite_pending"], false);
+            assert_eq!(
+                node(&settled, "settings_items", "settings_error_label")["text"],
+                bounded["warning"]
+            );
+        }
+    }
+}
+
+#[test]
+fn url_only_oidc_edit_discovers_destination_metadata_and_preserves_overrides() {
+    use cito_native::core::config::{discover_hub_config, merge_hub_config};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["hubs"][0] = json!({"name":"personal","url":"https://old.example.com","auth_mode":"oidc","enabled":true,"is_default":true,"status":"connected","issuer":"https://old-id.example.com","client_id":"old-client","redirect_port":8400,"is_builtin":false});
+    open(&f, p, &cfg, "hubs");
+    control(&f, p, "edit_hub:personal");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        assert_eq!(line, "GET /health HTTP/1.1\r\n");
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let body = json!({"auth_mode":"oidc","oidc":{"issuer":"https://new-id.example.com","client_id":"new-client","redirect_port":8500}}).to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    input(&f, p, "settings_hub_url", &url);
+    control(&f, p, "submit_add_hub");
+    let request = latest(&f, p, "setup_save_hub");
+    for key in ["issuer", "client_id", "redirect_port"] {
+        assert!(request.get(key).is_none(), "{request}");
+    }
+    let adopted = discover_hub_config(merge_hub_config(&cfg["hubs"][0], &request)).unwrap();
+    server.join().unwrap();
+    assert_eq!(adopted["issuer"], "https://new-id.example.com");
+    assert_eq!(adopted["clientId"], "new-client");
+    assert_eq!(adopted["redirectPort"], 8500);
+    f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":request["request_id"],"error":"Retry"}));
+    input(&f, p, "settings_hub_issuer", "https://override.example.com");
+    input(&f, p, "settings_hub_client_id", "");
+    input(&f, p, "settings_hub_redirect_port", "0");
+    control(&f, p, "submit_add_hub");
+    let explicit = latest(&f, p, "setup_save_hub");
+    assert_eq!(explicit["issuer"], "https://override.example.com");
+    assert_eq!(explicit.get("client_id"), Some(&Value::Null));
+    assert_eq!(explicit["redirect_port"], 0);
+}
+
+#[test]
 fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

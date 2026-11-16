@@ -151,6 +151,22 @@ impl SessionActivity {
         }
     }
 
+    /// Targeted probes observe endpoint-local state even with discovery disabled.
+    pub(super) fn observe_badge(&mut self, observation: &Value) {
+        self.reap_badges();
+        let Some(observed) = observation.get("badge") else {
+            return;
+        };
+        if let Some(badge) = self.badges.get_mut(&Target::of(observation)) {
+            if badge.desired.session_id == string(observation, "session_id")
+                && *observed != json!(badge.desired.badge)
+            {
+                badge.sent = None;
+                badge.retry_at = Instant::now();
+            }
+        }
+    }
+
     pub fn discovery_demand(&mut self, background: bool, configured: HashSet<String>) {
         self.background_discovery = background;
         self.configured = Some(configured);

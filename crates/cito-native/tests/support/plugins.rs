@@ -1514,54 +1514,56 @@ fn socket(path: &std::path::Path, request: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 #[test]
-fn pi_badge_clear_converges_for_missing_or_departed_bridges() {
+fn agent_badge_clear_converges_for_missing_or_departed_bridges() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let app = f.dir.join("pi.mjs");
-    fs::write(&app, "console.log('ready');setInterval(()=>{},1000)").unwrap();
-    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.output(endpoint, false).contains("ready"));
-    let path = f
-        .state
-        .join(format!("sockets/pi-pid-{}.sock", f.pid(endpoint)));
-    let update = |badge: Value| {
-        f.plugin(
-            PI,
+    for (id, plugin) in [("pi", PI), ("claude", CLAUDE)] {
+        let f = Fixture::new(json!({}));
+        let app = f.dir.join(format!("{id}.mjs"));
+        fs::write(&app, "console.log('ready');setInterval(()=>{},1000)").unwrap();
+        let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+        wait(|| f.output(endpoint, false).contains("ready"));
+        let path = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", f.pid(endpoint)));
+        let update = |badge: Value| {
+            f.plugin(
+            plugin,
             json!({"op":"update_badge","endpoint_pid":f.pid(endpoint),"session_id":"session-a","badge":badge}),
         )
-    };
+        };
 
-    // A process discovered before its bridge starts has nothing to clear.
-    assert!(!path.exists());
-    assert_eq!(update(Value::Null), json!({"ok":true}));
-    assert_eq!(update(json!("badge"))["ok"], false);
+        // A process discovered before its bridge starts has nothing to clear.
+        assert!(!path.exists());
+        assert_eq!(update(Value::Null), json!({"ok":true}));
+        assert_eq!(update(json!("badge"))["ok"], false);
 
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-    assert!(path.exists());
-    // A live endpoint's transport failure must remain retryable.
-    assert_eq!(update(Value::Null)["ok"], false);
-    assert!(path.exists());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        // A live endpoint's transport failure must remain retryable.
+        assert_eq!(update(Value::Null)["ok"], false);
+        assert!(path.exists());
 
-    f.stop(endpoint);
-    assert_eq!(update(json!("badge"))["ok"], false);
-    assert!(path.exists(), "badge writes must not clean up the socket");
-    assert_eq!(update(Value::Null), json!({"ok":true}));
-    assert!(
-        !path.exists(),
-        "a departed endpoint's stale socket is removed"
-    );
-    assert_eq!(update(Value::Null), json!({"ok":true}));
-    let unrelated = f.spawn("/bin/cat", &[], &[]);
-    let stale = f
-        .state
-        .join(format!("sockets/pi-pid-{}.sock", f.pid(unrelated)));
-    drop(UnixListener::bind(&stale).unwrap());
-    assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":f.pid(unrelated),"session_id":"session-a","badge":null}))["ok"],true);
-    assert!(
-        !stale.exists(),
-        "A reused PID running another app cannot retain a badge socket"
-    );
+        f.stop(endpoint);
+        assert_eq!(update(json!("badge"))["ok"], false);
+        assert!(path.exists(), "badge writes must not clean up the socket");
+        assert_eq!(update(Value::Null), json!({"ok":true}));
+        assert!(
+            !path.exists(),
+            "a departed endpoint's stale socket is removed"
+        );
+        assert_eq!(update(Value::Null), json!({"ok":true}));
+        let unrelated = f.spawn("/bin/cat", &[], &[]);
+        let stale = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", f.pid(unrelated)));
+        drop(UnixListener::bind(&stale).unwrap());
+        assert_eq!(f.plugin(plugin,json!({"op":"update_badge","endpoint_pid":f.pid(unrelated),"session_id":"session-a","badge":null}))["ok"],true);
+        assert!(
+            !stale.exists(),
+            "A reused PID running another app cannot retain a badge socket"
+        );
+    }
 }
 
 #[test]

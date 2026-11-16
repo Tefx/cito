@@ -534,9 +534,11 @@ pub fn handle(input: &Value) -> Result<Value> {
                 );
             }
             let sid = str_at(v, "session_id");
-            Ok(
-                json!({"ok":true,"status":if sid==str_at(req,"session_id"){"alive"}else{"switched"},"current_session_id":sid,"reason":null}),
-            )
+            let mut result = json!({"ok":true,"status":if sid==str_at(req,"session_id"){"alive"}else{"switched"},"current_session_id":sid,"reason":null});
+            if let Some(badge) = v.get("badge") {
+                result["badge"] = badge.clone();
+            }
+            Ok(result)
         }
         "wake" | "update_badge" => {
             let Some(p) = pid(req) else {

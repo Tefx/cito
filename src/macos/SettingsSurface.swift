@@ -188,7 +188,7 @@ extension Companion {
             }
             settled = true
         }
-        if request == hubInviteRequest && (operation.isEmpty || operation == "paste_hub_invite") {
+        if request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation)) {
             hubInvitePending = false; settled = true
         }
         if request == submittedHostHubRequestId && (operation.isEmpty || operation == "set_host_hub") {
@@ -1124,7 +1124,7 @@ extension Companion {
             guard let self = self else { return }
             let wasEditing = self.editingExistingHub
             self.editingExistingHub=false
-            self.editingOriginalHub=""
+            self.editingOriginalHub=""; self.editingInitialHub=nil
             self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubRedirectPort=""; self.addHubAuth="none"; self.addHubAuthExplicit=false
             self.addHubDraftGeneration += 1
             self.addHubError=nil; self.pendingHubSave=nil; self.inviteParseRequest=""
@@ -1262,6 +1262,13 @@ extension Companion {
                     if !cid.isEmpty { action["client_id"] = cid } else if self.editingExistingHub { action["client_id"] = NSNull() }
                     if let port = Int(self.addHubRedirectPort.trimmingCharacters(in:.whitespacesAndNewlines)) { action["redirect_port"] = port }
                     else if self.editingExistingHub { action["redirect_port"] = NSNull() }
+                    // A URL-only edit must discover the destination's metadata,
+                    // while deliberate overrides and explicit clears retain priority.
+                    if let initial = self.editingInitialHub, url != normalizedHubURL(initial.url) {
+                        if iss == (initial.issuer ?? "") { action.removeValue(forKey:"issuer") }
+                        if cid == (initial.client_id ?? "") { action.removeValue(forKey:"client_id") }
+                        if self.addHubRedirectPort == (initial.redirect_port.map(String.init) ?? "") { action.removeValue(forKey:"redirect_port") }
+                    }
                 }
                 let pending = PendingHubSave(name:name, requestId:UUID().uuidString, generation:self.addHubDraftGeneration)
                 self.pendingHubSave=pending; self.addHubError=nil
@@ -1310,7 +1317,7 @@ extension Companion {
                     self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubRedirectPort=hub.redirect_port.map(String.init) ?? ""; self.addHubToken=""
                     self.addHubDraftGeneration += 1
                     self.pendingHubSave=nil; self.addHubError=nil; self.inviteParseRequest=""
-                    self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.addHubFormOpen=true
+                    self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.editingInitialHub=hub; self.addHubFormOpen=true
                     self.rebuildSettingsPanel(revealAddHub: true)
                 }
                 row.addSubview(edit)

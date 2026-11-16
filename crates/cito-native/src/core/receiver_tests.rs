@@ -414,6 +414,10 @@ fn missing_and_acked_claim_members_reconcile_without_partially_claiming_unread(
     }
     assert_eq!(rows[2]["state"], "RECEIVED");
     assert!(rows[2]["batch_id"].is_null());
+    assert_eq!(
+        f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
+        1
+    );
     assert!(f.hub_db()?.query(
         "SELECT claimed_by_channel FROM hub_signals WHERE signal_id='remaining'",
         &[]
@@ -430,6 +434,49 @@ fn missing_and_acked_claim_members_reconcile_without_partially_claiming_unread(
         1
     );
     assert_eq!(requests[0]["signals"][0]["signal_id"], "remaining");
+    Ok(())
+}
+
+#[test]
+fn terminal_claim_loss_and_expiry_drop_retries_without_dropping_unread_survivors(
+) -> Result<(), String> {
+    for transition in ["initial_ack", "renewal_ack", "expired"] {
+        let f = Fixture::new()?;
+        f.seed("s")?;
+        let plugin = f.plugin(DELIVER);
+        match transition {
+            "initial_ack" => {
+                f.client.rpc("signal_ack", &json!({"node_id":f.row["listener_id"],"signal_ids":["s"],"channel_id":"sibling:fixture"}))?;
+                f.dispatch(&plugin)?;
+                assert!(f.requests()?.is_empty());
+                assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
+            }
+            "renewal_ack" => {
+                let worker = f.worker(f.plugin(WAIT));
+                wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+                f.client.rpc("signal_ack", &json!({"node_id":f.row["listener_id"],"signal_ids":["s"],"channel_id":"sibling:fixture"}))?;
+                wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
+                assert!(worker.join()?.is_err());
+                child_gone(&f)?;
+                assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
+            }
+            _ => {
+                f.state
+                    .db
+                    .execute("UPDATE local_signals SET expires_at_ms=1", &[])?;
+                f.dispatch(&plugin)?;
+                assert_eq!(f.rows()?[0]["state"], "EXPIRED_UNSENT");
+                assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
+            }
+        }
+        assert!(
+            f.state
+                .db
+                .query("SELECT * FROM wake_retries", &[])?
+                .is_empty(),
+            "{transition}"
+        );
+    }
     Ok(())
 }
 

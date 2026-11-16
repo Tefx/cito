@@ -328,7 +328,6 @@ mod control_tests {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let config = json!({"botToken":"test-token","apiBaseUrl":format!("http://{}",listener.local_addr().unwrap())});
-        let (release, wait) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             use std::os::fd::AsRawFd;
             for method in ["getMe", "sendMessage"] {
@@ -363,25 +362,31 @@ mod control_tests {
                     }
                 }
                 reader.read_exact(&mut vec![0; length]).unwrap();
-                if method == "getMe" {
-                    let body = json!({"ok":true,"result":{"username":"sample_bot"}}).to_string();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .unwrap();
+                // Each call fits the original budget on its own; together they
+                // exceed it. A per-call reset would incorrectly report success.
+                std::thread::sleep(Duration::from_millis(if method == "getMe" {
+                    350
                 } else {
-                    wait.recv_timeout(Duration::from_secs(2)).unwrap();
+                    300
+                }));
+                let body = if method == "getMe" {
+                    json!({"ok":true,"result":{"username":"sample_bot"}})
+                } else {
+                    json!({"ok":true,"result":{"message_id":42}})
                 }
+                .to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
             }
         });
         let started = std::time::Instant::now();
         let reply = rpc(
             &config,
-            &json!({"op":"test","req_id":"bounded","user_config":{"chatId":"123"},"control_deadline_ms":now_ms()+200}),
+            &json!({"op":"test","req_id":"bounded","user_config":{"chatId":"123"},"control_deadline_ms":now_ms()+500}),
         );
-        release.send(()).unwrap();
         worker.join().unwrap();
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["req_id"], "bounded");

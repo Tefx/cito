@@ -295,7 +295,7 @@ pub fn poll_listener(
                 for message in remote["messages"].as_array().into_iter().flatten() {
                     if !message["acked_at_ms"].is_null() && pending.iter().any(|p|p["seq"] == message["seq"] && p["signal_id"] == message["signal_id"]) {
                         db.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[message["acked_at_ms"].clone(),json!(hub),json!(id),message["signal_id"].clone()])?;
-                        db.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+                        super::state::reconcile_wake_retry(db, hub, id)?;
                     }
                 }
                 db.execute("UPDATE local_listeners SET ack_scan_seq=? WHERE hub=? AND listener_id=?",&[pending.last().map(|r|r["seq"].clone()).unwrap_or(json!(0)),json!(hub),json!(id)])?;
