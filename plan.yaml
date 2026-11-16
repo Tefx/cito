@@ -14545,7 +14545,7 @@ phases:
 - id: v49
   name: 'V49 Hub /health OIDC Auto-Discovery, Multi-Principal Signal Isolation, UI
     Settlement & 29-Item Ledger Convergence (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All binding v49 requirements across Contract §§1–5 and the 29-item Admitted
     Finding Ledger (A1–A8, B1–B12, C1–C6, R3-2–R3-4) pass; 3-way incremental [REQUIRES_SKILL:
     contract-and-simplicity] audit convergence (uiux-auditor, pathway-auditor, structural-auditor)
@@ -14802,7 +14802,7 @@ phases:
   - id: v49.review
     name: 'V49 3-Way Incremental Audit Convergence & Full Workspace Regression Gate
       [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v49` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v49.core`, `v49.ui`,\
@@ -14857,6 +14857,23 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-16T15:50:15.240850Z'
+    done_at: '2026-11-16T16:00:49.799452+00:00'
+    evidence: 'Phase v49 terminal acceptance PASSED via independent fresh gate-reviewer
+      (gate.report.v2 FULL PHASE_GATE bound to git:7268aabe1ecae2ef764116f7ed206f9bbebad84b;
+      45/45 requirements PROVEN, 0 findings; validated with POSITIVE_GATE_EVIDENCE).
+
+      Round 5 three-way incremental audit converged unanimously to PROVEN / ZERO_NEW_ISSUES
+      (uiux-auditor, structural-auditor, pathway-auditor all validated POSITIVE_EVIDENCE;
+      52/52 full-file coverage completed).
+
+      Committed verification on fb1bdc7 (only plan.yaml changed to 7268aab): cargo
+      fmt --all -- --check & git diff --check passed; Rust 1.95.0 Clippy --workspace
+      --all-targets -- -D warnings 0 warnings; detached os.setsid() (PPID=1, Python
+      3.11.18, RUST_TEST_THREADS=2) cargo test --workspace 552 passed / 0 failed /
+      4 ignored; cargo build --release 0 warnings + 7/7 staged binaries strict codesign
+      verified on HEAD; packaging/release.py check (0.21.3, no tag); 17 packaging
+      unit tests passed; site-clipboard.mjs passed; 0 §1.2/neutral-name/English violations;
+      live ~/.cito sockets untouched and /Applications/Cito.app absent.'
   - id: v49.consolidate
     name: 'V49 Round 1 Admitted Ledger Consolidation, Cross-Layer Settlement, Site
       Docs & Release Binary Staging (V49-C1–V49-C8) [REQUIRES_SKILL: contract-and-simplicity]'
