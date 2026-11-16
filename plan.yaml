@@ -14990,7 +14990,7 @@ phases:
   - id: v49.fix
     name: 'V49 Round 2 Admitted Ledger Closure & Release Binary Staging (V49-R2-1–V49-R2-7,
       F8) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Resolve all\
@@ -15084,3 +15084,19 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-16T13:28:58.006261Z'
+    done_at: '2026-11-16T14:25:04.300999+00:00'
+    evidence: 'Completed v49.fix (candidate refs/vectl/candidates/v49.fix -> 7285dfba7e4614d2c6fee8cee05cb295890f9a5f,
+      fast-forwarded onto main; 17 files changed across crates/cito-native/**, plugins/*/bin/*,
+      src/macos/**, and bin/**):
+
+      - Resolved all 7 Round 2 admitted findings (V49-R2-1 through V49-R2-7) plus
+      Directory receipt-handling and failed-reload event-worker ownership regressions
+      caught during full regression, and refreshed all 7 staged binaries (`F8`).
+
+      - Verified on committed 7285dfb (/tmp/v49-fix-check/verification.md): `cargo
+      fmt --all -- --check` & `git diff --check` passed; Rust 1.95.0 preview Clippy
+      `-D warnings` 0 warnings; detached double-fork `os.setsid()` `cargo test --workspace`
+      (**552 passed, 0 failed, 4 ignored**); `cargo build --release` 0 warnings +
+      **7/7 strict codesign** passed; `packaging/release.py check` (`0.21.3`, no tag);
+      **17 packaging unit tests** passed; `site-clipboard.mjs` passed; 0 `§1.2`/neutral-name/English
+      violations; live `~/.cito` sockets untouched and `/Applications/Cito.app` absent.'
