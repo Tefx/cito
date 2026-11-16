@@ -14586,7 +14586,7 @@ phases:
   - id: v49.core
     name: V49 Rust Core, Hub /health OIDC Auto-Discovery, Principal Signal Isolation
       & Plugin Hardening (Contract §§2–4, B1–B12, C1–C2, C4, C6, R3-2–R3-4)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - src/macos/**\n    - README.md\n    - docs/**\n    -\
@@ -14666,6 +14666,21 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-16T08:12:34.506763Z'
+    done_at: '2026-11-16T09:40:49.057911+00:00'
+    evidence: 'Completed v49.core (candidate refs/vectl/candidates/v49.core -> 07371a0cf4179e3418b59e3ce47f14c4dd42532e,
+      rebased over plan.yaml claim commit c769a25 onto main at 14b0f959dea0336f1b5c6c80f0ce88d11b54623c;
+      36 files changed in crates/cito-native/** and plugins/**):
+
+      - Implemented Binding Contract §§2-4 and Ledger items B1-B12, C1-C2, C4, R3_2-R3_4,
+      plus Rust IPC portions of A8 (`ui_ipc.rs` `Frame.truncated`) and C3 (`projection.rs`
+      `redirect_port` projection).
+
+      - Verified on committed state (07371a0): `cargo fmt --all -- --check` & `git
+      diff --check` passed; `cargo clippy --workspace --all-targets -- -D warnings`
+      passed with 0 warnings; detached `cargo test -p cito-native --lib` (284 passed,
+      4 ignored), `--test native daemon::` (71 passed), `--test native plugins::`
+      (46 passed), and telegram control-deadline test (1 passed); version kept at
+      0.21.3 with no release tag and zero writes to `~/.cito` or `/Applications/Cito.app`.'
   - id: v49.ui
     name: V49 macOS Swift UI Zero-Config OIDC Form, Passive Flush, Receipt Settlement
       & HeadlessOracle Guard (Contract §5, A1–A8, C3)
