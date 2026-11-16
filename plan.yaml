@@ -14545,7 +14545,7 @@ phases:
 - id: v49
   name: 'V49 Hub /health OIDC Auto-Discovery, Multi-Principal Signal Isolation, UI
     Settlement & 29-Item Ledger Convergence (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: in_progress
   gate: 'All binding v49 requirements across Contract §§1–5 and the 29-item Admitted
     Finding Ledger (A1–A8, B1–B12, C1–C6, R3-2–R3-4) pass; 3-way incremental [REQUIRES_SKILL:
     contract-and-simplicity] audit convergence (uiux-auditor, pathway-auditor, structural-auditor)
@@ -14586,7 +14586,7 @@ phases:
   - id: v49.core
     name: V49 Rust Core, Hub /health OIDC Auto-Discovery, Principal Signal Isolation
       & Plugin Hardening (Contract §§2–4, B1–B12, C1–C2, C4, C6, R3-2–R3-4)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - src/macos/**\n    - README.md\n    - docs/**\n    -\
@@ -14664,6 +14664,8 @@ phases:
     - plugins/claude/native.rs
     - plugins/telegram/native.rs
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-16T08:12:34.506763Z'
   - id: v49.ui
     name: V49 macOS Swift UI Zero-Config OIDC Form, Passive Flush, Receipt Settlement
       & HeadlessOracle Guard (Contract §5, A1–A8, C3)
