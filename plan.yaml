@@ -14684,7 +14684,7 @@ phases:
   - id: v49.ui
     name: V49 macOS Swift UI Zero-Config OIDC Form, Passive Flush, Receipt Settlement
       & HeadlessOracle Guard (Contract §5, A1–A8, C3)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/**\n \
       \ blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n\
@@ -14733,10 +14733,12 @@ phases:
     depends_on:
     - v49.core
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-16T09:40:54.924995Z'
   - id: v49.docs
     name: V49 Documentation Alignment for OIDC Auto-Discovery, Redirect Port & Pi
       Bridge Claims (C5)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - crates/**\n    - src/**\n    - plugins/**\n\nDeliver:\n\
@@ -14761,6 +14763,8 @@ phases:
     depends_on:
     - v49.core
     agent: docs-editor
+    claimed_by: docs-editor
+    claimed_at: '2026-11-16T09:40:54.925121Z'
   - id: v49.review
     name: 'V49 3-Way Incremental Audit Convergence & Full Workspace Regression Gate
       [REQUIRES_SKILL: contract-and-simplicity]'
