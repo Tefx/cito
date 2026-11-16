@@ -15189,7 +15189,7 @@ phases:
   - id: v49.fix3
     name: 'V49 Round 4 Admitted Edge Closure & Release Binary Staging (R4-F1) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/**\n \
       \   - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Close `R4-F1`\
@@ -15233,3 +15233,5 @@ phases:
     depends_on:
     - v49.fix2
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-16T15:31:13.885524Z'
