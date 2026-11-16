@@ -14802,7 +14802,7 @@ phases:
   - id: v49.review
     name: 'V49 3-Way Incremental Audit Convergence & Full Workspace Regression Gate
       [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v49` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v49.core`, `v49.ui`,\
@@ -14850,6 +14850,8 @@ phases:
     - v49.consolidate
     - v49.fix
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-16T14:25:08.753003Z'
   - id: v49.consolidate
     name: 'V49 Round 1 Admitted Ledger Consolidation, Cross-Layer Settlement, Site
       Docs & Release Binary Staging (V49-C1–V49-C8) [REQUIRES_SKILL: contract-and-simplicity]'
