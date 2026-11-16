@@ -15189,7 +15189,7 @@ phases:
   - id: v49.fix3
     name: 'V49 Round 4 Admitted Edge Closure & Release Binary Staging (R4-F1) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/**\n \
       \   - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Close `R4-F1`\
@@ -15235,3 +15235,20 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-16T15:31:13.885524Z'
+    done_at: '2026-11-16T15:50:11.064120+00:00'
+    evidence: 'Completed v49.fix3 (candidate refs/vectl/candidates/v49.fix3 -> fb1bdc7a005f134ce7c47f778f33dd08ee0b6fc7,
+      fast-forwarded onto main; 9 files across src/macos/SettingsSurface.swift, oidc_settlement.rs,
+      and 7 staged binaries):
+
+      - Closed R4-F1: trimmed inherited issuer/clientId comparisons against committed
+      snapshot before canonical settings refresh while preserving raw PendingHubSave
+      snapshots for newer-draft equality; extended `retained_oidc_draft_advances_committed_baseline_before_second_url_change`
+      with whitespace-padded inherited fields.
+
+      - Verified on committed fb1bdc7 (/tmp/cito-v49-fix3/workspace-final.log): `cargo
+      fmt --all -- --check` & `git diff --check` passed; Rust 1.95.0 Clippy `-D warnings`
+      0 warnings; detached `os.setsid()` `cargo test --workspace` (**552 passed, 0
+      failed, 4 ignored**); `cargo build --release` 0 warnings + **7/7 strict codesign**
+      passed; `packaging/release.py check` (`0.21.3`, no tag); **17 packaging tests**
+      passed; `site-clipboard.mjs` passed; `~/.cito` sockets untouched and `/Applications/Cito.app`
+      absent.'
