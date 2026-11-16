@@ -14542,3 +14542,250 @@ phases:
       \ 0\n   - Live closed-UI idle check (`ps` & `top -l 2`): `cito-ui` (pid 52709)\
       \ 0.0% CPU / IDLEW 0 / 12M; `cito-native daemon` (pid 52700) 0.0–1.1% CPU /\
       \ IDLEW 0 / 4.5M."
+- id: v49
+  name: 'V49 Hub /health OIDC Auto-Discovery, Multi-Principal Signal Isolation, UI
+    Settlement & 29-Item Ledger Convergence (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: pending
+  gate: 'All binding v49 requirements across Contract §§1–5 and the 29-item Admitted
+    Finding Ledger (A1–A8, B1–B12, C1–C6, R3-2–R3-4) pass; 3-way incremental [REQUIRES_SKILL:
+    contract-and-simplicity] audit convergence (uiux-auditor, pathway-auditor, structural-auditor)
+    reaches ZERO_NEW_ISSUES; cargo fmt --all -- --check, git diff --check, cargo clippy
+    --workspace --all-targets -- -D warnings, full cargo test --workspace, cargo build
+    --release (0 warnings), python3 packaging/release.py check (version 0.21.3, NO
+    release tag), python3 -m unittest discover -s packaging, node crates/cito-native/tests/support/site-clipboard.mjs,
+    and zero §1.2/private-name violations pass before PASS.'
+  context: 'Implement converged Binding Contract §§1–5 and the 29-item Admitted Finding
+    Ledger (A1–A8, B1–B12, C1–C6, R3-2–R3-4) directly without repeating Stage 1 discovery:
+    (1) v49.core (rust-engineer, depends_on: []): Contract §§2–4 (Hub /health OIDC
+    auto-discovery + cito hub --redirect-port / CITO_OIDC_REDIRECT_PORT, lock-free
+    /health probing in setup_save_hub/save_hub/paste_hub_invite, canonical config
+    normalization in config.rs/http_actions.rs/setup.rs/login.rs, committed: true
+    receipts & after_channel_action, live_receivers() + remote channel active check,
+    wake_retries cleanup, (hub_url, principal_id) local_signals isolation across session_activity.rs/projection.rs/daemon/mcp.rs/receiver.rs/http_actions.rs,
+    disabled-Hub unlisten + cito_find host filter + read_send_receipt + remove-hub
+    cleanup, identity::display_address non-ASCII safety, plugin_support.rs arg boundary
+    preservation, hub_plugins.rs OS exit vs pipe EOF & descendant cleanup, main.rs
+    sidecar startup deadline, and plugins/{pi,codex,claude,telegram}); (2) v49.ui
+    (frontend-engineer, depends_on: [v49.core]): Contract §5 & A1–A8, C3 (src/macos/{Companion,SettingsSurface,Models,UIPrimitives,HeadlessOracle}.swift,
+    keeping none/token add_hub_form height 252, 2-row OIDC zero-config form with Auto-discovered
+    placeholder and Saving… edit pending label, redirect_port decoding/passthrough,
+    controlTextDidEndEditing-only passive flush preserving undoManager & hasMarkedText(),
+    non-deferred explicit receipts & form dismissal, full pending* settlement on settings
+    == nil / authority_changed / paste_hub_invite / Escape / ok == false, and Frame.truncated:
+    Bool? guard); (3) v49.docs (docs-editor, depends_on: [v49.core]): C5 (README.md:163,
+    191-214, docs/DESIGN.md:107-118, 201-228, 396-410, deploy/hub/README.md if applicable:
+    remove obsolete 🔔 badge and .jsonl claims, document Hub /health OIDC auto-discovery
+    and --redirect-port / redirectPort / CITO_OIDC_REDIRECT_PORT in English only,
+    keeping version 0.21.3 with no company/internal names); (4) v49.review (gate-reviewer,
+    depends_on: [v49.core, v49.ui, v49.docs]): [REQUIRES_SKILL: contract-and-simplicity]
+    + 3-way incremental audit convergence (uiux-auditor, pathway-auditor, structural-auditor
+    to ZERO_NEW_ISSUES) + full workspace regression before PASS.'
+  depends_on:
+  - v48
+  steps:
+  - id: v49.core
+    name: V49 Rust Core, Hub /health OIDC Auto-Discovery, Principal Signal Isolation
+      & Plugin Hardening (Contract §§2–4, B1–B12, C1–C2, C4, C6, R3-2–R3-4)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - src/macos/**\n    - README.md\n    - docs/**\n    -\
+      \ deploy/**\n\nDeliver:\n- Implement converged Binding Contract §§2–4 and all\
+      \ Rust Core, Hub, Daemon, CLI, and Plugin items (`B1`–`B12`, `C1`–`C2`, `C4`,\
+      \ `C6`, `R3-2`–`R3-4`) from the 29-item Admitted Finding Ledger without repeating\
+      \ Stage 1 discovery:\n  1. Hub `/health` OIDC Auto-Discovery & Redirect Port\
+      \ Authority (`crates/cito-native/src/core/{hub,cli,config,login,setup}.rs`,\
+      \ `crates/cito-native/src/core/daemon/http_actions.rs`):\n     - Expose OIDC\
+      \ auto-discovery metadata on `GET /health` when `auth_mode == \"oidc\"` and\
+      \ support `cito hub --redirect-port <port>` / `CITO_OIDC_REDIRECT_PORT`.\n \
+      \    - Perform lock-free `/health` probing in `setup_save_hub`, `save_hub`,\
+      \ and `paste_hub_invite` (outside the daemon service lock) to populate omitted\
+      \ OIDC `issuer`, `clientId`, and `redirectPort` fields.\n     - Enforce canonical\
+      \ config normalization across `config.rs`, `http_actions.rs`, `setup.rs`, and\
+      \ `login.rs`.\n  2. Committed Receipts & `after_channel_action` Settlement (`crates/cito-native/src/core/daemon/{channels,http_actions,ui_ipc}.rs`):\n\
+      \     - Emit `\"committed\": true` on committed Hub and channel mutation receipts\
+      \ and unify `after_channel_action` post-commit handling so secondary refresh/projection\
+      \ errors never mask committed state.\n  3. Live Receivers, Remote Channel Active\
+      \ Check & `wake_retries` Cleanup (`crates/cito-native/src/core/{receiver,session_activity,state}.rs`,\
+      \ `crates/cito-native/src/core/daemon/{mod,projection}.rs`):\n     - Reconcile\
+      \ `live_receivers()` and remote channel active checks accurately and clean up\
+      \ `wake_retries` entries deterministically upon retirement, unlisten, or Hub\
+      \ removal.\n  4. Multi-Principal `(hub_url, principal_id)` `local_signals` Isolation\
+      \ (`crates/cito-native/src/core/{session_activity,receiver,state}.rs`, `crates/cito-native/src/core/daemon/{projection,mcp,http_actions}.rs`):\n\
+      \     - Scope `local_signals` storage, unread counters, activity projections,\
+      \ acknowledgments, and inbox queries by `(hub_url, principal_id)` across `session_activity.rs`,\
+      \ `projection.rs`, `daemon/mcp.rs`, `receiver.rs`, and `http_actions.rs`.\n\
+      \  5. Disabled-Hub `unlisten`, `cito_find` Host Filter, `read_send_receipt`\
+      \ & Remove-Hub Cleanup (`crates/cito-native/src/core/daemon/{mod,mcp,http_actions,projection}.rs`,\
+      \ `crates/cito-native/src/core/{state,receiver}.rs`):\n     - Permit `unlisten`\
+      \ on disabled Hubs, enforce consistent `cito_find` `host` filtering, preserve\
+      \ committed `read_send_receipt` semantics, and purge all Hub-scoped tables/caches\
+      \ on Hub removal.\n  6. Non-ASCII Address Safety, Process Arg Boundaries, Subprocess\
+      \ Lifecycle & Plugins (`crates/cito-native/src/core/{identity,hub_plugins}.rs`,\
+      \ `crates/cito-native/src/{plugin_support,main}.rs`, `plugins/{pi,codex,claude,telegram}/**`):\n\
+      \     - Make `identity::display_address` non-ASCII / UTF-8 char-boundary safe.\n\
+      \     - Preserve argument boundaries in `plugin_support.rs`.\n     - Separate\
+      \ OS process exit from pipe EOF and clean up descendant processes in `hub_plugins.rs`.\n\
+      \     - Enforce a bounded startup deadline for `stdio_sidecar` in `crates/cito-native/src/main.rs`.\n\
+      \     - Apply all paired fixes in `plugins/{pi,codex,claude,telegram}` and add\
+      \ discriminating unit/integration tests in `crates/cito-native`.\n\nBoundary:\n\
+      - Owner: `rust-engineer`. Isolated worktree transaction modifying `crates/cito-native/**`\
+      \ and `plugins/**`.\n\nAdmit:\n- Depends on Phase `v48` completion (`2259c8d`).\n\
+      - Verification: affected unit/integration tests (`cargo test -p cito-native\
+      \ ...`) and `cargo clippy --workspace --all-targets -- -D warnings` pass with\
+      \ 0 warnings. Consumed by `v49.ui`, `v49.docs`, and `v49.review`.\n\nRecovery:\n\
+      - Repair any Rust, plugin, or test failure in place within the worktree before\
+      \ completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native daemon:: && cargo test -p cito-native --test native plugins:: && cargo
+      clippy --workspace --all-targets -- -D warnings'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/channels.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - plugins/codex/native.rs
+    - plugins/claude/native.rs
+    - plugins/telegram/native.rs
+    agent: rust-engineer
+  - id: v49.ui
+    name: V49 macOS Swift UI Zero-Config OIDC Form, Passive Flush, Receipt Settlement
+      & HeadlessOracle Guard (Contract §5, A1–A8, C3)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/**\n \
+      \ blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n\
+      \    - README.md\n    - docs/**\n    - deploy/**\n\nDeliver:\n- Implement converged\
+      \ Binding Contract §5 and ledger items `A1`–`A8`, `C3` across `src/macos/{Companion,SettingsSurface,Models,UIPrimitives,HeadlessOracle}.swift`\
+      \ and `crates/cito-native/tests/**` without repeating Stage 1 discovery:\n \
+      \ 1. Zero-Config OIDC `add_hub_form` Geometry & Labels (`src/macos/SettingsSurface.swift`):\n\
+      \     - Preserve `\"none\"` and `\"token\"` `add_hub_form` height at `252`.\n\
+      \     - Render the 2-row OIDC zero-config form with `\"Auto-discovered\"` placeholder\
+      \ text and `\"Saving…\"` pending label when editing an existing Hub.\n  2. `redirect_port`\
+      \ Decoding & Passthrough (`src/macos/{Models,SettingsSurface,Companion}.swift`):\n\
+      \     - Decode `redirect_port` (`redirectPort`) in `Models.swift` and preserve/pass\
+      \ it through Hub edit/save flows in `SettingsSurface.swift` and `Companion.swift`.\n\
+      \  3. `controlTextDidEndEditing`-Only Passive Flush (`src/macos/{UIPrimitives,SettingsSurface,Companion}.swift`):\n\
+      \     - Restrict passive text-field flushing to `controlTextDidEndEditing`,\
+      \ preserving active field editor attachment, `undoManager` history, and `hasMarkedText()`\
+      \ IME composition across background refreshes.\n  4. Non-Deferred Explicit Receipts\
+      \ & Form Dismissal (`src/macos/{Companion,SettingsSurface}.swift`):\n     -\
+      \ Process explicit `request_id`-correlated receipts immediately without deferring\
+      \ behind closed/lazy surface gates, and dismiss `add_hub_form` / inline Hub\
+      \ editing upon confirmed receipt settlement.\n  5. Complete `pending*` Settlement\
+      \ (`src/macos/{Companion,SettingsSurface}.swift`):\n     - Settle and clear\
+      \ all `pending*` states on `settings == nil`, `authority_changed == true`, `paste_hub_invite`\
+      \ completion/error, `Escape` cancellation, and `ok == false` receipt responses.\n\
+      \  6. `Frame.truncated: Bool?` Guard & UI/Oracle Tests (`src/macos/{Models,Companion,HeadlessOracle}.swift`,\
+      \ `crates/cito-native/tests/**`):\n     - Decode and guard `Frame.truncated:\
+      \ Bool?` on inbound frames, and add discriminating UI/oracle regression tests\
+      \ in `crates/cito-native/tests/support/ui/**`.\n\nBoundary:\n- Owner: `frontend-engineer`.\
+      \ Isolated worktree transaction modifying `src/macos/**` and `crates/cito-native/tests/**`.\n\
+      \nAdmit:\n- Depends on `v49.core`.\n- Verification: Swift/AppKit build + UI/oracle\
+      \ tests (`cargo test -p cito-native --test native ui::`) pass with zero `HeadlessOracle`\
+      \ violations. Consumed by `v49.review`.\n\nRecovery:\n- Repair any Swift build,\
+      \ layout, `HeadlessOracle`, or UI test failure in place within the worktree\
+      \ before completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/Models.swift
+    - src/macos/UIPrimitives.swift
+    - src/macos/HeadlessOracle.swift
+    - crates/cito-native/tests/support/ui/mod.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/tests/support/ui/settlement.rs
+    depends_on:
+    - v49.core
+    agent: frontend-engineer
+  - id: v49.docs
+    name: V49 Documentation Alignment for OIDC Auto-Discovery, Redirect Port & Pi
+      Bridge Claims (C5)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - crates/**\n    - src/**\n    - plugins/**\n\nDeliver:\n\
+      - Implement `C5` across `README.md` (`163, 191-214`), `docs/DESIGN.md` (`107-118,\
+      \ 201-228, 396-410`), and `deploy/hub/README.md` (if applicable) without repeating\
+      \ Stage 1 discovery:\n  1. Remove obsolete Pi footer `\U0001F514` badge claims\
+      \ and obsolete shared-cwd `.jsonl` fallback claims.\n  2. Document Hub `/health`\
+      \ OIDC auto-discovery and `--redirect-port` / `redirectPort` / `CITO_OIDC_REDIRECT_PORT`\
+      \ in English only.\n  3. Keep version `0.21.3` with zero company or internal\
+      \ names (`rda.ai`, `tasca`, `casdoor`, `zhaomeng`, `agentic-hub`, `18768`).\n\
+      \nBoundary:\n- Owner: `docs-editor`. Isolated worktree transaction modifying\
+      \ `README.md`, `docs/**`, and `deploy/**`.\n\nAdmit:\n- Depends on `v49.core`.\n\
+      - Verification: `git diff --check`, `python3 packaging/release.py check`, `node\
+      \ crates/cito-native/tests/support/site-clipboard.mjs`, and zero private-name\
+      \ or non-English matches. Consumed by `v49.review`.\n\nRecovery:\n- Repair any\
+      \ documentation or check discrepancy in place within the worktree before completion.\n"
+    verification: git diff --check && python3 packaging/release.py check && node crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - README.md
+    - docs/DESIGN.md
+    - deploy/hub/README.md
+    depends_on:
+    - v49.core
+    agent: docs-editor
+  - id: v49.review
+    name: 'V49 3-Way Incremental Audit Convergence & Full Workspace Regression Gate
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
+      - Terminal Phase `v49` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` over the integrated outcomes of `v49.core`, `v49.ui`,\
+      \ and `v49.docs`:\n  1. Execute and verify 3-way incremental `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` audit convergence (`uiux-auditor`, `pathway-auditor`,\
+      \ `structural-auditor` all reaching `ZERO_NEW_ISSUES`) across Binding Contract\
+      \ §§1–5 and all 29 Admitted Finding Ledger items (`A1`–`A8`, `B1`–`B12`, `C1`–`C6`,\
+      \ `R3-2`–`R3-4`).\n  2. Run and verify full workspace regression and packaging\
+      \ checks at version `0.21.3` (with NO release tag) before `PASS`:\n     - `cargo\
+      \ fmt --all -- --check` and `git diff --check`\n     - `cargo clippy --workspace\
+      \ --all-targets -- -D warnings`\n     - `cargo test --workspace`\n     - `cargo\
+      \ build --release` (0 warnings, updating and verifying staged binaries)\n  \
+      \   - `python3 packaging/release.py check` (version `0.21.3`, NO release tag)\
+      \ and `python3 -m unittest discover -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \     - Zero `§1.2` hardcoding violations across `crates/cito-native/src/core/`\
+      \ and `src/macos/`, and zero private/internal name matches (`rda\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`)\
+      \ across product and documentation paths.\n\nBoundary:\n- Owner: `gate-reviewer`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
+      \ no_repo_change`) over the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
+      \nAdmit:\n- Depends on `v49.core`, `v49.ui`, and `v49.docs`.\n- Consumed evidence:\
+      \ integrated commits from `v49.core`, `v49.ui`, and `v49.docs`, 3-way incremental\
+      \ audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`\
+      \ to `ZERO_NEW_ISSUES`), and full workspace regression outputs.\n\nRecovery:\n\
+      - If any audit finding, test failure, clippy/compiler warning, packaging mismatch,\
+      \ or `§1.2`/private-name violation is found, fail the gate with concrete `file:line`\
+      \ evidence so a scoped repair can resolve it before Delta re-verification.\n"
+    verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
+      --all-targets -- -D warnings && cargo test --workspace && cargo build --release
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      && node crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - deploy/hub/README.md
+    - packaging/release.py
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v49.core
+    - v49.ui
+    - v49.docs
+    agent: gate-reviewer
