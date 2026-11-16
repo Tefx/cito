@@ -14738,7 +14738,7 @@ phases:
   - id: v49.docs
     name: V49 Documentation Alignment for OIDC Auto-Discovery, Redirect Port & Pi
       Bridge Claims (C5)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - crates/**\n    - src/**\n    - plugins/**\n\nDeliver:\n\
@@ -14765,6 +14765,21 @@ phases:
     agent: docs-editor
     claimed_by: docs-editor
     claimed_at: '2026-11-16T09:40:54.925121Z'
+    done_at: '2026-11-16T09:43:38.454051+00:00'
+    evidence: 'Completed v49.docs (claimed_by: docs-editor; executed by executor because
+      docs-editor is not registered in this Larva runtime; candidate refs/vectl/candidates/v49.docs
+      -> 7b64648de68ae9f5b6fb8e9397489cbb40b75d02, fast-forwarded onto main):
+
+      - Updated `README.md`, `deploy/hub/README.md`, and `docs/DESIGN.md` per Binding
+      Contract C5: removed obsolete Pi footer bell badge and positive shared-cwd `.jsonl`
+      claims; documented Hub `/health` OIDC auto-discovery and `--redirect-port` /
+      `redirectPort` / `CITO_OIDC_REDIRECT_PORT` bounds (`1..=65535` server vs `0..=65535`
+      client).
+
+      - Verified `git diff --check`, `packaging/release.py check` (`0.21.3`), `node
+      crates/cito-native/tests/support/site-clipboard.mjs`, and zero matches for `rda\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`
+      across `README.md`, `docs/`, and `deploy/`. Keep version `0.21.3` with no release
+      tag.'
   - id: v49.review
     name: 'V49 3-Way Incremental Audit Convergence & Full Workspace Regression Gate
       [REQUIRES_SKILL: contract-and-simplicity]'
