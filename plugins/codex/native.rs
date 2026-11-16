@@ -604,6 +604,18 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ));
             }
             let transport_pid = explicit_pid(req)?.is_some();
+            if explicit.is_none()
+                && transport_pid
+                && pid(req).is_some_and(|p| {
+                    process_command(p)
+                        .is_ok_and(|cmd| is_agent_harness(&cmd) && !matches_process(&cmd))
+                })
+            {
+                return Ok(error(
+                    "BINDING_REQUIRED",
+                    "Transport belongs to another harness",
+                ));
+            }
             let all = try_rows(req)?;
             let known_row = explicit
                 .as_deref()
@@ -614,6 +626,15 @@ pub fn handle(req: &Value) -> Result<Value> {
                 || (explicit.is_none()
                     && ((!transport_pid && str_at(req, "cli_cmd").is_none()) || all.is_empty()));
             if needs_cached_pid && (!transport_pid || req["cached_caller"].is_object()) {
+                if explicit.is_none()
+                    && str_at(&req["meta"], "expected_harness")
+                        .unwrap_or("")
+                        .is_empty()
+                    && str_at(&req["meta"], "expected_session_id")
+                        .is_some_and(|id| req["cached_caller"]["session_id"] != id)
+                {
+                    return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
+                }
                 match cached_caller(req, "codex", explicit.as_deref(), matches_process) {
                     Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),

@@ -131,6 +131,44 @@ finally:
 }
 
 #[test]
+fn pi_discovery_excludes_a_child_below_a_different_harness() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let child_app = f.dir.join("pi.mjs");
+    fs::write(&child_app, r#"import fs from 'node:fs';import net from 'node:net';
+const dir=process.env.CITO_STATE_DIR+'/sockets';fs.mkdirSync(dir,{recursive:true});
+net.createServer(c=>c.once('data',()=>c.end(JSON.stringify({ok:true,session_id:'nested-session',cwd:'/repo',pi_pid:process.pid})+'\n')))
+.listen(dir+'/pi-pid-'+process.pid+'.sock',()=>console.log('ready'));
+"#).unwrap();
+    let parent_app = f.dir.join("claude.mjs");
+    fs::write(
+        &parent_app,
+        r#"import {spawn} from 'node:child_process';
+const child=spawn(process.execPath,[process.argv[2]],{stdio:'inherit'});
+console.log(JSON.stringify({child:child.pid}));
+process.on('SIGTERM',()=>{child.kill();process.exit()});
+"#,
+    )
+    .unwrap();
+    let parent = spawn_interactive(
+        &f,
+        "node",
+        &[parent_app.to_str().unwrap(), child_app.to_str().unwrap()],
+        &[],
+    );
+    wait(|| f.output(parent, false).contains("ready"));
+    let child = f
+        .frames(parent)
+        .into_iter()
+        .find_map(|row| row["child"].as_u64())
+        .unwrap();
+    let direct = f.plugin(PI, json!({"op":"resolve_caller","endpoint_pid":child}));
+    assert_eq!(direct["caller"]["session_id"], "nested-session", "{direct}");
+    let discovered = f.plugin(PI, json!({"op":"discover_sessions"}));
+    assert_eq!(discovered["sessions"], json!([]), "{discovered}");
+}
+
+#[test]
 fn claude_fallback_hook_handoff_and_descendant_session_fence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -285,7 +323,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
 s=socket.socket(socket.AF_UNIX);s.settimeout(.15);s.connect(sys.argv[1]);s.sendall(b'{"op":"identify"}\n')
 try: print(json.dumps({'early':s.recv(4096).decode()}),flush=True)
 except socket.timeout: print(json.dumps({'blocked':True}),flush=True)
-s.settimeout(2);print(s.recv(4096).decode(),flush=True)
+s.settimeout(2);print(s.makefile().readline(),flush=True)
 "#, socket_path.to_str().unwrap()], &[]);
     wait(|| !f.frames(client).is_empty());
     assert_eq!(
@@ -296,8 +334,15 @@ s.settimeout(2);print(s.recv(4096).decode(),flush=True)
     );
     atomic_write(&binding, &canonical).unwrap();
     drop(lock);
-    wait(|| f.frames(client).len() >= 2);
     wait(|| f.exited(client));
+    assert!(
+        f.frames(client).len() >= 2,
+        "Client: {} / {}; sidecar: {} / {}",
+        f.output(client, false),
+        f.output(client, true),
+        f.output(sidecar, false),
+        f.output(sidecar, true)
+    );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
     assert_eq!(
         f.frames(client).last().unwrap()["session_id"],
@@ -379,7 +424,10 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
     use std::sync::mpsc;
     use std::time::Duration;
     let _serial = serial();
-    for op in ["discover_sessions", "probe"] {
+    for (op, replacement) in ["discover_sessions", "probe"]
+        .into_iter()
+        .flat_map(|op| [(op, "new-session"), (op, "old-session")])
+    {
         let f = Fixture::new(json!({}));
         let parent = spawn_hook_parent(&f, &[]);
         let pid = f.pid(parent);
@@ -414,7 +462,7 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         parent_hook(
             &f,
             parent,
-            json!({"hook_event_name":"SessionStart","session_id":"new-session","cwd":"/repo-b"}),
+            json!({"hook_event_name":"SessionStart","session_id":replacement,"cwd":"/repo-b"}),
         );
         let canonical = fs::read(&binding).unwrap();
         release_tx.send(()).unwrap();
@@ -432,9 +480,150 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         }
         assert_eq!(fs::read(&binding).unwrap(), canonical, "{op}");
         let canonical: Value = serde_json::from_slice(&canonical).unwrap();
-        assert_eq!(canonical["session_id"], "new-session");
+        assert_eq!(canonical["session_id"], replacement);
+        assert_eq!(canonical["cwd"], "/repo-b");
         assert_eq!(canonical["source"], "hook");
     }
+}
+
+#[test]
+fn claude_canonical_adoption_does_not_renew_activity_on_identify_or_discovery() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let parent = spawn_hook_parent(&f, &[]);
+    let pid = f.pid(parent);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    let mut env = f.env.clone();
+    env.insert("CLAUDE_SESSION_ID".into(), "startup-session".into());
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
+    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
+    assert_eq!(
+        socket(&path, json!({"op":"identify"}))["session_id"],
+        "startup-session"
+    );
+    parent_hook(
+        &f,
+        parent,
+        json!({"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo"}),
+    );
+    let adopted = socket(&path, json!({"op":"identify"}));
+    assert_eq!(adopted["session_id"], "canonical-session");
+    for _ in 0..3 {
+        // Cross the timestamp granularity without waiting for an activity timeout.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let identified = socket(&path, json!({"op":"identify"}));
+        assert_eq!(identified["session_id"], "canonical-session");
+        assert_eq!(identified["updated_at_ms"], adopted["updated_at_ms"]);
+        let discovered = f.plugin(CLAUDE, json!({"op":"discover_sessions","endpoint_pid":pid}));
+        assert_eq!(
+            discovered["sessions"].as_array().unwrap().len(),
+            1,
+            "{discovered}"
+        );
+        assert_eq!(discovered["sessions"][0]["session_id"], "canonical-session");
+        assert_eq!(
+            discovered["sessions"][0]["updated_at_ms"],
+            adopted["updated_at_ms"]
+        );
+    }
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
+}
+
+#[test]
+fn claude_hook_only_http_ack_and_shell_cli_keep_transport_pids_out_of_identity() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    f.env.insert("TEST_CITO".into(), NATIVE.into());
+    let plugin = f.state.join("plugins/claude");
+    fs::create_dir_all(&plugin).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/claude/plugin.json")).unwrap())
+            .unwrap();
+    manifest["command"] = json!([CLAUDE]);
+    fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    assert_eq!(f.plugin(CLAUDE, json!({"op":"setup_apply"}))["ok"], true);
+    let cwd = fs::canonicalize(&f.dir).unwrap();
+    let slug: String = cwd
+        .to_str()
+        .unwrap()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcripts = f.home.join(".claude/projects").join(slug);
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::write(
+        transcripts.join("11111111-1111-4111-8111-111111111111.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    f.daemon(&[]);
+    let shell = |command: &str| {
+        let (ok, out, err) = f.command("/bin/sh", &["-c", command], "");
+        assert!(ok, "{out}: {err}");
+    };
+    shell(
+        r#""$TEST_CITO" listen --claude 11111111-1111-4111-8111-111111111111; status=$?; exit "$status""#,
+    );
+    let listener = f
+        .rows("SELECT * FROM local_listeners WHERE harness='claude'")
+        .remove(0);
+    assert_eq!(
+        listener["session_id"],
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert!(listener["endpoint_pid"].is_null(), "{listener}");
+    let sent = f.tool(
+        "cito_send",
+        json!({"to":listener["public_id"],"message":"Hook-only delivery"}),
+        json!({}),
+    );
+    let id = sent["signal_id"].as_str().unwrap();
+    let queue = f
+        .state
+        .join("claude/wakes/11111111-1111-4111-8111-111111111111.jsonl");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    wait(|| {
+        assert!(
+            std::time::Instant::now() < until,
+            "No hook queue: sent={sent}, signals={:?}, listeners={:?}",
+            f.rows("SELECT * FROM local_signals"),
+            f.rows("SELECT * FROM local_listeners")
+        );
+        fs::read_to_string(&queue).is_ok_and(|text| !text.is_empty())
+    });
+    let parent = spawn_hook_parent(&f, &[]);
+    let output = parent_hook(
+        &f,
+        parent,
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
+    );
+    assert!(
+        output.to_string().contains("Hook-only delivery"),
+        "{output}"
+    );
+    // The real HTTP ACK must commit now; a durable fallback alone cannot satisfy this.
+    assert_eq!(
+        f.rows(&format!(
+            "SELECT * FROM local_signals WHERE signal_id='{id}' AND acknowledged_at_ms IS NOT NULL"
+        ))
+        .len(),
+        1
+    );
+    assert!(!queue.exists());
+    let caller = f.tool(
+        "cito_status",
+        json!({}),
+        json!({"claudeSessionId":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
+    );
+    assert_eq!(caller["ok"], true, "{caller}");
+    shell(
+        r#""$TEST_CITO" unlisten --claude 11111111-1111-4111-8111-111111111111; status=$?; exit "$status""#,
+    );
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='claude' AND status='ACTIVE'")
+        .is_empty());
 }
 
 #[test]

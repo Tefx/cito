@@ -39,6 +39,13 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":claude_pid,"cwd":"/repo"}));
     wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    let foreign = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","cwd":"/repo",
+        "meta":{"_stdio":{"endpoint_pid":claude_pid}}}),
+    );
+    assert_eq!(foreign["ok"], false, "{foreign}");
+    assert_eq!(foreign["error_code"], "BINDING_REQUIRED", "{foreign}");
     let request = json!({"op":"resolve_caller","meta":{"endpoint_pid":std::process::id(),"threadId":"thread-a"}});
     let pi_rejection = f.plugin(PI, request.clone());
     assert_eq!(
@@ -84,12 +91,51 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     assert_eq!(direct["caller"]["harness"], "claude", "{direct}");
     // Incompatible harness metadata cannot seed the thread provider directly.
     let direct = f.plugin(CODEX, json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":{"expected_harness":"claude"}}));
-    assert_ne!(direct["caller"]["session_id"], "claude-session", "{direct}");
+    assert_eq!(direct["ok"], false, "{direct}");
+    assert_eq!(direct["error_code"], "INVALID_INPUT", "{direct}");
     for meta in [json!({}), json!({"expected_session_id":"thread-a"})] {
         let direct = f.plugin(CLAUDE, json!({"op":"resolve_caller","endpoint_pid":std::process::id(),"explicit_session_id":"thread-a","meta":meta}));
         assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
     }
     f.daemon(&[]);
+    let routed = f.tool(
+        "cito_listen",
+        json!({"about":"Unfenced transport routing"}),
+        json!({"_stdio":{"endpoint_pid":claude_pid},"cwd":"/repo"}),
+    );
+    assert_eq!(routed["ok"], true, "{routed}");
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='codex'")
+            .len(),
+        0
+    );
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='claude'")[0]["session_id"],
+        "claude-session"
+    );
+    // Explicit thread metadata seeds a Codex cache entry for this same transport.
+    let seeded = f.tool("cito_status", json!({}),
+        json!({"expected_harness":"codex","threadId":"thread-a","_stdio":{"endpoint_pid":claude_pid},"cwd":"/repo"}));
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    source.execute("DELETE FROM threads", &[]).unwrap();
+    let routed = f.tool("cito_status", json!({}),
+        json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    // Exercise the cache verifier directly, too: provider ordering must not mask it.
+    let cached =
+        json!({"harness":"codex","session_id":"thread-a","endpoint_pid":std::process::id()});
+    let direct = f.plugin(CODEX, json!({"op":"resolve_caller","require_open":false,
+        "cached_caller":cached,"meta":{"_stdio":{"endpoint_pid":std::process::id()},"expected_session_id":"claude-session"}}));
+    assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    let conflict = json!({"op":"resolve_caller","require_open":false,
+        "cached_caller":cached,"meta":{"_stdio":{"endpoint_pid":std::process::id()},"threadId":"thread-a","expected_session_id":"claude-session"}});
+    assert_eq!(
+        f.plugin(CODEX, conflict.clone())["error_code"],
+        "INVALID_INPUT"
+    );
+    source
+        .execute("INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[])
+        .unwrap();
     let rejected = f.tool_result("cito_status", json!({}), expected);
     assert_eq!(rejected["isError"], true, "{rejected}");
     assert!(
@@ -178,6 +224,80 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     );
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
+}
+
+#[test]
+fn nested_harness_stdio_never_claims_an_outer_bridge_but_shells_can() {
+    let _lock = serial();
+    for (outer, inner) in [("pi", "claude"), ("claude", "pi")] {
+        for shell in [false, true] {
+            let f = Fixture::new(json!({}));
+            for (id, bin) in [("pi", PI), ("claude", CLAUDE), ("codex", CODEX)] {
+                let plugin = f.state.join("plugins").join(id);
+                fs::create_dir_all(&plugin).unwrap();
+                let mut manifest: Value = serde_json::from_slice(
+                    &fs::read(root().join(format!("plugins/{id}/plugin.json"))).unwrap(),
+                )
+                .unwrap();
+                manifest["command"] = json!([bin]);
+                fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+            }
+            let inner_app = f.dir.join(format!("{inner}.mjs"));
+            fs::write(
+                &inner_app,
+                r#"import {spawn} from 'node:child_process';
+const mcp=spawn(process.argv[2],['mcp-stdio'],{stdio:['pipe','inherit','inherit']});
+process.stdin.pipe(mcp.stdin);
+process.on('SIGTERM',()=>{mcp.kill();process.exit()});
+"#,
+            )
+            .unwrap();
+            let outer_app = f.dir.join(format!("{outer}.mjs"));
+            fs::write(&outer_app, r#"import fs from 'node:fs';import net from 'node:net';import {spawn} from 'node:child_process';
+const path=process.env.CITO_STATE_DIR+'/sockets/'+process.argv[2]+'-pid-'+process.pid+'.sock';
+fs.mkdirSync(process.env.CITO_STATE_DIR+'/sockets',{recursive:true});
+const server=net.createServer(c=>{c.once('data',()=>c.end(JSON.stringify({ok:true,session_id:'outer-session',cwd:'/repo',pi_pid:process.pid})+'\n'))});
+server.listen(path,()=>{
+ const child=process.argv[4]==='shell'
+  ? spawn('/bin/sh',['-c','"$TEST_CITO" mcp-stdio; status=$?; exit "$status"'],{stdio:['pipe','inherit','inherit'],env:{...process.env,TEST_CITO:process.argv[3]}})
+  : spawn(process.execPath,[process.argv[4],process.argv[3]],{stdio:['pipe','inherit','inherit']});
+ process.stdin.pipe(child.stdin);
+ console.log(JSON.stringify({child:child.pid}));
+ process.on('SIGTERM',()=>{child.kill();server.close();process.exit()});
+});
+"#).unwrap();
+            f.daemon(&[]);
+            let owner = f.spawn(
+                "node",
+                &[
+                    outer_app.to_str().unwrap(),
+                    outer,
+                    NATIVE,
+                    if shell {
+                        "shell"
+                    } else {
+                        inner_app.to_str().unwrap()
+                    },
+                ],
+                &[],
+            );
+            wait(|| f.frames(owner).iter().any(|r| r["child"].is_u64()));
+            f.send(owner, json!({"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"cito_listen","arguments":{"about":"Nested transport boundary"}}}));
+            wait(|| f.frames(owner).iter().any(|r| r["id"] == 77));
+            let reply = f.frames(owner).into_iter().find(|r| r["id"] == 77).unwrap();
+            if shell {
+                assert_ne!(reply["result"]["isError"], true, "{outer}: {reply}");
+                let rows = f.rows("SELECT * FROM local_listeners WHERE session_id='outer-session'");
+                assert_eq!(rows.len(), 1, "{outer}: {reply}");
+                assert_eq!(rows[0]["harness"], outer);
+            } else {
+                assert_eq!(reply["result"]["isError"], true, "{outer}: {reply}");
+                assert!(f
+                    .rows("SELECT * FROM local_listeners WHERE session_id='outer-session'")
+                    .is_empty());
+            }
+        }
+    }
 }
 
 #[test]

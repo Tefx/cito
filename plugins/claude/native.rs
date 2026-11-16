@@ -386,7 +386,7 @@ fn hook_parent_matches(p: u32) -> bool {
 fn binding_snapshot(path: &Path) -> Option<Value> {
     read_json(path)
         .ok()
-        .map(|v| json!([v["session_id"], v["start"], v["source"]]))
+        .map(|v| json!([v["session_id"], v["cwd"], v["start"], v["source"]]))
 }
 fn remove_rejected_binding(path: &Path, snapshot: Option<Value>) -> Result<()> {
     let _lock = FileLock::acquire(&path.with_extension("lock"))?;
@@ -488,7 +488,10 @@ fn resolve(req: &Value) -> Result<String> {
     }
     if let Some(s) = explicit {
         if let Some(p) = pid(req) {
-            if !process_command(p).is_ok_and(|command| matches_process(&command)) {
+            if (caller_supplied_pid(req)?.is_some()
+                || (explicit_pid(req)?.is_some() && !req["cli_cmd"].is_string()))
+                && !process_command(p).is_ok_and(|command| matches_process(&command))
+            {
                 return Err("A verified endpoint process is required for caller metadata".into());
             }
         }
@@ -559,6 +562,11 @@ fn bridge(req: &Value) -> Result<Value> {
     let mut p = pid(req).ok_or("Endpoint PID is required")?;
     let mut visited = HashSet::new();
     while p > 1 && visited.insert(p) {
+        if process_command(p)
+            .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
+        {
+            break;
+        }
         if let Ok(response) = socket_call(
             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
             &json!({"op":"identify"}),
@@ -729,7 +737,11 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .as_ref()
                 .and_then(|v| v["endpoint_pid"].as_u64())
                 .and_then(|p| u32::try_from(p).ok())
-                .or_else(|| pid(req));
+                .or_else(|| {
+                    pid(req).filter(|p| {
+                        process_command(*p).is_ok_and(|command| matches_process(&command))
+                    })
+                });
             let c = caller(req, "claude", &sid, cwd, endpoint, t.as_deref());
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
@@ -1333,14 +1345,10 @@ fn sidecar(req: Value) -> Result<()> {
                     }
                 }
             }
-            let next = next.unwrap_or_else(|| fallback.clone());
-            if next != current {
-                last_active = now_ms();
-                current = next;
-            }
+            let mut next = next.unwrap_or_else(|| fallback.clone());
             let mut channel_req = req.clone();
             channel_req["_binding_source"] = json!("channel");
-            if let Some(binding) = record_binding(&channel_req, p, &current, cwd)? {
+            if let Some(binding) = record_binding(&channel_req, p, &next, cwd)? {
                 if binding["source"] != "channel"
                     && str_at(&binding, "start").is_some()
                     && str_at(&binding, "start").map(str::to_owned) == process_start(p)
@@ -1350,12 +1358,13 @@ fn sidecar(req: Value) -> Result<()> {
                         // Keep an established fallback alias, otherwise adopt its identity.
                         alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
                         let selected = if alias_active { &fallback } else { sid };
-                        if current != selected {
-                            current = selected.to_string();
-                            last_active = now_ms();
-                        }
+                        next = selected.to_string();
                     }
                 }
+            }
+            if next != current {
+                current = next;
+                last_active = now_ms();
             }
             let transcript = if alias_active {
                 first_transcript.as_deref().unwrap_or(&current)

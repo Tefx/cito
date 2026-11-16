@@ -125,7 +125,7 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     let command = process_command(pid)?;
     if has_harness_ancestor(pid, |ancestor, command| {
         let path = state(req).join(format!("sockets/pi-pid-{ancestor}.sock"));
-        matches_process(command)
+        is_agent_harness(command)
             || (path.exists()
                 && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true))
     }) {
@@ -315,6 +315,11 @@ fn candidates(req: &Value) -> Result<Candidates> {
         let mut searched = Vec::new();
         for mut p in roots {
             for _ in 0..=if resolve { 5 } else { 0 } {
+                if process_command(p)
+                    .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
+                {
+                    break;
+                }
                 searched.push(p);
                 if let Ok(v) = identify(req, p) {
                     responded = true;

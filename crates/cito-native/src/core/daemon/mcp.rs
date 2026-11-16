@@ -245,7 +245,11 @@ impl DaemonService {
             return Err("UNSUPPORTED_HARNESS: Unknown harness".into());
         }
         let mut failures = Vec::new();
-        for plugin in self.plugins.agent_plugins() {
+        let mut plugins = self.plugins.agent_plugins();
+        if expected.is_empty() && explicit_pid {
+            plugins.sort_by_key(|plugin| !plugin.pid_bound);
+        }
+        for plugin in plugins {
             if !expected.is_empty() && plugin.id != expected {
                 continue;
             }
