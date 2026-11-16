@@ -674,9 +674,12 @@ pub fn handle(req: &Value) -> Result<Value> {
             // A generic session fence cannot turn an inferred thread into an
             // authoritative cross-provider conflict. Let other providers resolve it.
             if explicit.is_none()
-                && req["meta"]["expected_harness"] != "codex"
-                && str_at(&req["meta"], "expected_session_id")
-                    .is_some_and(|id| c["session_id"] != id)
+                && ["meta", "_meta"]
+                    .iter()
+                    .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
+                && ["meta", "_meta"].iter().any(|key| {
+                    str_at(&req[key], "expected_session_id").is_some_and(|id| c["session_id"] != id)
+                })
             {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
             }

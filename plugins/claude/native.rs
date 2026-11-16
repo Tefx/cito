@@ -689,13 +689,25 @@ pub fn handle(req: &Value) -> Result<Value> {
                 && req["cached_caller"].is_object()
                 && !req["cli_cmd"].is_string()
             {
-                let resolved = match resolve(req) {
-                    Ok(s) => Some(s),
-                    Err(e) if e.starts_with("Conflicting") => return Ok(error("INVALID_INPUT", e)),
-                    Err(_) => hint.clone(),
-                };
-                match cached_caller(req, "claude", resolved.as_deref(), matches_process) {
-                    Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
+                match cached_caller(req, "claude", hint.as_deref(), matches_process) {
+                    Ok(Some(c)) => {
+                        if let Some(p) = pid(req) {
+                            if let Ok(binding) = read_json(&binding_path(req, p)) {
+                                if str_at(&binding, "start").is_some()
+                                    && str_at(&binding, "start").map(str::to_owned)
+                                        == process_start(p)
+                                    && str_at(&binding, "session_id")
+                                        .is_some_and(|sid| c["session_id"] != sid)
+                                {
+                                    return Ok(error(
+                                        "BINDING_REQUIRED",
+                                        "Endpoint session binding changed",
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(json!({"ok":true,"caller":c}));
+                    }
                     Err(e) => return Ok(e),
                     Ok(None) => {}
                 }
@@ -743,6 +755,17 @@ pub fn handle(req: &Value) -> Result<Value> {
                     })
                 });
             let c = caller(req, "claude", &sid, cwd, endpoint, t.as_deref());
+            if live.is_none()
+                && hint.is_none()
+                && ["meta", "_meta"]
+                    .iter()
+                    .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
+                && ["meta", "_meta"]
+                    .iter()
+                    .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != sid))
+            {
+                return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
+            }
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }

@@ -398,6 +398,7 @@ c,_=s.accept();c.settimeout(2);c.recv(4096);c.sendall((sys.argv[2]+'\n').encode(
     atomic_write(&binding, &canonical).unwrap();
     drop(lock);
     wait(|| f.exited(discovery));
+    wait(|| !f.frames(discovery).is_empty());
     assert_eq!(f.frames(discovery)[0]["ok"], true);
     assert_eq!(fs::read(&binding).unwrap(), canonical);
 
