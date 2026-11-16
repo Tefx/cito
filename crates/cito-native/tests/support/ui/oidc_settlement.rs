@@ -558,7 +558,17 @@ fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
         let f = Fixture::new(json!({}));
         let p = start(&f);
         let mut cfg = settings();
-        cfg["hubs"][0] = json!({"name":"personal","url":"https://a.example.com","auth_mode":"oidc","enabled":true,"is_default":true,"status":"connected","issuer":"https://id-a.example.com","client_id":"a-client","redirect_port":8400,"is_builtin":false});
+        let inherited_issuer = if refresh_before_edit {
+            "https://id-a.example.com"
+        } else {
+            " \thttps://id-a.example.com\n "
+        };
+        let inherited_client_id = if refresh_before_edit {
+            "a-client"
+        } else {
+            " \ta-client\n "
+        };
+        cfg["hubs"][0] = json!({"name":"personal","url":"https://a.example.com","auth_mode":"oidc","enabled":true,"is_default":true,"status":"connected","issuer":inherited_issuer,"client_id":inherited_client_id,"redirect_port":8400,"is_builtin":false});
         open(&f, p, &cfg, "hubs");
         control(&f, p, "edit_hub:personal");
         input(&f, p, "settings_hub_url", "https://b.example.com");
@@ -597,7 +607,7 @@ fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
             if refresh_before_edit {
                 "b-client"
             } else {
-                "a-client"
+                inherited_client_id
             }
         );
         assert_eq!(
@@ -607,7 +617,7 @@ fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
             } else if refresh_before_edit {
                 "https://id-b.example.com"
             } else {
-                "https://id-a.example.com"
+                inherited_issuer
             }
         );
         input(&f, p, "settings_hub_url", "https://a.example.com");

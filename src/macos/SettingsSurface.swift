@@ -1296,8 +1296,8 @@ extension Companion {
                     let initial = self.editingInitialHub
                     let initialURL = committed?.url ?? initial.map { normalizedHubURL($0.url) }
                     if committed != nil || (initialURL != nil && url != initialURL) {
-                        if iss == (committed?.issuer ?? initial?.issuer ?? "") { action.removeValue(forKey:"issuer") }
-                        if cid == (committed?.clientId ?? initial?.client_id ?? "") { action.removeValue(forKey:"client_id") }
+                        if iss == (committed?.issuer ?? initial?.issuer ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"issuer") }
+                        if cid == (committed?.clientId ?? initial?.client_id ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"client_id") }
                         if self.addHubRedirectPort == (committed?.redirectPort ?? initial?.redirect_port.map(String.init) ?? "") { action.removeValue(forKey:"redirect_port") }
                     }
                 }
