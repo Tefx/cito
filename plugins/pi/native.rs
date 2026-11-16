@@ -438,10 +438,11 @@ pub fn handle(input: &Value) -> Result<Value> {
             let matches: Vec<_> = cs
                 .into_iter()
                 .filter(|(_, v)| {
-                    str_at(req, "explicit_session_id")
-                        .or_else(|| str_at(&req["meta"], "expected_session_id"))
-                        .map(|s| v["session_id"] == s)
-                        .unwrap_or(true)
+                    str_at(req, "explicit_session_id").is_none_or(|s| v["session_id"] == s)
+                        && [&req["meta"], &req["_meta"]].iter().all(|source| {
+                            str_at(source, "expected_session_id")
+                                .is_none_or(|s| v["session_id"] == s)
+                        })
                 })
                 .collect();
             if matches.len() != 1 {

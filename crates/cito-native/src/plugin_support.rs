@@ -485,12 +485,18 @@ pub fn caller_pid_roots(req: &Value) -> Result<Vec<u32>> {
     if let Some(p) = explicit_pid(req)? {
         return Ok(vec![p]);
     }
-    if let Some(p) = positive_pid(&req["http_client_pid"])
-        .or_else(|| positive_pid(&req["meta"]["http_client_pid"]))
-    {
+    if let Some(p) = positive_pid(&req["http_client_pid"]).or_else(|| {
+        [&req["meta"], &req["_meta"]]
+            .iter()
+            .find_map(|source| positive_pid(&source["http_client_pid"]))
+    }) {
         return Ok(vec![p]);
     }
-    if req["http_transport"] == true || req["meta"]["http_transport"] == true {
+    if req["http_transport"] == true
+        || [&req["meta"], &req["_meta"]]
+            .iter()
+            .any(|source| source["http_transport"] == true)
+    {
         return Ok(vec![]);
     }
     // SAFETY: getppid only reads the current process's parent ID.
@@ -1719,6 +1725,17 @@ mod tests {
         assert_eq!(explicit_pid(&transport)?, Some(101));
         assert_eq!(caller_supplied_pid(&transport)?, None);
         assert_eq!(caller_pid_roots(&transport)?, vec![101]);
+        for envelope in ["meta", "_meta"] {
+            let mut request = json!({});
+            request[envelope] = json!({"http_transport":true});
+            assert!(caller_pid_roots(&request)?.is_empty());
+            request[envelope]["http_client_pid"] = json!(202);
+            assert_eq!(caller_pid_roots(&request)?, vec![202]);
+            request["http_client_pid"] = json!(303);
+            assert_eq!(caller_pid_roots(&request)?, vec![303]);
+            request["endpoint_pid"] = json!(404);
+            assert_eq!(caller_pid_roots(&request)?, vec![404]);
+        }
         for key in ["pid", "endpoint_pid", "bridgePid", "bridgePID"] {
             let mut request = transport.clone();
             request["_meta"]["nested"] = json!([{key:202}]);

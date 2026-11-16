@@ -399,7 +399,7 @@ fn provider_session_metadata_has_envelope_parity() {
     }
     let source =
         cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
-    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER); INSERT INTO threads VALUES('indexed-session','/repo',0)", &[]).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,git_branch TEXT); INSERT INTO threads VALUES('indexed-session','/repo',0,'main')", &[]).unwrap();
     let req =
         json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
     let unfenced = f.plugin(CODEX, req.clone());
@@ -412,6 +412,94 @@ fn provider_session_metadata_has_envelope_parity() {
             resolved["caller"]["session_id"], "indexed-session",
             "{resolved}"
         );
+    }
+    source
+        .execute("UPDATE threads SET id=' selected-session '", &[])
+        .unwrap();
+    for envelope in ["meta", "_meta"] {
+        let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo"});
+        req[envelope] = json!({"expected_session_id":"selected-session"});
+        let rejected = f.plugin(CODEX, req);
+        assert_eq!(rejected["error_code"], "BINDING_REQUIRED", "{rejected}");
+    }
+    source
+        .execute("UPDATE threads SET id='selected-session'", &[])
+        .unwrap();
+    for (bin, harness) in [(PI, "pi"), (CODEX, "codex"), (CLAUDE, "claude")] {
+        // Execute real providers below a recognizable harness. HTTP transport
+        // metadata must suppress that ancestry, while a client PID selects it.
+        let app = f.dir.join(format!("{harness}.mjs"));
+        fs::write(&app, r#"import fs from 'node:fs';import net from 'node:net';import readline from 'node:readline';import {spawn} from 'node:child_process';
+const dir=process.env.CITO_STATE_DIR+'/sockets';fs.mkdirSync(dir,{recursive:true});
+net.createServer(c=>c.once('data',()=>c.end(JSON.stringify({ok:true,session_id:'selected-session',cwd:'/repo',pi_pid:process.pid})+'\n')))
+.listen(dir+'/pi-pid-'+process.pid+'.sock',()=>console.log('ready'));
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const req=JSON.parse(line);
+ const child=spawn(process.argv[2],{stdio:['pipe','inherit','inherit']});
+ child.stdin.end(JSON.stringify(req)+'\n');
+});
+"#).unwrap();
+        let endpoint = f.spawn("node", &[app.to_str().unwrap(), bin], &[]);
+        wait(|| f.output(endpoint, false).contains("ready"));
+        let pid = f.pid(endpoint);
+        if harness == "claude" {
+            let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+            fs::create_dir_all(binding.parent().unwrap()).unwrap();
+            fs::write(
+                binding,
+                json!({"session_id":"selected-session","cwd":"/repo",
+                    "start":cito_native::support::process_start(pid)})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        for envelope in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo",
+                "http_transport":true});
+            req[envelope] = json!({"http_client_pid":pid,"expected_session_id":"selected-session"});
+            if harness == "codex" {
+                req[envelope]["threadId"] = json!("selected-session");
+            }
+            let resolved = f.plugin(bin, req.clone());
+            assert_eq!(
+                resolved["caller"]["session_id"], "selected-session",
+                "{harness}/{envelope}/http_client_pid: {resolved}"
+            );
+            assert_eq!(
+                resolved["caller"]["endpoint_pid"], pid,
+                "{harness}/{envelope}/http_client_pid: {resolved}"
+            );
+            if harness == "pi" {
+                req[envelope]["expected_session_id"] = json!("other-session");
+                let rejected = f.plugin(bin, req);
+                assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+            }
+        }
+        for envelope in [None, Some("meta"), Some("_meta")] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo",
+                "state_dir":f.state,"env":f.env});
+            if let Some(key) = envelope {
+                req[key] = json!({"http_transport":true});
+            }
+            let before = f.frames(endpoint).len();
+            f.send(endpoint, req);
+            wait(|| f.frames(endpoint).len() > before);
+            let reply = f.frames(endpoint).last().unwrap().clone();
+            // Claude never infers a caller PID from its parent process, even
+            // without HTTP metadata; Pi and Codex provide positive controls.
+            if envelope.is_some() || harness == "claude" {
+                assert_eq!(
+                    reply["error_code"], "BINDING_REQUIRED",
+                    "{harness}/{envelope:?}/http_transport: {reply}"
+                );
+            } else {
+                assert_eq!(
+                    reply["caller"]["session_id"], "selected-session",
+                    "{harness}/ancestor control: {reply}"
+                );
+            }
+        }
+        f.stop(endpoint);
     }
 }
 

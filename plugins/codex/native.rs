@@ -685,7 +685,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             // A generic session fence cannot turn an inferred thread into an
             // authoritative cross-provider conflict. Let other providers resolve it.
             if explicit.is_none()
-                && has_generic_session_mismatch(req, str_at(&c, "session_id").unwrap_or(""))
+                && has_generic_session_mismatch(req, c["session_id"].as_str().unwrap_or(""))
             {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
             }
