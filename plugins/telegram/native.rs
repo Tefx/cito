@@ -190,10 +190,22 @@ fn chunks(text: &str) -> Vec<&str> {
     }
     chunks
 }
-fn send(config: &Value, chat: &str, text: &str) -> Result<Vec<String>> {
+fn control_budget(deadline: u64) -> Result<Duration> {
+    let remaining = deadline.saturating_sub(now_ms());
+    if remaining == 0 {
+        return Err("Control request deadline exceeded".into());
+    }
+    Ok(Duration::from_millis(remaining))
+}
+fn send(config: &Value, chat: &str, text: &str, deadline: u64) -> Result<Vec<String>> {
     let mut ids = vec![];
     for text in chunks(text) {
-        let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
+        let r = api_with_timeout(
+            config,
+            "sendMessage",
+            json!({"chat_id":chat,"text":text}),
+            control_budget(deadline)?,
+        )?;
         ids.push(id(&r["message_id"]).ok_or("Telegram message_id is missing")?);
     }
     Ok(ids)
@@ -270,7 +282,10 @@ fn rpc(config: &Value, req: &Value) -> Value {
         config
     };
     let result = (|| -> Result<Value> {
-        let me = api(c, "getMe", json!({}))?;
+        let deadline = req["control_deadline_ms"]
+            .as_u64()
+            .unwrap_or_else(|| now_ms() + 8000);
+        let me = api_with_timeout(c, "getMe", json!({}), control_budget(deadline)?)?;
         let username = str_at(&me, "username").ok_or("Bot username is unavailable")?;
         if req["op"] == "format_pair" {
             return Ok(
@@ -285,6 +300,7 @@ fn rpc(config: &Value, req: &Value) -> Value {
                     "Cito channel connected for @{}",
                     str_at(req, "user").unwrap_or("user")
                 ),
+                deadline,
             )?;
             format!("Sent test message to chat {chat}")
         } else {
@@ -303,6 +319,82 @@ fn rpc(config: &Value, req: &Value) -> Value {
         Err(e) => json!({"op":"rpc_result","req_id":req["req_id"],"ok":false,"error":e}),
     }
 }
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    #[test]
+    fn rpc_shares_one_deadline_and_skips_expired_queue_work() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = json!({"botToken":"test-token","apiBaseUrl":format!("http://{}",listener.local_addr().unwrap())});
+        let (release, wait) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            use std::os::fd::AsRawFd;
+            for method in ["getMe", "sendMessage"] {
+                assert!(crate::support::poll_until(
+                    &mut [libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0
+                    }],
+                    Some(std::time::Instant::now() + Duration::from_secs(2))
+                )
+                .unwrap());
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.contains(method));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                if method == "getMe" {
+                    let body = json!({"ok":true,"result":{"username":"sample_bot"}}).to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                } else {
+                    wait.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        let reply = rpc(
+            &config,
+            &json!({"op":"test","req_id":"bounded","user_config":{"chatId":"123"},"control_deadline_ms":now_ms()+200}),
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["req_id"], "bounded");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let expired = rpc(
+            &config,
+            &json!({"op":"test","control_deadline_ms":now_ms()-1}),
+        );
+        assert_eq!(expired["ok"], false);
+        assert_eq!(expired["error"], "Control request deadline exceeded");
+    }
+}
+
 struct Pending {
     cursor: u64,
     key: Option<String>,
@@ -325,6 +417,7 @@ impl Outbound {
                                 &config,
                                 str_at(&request, "chat").unwrap_or(""),
                                 str_at(&request, "text").unwrap_or(""),
+                                request["control_deadline_ms"].as_u64().unwrap_or(0),
                             ) {
                                 eprintln!("Telegram confirmation: {error}");
                             }
@@ -340,7 +433,8 @@ impl Outbound {
             control: worker(),
         }
     }
-    fn submit(&self, config: &Value, request: Value) {
+    fn submit(&self, config: &Value, mut request: Value) {
+        request["control_deadline_ms"] = json!(now_ms() + 8000);
         let tx = if request["op"] == "deliver" {
             &self.deliveries
         } else {

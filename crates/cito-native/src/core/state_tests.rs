@@ -10,7 +10,7 @@ impl Fixture {
         let dir =
             std::env::temp_dir().join(format!("cito-state-{}", crate::plugins::random_uuid_v4()));
         let state = LocalState::open(&dir)?;
-        state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token) VALUES('local','c_1','none#alice','alice','host','host','agent','s','','Target','','workspace','ACTIVE',1,'owner')", &[])?;
+        state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token,hub_url) VALUES('local','c_1','none#alice','alice','host','host','agent','s','','Target','','workspace','ACTIVE',1,'owner','local://')", &[])?;
         Ok(Self { state, dir })
     }
     fn listener(&self) -> Result<Value, String> {
@@ -19,7 +19,7 @@ impl Fixture {
             .ok_or_else(|| "Missing fixture listener".into())
     }
     fn seed(&self, id: &str, seq: usize) -> Result<(), String> {
-        self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,'c_1',?,1,'alice','host.local','','message','2026-01-01T00:00:00.000Z',?,'RECEIVED')", &[json!(id), json!(seq), json!(now_ms()+60_000)])?;
+        self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'c_1',?,1,'alice','host.local','','message','2026-01-01T00:00:00.000Z',?,'RECEIVED','local://','none#alice')", &[json!(id), json!(seq), json!(now_ms()+60_000)])?;
         Ok(())
     }
     fn rows(&self) -> Result<Vec<Value>, String> {
@@ -33,6 +33,67 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+#[test]
+fn signal_reads_and_acknowledgments_isolate_origin_and_accept_principal_aliases(
+) -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.state.db.execute(
+        "UPDATE local_listeners SET principal_id='oidc:https://id.example.com|alice'",
+        &[],
+    )?;
+    for id in [
+        "current",
+        "legacy-principal",
+        "other-principal",
+        "other-url",
+        "unbound",
+    ] {
+        f.seed(id, 1)?;
+    }
+    f.state.db.execute("UPDATE local_signals SET principal_id='oidc:https://id.example.com|alice'; UPDATE local_signals SET principal_id='https://id.example.com#alice' WHERE signal_id='legacy-principal'; UPDATE local_signals SET principal_id='none#other' WHERE signal_id='other-principal'; UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='other-url'; UPDATE local_signals SET hub_url=NULL,principal_id=NULL WHERE signal_id='unbound'",&[])?;
+    let (rows, total, unread) = f.state.query_activity("all", "")?;
+    assert_eq!((rows.len(), total, unread), (2, 2, 2));
+    assert_eq!(f.state.current_signals("local", "c_1", 1)?.len(), 1);
+    f.state.schedule_wake_retry_for(&f.listener()?, 5000)?;
+    f.state.isolate_stale_signals(&f.listener()?)?;
+    for row in f.rows()? {
+        if !["current", "legacy-principal"].contains(&string(&row, "signal_id")) {
+            assert_eq!(row["state"], "STORED_PASSIVE");
+            assert_eq!(row["held_reason"], "authority_mismatch");
+        }
+    }
+    f.state.acknowledge(
+        "local",
+        "c_1",
+        &[
+            json!("current"),
+            json!("legacy-principal"),
+            json!("other-principal"),
+            json!("other-url"),
+            json!("unbound"),
+        ],
+        "host:agent",
+    )?;
+    let acks = f.state.db.query(
+        "SELECT signal_id FROM pending_hub_acks ORDER BY signal_id",
+        &[],
+    )?;
+    assert_eq!(
+        acks,
+        vec![
+            json!({"signal_id":"current"}),
+            json!({"signal_id":"legacy-principal"})
+        ]
+    );
+    assert!(f
+        .state
+        .db
+        .query("SELECT * FROM wake_retries", &[])?
+        .is_empty());
+    assert_eq!(f.state.query_activity("all", "")?.2, 0);
+    Ok(())
+}
+
 #[test]
 fn hub_clock_remaining_lifetime_survives_client_skew_at_admission() -> Result<(), String> {
     for skew in [-1_860_000i64, 1_860_000] {
@@ -247,9 +308,19 @@ fn signal_origin_upgrade_leaves_legacy_rows_unbound_and_new_admissions_immutable
     let rows = state
         .db
         .query("SELECT * FROM pending_hub_acks ORDER BY signal_id", &[])?;
-    assert!(rows[0]["hub_url"].is_null() && rows[0]["principal_id"].is_null());
-    assert_eq!(rows[1]["hub_url"], "local://");
-    assert_eq!(rows[1]["principal_id"], "none#alice");
+    assert!(
+        rows.is_empty(),
+        "A changed principal cannot acknowledge retained or legacy signals"
+    );
+    let signals = state
+        .db
+        .query("SELECT * FROM local_signals ORDER BY signal_id", &[])?;
+    assert!(signals[0]["hub_url"].is_null() && signals[0]["principal_id"].is_null());
+    assert_eq!(signals[1]["hub_url"], "local://");
+    assert_eq!(signals[1]["principal_id"], "none#alice");
+    assert!(signals
+        .iter()
+        .all(|signal| signal["acknowledged_at_ms"].is_null()));
     Ok(())
 }
 #[test]
@@ -285,7 +356,7 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
     ] {
         assert_eq!(f.state.query_activity("all", query)?.1, 1, "{query}");
     }
-    f.state.db.execute("UPDATE local_signals SET hub='work',from_user='Alice.Smith',from_harness='fixture',from_listener_id='alice-smith-abcdef1234567890'", &[])?;
+    f.state.db.execute("UPDATE local_listeners SET hub='work'; UPDATE local_signals SET hub='work',from_user='Alice.Smith',from_harness='fixture',from_listener_id='alice-smith-abcdef1234567890'", &[])?;
     for query in [
         "alice-smith/fixture#abcd",
         "work:alice-smith/fixture#abcd",
@@ -294,9 +365,10 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
         let (rows, total, unread) = f.state.query_activity("all", query)?;
         assert_eq!((rows.len(), total, unread), (1, 1, 1), "{query}");
     }
-    f.state
-        .db
-        .execute("UPDATE local_signals SET hub='local'", &[])?;
+    f.state.db.execute(
+        "UPDATE local_listeners SET hub='local'; UPDATE local_signals SET hub='local'",
+        &[],
+    )?;
     let batch = f.state.claim_wake_batch("local", "c_1")?;
     f.state.finish_wake_batch(
         &f.listener()?,

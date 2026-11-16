@@ -329,6 +329,45 @@ fn visibility_close_actions_emit_no_full_snapshot() -> Result<(), String> {
 }
 
 #[test]
+fn receiver_liveness_uses_authority_without_a_poll_worker() -> Result<(), String> {
+    let f = Fixture::new()?;
+    assert!(f.service.receivers.is_empty());
+    let row = f
+        .service
+        .state
+        .active()?
+        .into_iter()
+        .find(|row| row["harness"] == "human")
+        .ok_or("Missing Human attachment")?;
+    let id = row["listener_id"].clone();
+    assert!(f
+        .service
+        .live_receivers()?
+        .iter()
+        .any(|row| row["listener_id"] == id));
+    for sql in [
+        "UPDATE local_listeners SET principal_id='none#other' WHERE listener_id=?",
+        "UPDATE local_listeners SET hub_url='https://other.example.com' WHERE listener_id=?",
+    ] {
+        f.service.state.db.execute(sql, std::slice::from_ref(&id))?;
+        assert!(!f
+            .service
+            .live_receivers()?
+            .iter()
+            .any(|row| row["listener_id"] == id));
+        f.service.state.db.execute(
+            "UPDATE local_listeners SET principal_id=?,hub_url=? WHERE listener_id=?",
+            &[
+                row["principal_id"].clone(),
+                row["hub_url"].clone(),
+                id.clone(),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn closed_ui_emits_light_status_without_activity_history_or_inventory() -> Result<(), String> {
     let mut f = Fixture::new()?;
     let mailbox = Arc::new(UiMailbox::default());
@@ -337,7 +376,8 @@ fn closed_ui_emits_light_status_without_activity_history_or_inventory() -> Resul
     let initial: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing initial state")?)
         .map_err(|e| e.to_string())?;
     assert!(initial.get("settings").is_some());
-    f.service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','new','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED')", &[json!(now_ms()+60_000)])?;
+    f.service.state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,hub_url,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES('local','target','none#alice','local://','alice','host','host','fixture','s','','Target','','self','ACTIVE')", &[])?;
+    f.service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local','new','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED','local://','none#alice')", &[json!(now_ms()+60_000)])?;
     f.service.push_ui();
     let status: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing status state")?)
         .map_err(|e| e.to_string())?;

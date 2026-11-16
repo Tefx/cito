@@ -2740,6 +2740,9 @@ fn human_operation(
                 return Err("STALE_GENERATION: Human device attachment superseded".into());
             }
             if op == "human_device_heartbeat" {
+                if reg["channels"][channel]["state"] != "ACTIVE" {
+                    return Err("STALE_GENERATION: Human device attachment is inactive".into());
+                }
                 reg["channels"][channel]["updated_at_ms"] = json!(now);
             } else {
                 reg["channels"][channel]["state"] = json!("UNLISTENED");
@@ -3062,7 +3065,7 @@ fn handle_http(
             return Ok(());
         }
         if path == "/health" && method == "GET" {
-            http_json(&mut stream,200,&json!({"ok":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"auth_mode":auth.mode})).map_err(|e|e.to_string())?;
+            http_json(&mut stream, 200, &auth.health()).map_err(|e| e.to_string())?;
             return Ok(());
         }
         let principal = auth.authenticate(&headers)?;
@@ -3197,6 +3200,7 @@ fn cli_setting(flag: &str) -> &str {
         "--token" => "CITO_HUB_TOKEN",
         "--issuer" => "CITO_OIDC_ISSUER",
         "--client-id" => "CITO_OIDC_CLIENT_ID",
+        "--redirect-port" => "CITO_OIDC_REDIRECT_PORT",
         "--data-dir" => "CITO_HUB_DATA_DIR",
         _ => flag,
     }
@@ -3217,6 +3221,7 @@ fn cli_options(args: &[String]) -> Result<HashMap<String, String>, String> {
             "--token",
             "--issuer",
             "--client-id",
+            "--redirect-port",
             "--data-dir",
         ]
         .contains(&key)
@@ -3268,12 +3273,20 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
     if bind.parse::<std::net::IpAddr>().is_err() {
         return Err("CITO_HUB_BIND must be an IP address".into());
     }
-    let auth = HubAuth::new(
+    let mut auth = HubAuth::new(
         &mode,
         value("--token", "CITO_HUB_TOKEN"),
         value("--issuer", "CITO_OIDC_ISSUER"),
         value("--client-id", "CITO_OIDC_CLIENT_ID"),
     )?;
+    auth.redirect_port = value("--redirect-port", "CITO_OIDC_REDIRECT_PORT")
+        .map(|raw| {
+            raw.parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or("INVALID_INPUT: redirect port must be an integer in 1..65535")
+        })
+        .transpose()?;
     let raw = value("--data-dir", "CITO_HUB_DATA_DIR").unwrap_or_else(|| "~/.cito/hub".into());
     let home = env_value("HOME").unwrap_or_else(|| ".".into());
     let data_dir = super::plugins::expand_home_dir(&raw, "CITO_HUB_DATA_DIR", Some(&home))?;

@@ -1177,7 +1177,7 @@ pub fn plugin_request_with_progress(
     execute().map_err(|e| format!("PLUGIN_EXEC_FAILED: {}: {e}", plugin.id))
 }
 
-fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
+pub fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
     // SAFETY: siginfo is writable, pid belongs to an unreaped Child, and WNOWAIT
     // observes completion without releasing its PID or process-group ownership.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };

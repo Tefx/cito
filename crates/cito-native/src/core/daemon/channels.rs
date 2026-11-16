@@ -135,6 +135,30 @@ pub(super) fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn maintenance_warnings_do_not_commit_a_failed_channel_test() {
+        let failed = after_channel_action(
+            Ok(json!({"ok":false,"op":"channel_test_result"})),
+            ChannelActionKind::Mutation,
+            "Refresh failed".into(),
+        )
+        .unwrap();
+        assert_eq!(failed["ok"], false);
+        assert!(failed.get("committed").is_none());
+        let committed = after_channel_action(
+            Ok(json!({"ok":true})),
+            ChannelActionKind::Mutation,
+            "Refresh failed".into(),
+        )
+        .unwrap();
+        assert_eq!(committed["committed"], true);
+        assert_eq!(committed["maintenance_warning"], "Refresh failed");
+    }
+}
+
 fn channel_id(action: &Value) -> Result<&str, String> {
     action["channel_id"]
         .as_str()
@@ -352,7 +376,9 @@ fn after_channel_action(
     }
     result.map(|mut value| {
         if let Some(fields) = value.as_object_mut() {
-            fields.insert("committed".into(), json!(true));
+            if fields.get("ok") == Some(&json!(true)) && kind == ChannelActionKind::Mutation {
+                fields.insert("committed".into(), json!(true));
+            }
             fields.insert("maintenance_warning".into(), json!(error));
         } else {
             eprintln!("Channel maintenance: {error}");

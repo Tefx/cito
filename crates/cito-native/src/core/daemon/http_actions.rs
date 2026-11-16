@@ -154,7 +154,9 @@ pub(super) fn dispatch_action(
             )
             .unwrap_or_else(|e| e.into_inner());
     };
-    if interactive_login(action) {
+    if interactive_login(action)
+        || (result.is_err() && matches!(string(action, "op"), "setup_save_hub" | "save_hub"))
+    {
         s.record_hub_result(action, &result, None);
     }
     if let Err(error) = &result {
@@ -163,7 +165,7 @@ pub(super) fn dispatch_action(
         );
     }
     if refresh_setup && result.is_ok() {
-        s.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings()}));
+        s.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings()}));
         s.push_ui_result(Some(action));
     } else {
         s.push_ui();
@@ -180,6 +182,54 @@ fn dispatch_action_inner(
 ) -> Result<Value, String> {
     if let Some(kind) = channel_action_kind(action) {
         return dispatch_channel_action(service, action, kind, ui_generation);
+    }
+    if matches!(
+        string(action, "op"),
+        "setup_save_hub" | "save_hub" | "paste_hub_invite"
+    ) && action["parse_only"] != true
+    {
+        let (before, default_hub) = {
+            let s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+            s.validate_ui_generation(ui_generation)?;
+            if action["op"] == "paste_hub_invite" {
+                s.reject_own_hub_invite(&parse_hub_invite(string(action, "invite"))?)?;
+            }
+            (s.raw_config()?, s.config.default_hub.clone())
+        };
+        let mut prepared = action.clone();
+        let mut submitted = if action["op"] == "paste_hub_invite" {
+            parse_hub_invite(string(action, "invite"))?
+        } else {
+            action.clone()
+        };
+        let patch = submitted
+            .get("config")
+            .filter(|v| v.is_object())
+            .unwrap_or(&submitted);
+        let original = submitted["original_name"]
+            .as_str()
+            .or_else(|| submitted["hub"].as_str())
+            .unwrap_or(&default_hub);
+        let base = if submitted["edit"] == true {
+            &before["hubs"][original]
+        } else {
+            &Value::Null
+        };
+        let config = crate::core::config::discover_hub_config(
+            crate::core::config::merge_hub_config(base, patch),
+        )?;
+        if action["op"] == "paste_hub_invite" {
+            submitted = config;
+            prepared["invite"] = json!(submitted.to_string());
+        } else {
+            prepared["config"] = config;
+        }
+        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
+        if s.closing || shutdown_requested() {
+            return Err("Shutting down".into());
+        }
+        return s.action_with_precondition(&prepared, Some(&before));
     }
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
@@ -458,13 +508,160 @@ pub(super) fn handle_http(
     );
 }
 
+pub(super) fn mutating_action(action: &Value) -> bool {
+    matches!(
+        string(action, "op"),
+        "setup_save_hub"
+            | "save_hub"
+            | "set_host_hub"
+            | "setup_apply"
+            | "setup_remove_app"
+            | "setup_disconnect_all"
+            | "setup_remove_hub"
+            | "remove_hub"
+            | "setup_toggle_hub"
+            | "hub_action"
+            | "set_user"
+            | "switch_hub"
+            | "set_launch_at_login"
+            | "set_auto_listen"
+            | "set_scope"
+            | "set_listen_mode"
+            | "unlisten_session"
+            | "unlisten_all"
+            | "ack_signals"
+            | "mark_activity_read"
+            | "mark_all_activity_read"
+            | "clear_activity_history"
+    )
+}
+
 impl DaemonService {
+    pub(super) fn purge_hub_state(&mut self, hub: &str) -> Result<(), String> {
+        if let Some(slot) = self.slots.remove(hub) {
+            slot.close();
+        }
+        if let Some(pending) = self.oidc_recoveries.remove(hub) {
+            pending.cancelled.store(true, Ordering::SeqCst);
+            let _ = pending.worker.join();
+        }
+        let belongs = |key: &str| {
+            key.starts_with(&format!("{hub}:"))
+                || ["directory", "channels", "auto"]
+                    .iter()
+                    .any(|prefix| key == format!("{prefix}:{hub}"))
+        };
+        let workers: Vec<_> = self
+            .receivers
+            .keys()
+            .filter(|key| belongs(key))
+            .cloned()
+            .collect();
+        for key in workers {
+            if let Some(worker) = self.receivers.remove(&key) {
+                let _ = worker.join();
+            }
+        }
+        self.state.db.transaction(|db| {
+            for table in [
+                "local_signals",
+                "local_listeners",
+                "pending_hub_acks",
+                "pending_hub_detaches",
+                "local_sent_idempotency",
+                "wake_retries",
+            ] {
+                db.execute(&format!("DELETE FROM {table} WHERE hub=?"), &[json!(hub)])?;
+            }
+            Ok(())
+        })?;
+        self.last_hub_errors.remove(hub);
+        self.auth_backoff.remove(hub);
+        self.channel_inventories.remove(hub);
+        self.observations.retain(|key, _| !belongs(key));
+        if let Ok(mut retries) = self.ack_backoff.lock() {
+            retries.retain(|key, _| {
+                serde_json::from_str::<Value>(key).is_ok_and(|value| value[0] != hub)
+            });
+        }
+        let token = self.config.state_dir.join(format!("oidc-token-{hub}.json"));
+        match fs::remove_file(token) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn reject_own_hub_invite(&self, invite: &Value) -> Result<(), String> {
+        let Some(server) = &self.host_server else {
+            return Ok(());
+        };
+        let url =
+            url::Url::parse(string(invite, "url")).map_err(|_| "INVALID_INPUT: Invalid Hub URL")?;
+        let raw = self.raw_config()?;
+        let host = raw
+            .get("host_hub")
+            .or_else(|| raw.get("hostHub"))
+            .unwrap_or(&Value::Null);
+        let bind = string(host, "bind");
+        let hostname = local_host_name();
+        let mut local_hosts = vec![
+            "127.0.0.1".into(),
+            "localhost".into(),
+            "::1".into(),
+            hostname.clone(),
+            format!("{}.local", hostname.trim_end_matches(".local")),
+            advertised_hub_host(bind),
+            lan_advertised_host(bind),
+        ];
+        if matches!(bind, "" | "0.0.0.0" | "::") {
+            local_hosts.extend(tailscale_advertised_host());
+        }
+        let invite_host = url
+            .host_str()
+            .unwrap_or("")
+            .trim_matches(['[', ']'])
+            .trim_end_matches('.');
+        if url.port_or_known_default() == Some(server.port())
+            && local_hosts.iter().any(|local| {
+                local
+                    .trim_matches(['[', ']'])
+                    .trim_end_matches('.')
+                    .eq_ignore_ascii_case(invite_host)
+            })
+        {
+            return Err("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.".into());
+        }
+        Ok(())
+    }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
+        self.action_with_precondition(action, None)
+    }
+
+    fn action_with_precondition(
+        &mut self,
+        action: &Value,
+        precondition: Option<&Value>,
+    ) -> Result<Value, String> {
         let mut resolved_hub = None;
-        let result = self.action_inner(action, &mut resolved_hub);
+        let result = self
+            .action_inner(action, &mut resolved_hub, precondition)
+            .map(|mut value| {
+                if mutating_action(action) && value["ok"] == true {
+                    value["committed"] = json!(true);
+                }
+                if let Some(name) = &resolved_hub {
+                    value["redirect_port"] = self
+                        .slots
+                        .get(name)
+                        .map(|slot| slot.config["redirectPort"].clone())
+                        .unwrap_or(Value::Null);
+                }
+                value
+            });
         self.record_hub_result(action, &result, resolved_hub.as_deref());
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
-            self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
+            self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
         }
         if result.is_ok()
             && matches!(
@@ -544,6 +741,7 @@ impl DaemonService {
         &mut self,
         action: &Value,
         resolved_hub: &mut Option<String>,
+        precondition: Option<&Value>,
     ) -> Result<Value, String> {
         if !action.is_object() {
             return Err("INVALID_INPUT: Action must be an object".into());
@@ -665,10 +863,9 @@ impl DaemonService {
                 let mut detach_errors = Vec::new();
                 if action["harness"] != "human" {
                     let targets: Vec<String> = self
-                        .slots
-                        .keys()
-                        .filter(|name| action["hub"].is_null() || name.as_str() == hub)
-                        .cloned()
+                        .session_hubs(string(action, "harness"), string(action, "session_id"))?
+                        .into_iter()
+                        .filter(|name| action["hub"].is_null() || *name == hub)
                         .collect();
                     for name in targets {
                         self.ensure_agent_stop_row(
@@ -676,13 +873,15 @@ impl DaemonService {
                             string(action, "harness"),
                             string(action, "session_id"),
                         )?;
-                        let slot = self.slot(&name)?;
+                        let slot = self.slots.get(&name);
                         let rows=self.state.db.query("SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE'",&[json!(name),action["harness"].clone(),action["session_id"].clone()])?;
                         for row in rows.into_iter().filter(|row| {
-                            crate::core::auth::principal_ids_equal(
-                                string(row, "principal_id"),
-                                string(&slot.identity, "principal_id"),
-                            )
+                            slot.is_none_or(|slot| {
+                                crate::core::auth::principal_ids_equal(
+                                    string(row, "principal_id"),
+                                    string(&slot.identity, "principal_id"),
+                                )
+                            })
                         }) {
                             if let Err(error) = self.unlisten_id(&name, string(&row, "listener_id"))
                             {
@@ -799,6 +998,8 @@ impl DaemonService {
                     ("authMode", &["auth_mode", "auth"][..]),
                     ("clientId", &["client_id", "oidcClientId"][..]),
                     ("issuer", &["oidcIssuer"][..]),
+                    ("redirectPort", &["redirect_port", "oidcRedirectPort"][..]),
+                    ("scopes", &["oidcScopes"][..]),
                 ] {
                     if cfg.get(canonical).is_none() {
                         if let Some(value) = aliases.iter().find_map(|key| cfg.get(*key)).cloned() {
@@ -811,6 +1012,11 @@ impl DaemonService {
                 let mut rename_before = Value::Null;
                 let mut renamed_config = Value::Null;
                 self.mutate_config(|v| {
+                    if precondition.is_some_and(|before| before != v) {
+                        return Err(
+                            "INVALID_INPUT: Configuration changed during discovery; retry".into(),
+                        );
+                    }
                     rename_before = v.clone();
                     // Materialize the implicit local Hub before saving/editing a
                     // first explicit Hub, so first-run edits cannot discard it.
@@ -825,19 +1031,10 @@ impl DaemonService {
                         if !base.is_object() {
                             return Err("INVALID_INPUT: Unknown hub to edit".into());
                         }
-                        if let Some(patch) = cfg.as_object() {
-                            for (key, value) in patch {
-                                if matches!(
-                                    key.as_str(),
-                                    "token" | "clientSecret" | "client_secret" | "oidcClientSecret"
-                                ) && value.as_str().is_none_or(|s| s.is_empty())
-                                {
-                                    continue;
-                                }
-                                base[key] = value.clone();
-                            }
+                        if precondition.is_none() {
+                            base = crate::core::config::merge_hub_config(&base, &cfg);
+                            cfg = base;
                         }
-                        cfg = base;
                     }
                     cfg["url"] = json!(crate::plugins::validate_nats_url(
                         string(&cfg, "url").trim()
@@ -891,7 +1088,17 @@ impl DaemonService {
                         .or_else(|| cfg.get("auth_mode"))
                         .or_else(|| cfg.get("auth"))
                         .and_then(Value::as_str)
-                        .unwrap_or("none")
+                        .unwrap_or_else(|| {
+                            if !string(&cfg, "token").is_empty() {
+                                "token"
+                            } else if !string(&cfg, "issuer").is_empty()
+                                || !string(&cfg, "clientId").is_empty()
+                            {
+                                "oidc"
+                            } else {
+                                "none"
+                            }
+                        })
                         .to_ascii_lowercase();
                     if !matches!(auth.as_str(), "none" | "token" | "oidc") {
                         return Err("INVALID_INPUT: Invalid authMode".into());
@@ -932,6 +1139,9 @@ impl DaemonService {
                             "client_id",
                             "oidcIssuer",
                             "oidcClientId",
+                            "redirect_port",
+                            "oidcRedirectPort",
+                            "oidcScopes",
                         ] {
                             m.remove(k);
                         }
@@ -1118,52 +1328,24 @@ impl DaemonService {
                     repair_default_hub(v);
                     Ok(())
                 })?;
+                self.purge_hub_state(&hub)?;
             }
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
             "paste_hub_invite" => {
                 let mut invite = parse_hub_invite(string(action, "invite"))?;
                 if action["parse_only"] == true {
+                    if let Some(port) = invite
+                        .get("redirectPort")
+                        .or_else(|| invite.get("oidcRedirectPort"))
+                        .cloned()
+                    {
+                        invite["redirect_port"] = port;
+                    }
                     self.emit(json!({"op":"hub_invite","request_id":action["request_id"],"config":invite}));
                     return Ok(json!({"ok":true}));
                 }
                 let raw = self.raw_config()?;
-                if let Some(server) = &self.host_server {
-                    let url = url::Url::parse(string(&invite, "url"))
-                        .map_err(|_| "INVALID_INPUT: Invalid Hub URL")?;
-                    let host = raw
-                        .get("host_hub")
-                        .or_else(|| raw.get("hostHub"))
-                        .unwrap_or(&Value::Null);
-                    let bind = string(host, "bind");
-                    let hostname = local_host_name();
-                    let mut local_hosts = vec![
-                        "127.0.0.1".to_owned(),
-                        "localhost".to_owned(),
-                        "::1".to_owned(),
-                        hostname.clone(),
-                        format!("{}.local", hostname.trim_end_matches(".local")),
-                        advertised_hub_host(bind),
-                        lan_advertised_host(bind),
-                    ];
-                    if matches!(bind, "" | "0.0.0.0" | "::") {
-                        local_hosts.extend(tailscale_advertised_host());
-                    }
-                    let invite_host = url
-                        .host_str()
-                        .unwrap_or("")
-                        .trim_matches(['[', ']'])
-                        .trim_end_matches('.');
-                    if url.port_or_known_default() == Some(server.port())
-                        && local_hosts.iter().any(|local| {
-                            local
-                                .trim_matches(['[', ']'])
-                                .trim_end_matches('.')
-                                .eq_ignore_ascii_case(invite_host)
-                        })
-                    {
-                        return Err("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.".into());
-                    }
-                }
+                self.reject_own_hub_invite(&invite)?;
                 let base = normalize_slug(string(&invite, "name"));
                 if !string(&invite, "name").is_empty() {
                     let mut name = base.clone();
@@ -1187,7 +1369,7 @@ impl DaemonService {
                     invite["name"] = json!(name);
                 }
                 invite["request_id"] = action["request_id"].clone();
-                return self.action(&invite);
+                return self.action_with_precondition(&invite, precondition);
             }
             "generate_hub_invite" => {
                 let mut invite = self.slot(&hub)?.config.clone();
@@ -1248,10 +1430,13 @@ impl DaemonService {
             "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
                 let ids = action["signal_ids"].as_array().cloned().unwrap_or_default();
                 let rows = self.state.db.query(
-                    "SELECT s.*,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
+                    "SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
                     &[json!(action["filter"].as_str().unwrap_or(&self.activity_filter))],
                 )?;
                 for row in rows {
+                    if !crate::core::state::joined_signal_is_current(&row) {
+                        continue;
+                    }
                     let requested_hub = string(action, "hub");
                     if !requested_hub.is_empty() && row["hub"] != requested_hub {
                         continue;
@@ -1295,11 +1480,12 @@ impl DaemonService {
                     .state
                     .db
                     .query(
-                        "SELECT message FROM local_signals WHERE hub=? AND signal_id=?",
+                        "SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status FROM local_signals s LEFT JOIN local_listeners l ON s.hub=l.hub AND s.listener_id=l.listener_id WHERE s.hub=? AND s.signal_id=?",
                         &[json!(hub), action["signal_id"].clone()],
                     )?
                     .into_iter()
                     .next()
+                    .filter(crate::core::state::joined_signal_is_current)
                     .ok_or("LISTENER_NOT_FOUND: Message no longer available")?;
                 let message = string(&row, "message");
                 let characters: Vec<_> = message.chars().collect();
@@ -1321,8 +1507,8 @@ impl DaemonService {
                     let selected = action["hub"].as_str().unwrap_or("");
                     let signal_id = action["signal_id"].as_str().unwrap_or("");
                     let filter=action["filter"].as_str().unwrap_or(&self.activity_filter);
-                    c.query_while("SELECT s.*,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
-                        if !crate::core::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { return Ok(true); }
+                    c.query_while("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
+                        if !crate::core::state::joined_signal_is_current(&row) || !crate::core::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { return Ok(true); }
                         if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES(?,?,?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms()),row["hub_url"].clone(),row["principal_id"].clone()])?; }
                         c.execute("UPDATE local_signals SET activity_hidden=1,acknowledged_at_ms=CASE WHEN ?='human' THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END WHERE hub=? AND signal_id=?", &[row["target_harness"].clone(),json!(now_ms()),row["hub"].clone(),row["signal_id"].clone()])?;
                         Ok(true)

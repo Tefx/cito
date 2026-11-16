@@ -1,8 +1,7 @@
 use crate::plugins::{
     expand_home_dir, is_staged_plugins_root, now_ms, random_hex, resolve_builtin_plugins_dir,
     selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
-    validate_https_issuer, validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
-    CITO_VERSION,
+    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor, CITO_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -1180,6 +1179,7 @@ pub fn run_setup_cli(args: &[String]) {
         let mut hub_token: Option<String> = None;
         let mut hub_issuer: Option<String> = None;
         let mut hub_client_id: Option<String> = None;
+        let mut hub_redirect_port: Option<Value> = None;
         let mut enable_hubs: Vec<String> = Vec::new();
         let mut disable_hubs: Vec<String> = Vec::new();
         let mut remove_hubs: Vec<String> = Vec::new();
@@ -1188,8 +1188,12 @@ pub fn run_setup_cli(args: &[String]) {
 
         let read_val = |arg: &str, idx: usize, flag: &str| -> Result<(String, usize), String> {
             if let Some(rest) = arg.strip_prefix(&format!("{flag}=")) {
-                let v = rest.trim();
-                if v.is_empty() {
+                let v = if flag == "--client-id" {
+                    rest
+                } else {
+                    rest.trim()
+                };
+                if v.is_empty() && !matches!(flag, "--issuer" | "--client-id" | "--redirect-port") {
                     return Err(format!("Missing value for {flag}"));
                 }
                 return Ok((v.to_string(), idx));
@@ -1275,6 +1279,16 @@ pub fn run_setup_cli(args: &[String]) {
             } else if arg == "--client-id" || arg.starts_with("--client-id=") {
                 let (v, next_i) = read_val(arg, i, "--client-id")?;
                 hub_client_id = Some(v);
+                i = next_i;
+            } else if arg == "--redirect-port" || arg.starts_with("--redirect-port=") {
+                let (v, next_i) = read_val(arg, i, "--redirect-port")?;
+                hub_redirect_port = Some(if v.is_empty() {
+                    Value::Null
+                } else {
+                    json!(v.parse::<u16>().map_err(|_| {
+                        "INVALID_INPUT: redirect port must be an integer from 0 to 65535"
+                    })?)
+                });
                 i = next_i;
             } else if arg == "--enable-hub" || arg.starts_with("--enable-hub=") {
                 let (v, next_i) = read_val(arg, i, "--enable-hub")?;
@@ -1518,24 +1532,8 @@ pub fn run_setup_cli(args: &[String]) {
                 return Err(format!("Invalid hub name: {name}"));
             }
             let url = validate_nats_url(url_raw)?;
-            let auth = hub_auth.clone().unwrap_or_else(|| "none".to_string());
-            if auth == "token" && hub_token.as_deref().unwrap_or("").trim().is_empty() {
-                return Err("Hub token is required when auth is token".to_string());
-            }
-            let mut iss_norm = None;
-            let mut cid_norm = None;
-            if auth == "oidc" || hub_issuer.is_some() {
-                let raw_iss = hub_issuer.as_deref().unwrap_or("").trim();
-                if raw_iss.is_empty() {
-                    return Err("Hub issuer is required when auth is oidc".to_string());
-                }
-                iss_norm = Some(validate_https_issuer(raw_iss)?);
-                let raw_cid = hub_client_id.as_deref().unwrap_or("").trim();
-                if raw_cid.is_empty() {
-                    return Err("Hub client-id is required when auth is oidc".to_string());
-                }
-                cid_norm = Some(raw_cid.to_string());
-            }
+            let (_, existing_hubs, _) = try_normalize_existing_config(raw_config.as_deref())?;
+            let base = existing_hubs.get(name).unwrap_or(&Value::Null);
             let def_scope = if url == "local://" {
                 "workspace"
             } else {
@@ -1544,19 +1542,50 @@ pub fn run_setup_cli(args: &[String]) {
             let mut entry = Map::new();
             entry.insert("url".to_string(), json!(url));
             entry.insert("natsUrl".to_string(), json!(url));
-            entry.insert("authMode".to_string(), json!(auth));
+            if let Some(ref auth) = hub_auth {
+                entry.insert("authMode".into(), json!(auth));
+            } else if hub_issuer.as_deref().is_some_and(|value| !value.is_empty())
+                || hub_client_id
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+            {
+                entry.insert("authMode".into(), json!("oidc"));
+            } else if hub_token
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                entry.insert("authMode".into(), json!("token"));
+            }
             if let Some(ref t) = hub_token {
                 entry.insert("token".to_string(), json!(t.trim()));
             }
-            if let Some(ref iss) = iss_norm {
-                entry.insert("issuer".to_string(), json!(iss));
+            if let Some(ref iss) = hub_issuer {
+                entry.insert(
+                    "issuer".to_string(),
+                    if iss.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(iss)
+                    },
+                );
             }
-            if let Some(ref cid) = cid_norm {
-                entry.insert("clientId".to_string(), json!(cid));
+            if let Some(ref cid) = hub_client_id {
+                entry.insert(
+                    "clientId".to_string(),
+                    if cid.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(cid)
+                    },
+                );
             }
             entry.insert("enabled".to_string(), json!(true));
             entry.insert("defaultScope".to_string(), json!(def_scope));
-            validated_hub = Some((name.clone(), Value::Object(entry)));
+            if let Some(port) = hub_redirect_port {
+                entry.insert("redirectPort".into(), port);
+            }
+            let entry = super::config::merge_hub_config(base, &Value::Object(entry));
+            validated_hub = Some((name.clone(), super::config::discover_hub_config(entry)?));
         }
 
         let mut resolved_default_hub = "local".to_string();
@@ -1571,6 +1600,11 @@ pub fn run_setup_cli(args: &[String]) {
             });
 
             if let Some((ref hname, ref hentry)) = validated_hub {
+                if existing != raw_config.as_deref() {
+                    return Err(
+                        "INVALID_INPUT: Configuration changed during discovery; retry".into(),
+                    );
+                }
                 hubs.insert(hname.clone(), hentry.clone());
                 if set_default || (!had_remote_before && def_hub == "local" && hname != "local") {
                     def_hub = hname.clone();

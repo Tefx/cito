@@ -805,16 +805,13 @@ pub fn process_command(pid: u32) -> Result<String> {
             .take(argc)
             .map(String::from_utf8_lossy)
             .collect::<Vec<_>>()
-            .join(" "))
+            .join("\0")
+            + "\0")
     }
     #[cfg(not(target_os = "macos"))]
     {
         std::fs::read(format!("/proc/{pid}/cmdline"))
-            .map(|b| {
-                String::from_utf8_lossy(&b)
-                    .trim_end_matches('\0')
-                    .replace('\0', " ")
-            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
             .map_err(|_| "Cannot inspect endpoint command".into())
     }
 }
@@ -956,10 +953,16 @@ pub fn cached_caller(
     }
     Ok(Some(cached.clone()))
 }
-// ps exposes a command line rather than argv. Inspect only the program and its
-// immediate interpreter script; arbitrary later arguments never identify an app.
+// Native process inspection preserves argv with NUL separators. Plain command
+// lines are accepted for process-list fixtures; later arguments never identify an app.
+pub fn process_arguments(command: &str) -> impl Iterator<Item = &str> {
+    let argv = command.contains('\0');
+    command
+        .split(move |c: char| if argv { c == '\0' } else { c.is_whitespace() })
+        .filter(|word| !word.is_empty())
+}
 pub fn process_entrypoint(command: &str) -> Option<(&str, Option<&str>)> {
-    let mut words = command.split_whitespace();
+    let mut words = process_arguments(command);
     let program = words.next()?.trim_matches(['\'', '"']);
     let basename = Path::new(program).file_name()?.to_str()?;
     if matches!(basename, "node" | "nodejs" | "bun" | "deno") {
@@ -2032,6 +2035,12 @@ mod tests {
     }
     #[test]
     fn interpreter_entrypoint_ignores_loader_values_and_rejects_eval() {
+        assert_eq!(process_entrypoint("/Applications/Runtime Tools/node\0--require\0/tmp/preload with spaces.js\0/Users/alice/Agent Tools/pi.mjs\0--session\0other\0"), Some(("/Applications/Runtime Tools/node", Some("/Users/alice/Agent Tools/pi.mjs"))));
+        assert_eq!(
+            process_entrypoint("/Applications/Agent Tools/agent\0--flag\0"),
+            Some(("/Applications/Agent Tools/agent", None))
+        );
+        assert_eq!(process_entrypoint("node\0-e\0/tmp/fake script.js\0"), None);
         assert_eq!(process_entrypoint("node --require /tmp/preload.js --experimental-strip-types /tmp/program.js --session other"), Some(("node", Some("/tmp/program.js"))));
         assert_eq!(process_entrypoint("node -e /tmp/program.js"), None);
         assert_eq!(

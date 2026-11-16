@@ -124,13 +124,22 @@ pub(crate) fn is_live_peer(row: &Value, now: u64) -> bool {
 pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value]) -> String {
     let user = normalize_slug(string(row, "owner_user"));
     let harness = string(row, "harness");
-    let suffix = string(row, "listener_id").strip_prefix("c_").unwrap_or("");
+    let id = string(row, "listener_id");
+    let suffix = if canonical_node_id(id).is_ok() {
+        id.strip_prefix("c_").unwrap_or("")
+    } else {
+        ""
+    };
     let address = if harness == "human" {
         format!("@{}", string(row, "owner_user"))
     } else {
         let mut chosen = None;
         for length in [4, 8, 12, 16] {
-            let prefix = &suffix[..suffix.len().min(length)];
+            let end = suffix
+                .char_indices()
+                .nth(length)
+                .map_or(suffix.len(), |(i, _)| i);
+            let prefix = &suffix[..end];
             if prefix.is_empty() {
                 break;
             }
@@ -254,6 +263,17 @@ pub fn iso(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_unicode_ids_use_the_full_safe_fallback() {
+        for id in ["c_ab😀defghijkl", "c_ééé", "c_BAD-ID", "c_abcd"] {
+            let row = json!({"listener_id":id,"owner_user":"alice","harness":"agent"});
+            assert_eq!(
+                display_address("local", "local", &row, &[]),
+                public_listener_id("alice", id)
+            );
+        }
+    }
+
     #[test]
     fn slugs_and_node_ids() {
         assert_eq!(normalize_slug("Alice._Smith"), "alice-smith");

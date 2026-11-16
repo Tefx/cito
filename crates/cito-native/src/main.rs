@@ -36,9 +36,12 @@ struct Sidecar {
 impl Drop for Sidecar {
     fn drop(&mut self) {
         self.input.take();
-        if !cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100))
-            .unwrap_or(false)
-        {
+        let _ = cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100));
+        if cito_native::core::plugins::peek_plugin_exit(self.child.id()).is_ok() {
+            // SAFETY: an unreaped owned process still reserves its process group.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            }
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
@@ -182,8 +185,11 @@ fn run_mcp_stdio() {
             continue;
         }
         let result = (|| -> Result<(Sidecar, Value), String> {
+            use std::os::{fd::AsRawFd, unix::process::CommandExt};
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
             let mut cmd = plugins::plugin_command(plugin)?;
             let mut child = cmd
+                .process_group(0)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -199,12 +205,47 @@ fn run_mcp_stdio() {
                 .take()
                 .ok_or("Plugin stdout unavailable")?;
             let request = json!({"op":"stdio_sidecar","endpoint_pid":endpoint,"cwd":env::current_dir().ok(),"state_dir":config.state_dir,"env":env::vars().collect::<std::collections::BTreeMap<_,_>>()});
-            writeln!(
-                sidecar.input.as_mut().ok_or("Plugin stdin unavailable")?,
-                "{request}"
-            )
-            .map_err(|e| e.to_string())?;
+            let input = sidecar.input.as_mut().ok_or("Plugin stdin unavailable")?;
+            let fd = input.as_raw_fd();
+            // SAFETY: input owns this live descriptor for the entire bounded write.
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+            let bytes = format!("{request}\n").into_bytes();
+            let mut offset = 0;
+            while offset < bytes.len() {
+                if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed)
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err("Plugin startup cancelled or timed out".into());
+                }
+                match input.write(&bytes[offset..]) {
+                    Ok(0) => return Err("Plugin stdin closed".into()),
+                    Ok(n) => offset += n,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        let mut fds = [
+                            libc::pollfd {
+                                fd,
+                                events: libc::POLLOUT,
+                                revents: 0,
+                            },
+                            libc::pollfd {
+                                fd: wake.read_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                        ];
+                        cito_native::support::poll_until(&mut fds, Some(deadline))?;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
             let (tx, rx) = mpsc::channel();
+            let ready_wake = Arc::new(cito_native::support::WakePipe::new()?);
+            let ready_notice = ready_wake.clone();
             let out = lock.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stdout);
@@ -215,6 +256,7 @@ fn run_mcp_stdio() {
                         serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())
                     });
                 let _ = tx.send(ready);
+                ready_notice.notify();
                 while let Ok(Some(line)) = read_sidecar_line(&mut reader) {
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
                         if v["jsonrpc"] == "2.0" && v.get("method").is_some() {
@@ -223,9 +265,24 @@ fn run_mcp_stdio() {
                     }
                 }
             });
-            let ready = rx
-                .recv_timeout(Duration::from_secs(10))
-                .map_err(|e| e.to_string())??;
+            let mut fds = [
+                libc::pollfd {
+                    fd: ready_wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            if !cito_native::support::poll_until(&mut fds, Some(deadline))?
+                || STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err("Plugin startup cancelled or timed out".into());
+            }
+            let ready = rx.try_recv().map_err(|error| error.to_string())??;
             if ready["op"] != "ready" {
                 return Err("Plugin did not send ready".into());
             }

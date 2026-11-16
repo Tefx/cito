@@ -363,6 +363,23 @@ impl SessionActivity {
             }
             for (target, intent) in desired {
                 if let Some(badge) = self.badges.get_mut(&target) {
+                    if changed
+                        && self
+                            .discovery
+                            .iter()
+                            .filter(|provider| provider.plugin.id == target.harness)
+                            .flat_map(|provider| &provider.cached)
+                            .any(|candidate| {
+                                Target::of(candidate) == target
+                                    && candidate["session_id"] == intent.session_id
+                                    && candidate
+                                        .get("badge")
+                                        .is_some_and(|observed| *observed != json!(intent.badge))
+                            })
+                    {
+                        badge.sent = None;
+                        badge.retry_at = Instant::now();
+                    }
                     if badge.desired != intent {
                         badge.desired = intent;
                         badge.failures = 0;
@@ -690,7 +707,17 @@ fn desired_badges(
     state: &LocalState,
     live_active: &[Value],
 ) -> Result<BTreeMap<Target, Intent>, String> {
-    let rows = state.db.transaction(|db| db.query("SELECT l.*, (SELECT COUNT(*) FROM local_signals s WHERE s.hub=l.hub AND s.listener_id=l.listener_id AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>? AND s.state!='EXPIRED_UNSENT') AS badge_unread FROM local_listeners l ORDER BY (l.status='ACTIVE') DESC,l.binding_generation DESC,l.hub ASC,l.listener_id ASC", &[json!(now_ms())]))?;
+    let mut rows = state.db.query("SELECT * FROM local_listeners ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC", &[])?;
+    for row in &mut rows {
+        row["badge_unread"] = json!(state
+            .current_signals(string(row, "hub"), string(row, "listener_id"), usize::MAX)?
+            .iter()
+            .filter(
+                |signal| signal["expires_at_ms"].as_u64().unwrap_or(0) > now_ms()
+                    && signal["state"] != "EXPIRED_UNSENT"
+            )
+            .count());
+    }
     let is_live = |row: &Value| {
         row["status"] == "ACTIVE"
             && live_active.iter().any(|live| {
@@ -944,7 +971,7 @@ print(json.dumps(response), flush=True)
             pid: Option<u64>,
             generation: u64,
         ) -> Result<Value, String> {
-            self.state.db.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token) VALUES(?,'c_abcdefghijkl','abcdefghijk--more-abcdefghijkl','none#alice','alice','host','host','agent',?,?,'/workspace','Target','','workspace','ACTIVE',?,'owner')",&[json!(hub),json!(session),json!(pid),json!(generation)])?;
+            self.state.db.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token,hub_url) VALUES(?,'c_abcdefghijkl','abcdefghijk--more-abcdefghijkl','none#alice','alice','host','host','agent',?,?,'/workspace','Target','','workspace','ACTIVE',?,'owner','local://')",&[json!(hub),json!(session),json!(pid),json!(generation)])?;
             self.state
                 .listener(hub, "c_abcdefghijkl")?
                 .ok_or_else(|| "Missing listener".into())
@@ -957,7 +984,7 @@ print(json.dumps(response), flush=True)
             acked: Value,
             expires: u64,
         ) -> Result<(), String> {
-            self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,acknowledged_at_ms) VALUES(?,?,'c_abcdefghijkl',1,1,'bob','remote','Sender','hello','2026-01-01T00:00:00.000Z',?,?,?)",&[json!(hub),json!(id),json!(expires),json!(state),acked])?;
+            self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,acknowledged_at_ms,hub_url,principal_id) VALUES(?,?,'c_abcdefghijkl',1,1,'bob','remote','Sender','hello','2026-01-01T00:00:00.000Z',?,?,?,'local://','none#alice')",&[json!(hub),json!(id),json!(expires),json!(state),acked])?;
             Ok(())
         }
     }
@@ -1055,6 +1082,34 @@ print(json.dumps(response), flush=True)
             &[],
         )?;
         activity.tick(&f.state, &[])?;
+        activity.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_badge_observation_repairs_a_reloaded_endpoint() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        let candidate = json!({"harness":"agent","session_id":"s","endpoint_pid":42,"badge":"Cito · abcdefghijk"});
+        f.provider("agent", json!({"sessions":[candidate]}))?;
+        let live = vec![f.listener("local", "s", Some(42), 1)?];
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &live, |a| {
+            !a.discovery_pending()
+                && a.badges
+                    .values()
+                    .all(|badge| badge.sent.as_ref() == Some(&badge.desired))
+        })?;
+        let before = f.calls("agent", "update_badge").len();
+        fs::write(f.dir.join("agent/options.json"),json!({"sessions":[{"harness":"agent","session_id":"s","endpoint_pid":42,"badge":null}]}).to_string()).map_err(|e|e.to_string())?;
+        activity.refresh_discovery();
+        pump(&mut activity, &f, &live, |a| {
+            !a.discovery_pending()
+                && f.calls("agent", "update_badge").len() > before
+                && a.badges
+                    .values()
+                    .all(|badge| badge.sent.as_ref() == Some(&badge.desired))
+        })?;
+        assert_eq!(f.effect("agent").unwrap()["badge"], "Cito · abcdefghijk");
         activity.shutdown()?;
         Ok(())
     }

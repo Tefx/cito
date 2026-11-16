@@ -1110,6 +1110,7 @@ impl DaemonService {
                     key,
                     thread::spawn(move || {
                         let _ = inventory.refresh(&slot, observed_gen);
+                        wake_daemon();
                     }),
                 );
             }
@@ -1145,6 +1146,7 @@ impl DaemonService {
                             }
                             Ok(())
                         })();
+                        wake_daemon();
                         if refreshed.is_ok() && slot.local.is_none() {
                             let _ = Self::reconcile_unlistened(&state, &slot, &host_id);
                         }
@@ -1213,7 +1215,7 @@ impl DaemonService {
                     }
                     }
                 } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
-                    if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
+                    if !super::registration::remote_matches_listener(&remote,&row,&channel) || remote["channels"][&channel]["state"] != "ACTIVE" {let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
                     let mut changed = remote["listen_mode"] != row["listen_mode"];
                     remote["listen_mode"] = row["listen_mode"].clone();
@@ -1347,10 +1349,9 @@ impl DaemonService {
                 let quiet = result
                     .as_ref()
                     .is_ok_and(|result| result["ok"] == true && result["status"] == "alive");
-                if let Ok(result) = result {
-                    for (row, client) in targets {
-                        let _ = super::receiver::apply_probe(&state, &client, &row, &result);
-                    }
+                let result = result.unwrap_or_else(|error| json!({"ok":false,"error":error}));
+                for (row, client) in targets {
+                    let _ = super::receiver::apply_probe(&state, &client, &row, &result);
                 }
                 wake_daemon();
                 quiet

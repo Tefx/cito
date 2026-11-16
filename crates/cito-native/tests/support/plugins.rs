@@ -1517,7 +1517,10 @@ fn socket(path: &std::path::Path, request: Value) -> Value {
 fn pi_badge_clear_converges_for_missing_or_departed_bridges() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let endpoint = f.spawn("/bin/cat", &[], &[]);
+    let app = f.dir.join("pi.mjs");
+    fs::write(&app, "console.log('ready');setInterval(()=>{},1000)").unwrap();
+    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
     let path = f
         .state
         .join(format!("sockets/pi-pid-{}.sock", f.pid(endpoint)));
@@ -1549,6 +1552,16 @@ fn pi_badge_clear_converges_for_missing_or_departed_bridges() {
         "a departed endpoint's stale socket is removed"
     );
     assert_eq!(update(Value::Null), json!({"ok":true}));
+    let unrelated = f.spawn("/bin/cat", &[], &[]);
+    let stale = f
+        .state
+        .join(format!("sockets/pi-pid-{}.sock", f.pid(unrelated)));
+    drop(UnixListener::bind(&stale).unwrap());
+    assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":f.pid(unrelated),"session_id":"session-a","badge":null}))["ok"],true);
+    assert!(
+        !stale.exists(),
+        "A reused PID running another app cannot retain a badge socket"
+    );
 }
 
 #[test]
@@ -2748,7 +2761,7 @@ fn claude_offline_hook_retires_output_only_after_identity_bound_durable_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
-    local.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES('work','c_offline','none#alice','alice','host','laptop','claude','session-a','/repo','Work','','workspace','ACTIVE','https://hub.example.com'); INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,batch_id,queue_written,queue_confirmed,hub_url,principal_id) VALUES('work','offline-signal','c_offline',1,1,'bob','desktop','','Delivered exactly once','now',9999999999999,'DISPATCHED','offline-batch',1,1,'https://hub.example.com','none#alice'); UPDATE local_listeners SET hub_url='https://replacement.example.com',principal_id='none#bob' WHERE listener_id='c_offline'",&[]).unwrap();
+    local.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES('work','c_offline','none#alice','alice','host','laptop','claude','session-a','/repo','Work','','workspace','ACTIVE','https://hub.example.com'); INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,batch_id,queue_written,queue_confirmed,hub_url,principal_id) VALUES('work','offline-signal','c_offline',1,1,'bob','desktop','','Delivered exactly once','now',9999999999999,'DISPATCHED','offline-batch',1,1,'https://hub.example.com','none#alice')",&[]).unwrap();
     f.plugin(CLAUDE,json!({"op":"wake","session_id":"session-a","batch_id":"offline-batch","text":"Delivered exactly once","wake":false}));
     let output = f.plugin(
         HOOK,

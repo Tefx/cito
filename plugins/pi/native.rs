@@ -136,7 +136,7 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     {
         return Ok(false);
     }
-    let args: Vec<_> = command.split_whitespace().collect();
+    let args: Vec<_> = process_arguments(&command).collect();
     Ok(!args.iter().any(|a| {
         matches!(
             *a,
@@ -348,6 +348,28 @@ fn candidates(req: &Value) -> Result<Candidates> {
                 p = parent;
             }
         }
+        if !resolve && req["op"] == "probe" {
+            let mut inspection = req.clone();
+            inspection["op"] = json!("setup_inspect");
+            let configured = setup(&inspection)?["configured"] == true;
+            let cached = pid(req)
+                .filter(|p| {
+                    configured
+                        && allow_process_only(req)
+                        && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+                })
+                .and_then(|p| {
+                    let cached =
+                        read_json(&state(req).join(format!("pi/endpoints/{p}.json"))).ok()?;
+                    let identity = process_identity(p).ok()?;
+                    (cached["identity"] == identity
+                        && matches_process(str_at(&identity, "command").unwrap_or("")))
+                    .then_some((p, cached["session"].clone()))
+                })
+                .into_iter()
+                .collect();
+            return Ok((cached, responded, None));
+        }
         // A responding bridge with no open session must not be bypassed.
         let mut live = vec![];
         if !responded {
@@ -368,14 +390,18 @@ fn candidates(req: &Value) -> Result<Candidates> {
     Ok((out, false, None))
 }
 fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
-    caller(
+    let mut result = caller(
         req,
         "pi",
         str_at(v, "session_id").unwrap_or(""),
         str_at(v, "cwd").unwrap_or(""),
         Some(p),
         str_at(v, "session_name"),
-    )
+    );
+    if let Some(badge) = v.get("badge") {
+        result["badge"] = badge.clone();
+    }
+    result
 }
 pub fn handle(input: &Value) -> Result<Value> {
     let req = input;
@@ -532,7 +558,11 @@ pub fn handle(input: &Value) -> Result<Value> {
                     Ok(reply) if clearing && reply["error"] == "SESSION_MISMATCH" => {
                         Ok(json!({"ok":true}))
                     }
-                    Err(_) if clearing && process_identity(p).is_err() => {
+                    Err(_)
+                        if clearing
+                            && !process_command(p)
+                                .is_ok_and(|command| matches_process(&command)) =>
+                    {
                         let _ = fs::remove_file(&path);
                         Ok(json!({"ok":true}))
                     }

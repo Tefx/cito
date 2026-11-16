@@ -305,6 +305,12 @@ impl DaemonService {
                 .map(|s| &s.config)
                 .or_else(|| raw["hubs"].get(string(item, "name")));
             if let Some(cfg) = cfg {
+                item["redirect_port"] = cfg
+                    .get("redirectPort")
+                    .or_else(|| cfg.get("redirect_port"))
+                    .or_else(|| cfg.get("oidcRedirectPort"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 item["issuer"] = cfg
                     .get("issuer")
                     .or_else(|| cfg.get("oidcIssuer"))
@@ -443,14 +449,15 @@ impl DaemonService {
             .active()?
             .into_iter()
             .filter(|row| {
-                self.slots
-                    .get(string(row, "hub"))
-                    .is_some_and(|slot| !slot.closed.load(Ordering::SeqCst))
-                    && self.receivers.contains_key(&format!(
-                        "{}:{}",
-                        string(row, "hub"),
-                        string(row, "listener_id")
-                    ))
+                self.slots.get(string(row, "hub")).is_some_and(|slot| {
+                    !slot.closed.load(Ordering::SeqCst)
+                        && slot.capabilities()["auth_valid"] == true
+                        && row["hub_url"] == slot.config["url"]
+                        && crate::core::auth::principal_ids_equal(
+                            string(row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        )
+                })
             })
             .collect())
     }
@@ -670,10 +677,32 @@ impl DaemonService {
         let mut hubs: Vec<_> = self
             .slots
             .iter()
-            .map(|(name, slot)| json!([name, slot.event_revision(), slot.capabilities()]))
+            .map(|(name, slot)| {
+                json!([
+                    name,
+                    slot.event_revision(),
+                    slot.directory_revision(),
+                    slot.capabilities()
+                ])
+            })
             .collect();
         hubs.sort_by_key(Value::to_string);
+        let mut inventories: Vec<_> = self
+            .channel_inventories
+            .iter()
+            .map(|(name, entry)| {
+                entry
+                    .cached
+                    .lock()
+                    .map(|cached| json!([name, cached.completed_gen]))
+                    .map_err(|_| "Channel inventory lock poisoned")
+            })
+            .collect::<Result<_, _>>()?;
+        inventories.sort_by_key(Value::to_string);
         Ok(json!([
+            inventories,
+            self.last_hub_errors,
+            self.last_host_hub_error,
             changes,
             external,
             hubs,
@@ -718,10 +747,10 @@ impl DaemonService {
             *row = project_fields(row, SESSION_FIELDS);
             self.project_session_controls(row);
         }
-        let counts = self.state.db.query("SELECT COUNT(*) AS total,COUNT(CASE WHEN acknowledged_at_ms IS NULL THEN 1 END) AS unread FROM local_signals WHERE activity_hidden=0", &[])?;
-        frame["unread_count"] = counts[0]["unread"].clone();
-        frame["activity_has_any"] = json!(counts[0]["total"].as_u64().unwrap_or(0) > 0);
-        frame["activity_all_total"] = counts[0]["total"].clone();
+        let (_, total, unread) = self.state.query_activity("all", "")?;
+        frame["unread_count"] = json!(unread);
+        frame["activity_has_any"] = json!(total > 0);
+        frame["activity_all_total"] = json!(total);
         frame["status"] = json!(if sessions.is_empty() {
             "idle"
         } else {
@@ -786,6 +815,9 @@ impl DaemonService {
                 frame["ok"] = json!(true);
                 frame["request_id"] = action["request_id"].clone();
                 frame["source_op"] = action["op"].clone();
+                if super::http_actions::mutating_action(action) {
+                    frame["committed"] = json!(true);
+                }
                 if super::channels::channel_action_kind(action)
                     == Some(super::channels::ChannelActionKind::Mutation)
                 {

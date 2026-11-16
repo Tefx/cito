@@ -184,10 +184,19 @@ export default function citoBridge(pi: BridgeAPI): void {
     sessionId = nextSessionId;
     if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
   }
+  let renderedBadge: string | undefined;
+  let renderedContext: BridgeContext | undefined;
+  function renderBadge(ctx: BridgeContext | undefined): void {
+    if (ctx && (ctx !== renderedContext || renderedBadge !== activeBadge)) {
+      ctx.ui.setStatus("cito", activeBadge);
+      renderedContext = ctx;
+      renderedBadge = activeBadge;
+    }
+  }
   function update(ctx: BridgeContext): void {
-    setSession(ctx.sessionManager.getSessionId());
+    setSession(ctx.sessionManager.getSessionId() ?? sessionId ?? `pid-${process.pid}`);
     context = ctx;
-    ctx.ui.setStatus("cito", activeBadge);
+    renderBadge(ctx);
   }
   function unlinkSocket(): void {
     if (!ownsSocket) return;
@@ -211,12 +220,12 @@ export default function citoBridge(pi: BridgeAPI): void {
     setSession(identity.session_id);
     const currentId = identity.session_id;
     if (req.op === "identify") return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid,
-      ...identity, updated_at_ms: lastActiveMs };
+      ...identity, badge: activeBadge ?? null, updated_at_ms: lastActiveMs };
     if (!currentId || req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
       activeBadge = (req.badge as string | undefined) ?? undefined;
-      ctx?.ui.setStatus("cito", activeBadge);
+      renderBadge(ctx);
       return { ok: true };
     }
     const processedBatchIds = sessions.get(currentId)!;
@@ -232,15 +241,16 @@ export default function citoBridge(pi: BridgeAPI): void {
     return { ok: true, delivered: true, deduplicated: false };
   }
 
+  const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
+    || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
+  const discoveryAllowed = process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY === "1" || !headless && !!process.stdin.isTTY;
   let serverReady: Promise<void> | undefined;
   let shuttingDown = false;
   function ensureServer(): Promise<void> {
     return serverReady ??= startServer().catch(error => { serverReady = undefined; throw error; });
   }
   async function startServer(): Promise<void> {
-    const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
-      || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
-    if (server || shuttingDown || process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY !== "1" && (headless || !process.stdin.isTTY)) return;
+    if (server || shuttingDown || !discoveryAllowed) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     const instance = createServer(socket => {
@@ -325,8 +335,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   // Load-time startup also serves hosts that loaded the extension after session_start.
   void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
   let repairing = false;
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const repairWatcher = watch(directory, { persistent: false }, () => {
+  if (discoveryAllowed) mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const repairWatcher = discoveryAllowed ? watch(directory, { persistent: false }, () => {
     if (shuttingDown || repairing || existsSync(socketPath)) return;
     let configured = false;
     try {
@@ -353,8 +363,8 @@ export default function citoBridge(pi: BridgeAPI): void {
       serverReady = undefined;
       await ensureServer();
     })().catch(() => {}).finally(() => { repairing = false; }); // Retry transient bind failures on the next tick.
-  });
-  repairWatcher.on("error", () => {}); // Session lifecycle events can still retry failed recovery.
+  }) : undefined;
+  repairWatcher?.on("error", () => {}); // Session lifecycle events can still retry failed recovery.
   pi.on("session_start", async (_event, ctx) => {
     registerMcpServer();
     lastActiveMs = Date.now();
@@ -438,7 +448,10 @@ export default function citoBridge(pi: BridgeAPI): void {
         const payload = await callMcpTool(tool, toolArgs);
         if (sessionId !== commandSessionId) return;
         if (tool === "cito_listen") {
-          activeBadge ??= `Cito · ${String(payload.listener_id ?? "cito")}`;
+          const publicId = String(payload.listener_id ?? "cito").trim().split(":").at(-1)!;
+          const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
+          const short = Array.from(slug).slice(0, 12).join("").replace(/-+$/, "") || "cito";
+          activeBadge ??= `Cito · ${short}`;
           ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
         } else if (targetHub) {
           ctx.ui.notify?.(`Cito stopped listening on ${targetHub}`, "info");
@@ -450,14 +463,14 @@ export default function citoBridge(pi: BridgeAPI): void {
         if (sessionId !== commandSessionId) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
-      ctx.ui.setStatus("cito", activeBadge);
+      renderBadge(ctx);
     },
   });
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
-    repairWatcher.close();
+    repairWatcher?.close();
     await serverReady?.catch(() => {});
     context = undefined;
     activeBadge = undefined;

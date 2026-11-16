@@ -1,4 +1,29 @@
 use super::*;
+
+#[test]
+fn health_exposes_only_oidc_discovery_metadata() {
+    for (mode, token) in [("none", None), ("token", Some("secret".into()))] {
+        let auth = HubAuth::new(mode, token, None, None).unwrap();
+        assert!(auth.health().get("oidc").is_none());
+        assert_eq!(auth.health()["auth_mode"], mode);
+    }
+    let mut auth = HubAuth::new(
+        "oidc",
+        None,
+        Some("https://id.example.com".into()),
+        Some("client".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        auth.health()["oidc"],
+        json!({"issuer":"https://id.example.com","client_id":"client"})
+    );
+    auth.redirect_port = Some(0);
+    assert!(auth.health()["oidc"].get("redirect_port").is_none());
+    auth.redirect_port = Some(65535);
+    assert_eq!(auth.health()["oidc"]["redirect_port"], 65535);
+}
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, EncodingKey, Header};
 fn verifier(alg: Algorithm) -> (OidcVerifier, EncodingKey) {
@@ -471,6 +496,7 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
     );
     let auth = HubAuth {
         mode: "oidc".into(),
+        redirect_port: None,
         token: None,
         verifier: Some(verifier),
     };
@@ -530,6 +556,7 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
             0,
             HubAuth {
                 mode: "oidc".into(),
+                redirect_port: None,
                 token: None,
                 verifier: Some(verifier),
             },

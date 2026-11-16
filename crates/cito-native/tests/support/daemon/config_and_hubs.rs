@@ -950,11 +950,24 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
             let canonical = match key.as_str() {
                 "client_id" | "oidcClientId" => "clientId",
                 "oidcIssuer" => "issuer",
+                "oidcScopes" => "scopes",
+                "redirect_port" | "oidcRedirectPort" => "redirectPort",
+                "auth_mode" | "auth" => "authMode",
                 key => key,
             };
             assert_eq!(&config["hubs"]["work"][canonical], value);
         }
-        for key in ["client_id", "oidcIssuer", "oidcClientId", "request_id"] {
+        for key in [
+            "client_id",
+            "oidcIssuer",
+            "oidcClientId",
+            "oidcScopes",
+            "redirect_port",
+            "oidcRedirectPort",
+            "auth_mode",
+            "auth",
+            "request_id",
+        ] {
             assert!(config["hubs"]["work"].get(key).is_none());
         }
         let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");

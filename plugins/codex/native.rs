@@ -41,7 +41,7 @@ fn interactive_process(p: u32, command: &str) -> bool {
     }
     matches_process(command)
         && process_has_tty(p)
-        && !command.split_whitespace().any(|arg| {
+        && !process_arguments(command).any(|arg| {
             matches!(
                 arg,
                 "exec"
@@ -624,7 +624,11 @@ pub fn handle(req: &Value) -> Result<Value> {
                     "Transport belongs to another harness",
                 ));
             }
-            let all = try_rows(req)?;
+            let all = if explicit.is_none() {
+                try_rows(req)?
+            } else {
+                Vec::new()
+            };
             let known_row = explicit
                 .as_deref()
                 .map(|id| row_for_id(req, id))

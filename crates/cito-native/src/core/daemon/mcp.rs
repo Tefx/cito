@@ -172,11 +172,19 @@ fn read_send_receipt(
     if payload["status"] == "PENDING_PUBLISH" {
         return Ok(());
     }
-    let (state, slot, signal) = {
+    let (slot, signal) = {
         let s = service.lock().map_err(|_| "Service lock poisoned")?;
         let raw = string(payload, "signal_id");
-        let (hub, signal) = raw.split_once(':').unwrap_or((&s.config.default_hub, raw));
-        (s.state.clone(), s.slot(hub)?.clone(), signal.to_string())
+        let signal = raw.rsplit(':').next().unwrap_or(raw);
+        let rows = s.state.db.query(
+            "SELECT hub FROM local_sent_idempotency WHERE signal_id=?",
+            &[json!(signal)],
+        )?;
+        let committed = rows
+            .first()
+            .filter(|_| rows.len() == 1)
+            .ok_or("Committed send receipt is unavailable")?;
+        (s.slot(string(committed, "hub"))?.clone(), signal.to_owned())
     };
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -188,25 +196,23 @@ fn read_send_receipt(
             "stream_get_message",
             &json!({"stream":"CITO_SIGNALS","seq":payload["seq"]}),
         )?;
+        let wire = STANDARD
+            .decode(string(&remote, "data_b64"))
+            .map_err(|e| e.to_string())?;
+        let observed: Value = serde_json::from_slice(&wire).map_err(|e| e.to_string())?;
+        if observed["signal_id"] != signal {
+            return Err("Send receipt authority changed".into());
+        }
         if remote["received"] == true {
+            payload["receipt_status"] = json!("received");
             break;
         }
         if Instant::now() >= deadline {
-            payload["status"] = json!("stored_passive");
-            payload["held_reason"] = json!("sender_ack_timeout");
+            payload["receipt_status"] = json!("pending");
             break;
         }
         slot.wait_for_event(revision, deadline);
     }
-    state.db.execute(
-        "UPDATE local_sent_idempotency SET status=?,held_reason=? WHERE hub=? AND signal_id=?",
-        &[
-            payload["status"].clone(),
-            payload["held_reason"].clone(),
-            json!(slot.name),
-            json!(signal),
-        ],
-    )?;
     Ok(())
 }
 
@@ -436,6 +442,13 @@ impl DaemonService {
         Ok(result)
     }
 
+    pub(super) fn session_hubs(&self, harness: &str, session: &str) -> Result<Vec<String>, String> {
+        let mut hubs: Vec<_> = self.slots.keys().cloned().collect();
+        hubs.extend(self.state.db.query("SELECT DISTINCT hub FROM local_listeners WHERE harness=? AND session_id=? AND status!='FENCED_INACTIVE'", &[json!(harness),json!(session)])?.iter().map(|row| string(row,"hub").to_owned()));
+        hubs.sort();
+        hubs.dedup();
+        Ok(hubs)
+    }
     /// Stop intent exists even if this session has never been enrolled.
     pub(super) fn ensure_agent_stop_row(
         &self,
@@ -446,7 +459,10 @@ impl DaemonService {
         if harness.is_empty() || harness == "human" || session.is_empty() {
             return Err("INVALID_INPUT: An agent session is required".into());
         }
-        let slot = self.slot(hub)?;
+        let slot = match self.slot(hub) {
+            Ok(slot) => slot,
+            Err(error) => return self.state.db.query("SELECT listener_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY binding_generation DESC LIMIT 1", &[json!(hub),json!(harness),json!(session)])?.first().map(|row| string(row,"listener_id").to_owned()).ok_or(error),
+        };
         let lock = self.state.registration_lock(hub)?;
         let _guard = lock
             .lock()
@@ -479,6 +495,7 @@ impl DaemonService {
         let row = self.state.listener(hub, id)?;
         let active = row.as_ref().is_some_and(|row| row["status"] == "ACTIVE");
         self.state.db.transaction(|c| {
+            c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
             if row.is_some() {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
                 c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=?,user_stopped=CASE WHEN harness!='human' AND ?='user' THEN 1 ELSE user_stopped END,retirement_reason=CASE WHEN harness!='human' THEN ? ELSE NULL END,retired_activity_revision=CASE WHEN ?='idle' THEN last_activity_revision ELSE retired_activity_revision END,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(reason),json!(reason),json!(reason),json!(hub),json!(id)])?;
@@ -591,15 +608,26 @@ impl DaemonService {
                             (row["channels"].as_object().is_none_or(|c| c.is_empty())
                                 && (string(&row, "host_name").to_lowercase().contains(&term)
                                     || string(&row, "host_id").to_lowercase().contains(&term)))
-                                || crate::core::lease::attachments(&row, &self.host_id, now_ms())
-                                    .iter()
-                                    .any(|attachment| {
-                                        string(attachment, "display_name")
-                                            .to_lowercase()
-                                            .contains(&term)
-                                            || string(attachment, "host_id")
-                                                .to_lowercase()
-                                                .contains(&term)
+                                || row["channels"]
+                                    .as_object()
+                                    .into_iter()
+                                    .flat_map(|channels| channels.values())
+                                    .filter(|channel| {
+                                        matches!(
+                                            crate::core::lease::attachment_availability(
+                                                channel,
+                                                crate::core::lease::registration_now(
+                                                    &row,
+                                                    now_ms()
+                                                )
+                                            ),
+                                            "ACTIVE" | "DISCONNECTED_RETAINED"
+                                        )
+                                    })
+                                    .any(|channel| {
+                                        ["display_name", "host_name", "host_id"].iter().any(|key| {
+                                            string(channel, key).to_lowercase().contains(&term)
+                                        })
                                     })
                         };
                         if ["user", "harness", "repo", "host"].iter().any(|key| {
@@ -739,7 +767,9 @@ impl DaemonService {
             .as_str()
             .unwrap_or(&self.config.default_hub)
             .to_string();
-        self.slot(&hub)?;
+        if name != "cito_unlisten" || args["hub"].is_string() {
+            self.slot(&hub)?;
+        }
         match name {
             "cito_listen" => {
                 let caller = self
@@ -788,7 +818,10 @@ impl DaemonService {
                         && r["session_id"] == caller["session_id"]
                 });
                 let unread = if let Some(row) = &row {
-                    self.state.db.query("SELECT COUNT(*) AS n FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL", &[json!(hub), row["listener_id"].clone()])?.first().map(|r|r["n"].clone()).unwrap_or(json!(0))
+                    json!(self
+                        .state
+                        .current_signals(&hub, string(row, "listener_id"), usize::MAX)?
+                        .len())
                 } else {
                     json!(0)
                 };
@@ -808,7 +841,7 @@ impl DaemonService {
                 let hubs: Vec<String> = if args["hub"].is_string() {
                     vec![hub]
                 } else {
-                    self.slots.keys().cloned().collect()
+                    self.session_hubs(string(&caller, "harness"), string(&caller, "session_id"))?
                 };
                 let mut removed = 0;
                 let mut detach_errors = Vec::new();
@@ -1187,7 +1220,11 @@ impl DaemonService {
             // the Hub commits, retry the RPC with the same key and committed signal ID.
             self.state.db.transaction(|c| {
                 if human && reply_to.is_string() {
-                    c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?", &[published["acked_at_ms"].clone(),json!(hub),json!(from_id),reply_to.clone()])?;
+                    let rows = c.query("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status FROM local_signals s JOIN local_listeners l ON s.hub=l.hub AND s.listener_id=l.listener_id WHERE s.hub=? AND s.listener_id=? AND s.signal_id=?", &[json!(hub),json!(from_id),reply_to.clone()])?;
+                    if rows.first().is_some_and(super::super::state::joined_signal_is_current) {
+                        c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?", &[published["acked_at_ms"].clone(),json!(hub),json!(from_id),reply_to.clone()])?;
+                        c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub),json!(from_id)])?;
+                    }
                 }
                 c.execute("UPDATE local_sent_idempotency SET signal_id=?,seq=?,status='wake_accepted' WHERE hub=? AND dedup_id=?",&[json!(signal_id),json!(seq),json!(hub),json!(dedup)])?;
                 Ok(())
@@ -1223,7 +1260,7 @@ impl DaemonService {
                 string(&caller, "harness"),
                 string(&caller, "session_id"),
             )?;
-            rows.extend(self.state.db.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY created_at,seq LIMIT ?",&[json!(name),json!(id),json!(limit)])?);
+            rows.extend(self.state.current_signals(name, &id, limit as usize)?);
             bindings.push((name.clone(), id));
         }
         rows.sort_by_key(|r| {
@@ -1260,7 +1297,12 @@ impl DaemonService {
                 if scoped_hub.is_some_and(|hub| hub != name) {
                     continue;
                 }
-                matches.extend(self.state.db.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (signal_id=? OR batch_id=?)",&[json!(name),json!(node),json!(id),json!(id)])?);
+                matches.extend(
+                    self.state
+                        .current_signals(name, node, usize::MAX)?
+                        .into_iter()
+                        .filter(|row| row["signal_id"] == *id || row["batch_id"] == *id),
+                );
             }
             if scoped_hub.is_none()
                 && matches

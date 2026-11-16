@@ -70,9 +70,7 @@ fn plugin_request_owned(
                             r.is_object()
                                 && r["state"] == "ACTIVE"
                                 && remote_matches_listener(r, row, channel)
-                                && r["channels"]
-                                    .get(channel)
-                                    .is_none_or(|ch| ch["state"] == "ACTIVE")
+                                && r["channels"][channel]["state"] == "ACTIVE"
                         })
                     else {
                         state.fence_listener_for(row, "fenced_before_dispatch")?;
@@ -174,6 +172,15 @@ pub fn poll_listener(
 ) -> Result<(), String> {
     let id = string(row, "listener_id");
     let hub = &client.name;
+    if row["hub_url"] != client.config["url"]
+        || !super::auth::principal_ids_equal(
+            string(row, "principal_id"),
+            string(&client.identity, "principal_id"),
+        )
+    {
+        return Err("STALE_GENERATION: Listener authority changed".into());
+    }
+    local.isolate_stale_signals(row)?;
     let name = format!("{}_{}", string(row, "host_id"), id);
     let added=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
     // A fallback response keeps its own clock observation, including time spent
@@ -198,7 +205,9 @@ pub fn poll_listener(
             .kv_get(id)?
             .ok_or("LISTENER_NOT_FOUND: Human inbox missing")?;
         let channel = format!("{}:human", string(row, "host_id"));
-        if !remote_matches_listener(&remote, row, &channel) {
+        if !remote_matches_listener(&remote, row, &channel)
+            || remote["channels"][&channel]["state"] != "ACTIVE"
+        {
             local.fence_listener_for(row, "fenced_before_dispatch")?;
             return Err("STALE_GENERATION: Human attachment superseded".into());
         }
@@ -210,6 +219,17 @@ pub fn poll_listener(
         )?;
         Some(guard)
     } else {
+        let remote = client
+            .kv_get(id)?
+            .ok_or("LISTENER_NOT_FOUND: Listener missing")?
+            .0;
+        let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
+        if !remote_matches_listener(&remote, row, &channel)
+            || remote["channels"][&channel]["state"] != "ACTIVE"
+        {
+            local.fence_listener_for(row, "fenced_before_dispatch")?;
+            return Err("STALE_GENERATION: Listener attachment superseded".into());
+        }
         None
     };
     for item in backlog["backlog"].as_array().into_iter().flatten() {
@@ -258,9 +278,16 @@ pub fn poll_listener(
         .listener(hub, id)?
         .map(|r| r["ack_scan_seq"].as_u64().unwrap_or(0))
         .unwrap_or(0);
-    let mut pending = local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND seq>? ORDER BY seq LIMIT 128",&[json!(hub),json!(id),json!(cursor)])?;
+    let mut current = local.current_signals(hub, id, usize::MAX)?;
+    current.sort_by_key(|signal| signal["seq"].as_u64().unwrap_or(0));
+    let mut pending: Vec<_> = current
+        .iter()
+        .filter(|signal| signal["seq"].as_u64().unwrap_or(0) > cursor)
+        .take(128)
+        .cloned()
+        .collect();
     if pending.is_empty() && cursor > 0 {
-        pending = local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY seq LIMIT 128",&[json!(hub),json!(id)])?;
+        pending = current.into_iter().take(128).collect();
     }
     if !pending.is_empty() {
         if let Ok(remote) = client.rpc("stream_get_message",&json!({"stream":"CITO_SIGNALS","seqs":pending.iter().map(|r|r["seq"].clone()).collect::<Vec<_>>()})) {
@@ -268,6 +295,7 @@ pub fn poll_listener(
                 for message in remote["messages"].as_array().into_iter().flatten() {
                     if !message["acked_at_ms"].is_null() && pending.iter().any(|p|p["seq"] == message["seq"] && p["signal_id"] == message["signal_id"]) {
                         db.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[message["acked_at_ms"].clone(),json!(hub),json!(id),message["signal_id"].clone()])?;
+                        db.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
                     }
                 }
                 db.execute("UPDATE local_listeners SET ack_scan_seq=? WHERE hub=? AND listener_id=?",&[pending.last().map(|r|r["seq"].clone()).unwrap_or(json!(0)),json!(hub),json!(id)])?;
@@ -318,7 +346,7 @@ pub fn probe_listener(
         &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"cwd":row["cwd"],"state_dir":state_dir}),
         None,
         Some((local, row)),
-    )?;
+    ).unwrap_or_else(|error| json!({"ok":false,"error":error}));
     apply_probe(local, client, row, &result)
 }
 
@@ -328,13 +356,11 @@ pub(super) fn apply_probe(
     row: &Value,
     result: &Value,
 ) -> Result<(), String> {
-    if result["ok"] != true {
-        return Err(crate::support::response_diagnostic(
-            result,
-            "Session probe failed",
-        ));
-    }
-    let status = string(result, "status");
+    let status = if result["ok"] == true {
+        string(result, "status")
+    } else {
+        "unknown"
+    };
     let failures = if status == "alive" {
         0
     } else {
@@ -360,6 +386,7 @@ pub(super) fn apply_probe(
         if revoke {
             let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
             if changed > 0 {
+                c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[row["hub"].clone(),row["listener_id"].clone()])?;
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
                 c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[row["hub"].clone(),row["listener_id"].clone(),client.config["url"].clone()])?;
             }

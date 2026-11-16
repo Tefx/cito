@@ -98,6 +98,7 @@ pub struct HubClient {
     pub auth_rejected_hash: Option<String>,
     pub rejected_bearer: Arc<Mutex<Option<String>>>,
     directory_cache: Arc<Mutex<Vec<Value>>>,
+    directory_revision: Arc<AtomicU64>,
     // Serialize network writers without holding the cache lock used by UI projections.
     directory_updates: Arc<Mutex<()>>,
     server_clock: Arc<Mutex<Option<(u64, Instant)>>>,
@@ -133,6 +134,7 @@ impl HubClient {
             auth_rejected_hash: None,
             rejected_bearer: Arc::new(Mutex::new(None)),
             directory_cache: Arc::new(Mutex::new(Vec::new())),
+            directory_revision: Arc::new(AtomicU64::new(0)),
             directory_updates: Arc::new(Mutex::new(())),
             server_clock: Arc::new(Mutex::new(None)),
             local,
@@ -311,6 +313,7 @@ impl HubClient {
     /// Preserve the authority-owned observations and running stream on renewal.
     pub fn inherit_authority(&mut self, old: &Self) {
         self.directory_cache = old.directory_cache.clone();
+        self.directory_revision = old.directory_revision.clone();
         self.directory_updates = old.directory_updates.clone();
         self.server_clock = old.server_clock.clone();
         self.status = old.status.clone();
@@ -416,6 +419,9 @@ impl HubClient {
                 *clock = Some((now.max(previous), Instant::now()));
             }
         }
+    }
+    pub fn directory_revision(&self) -> u64 {
+        self.directory_revision.load(Ordering::Acquire)
     }
     pub fn event_revision(&self) -> u64 {
         self.event_revision.load(Ordering::Acquire)
@@ -625,6 +631,7 @@ impl HubClient {
             if let Ok(mut cache) = self.directory_cache.lock() {
                 cache.retain(|row| row["listener_id"] != record["listener_id"]);
                 cache.push(record);
+                self.directory_revision.fetch_add(1, Ordering::Release);
             }
         }
     }
@@ -695,7 +702,10 @@ impl HubClient {
             }
         }
         if let Ok(mut cache) = self.directory_cache.lock() {
-            *cache = rows.clone();
+            if *cache != rows {
+                *cache = rows.clone();
+                self.directory_revision.fetch_add(1, Ordering::Release);
+            }
         }
         if let Ok(mut observed) = self.observed_at.lock() {
             *observed = Some(Instant::now());

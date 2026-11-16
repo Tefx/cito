@@ -959,6 +959,34 @@ fn pending_business_ack_requires_original_url_and_principal() {
             "device:human",
         )
         .unwrap();
+    assert!(state
+        .query(
+            "SELECT * FROM pending_hub_acks WHERE signal_id=?",
+            std::slice::from_ref(&delivered)
+        )
+        .unwrap()
+        .is_empty());
+    assert!(state
+        .query(
+            "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id=?",
+            std::slice::from_ref(&delivered)
+        )
+        .unwrap()[0]["acknowledged_at_ms"]
+        .is_null());
+    state
+        .execute(
+            "UPDATE local_listeners SET hub_url='local://',principal_id=? WHERE listener_id=?",
+            &[human["principal_id"].clone(), human["listener_id"].clone()],
+        )
+        .unwrap();
+    local
+        .acknowledge(
+            "local",
+            human["listener_id"].as_str().unwrap(),
+            std::slice::from_ref(&delivered),
+            "device:human",
+        )
+        .unwrap();
     let ack = state
         .query(
             "SELECT * FROM pending_hub_acks WHERE signal_id=?",
@@ -1054,9 +1082,16 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
         &[row["listener_id"].clone(), json!(now + 60_000)],
     )
     .unwrap();
-    db.transaction(|c|{for i in (1..=55).rev(){c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,?,?,?,'bob','laptop','Sender','Message','2030-01-01T00:00:00.000Z',?,'RECEIVED')",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!(now+60_000)])?;}Ok(())}).unwrap();
+    db.transaction(|c|{for i in (1..=55).rev(){c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,held_reason,hub_url,principal_id) VALUES('local',?,?,?,?,'bob','laptop','Sender','Message','2030-01-01T00:00:00.000Z',?,'STORED_PASSIVE','fixture_hold','local://',?)",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!(now+60_000),row["principal_id"].clone()])?;}Ok(())}).unwrap();
     let selected = f.tool("cito_inbox", json!({"ack_ids":["sig-55"]}), meta.clone());
     assert_eq!(selected["acknowledged_count"], 1);
+    assert!(db
+        .query(
+            "SELECT * FROM wake_retries WHERE listener_id=?",
+            std::slice::from_ref(&row["listener_id"])
+        )
+        .unwrap()
+        .is_empty());
     assert_eq!(
         selected["signals"]
             .as_array()
@@ -1532,7 +1567,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .unwrap()
         .as_millis() as u64
         + 60_000;
-    db.transaction(|c|{for i in 0..100 {c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,?,?,?,'bob','laptop','Sender',?,'2030-01-01T00:00:00.000Z',?,'STORED_PASSIVE')",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!("🦀".repeat(10000)),json!(expires)])?;}Ok(())}).unwrap();
+    db.transaction(|c|{for i in 0..100 {c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,?,?,?,'bob','laptop','Sender',?,'2030-01-01T00:00:00.000Z',?,'STORED_PASSIVE','local://',?)",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!("🦀".repeat(10000)),json!(expires),row["principal_id"].clone()])?;}Ok(())}).unwrap();
     f.daemon(&[]);
     let (s, frame) = f.action(json!({"op":"get_snapshot"}));
     assert_eq!(s, 200);

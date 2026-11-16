@@ -30,7 +30,7 @@ fn interactive_candidate(req: &Value, p: u32) -> bool {
     }) {
         return false;
     }
-    let args: Vec<_> = command.split_whitespace().collect();
+    let args: Vec<_> = process_arguments(&command).collect();
     !args
         .iter()
         .any(|arg| matches!(*arg, "-p" | "--print" | "--output-format=stream-json"))
@@ -325,6 +325,16 @@ fn persist_hook_acks(req: &Value, sessions: &[String], wakes: &[Value]) -> Resul
                 &[row["signal_id"].clone()],
                 &format!("{}:claude", str_at(&listener, "host_id").unwrap_or("")),
             )?;
+            let acked = local.db.query(
+                "SELECT acknowledged_at_ms FROM local_signals WHERE hub=? AND signal_id=?",
+                &[row["hub"].clone(), row["signal_id"].clone()],
+            )?;
+            if acked
+                .first()
+                .is_none_or(|signal| signal["acknowledged_at_ms"].is_null())
+            {
+                return Err("ACK signal authority changed".into());
+            }
         }
     }
     Ok(())
@@ -813,11 +823,21 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
         }
         "update_badge" => {
-            badge(
-                req,
-                str_at(req, "session_id").ok_or("Session ID is required")?,
-            )?;
-            Ok(json!({"ok":true}))
+            let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;
+            let p = pid(req).ok_or("Endpoint PID is required")?;
+            let path = state(req).join(format!("sockets/claude-pid-{p}.sock"));
+            if req["badge"].is_null() && !path.exists() {
+                return Ok(json!({"ok":true}));
+            }
+            match socket_call(
+                &path,
+                &json!({"op":"status","session_id":sid,"badge":req["badge"]}),
+            ) {
+                Ok(reply) if req["badge"].is_null() && reply["error"] == "SESSION_MISMATCH" => {
+                    Ok(json!({"ok":true}))
+                }
+                reply => reply,
+            }
         }
         "wake" => {
             let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;

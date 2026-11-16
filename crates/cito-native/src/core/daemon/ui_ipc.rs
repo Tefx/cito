@@ -26,7 +26,7 @@ fn cap_text(s: &str, limit: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
+fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated: &mut bool) {
     match v {
         Value::String(s) => {
             if matches!(
@@ -36,10 +36,12 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
                 return;
             }
             if key == "title" {
+                *truncated |= s.len() > 512;
                 *s = cap_text(s, 512);
                 return;
             }
             if key == "from_title" {
+                *truncated |= s.len() > 128;
                 *s = cap_text(s, 128);
                 return;
             }
@@ -49,6 +51,7 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
                 "cwd" | "summary" => 128,
                 _ => 4096,
             };
+            *truncated |= s.len() > cap;
             *s = cap_text(s, cap);
         }
         Value::Array(a) => {
@@ -60,10 +63,11 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
                 _ => 128,
             };
             if !preserve_collections {
+                *truncated |= a.len() > cap;
                 a.truncate(cap);
             }
             for item in a {
-                bound_fields(item, "", preserve_collections);
+                bound_fields(item, "", preserve_collections, truncated);
             }
         }
         Value::Object(m) => {
@@ -71,7 +75,7 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
                 return;
             }
             for (k, v) in m {
-                bound_fields(v, k, preserve_collections)
+                bound_fields(v, k, preserve_collections, truncated)
             }
         }
         _ => {}
@@ -82,7 +86,11 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     // Full-message copy uses correlated bounded chunks rather than preview caps.
     if frame["op"] != "activity_message" {
         let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
-        bound_fields(&mut frame, "", correlated);
+        let mut truncated = false;
+        bound_fields(&mut frame, "", correlated, &mut truncated);
+        if truncated {
+            frame["truncated"] = json!(true);
+        }
     }
     let mut receipt_only = false;
     loop {

@@ -171,10 +171,12 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
     let address = listener.local_addr().map_err(|e| e.to_string())?;
     let id = f.row["listener_id"].clone();
     let generation = f.row["binding_generation"].clone();
+    let remote = f.client.kv_get(string(&f.row, "listener_id"))?.unwrap().0;
     let server = thread::spawn(move || {
         for expected in [
             "consumer_add",
             "consumer_backlog",
+            "kv_get",
             "consumer_ack",
             "stream_get_message",
         ] {
@@ -205,6 +207,8 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
             let body = if expected == "consumer_add" {
                 let signal = json!({"signal_id":"expiring","to":id,"target_generation":generation,"from":{"principal_id":"none#alice","user":"alice","host_name":"desktop"},"message":"near expiry"});
                 json!({"ok":true,"result":{"server_now_ms":now,"backlog":[{"seq":1,"created_ms":now-1_800_000+50,"data_b64":STANDARD.encode(signal.to_string())}]}})
+            } else if expected == "kv_get" {
+                json!({"ok":true,"result":{"revision":1,"value_b64":STANDARD.encode(remote.to_string())}})
             } else if expected == "consumer_backlog" {
                 thread::sleep(Duration::from_millis(150));
                 json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Backlog failed"}})
@@ -218,8 +222,14 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
         "alice",
         None,
     );
+    let mut row = f.row.clone();
+    row["hub_url"] = client.config["url"].clone();
+    f.state.db.execute(
+        "UPDATE local_listeners SET hub_url=?",
+        &[client.config["url"].clone()],
+    )?;
     let mut admitted_at = 0;
-    poll_listener(&f.state, &client, &f.row, None, &f.dir, |_| {
+    poll_listener(&f.state, &client, &row, None, &f.dir, |_| {
         admitted_at = now_ms()
     })?;
     server.join().map_err(|_| "Clock server panicked")?;
@@ -255,6 +265,44 @@ fn child_gone(f: &Fixture) -> Result<(), String> {
         .map_err(|e| format!("Invalid child PID: {e}"))?;
     // SAFETY: signal zero only inspects the already-reaped fixture child's PID.
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    Ok(())
+}
+
+#[test]
+fn probe_transport_and_negative_responses_count_toward_retirement() -> Result<(), String> {
+    for body in [
+        "print('invalid json')",
+        "print(json.dumps({'ok':False,'error':'database unavailable'}))",
+    ] {
+        let f = Fixture::new()?;
+        let plugin = f.plugin(body);
+        f.state.schedule_wake_retry_for(&f.row, 5000)?;
+        for failures in 1..=3 {
+            let row = f
+                .state
+                .listener("local", string(&f.row, "listener_id"))?
+                .unwrap();
+            probe_listener(&f.state, &f.client, &row, &plugin, &f.dir)?;
+            let current = f
+                .state
+                .listener("local", string(&f.row, "listener_id"))?
+                .unwrap();
+            assert_eq!(current["consecutive_probe_failures"], failures);
+            assert_eq!(
+                current["status"],
+                if failures == 3 {
+                    "UNLISTENED"
+                } else {
+                    "ACTIVE"
+                }
+            );
+        }
+        assert!(f
+            .state
+            .db
+            .query("SELECT * FROM wake_retries", &[])?
+            .is_empty());
+    }
     Ok(())
 }
 

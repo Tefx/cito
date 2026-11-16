@@ -375,6 +375,7 @@ mod tests;
 
 pub struct HubAuth {
     pub mode: String,
+    pub redirect_port: Option<u16>,
     token: Option<String>,
     verifier: Option<OidcVerifier>,
 }
@@ -405,9 +406,20 @@ impl HubAuth {
         };
         Ok(Self {
             mode: mode.into(),
+            redirect_port: None,
             token,
             verifier,
         })
+    }
+    pub fn health(&self) -> Value {
+        let mut health = json!({"ok":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"auth_mode":self.mode});
+        if let Some(verifier) = &self.verifier {
+            health["oidc"] = json!({"issuer":verifier.issuer,"client_id":verifier.client_id});
+            if let Some(port) = self.redirect_port.filter(|port| *port != 0) {
+                health["oidc"]["redirect_port"] = json!(port);
+            }
+        }
+        health
     }
     pub fn authenticate(&self, headers: &HashMap<String, String>) -> Result<Value, String> {
         let user = headers

@@ -144,8 +144,12 @@ impl<'a> Settings<'a> {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: clientId required")?;
+        if client.trim() != client {
+            return Err("INVALID_INPUT: clientId must not have surrounding whitespace".into());
+        }
         let mut port = config
             .get("redirectPort")
+            .or_else(|| config.get("redirect_port"))
             .or_else(|| config.get("oidcRedirectPort"))
             .map(|value| {
                 value
@@ -155,7 +159,12 @@ impl<'a> Settings<'a> {
             })
             .transpose()?
             .unwrap_or(0);
-        if port == 0 {
+        if config
+            .get("redirectPort")
+            .or_else(|| config.get("redirect_port"))
+            .or_else(|| config.get("oidcRedirectPort"))
+            .is_none()
+        {
             if let Ok(raw) = std::env::var("CITO_OIDC_REDIRECT_PORT") {
                 port = raw.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or(
                     "INVALID_INPUT: CITO_OIDC_REDIRECT_PORT must be an integer in 1..65535",

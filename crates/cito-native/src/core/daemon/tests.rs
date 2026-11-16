@@ -9,6 +9,127 @@ use super::{
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
+#[test]
+fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    let dir = std::env::temp_dir().join(format!("cito-discovery-{}", random_uuid_v4()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+    let service = Arc::new(Mutex::new(DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?));
+    let result = (|| -> Result<(), String> {
+        for op in ["setup_save_hub", "save_hub", "paste_hub_invite"] {
+            let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+            let url = format!(
+                "http://{}",
+                listener.local_addr().map_err(|e| e.to_string())?
+            );
+            let (started, observed) = mpsc::sync_channel(1);
+            let (release, wait) = mpsc::sync_channel(1);
+            let server = thread::spawn(move || -> Result<(), String> {
+                let (mut stream, _) = listener.accept().map_err(|e| e.to_string())?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .map_err(|e| e.to_string())?;
+                let mut bytes = [0; 4096];
+                stream.read(&mut bytes).map_err(|e| e.to_string())?;
+                started.send(()).map_err(|e| e.to_string())?;
+                wait.recv_timeout(Duration::from_secs(3))
+                    .map_err(|e| e.to_string())?;
+                let body = json!({"auth_mode":"oidc","oidc":{"issuer":"https://id.example.com","client_id":"client","redirect_port":4280}}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .map_err(|e| e.to_string())
+            });
+            let mut action = json!({"op":op,"name":"work","url":url,"enabled":false});
+            if op == "paste_hub_invite" {
+                action = json!({"op":op,"invite":action.to_string()});
+            }
+            let worker_service = service.clone();
+            let worker = thread::spawn(move || {
+                super::http_actions::dispatch_action(&worker_service, &action, None)
+            });
+            observed
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|e| e.to_string())?;
+            let s = service
+                .try_lock()
+                .map_err(|_| "Discovery held the service mutex")?;
+            crate::plugins::with_config_lock(&config.config_path, || Ok(()))?;
+            let concurrent = op == "save_hub";
+            if concurrent {
+                s.mutate_config(|raw| {
+                    raw["theme"] = json!("dark");
+                    Ok(())
+                })?;
+            }
+            release.send(()).map_err(|e| e.to_string())?;
+            drop(s);
+            let saved = worker.join().map_err(|_| "Discovery worker panicked")?;
+            server.join().map_err(|_| "Health fixture panicked")??;
+            if concurrent {
+                assert!(saved.unwrap_err().contains("Configuration changed"));
+            } else {
+                assert_eq!(saved?["committed"], true);
+                let s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+                assert_eq!(s.raw_config()?["hubs"]["work"]["redirectPort"], 4280);
+                assert_eq!(
+                    s.settings()["hubs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|hub| hub["name"] == "work")
+                        .unwrap()["redirect_port"],
+                    4280
+                );
+            }
+        }
+        Ok(())
+    })();
+    service
+        .lock()
+        .map_err(|_| "Daemon lock poisoned")?
+        .shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
+fn ipc_marks_early_collection_and_text_truncation() {
+    for frame in [
+        json!({"op":"state","activity":vec![json!({"message":"short"});81]}),
+        json!({"op":"state","activity":[{"message":"x".repeat(513)}]}),
+    ] {
+        let bytes = ui_ipc::bounded_frame(frame).unwrap();
+        let bounded: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(bounded["truncated"], true);
+    }
+    let bounded: Value = serde_json::from_slice(
+        &ui_ipc::bounded_frame(json!({"op":"state","activity":[]})).unwrap(),
+    )
+    .unwrap();
+    assert!(bounded.get("truncated").is_none());
+}
+
 fn settle_setup_inspections(service: &mut DaemonService) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while service
@@ -1940,7 +2061,10 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
                 if let Some(requested) = requested {
                     retry["name"] = json!(requested);
                 }
-                assert_eq!(service.action(&retry)?, json!({"ok":true}));
+                assert_eq!(
+                    service.action(&retry)?,
+                    json!({"ok":true,"committed":true,"redirect_port":null})
+                );
                 let recovered = service.settings_for_hub(canonical);
                 assert!(recovered["hubs"]
                     .as_array()
@@ -1989,7 +2113,8 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
     let mut service = DaemonService::open(&config, &plugins)?;
     let result = (|| {
         for hub in ["local", "work"] {
-            service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES(?,'shared','node',1,1,'alice','host','','message','now',?,'RECEIVED')", &[json!(hub),json!(now_ms()+60_000)])?;
+            service.state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,hub_url,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,'node','none#alice','local://','alice','host','host','fixture','s','','Target','','self','ACTIVE')", &[json!(hub)])?;
+            service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES(?,'shared','node',1,1,'alice','host','','message','now',?,'RECEIVED','local://','none#alice')", &[json!(hub),json!(now_ms()+60_000)])?;
         }
         service.action(&json!({"op":"ack_signals","hub":"local","ack_all":true}))?;
         let state = service.state.clone();
@@ -2003,7 +2128,7 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"]}))?;
         assert!(unread()?.is_empty());
         for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
-            state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
+            state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED','local://','none#alice')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
         }
         let (_, matched, _) = state.query_activity("all", " review ")?;
         assert_eq!(matched, 1);
@@ -2418,6 +2543,7 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             activity[0]["can_reply"].is_boolean(),
             "Activity DTOs retain reply authority"
         );
+        service.reload_slots()?;
         service.state.db.execute("DROP TABLE wake_retries", &[])?;
         let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;
         assert_eq!(sent["ok"], true);
@@ -2429,6 +2555,7 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             .query("SELECT * FROM local_sent_idempotency", &[])?;
         assert_eq!(reservation.len(), 1);
         assert_eq!(reservation[0]["status"], "wake_accepted");
+        service.state.db.execute("CREATE TABLE wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id))", &[])?;
         Ok(())
     })();
     let shared = Arc::new(Mutex::new(service));

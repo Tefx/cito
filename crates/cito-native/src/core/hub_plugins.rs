@@ -128,6 +128,10 @@ impl ChannelProcess {
                 return Err(std::io::Error::last_os_error().to_string());
             }
         }
+        let exited = crate::support::child_exit_fd(child.id()).inspect_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+        })?;
         let reader_wake = shutdown_wake.clone();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
@@ -158,9 +162,15 @@ impl ChannelProcess {
                                 events: libc::POLLIN,
                                 revents: 0,
                             },
+                            libc::pollfd {
+                                fd: exited.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
                         ];
                         if crate::support::poll_until(&mut fds, None).is_err()
                             || fds[1].revents != 0
+                            || fds[2].revents != 0
                         {
                             break;
                         }
@@ -212,6 +222,10 @@ impl ChannelProcess {
     }
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+            && self
+                .child
+                .lock()
+                .is_ok_and(|child| super::plugins::peek_plugin_exit(child.id()) == Ok(None))
     }
     pub fn send(&self, value: &Value) -> Result<(), String> {
         if !self.alive() {
@@ -270,20 +284,18 @@ impl ChannelProcess {
             }
         }
         if let Ok(mut child) = self.child.lock() {
-            let mut reaped = child.try_wait().ok().flatten().is_some();
-            if !reaped {
-                let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
-                reaped = child.try_wait().ok().flatten().is_some();
-            }
-            if !reaped {
+            // waitid also recognizes an exited child after its kqueue exit event
+            // has passed. ECHILD prevents signaling after an external reap.
+            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
+            if super::plugins::peek_plugin_exit(child.id()).is_ok() {
                 // SAFETY: the owned, unreaped child still reserves its PID and
                 // process group, created by spawn. Never signal after reaping.
                 unsafe {
                     libc::kill(-(child.id() as i32), libc::SIGKILL);
                 }
                 let _ = child.kill();
-                let _ = child.wait();
             }
+            let _ = child.wait();
         }
         // No cursor, pairing, or delivery callback may outlive a stopped process.
         // Callers release the process registry and database locks before shutdown.
