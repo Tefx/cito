@@ -15105,7 +15105,7 @@ phases:
   - id: v49.fix2
     name: 'V49 Round 3 Admitted Edge Closure & Release Binary Staging (R3-F1, R3-F2)
       [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Resolve both\
@@ -15165,3 +15165,21 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-16T14:50:42.912128Z'
+    done_at: '2026-11-16T15:16:36.818115+00:00'
+    evidence: 'Completed v49.fix2 (candidate refs/vectl/candidates/v49.fix2 -> 118b56c2e6e1f38064d0644ee71fb89e51b00116,
+      fast-forwarded onto main; 13 files changed across crates/cito-native/**, plugins/*/bin/*,
+      src/macos/**, and bin/**):
+
+      - Closed R3-F1 (`Companion.swift` / `SettingsSurface.swift`: payload-free committed
+      receipt baseline reconciliation + `bounded_frame` two-save retained-draft test
+      in `oidc_settlement.rs`) and R3-F2 (`daemon/mod.rs:set_auto_listen` / `http_actions.rs`:
+      post-commit local projection warning preservation alongside `committed: true`
+      + `BEFORE UPDATE OF user_stopped` trigger test in `daemon/tests.rs`).
+
+      - Verified on committed 118b56c (/tmp/v49-fix2-check/verification.md): `cargo
+      fmt --all -- --check` & `git diff --check` passed; temporary Rust 1.95.0 Clippy
+      `-D warnings` 0 warnings; detached double-fork `os.setsid()` `cargo test --workspace`
+      (**552 passed, 0 failed, 4 ignored**); `cargo build --release` 0 warnings +
+      **7/7 strict codesign** passed; `packaging/release.py check` (`0.21.3`, no tag);
+      **17 packaging unit tests** passed; `site-clipboard.mjs` passed; 0 `§1.2`/neutral-name/English
+      violations; live `~/.cito` sockets untouched and `/Applications/Cito.app` absent.'
