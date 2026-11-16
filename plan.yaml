@@ -14850,7 +14850,7 @@ phases:
   - id: v49.consolidate
     name: 'V49 Round 1 Admitted Ledger Consolidation, Cross-Layer Settlement, Site
       Docs & Release Binary Staging (V49-C1–V49-C8) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - site/**\n    - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n\
@@ -14958,3 +14958,5 @@ phases:
     - v49.ui
     - v49.docs
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-16T10:34:46.147241Z'
