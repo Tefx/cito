@@ -14806,31 +14806,33 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v49` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v49.core`, `v49.ui`,\
-      \ `v49.docs`, and `v49.consolidate`:\n  1. Execute and verify 3-way incremental\
-      \ `[REQUIRES_SKILL: contract-and-simplicity]` audit convergence (`uiux-auditor`,\
-      \ `pathway-auditor`, `structural-auditor` all reaching `ZERO_NEW_ISSUES`) across\
-      \ Binding Contract §§1–5, all 29 Admitted Finding Ledger items (`A1`–`A8`, `B1`–`B12`,\
-      \ `C1`–`C6`, `R3-2`–`R3-4`), and Round 1 Frozen Finding Ledger items (`V49-C1`–`V49-C8`\
-      \ in `/tmp/v49-r1-frozen-ledger.md`).\n  2. Run and verify full workspace regression\
-      \ and packaging checks at version `0.21.3` (with NO release tag) before `PASS`:\n\
-      \     - `cargo fmt --all -- --check` and `git diff --check`\n     - `cargo clippy\
-      \ --workspace --all-targets -- -D warnings`\n     - `cargo test --workspace`\n\
-      \     - `cargo build --release` (0 warnings, verifying staged binaries in `bin/`)\n\
-      \     - `python3 packaging/release.py check` (version `0.21.3`, NO release tag)\
-      \ and `python3 -m unittest discover -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \ `v49.docs`, `v49.consolidate`, and `v49.fix`:\n  1. Execute and verify 3-way\
+      \ incremental `[REQUIRES_SKILL: contract-and-simplicity]` audit convergence\
+      \ (`uiux-auditor`, `pathway-auditor`, `structural-auditor` all reaching `ZERO_NEW_ISSUES`)\
+      \ across Binding Contract §§1–5, all 29 Admitted Finding Ledger items (`A1`–`A8`,\
+      \ `B1`–`B12`, `C1`–`C6`, `R3-2`–`R3-4`), Round 1 Frozen Finding Ledger items\
+      \ (`V49-C1`–`V49-C8` in `/tmp/v49-r1-frozen-ledger.md`), and Round 2 Frozen\
+      \ Finding Ledger items (`V49-R2-1`–`V49-R2-7` and `F8` in `/tmp/v49-r2-frozen-ledger.md`).\n\
+      \  2. Run and verify full workspace regression and packaging checks at version\
+      \ `0.21.3` (with NO release tag) before `PASS`:\n     - `cargo fmt --all --\
+      \ --check` and `git diff --check`\n     - `cargo clippy --workspace --all-targets\
+      \ -- -D warnings`\n     - `cargo test --workspace`\n     - `cargo build --release`\
+      \ (0 warnings, verifying staged binaries in `bin/`)\n     - `python3 packaging/release.py\
+      \ check` (version `0.21.3`, NO release tag) and `python3 -m unittest discover\
+      \ -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
       \     - Zero `§1.2` hardcoding violations across `crates/cito-native/src/core/`\
       \ and `src/macos/`, and zero private/internal name matches (`rda\\\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`)\
       \ across product and documentation paths.\n\nBoundary:\n- Owner: `gate-reviewer`\
       \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
       \ no_repo_change`) over the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
-      \nAdmit:\n- Depends on `v49.core`, `v49.ui`, `v49.docs`, and `v49.consolidate`.\n\
-      - Consumed evidence: integrated commits from `v49.core`, `v49.ui`, `v49.docs`,\
-      \ and `v49.consolidate`, 3-way incremental audit convergence (`uiux-auditor`,\
-      \ `pathway-auditor`, `structural-auditor` to `ZERO_NEW_ISSUES`), and full workspace\
-      \ regression outputs.\n\nRecovery:\n- If any audit finding, test failure, clippy/compiler\
-      \ warning, packaging mismatch, or `§1.2`/private-name violation is found, fail\
-      \ the gate with concrete `file:line` evidence so a scoped repair can resolve\
-      \ it before Delta re-verification."
+      \nAdmit:\n- Depends on `v49.core`, `v49.ui`, `v49.docs`, `v49.consolidate`,\
+      \ and `v49.fix`.\n- Consumed evidence: integrated commits from `v49.core`, `v49.ui`,\
+      \ `v49.docs`, `v49.consolidate`, and `v49.fix`, 3-way incremental audit convergence\
+      \ (`uiux-auditor`, `pathway-auditor`, `structural-auditor` to `ZERO_NEW_ISSUES`),\
+      \ and full workspace regression outputs.\n\nRecovery:\n- If any audit finding,\
+      \ test failure, clippy/compiler warning, packaging mismatch, or `§1.2`/private-name\
+      \ violation is found, fail the gate with concrete `file:line` evidence so a\
+      \ scoped repair can resolve it before Delta re-verification."
     verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace && cargo build --release
       && python3 packaging/release.py check && python3 -m unittest discover -s packaging
@@ -14846,6 +14848,7 @@ phases:
     - v49.ui
     - v49.docs
     - v49.consolidate
+    - v49.fix
     agent: gate-reviewer
   - id: v49.consolidate
     name: 'V49 Round 1 Admitted Ledger Consolidation, Cross-Layer Settlement, Site
@@ -14984,3 +14987,98 @@ phases:
       check` (`0.21.3`, no tag); **17 packaging unit tests** passed; `site-clipboard.mjs`
       passed; 0 neutral-name/`§1.2`/popup violations; `~/.cito` live sockets & absent
       `/Applications/Cito.app` untouched.'
+  - id: v49.fix
+    name: 'V49 Round 2 Admitted Ledger Closure & Release Binary Staging (V49-R2-1–V49-R2-7,
+      F8) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Resolve all\
+      \ 7 admitted Round 2 findings (`V49-R2-1`–`V49-R2-7` in `/tmp/v49-r2-frozen-ledger.md`)\
+      \ under `[REQUIRES_SKILL: contract-and-simplicity]` and rebuild/stage signed\
+      \ `bin/` binaries (`cargo build --release` 0 warnings, `7/7` `codesign --verify\
+      \ --strict`, version `0.21.3`, NO release tag, zero writes to `~/.cito` or `/Applications/Cito.app`):\n\
+      \  1. `V49-R2-1` (`pathway F1`, `REPAIR_REGRESSION`, `src/macos/Companion.swift:549-550`,\
+      \ `crates/cito-native/src/core/daemon/ui_ipc.rs`) — Preserve cached nested `Hub.attachments`\
+      \ on passive truncated state frames:\n     - When `preserveCollections` (`frame.truncated\
+      \ == true && frame.request_id == nil`) is active, preserve cached complete nested\
+      \ `attachments` on matched `Hub` objects while updating scalar fields, so `128`-capped\
+      \ truncated frames do not overwrite cached `129+` attachments.\n     - Add a\
+      \ discriminating test feeding real `bounded_frame` output with `129` attachments\
+      \ into an initialized UI.\n  2. `V49-R2-2` (`pathway F2`, `REPAIR_REGRESSION`,\
+      \ `src/macos/Companion.swift:379-404, 549`, `crates/cito-native/src/core/daemon/ui_ipc.rs`)\
+      \ — Payload-free committed `state` receipts settlement, warning surfacing, and\
+      \ control redraw:\n     - When `bounded_frame` strips `hubs`/`listeners`/`settings`\
+      \ on an oversized committed `state` receipt (such as `human_inbox_update` or\
+      \ `unlisten_all`), route the payload-free terminal `state` receipt through scoped\
+      \ settlement, surface `frame.warning`, and redraw `MenuSurface`/`DirectorySurface`/`SettingsSurface`\
+      \ controls so `Pausing…`/`Stopping…` recover without requiring stripped arrays\
+      \ (while preserving newer user drafts).\n     - Add a discriminating test passing\
+      \ real `human_inbox_update` / `unlisten_all` receipts through `bounded_frame`\
+      \ into the UI.\n  3. `V49-R2-3` (`pathway F3`, `TEST_ORACLE`, `crates/cito-native/src/core/receiver_tests.rs:272-305`)\
+      \ — Non-vacuous `wake_retries` precondition in `probe_transport_and_negative_responses_count_toward_retirement`:\n\
+      \     - Seed retryable work (admit an unread signal) before calling `schedule_wake_retry_for`,\
+      \ assert `wake_retries` contains a row before applying probe failures, and verify\
+      \ retirement deletes that row.\n  4. `V49-R2-4` (`pathway F4`, `MISSED_IN_SCOPE`,\
+      \ `crates/cito-native/src/core/daemon/mcp.rs:770-771`, `crates/cito-native/src/core/daemon/http_actions.rs:802-942`,\
+      \ `crates/cito-native/src/core/state.rs`) — Disabled-Hub retirement parity across\
+      \ explicit-hub `cito_unlisten`, `cli_human_device` detach, and Human `unlisten_session`:\n\
+      \     - Use durable target identity and local `DETACH_PENDING` retirement on\
+      \ disabled Hubs across explicit-hub `cito_unlisten({hub})` (and ordinary CLI\
+      \ `cito unlisten --hub`), `cli_human_device` detach, and Human `unlisten_session`,\
+      \ instead of requiring a live `self.slot(hub)` or iterating only live slots;\
+      \ preserve explicit remote-pending semantics and keep Human inbox policy separate\
+      \ from device detach.\n     - Add discriminating disabled-Hub retirement tests\
+      \ covering explicit-hub `cito_unlisten`, `cli_human_device` detach, and Human\
+      \ `unlisten_session`.\n  5. `V49-R2-5` (`pathway F5`, `UNCLOSED_ORIGINAL`, `src/macos/SettingsSurface.swift:44-75,\
+      \ 1267`) — Advance `editingInitialHub` on matching save settlement when keeping\
+      \ a newer draft:\n     - When an OIDC edit form (`Hub A`) saves an `A -> B`\
+      \ URL change while retaining the form for a newer local draft edit, advance\
+      \ `editingInitialHub` to the committed `Hub B` snapshot on matching save settlement\
+      \ while preserving newer draft edits and deliberate overrides, so a subsequent\
+      \ URL-only edit back to `A` does not resend stale `A` overrides.\n     - Add\
+      \ a two-save retained-draft discriminating test (`A -> B` with retained draft,\
+      \ then URL-only `B -> A`).\n  6. `V49-R2-6` (`pathway F6`, `MISSED_IN_SCOPE`,\
+      \ `crates/cito-native/src/core/daemon/http_actions.rs:660-698, 845-847, 1645-1652`)\
+      \ — Separate authoritative Hub/config commit from fallible secondary local projection/reload:\n\
+      \     - In `human_inbox_update`, Human `set_scope`, and config-mutation peers,\
+      \ separate the authoritative Hub/config commit from fallible secondary local\
+      \ projection/reload so a post-commit secondary projection failure still reports\
+      \ `committed: true` (with warning metadata) while keeping pre-commit domain\
+      \ rejections and unknown transport failures distinct.\n     - Add a discriminating\
+      \ test with a failing local projection trigger verifying `committed: true` +\
+      \ warning metadata after authoritative mutation commit.\n  7. `V49-R2-7` (`pathway\
+      \ F7`, `MISSED_IN_SCOPE`, `src/macos/SettingsSurface.swift:46, 623`) — Per-Hub\
+      \ scoping of `channel_inventory_error` on late `settings` receipts:\n     -\
+      \ When a late `settings` receipt for Hub `A` (`settings_hub = A`) arrives after\
+      \ selection moved to Hub `B`, settle `A`'s receipt and scope `channel_inventory_error`\
+      \ to Hub `A` (never rendering `A`'s inventory error in `B`'s active panel).\n\
+      \     - Add a discriminating `A`/`B` Hub switch test verifying foreign-Hub `channel_inventory_error`\
+      \ isolation.\n  8. `F8` (`bin/**`) — Release binary staging refresh:\n     -\
+      \ Run `cargo build --release` (0 warnings) and verify all `7/7` staged binaries\
+      \ (`bin/{cito,cito-daemon,cito-mcp,cito-ui}` and `plugins/{pi,claude,telegram}/bin/*`)\
+      \ pass `codesign --verify --strict` at version `0.21.3` (with NO release tag\
+      \ and zero writes to `~/.cito` or `/Applications/Cito.app`).\n\nImplementation\
+      \ Notes (Non-Binding):\n- Consult `/tmp/v49-r2-frozen-ledger.md` (`V49-R2-1`–`V49-R2-7`,\
+      \ `F8`) for exact file/line references and auditor reproducer notes.\n\nBoundary:\n\
+      - Owner: `senior-engineer` (`[REQUIRES_SKILL: contract-and-simplicity]`). Isolated\
+      \ worktree transaction modifying `crates/cito-native/**`, `plugins/**`, `src/macos/**`,\
+      \ and `bin/**`, with zero writes to `~/.cito` or `/Applications/Cito.app`.\n\
+      \nAdmit:\n- Depends on `v49.consolidate`.\n- Consumed by `v49.review`.\n\nRecovery:\n\
+      - Repair any regression, compiler/clippy warning, or staging mismatch in place\
+      \ within the worktree before completing the step."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets -- -D warnings && cargo test -p cito-native --lib
+      && cargo test -p cito-native --test native daemon:: && cargo test -p cito-native
+      --test native ui_ && cargo build --release && python3 packaging/release.py check'
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    - crates/cito-native/src/core/state.rs
+    depends_on:
+    - v49.consolidate
+    agent: senior-engineer
