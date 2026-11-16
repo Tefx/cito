@@ -14684,7 +14684,7 @@ phases:
   - id: v49.ui
     name: V49 macOS Swift UI Zero-Config OIDC Form, Passive Flush, Receipt Settlement
       & HeadlessOracle Guard (Contract §5, A1–A8, C3)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/**\n \
       \ blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n\
@@ -14735,6 +14735,25 @@ phases:
     agent: frontend-engineer
     claimed_by: frontend-engineer
     claimed_at: '2026-11-16T09:40:54.924995Z'
+    done_at: '2026-11-16T10:16:03.888536+00:00'
+    evidence: 'Completed v49.ui (candidate refs/vectl/candidates/v49.ui -> 6c164ef0aec9f1bba6f89817a0bc5724b8375cc8,
+      rebased over v49.docs onto main at cf4753130c221d548d54a33472a70db297a1ee39;
+      11 files in src/macos/** and crates/cito-native/tests/**):
+
+      - Implemented Binding Contract §5 and Ledger items A1-A8, C3: 2-row OIDC form
+      with "Auto-discovered" placeholder & "Saving…" edit pending label (preserving
+      252pt none/token height), redirect_port decoding/passthrough & NSNull() clears,
+      immediate non-deferred explicit receipts/error/form dismissal while preserving
+      active field editor undoManager & IME hasMarkedText() and flushing passive refreshes
+      only in controlTextDidEndEditing, full pending* settlement on settings==nil
+      / authority_changed / paste_hub_invite / Escape / ok==false, and Frame.truncated
+      guard.
+
+      - Verified on committed state (6c164ef): complete `ui::` suite 92 passed / 0
+      failed, HeadlessOracle geometry/overlap/clipping/truncation/contrast checks
+      passed, `cargo fmt --all -- --check` & `git diff --check` passed; version kept
+      at 0.21.3 with no writes to `~/.cito`, `/Applications/Cito.app`, `bin/`, or
+      `plan.yaml`.'
   - id: v49.docs
     name: V49 Documentation Alignment for OIDC Auto-Discovery, Redirect Port & Pi
       Bridge Claims (C5)
