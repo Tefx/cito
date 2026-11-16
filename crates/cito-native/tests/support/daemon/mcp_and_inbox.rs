@@ -121,21 +121,27 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let routed = f.tool("cito_status", json!({}),
         json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
     assert_eq!(routed["ok"], true, "{routed}");
-    // Exercise the cache verifier directly, too: provider ordering must not mask it.
-    let cached =
-        json!({"harness":"codex","session_id":"thread-a","endpoint_pid":std::process::id()});
-    let direct = f.plugin(CODEX, json!({"op":"resolve_caller","require_open":false,
-        "cached_caller":cached,"meta":{"_stdio":{"endpoint_pid":std::process::id()},"expected_session_id":"claude-session"}}));
-    assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
-    let conflict = json!({"op":"resolve_caller","require_open":false,
-        "cached_caller":cached,"meta":{"_stdio":{"endpoint_pid":std::process::id()},"threadId":"thread-a","expected_session_id":"claude-session"}});
-    assert_eq!(
-        f.plugin(CODEX, conflict.clone())["error_code"],
-        "INVALID_INPUT"
-    );
+    // A stale command must reject the cache before checking conflicting metadata.
+    for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
+        let cached =
+            json!({"harness":harness,"session_id":"thread-a","endpoint_pid":std::process::id()});
+        let direct = f.plugin(bin, json!({"op":"resolve_caller","require_open":false,
+            "cached_caller":cached,"meta":{"_stdio":{"endpoint_pid":std::process::id()},"expected_session_id":"other-session"}}));
+        assert_eq!(
+            direct["error_code"], "BINDING_REQUIRED",
+            "{harness}: {direct}"
+        );
+    }
     source
         .execute("INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[])
         .unwrap();
+    let uncached = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","require_open":false,
+        "cached_caller":null,"cwd":"/repo","meta":{"expected_session_id":"thread-a"}}),
+    );
+    assert_eq!(uncached["ok"], true, "{uncached}");
+    assert_eq!(uncached["caller"]["session_id"], "thread-a", "{uncached}");
     let rejected = f.tool_result("cito_status", json!({}), expected);
     assert_eq!(rejected["isError"], true, "{rejected}");
     assert!(
@@ -224,6 +230,161 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     );
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
+}
+
+#[test]
+fn cached_generic_session_fences_allow_all_providers_to_continue() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
+        let app = f.dir.join(format!("{harness}.mjs"));
+        fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+        let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+        wait(|| f.output(endpoint, false).contains("ready"));
+        let pid = f.pid(endpoint);
+        let cached = cito_native::support::remember_process(
+            json!({"harness":harness,"session_id":"cached-session","endpoint_pid":pid}),
+        );
+        assert!(cached["process_identity"].is_object());
+        for key in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,
+                "http_client_pid":pid,"http_transport":true,"cached_caller":cached});
+            req[key] = json!({"expected_session_id":"other-session"});
+            let direct = f.plugin(bin, req.clone());
+            assert_eq!(
+                direct["error_code"], "BINDING_REQUIRED",
+                "{harness}/{key}: {direct}"
+            );
+            // A harness fence turns the same live-process mismatch into a conflict.
+            for harness_key in ["meta", "_meta"] {
+                let mut fenced = req.clone();
+                if !fenced[harness_key].is_object() {
+                    fenced[harness_key] = json!({});
+                }
+                fenced[harness_key]["expected_harness"] = json!(harness);
+                let direct = f.plugin(bin, fenced.clone());
+                assert_eq!(
+                    direct["error_code"], "INVALID_INPUT",
+                    "{harness}/{key}/{harness_key}: {direct}"
+                );
+                fenced["cached_caller"]["process_identity"]["started_at"] = json!("old-invocation");
+                let stale = f.plugin(bin, fenced);
+                assert_eq!(
+                    stale["error_code"], "BINDING_REQUIRED",
+                    "{harness}: {stale}"
+                );
+            }
+        }
+        f.stop(endpoint);
+    }
+}
+
+#[test]
+fn daemon_attaches_rejected_caches_and_routes_to_the_next_real_provider() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[]).unwrap();
+    // Record requests and replies while forwarding unchanged to the actual providers.
+    let forwarder = f.dir.join("provider-trace.py");
+    fs::write(
+        &forwarder,
+        r#"import json,subprocess,sys
+request=sys.stdin.read()
+result=subprocess.run([sys.argv[1]],input=request,text=True,capture_output=True)
+with open(sys.argv[2],'a') as trace:
+ trace.write(json.dumps({'request':json.loads(request),'reply':json.loads(result.stdout)})+'\n')
+sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.returncode)
+"#,
+    )
+    .unwrap();
+    let trace = f.dir.join("provider-trace.jsonl");
+    for (harness, bin) in [("codex", CODEX), ("claude", CLAUDE), ("pi", PI)] {
+        let plugin = f.state.join("plugins").join(harness);
+        fs::create_dir_all(&plugin).unwrap();
+        let mut manifest: Value = serde_json::from_slice(
+            &fs::read(root().join(format!("plugins/{harness}/plugin.json"))).unwrap(),
+        )
+        .unwrap();
+        manifest["command"] = json!(["python3", forwarder, bin, trace]);
+        fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    }
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let pid = f.pid(endpoint);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    let mut env = f.env.clone();
+    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
+    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    f.daemon(&[]);
+    let seeded = f.tool(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"claude","_stdio":{"endpoint_pid":pid},"cwd":"/repo"}),
+    );
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
+    let _ = fs::remove_file(f.state.join(format!("claude/endpoints/{pid}.json")));
+    fs::write(&trace, "").unwrap();
+    let routed = f.tool("cito_status", json!({}),
+        json!({"_stdio":{"endpoint_pid":pid},"threadId":"thread-a","expected_session_id":"thread-a","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    let calls: Vec<Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejected = calls
+        .iter()
+        .position(|call| call["request"]["cached_caller"]["harness"] == "claude")
+        .unwrap();
+    assert_eq!(
+        calls[rejected]["request"]["cached_caller"]["session_id"],
+        "claude-session"
+    );
+    assert_eq!(calls[rejected]["reply"]["error_code"], "BINDING_REQUIRED");
+    assert!(calls[rejected + 1..]
+        .iter()
+        .any(|call| call["reply"]["caller"]["harness"] == "codex"
+            && call["reply"]["caller"]["session_id"] == "thread-a"));
+
+    // An HTTP forwarder has no explicit/stdio PID priority. Seed its Codex cache,
+    // remove the DB projection, then require cache rejection before Claude wins.
+    let seeded = f.tool(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"codex","threadId":"thread-a","cwd":"/repo"}),
+    );
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    source.execute("DELETE FROM threads", &[]).unwrap();
+    fs::write(&trace, "").unwrap();
+    let routed = f.tool("cito_status", json!({}),
+        json!({"claudeSessionId":"claude-session","expected_session_id":"claude-session","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    let calls: Vec<Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejected = calls
+        .iter()
+        .position(|call| call["request"]["cached_caller"]["harness"] == "codex")
+        .unwrap();
+    assert_eq!(
+        calls[rejected]["request"]["cached_caller"]["session_id"],
+        "thread-a"
+    );
+    assert!(calls[rejected]["request"]["meta"]["_stdio"].is_null());
+    assert_eq!(calls[rejected]["reply"]["error_code"], "BINDING_REQUIRED");
+    assert!(calls[rejected + 1..]
+        .iter()
+        .any(|call| call["reply"]["caller"]["harness"] == "claude"
+            && call["reply"]["caller"]["session_id"] == "claude-session"));
 }
 
 #[test]

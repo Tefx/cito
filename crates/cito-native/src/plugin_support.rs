@@ -886,7 +886,7 @@ pub fn cached_caller(
     session_hint: Option<&str>,
     matches_command: impl FnOnce(&str) -> bool,
 ) -> std::result::Result<Option<Value>, Value> {
-    if req["require_open"] != false || req.get("cached_caller").is_none() {
+    if req["require_open"] != false || req["cached_caller"].is_null() {
         return Ok(None);
     }
     let cached = &req["cached_caller"];
@@ -906,10 +906,6 @@ pub fn cached_caller(
             "INVALID_INPUT",
             "Cached caller endpoint PID does not match",
         ));
-    }
-    verify(cached, req).map_err(|e| error("INVALID_INPUT", e))?;
-    if session_hint.map(|s| s != session).unwrap_or(false) {
-        return Err(error("INVALID_INPUT", "Conflicting caller metadata"));
     }
     let current = process_identity(pid).map_err(|e| error("BINDING_REQUIRED", e))?;
     if !matches_command(
@@ -934,6 +930,22 @@ pub fn cached_caller(
             "BINDING_REQUIRED",
             "Cached endpoint process command or start time changed",
         ));
+    }
+    // A generic session fence can name another provider. Stale process bindings
+    // and unfenced cache misses must let the host continue provider discovery.
+    if session_hint.is_none()
+        && ["meta", "_meta"]
+            .iter()
+            .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
+        && ["meta", "_meta"]
+            .iter()
+            .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != session))
+    {
+        return Err(error("BINDING_REQUIRED", "Caller session mismatch"));
+    }
+    verify(cached, req).map_err(|e| error("INVALID_INPUT", e))?;
+    if session_hint.map(|s| s != session).unwrap_or(false) {
+        return Err(error("INVALID_INPUT", "Conflicting caller metadata"));
     }
     Ok(Some(cached.clone()))
 }

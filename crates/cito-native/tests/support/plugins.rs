@@ -334,6 +334,7 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
     );
     atomic_write(&binding, &canonical).unwrap();
     drop(lock);
+    wait(|| f.frames(client).len() >= 2);
     wait(|| f.exited(client));
     assert!(
         f.frames(client).len() >= 2,
@@ -593,12 +594,43 @@ fn claude_hook_only_http_ack_and_shell_cli_keep_transport_pids_out_of_identity()
         );
         fs::read_to_string(&queue).is_ok_and(|text| !text.is_empty())
     });
-    let parent = spawn_hook_parent(&f, &[]);
+    // Observe the actual hook HTTP exchange without replacing the daemon ACK path.
+    let proxy = f.spawn("python3", &["-c", r#"import http.server,http.client,json,sys
+class Proxy(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def do_POST(self):
+  body=self.rfile.read(int(self.headers['Content-Length']))
+  conn=http.client.HTTPConnection('127.0.0.1',int(sys.argv[1]),timeout=2)
+  conn.request('POST',self.path,body,{'Content-Type':'application/json'})
+  response=conn.getresponse();data=response.read();conn.close()
+  print(json.dumps({'path':self.path,'request':json.loads(body),'status':response.status,'response':json.loads(data)}),flush=True)
+  self.send_response(response.status);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(data)
+server=http.server.HTTPServer(('127.0.0.1',0),Proxy)
+print(json.dumps({'port':server.server_port}),flush=True);server.serve_forever()
+"#, &f.port.to_string()], &[]);
+    wait(|| !f.frames(proxy).is_empty());
+    let proxy_port = f.frames(proxy)[0]["port"].as_u64().unwrap().to_string();
+    let parent = spawn_hook_parent(&f, &[("CITO_DAEMON_PORT", &proxy_port)]);
     let output = parent_hook(
         &f,
         parent,
         json!({"hook_event_name":"UserPromptSubmit","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
     );
+    wait(|| f.frames(proxy).len() >= 2);
+    let exchange = f.frames(proxy).remove(1);
+    assert_eq!(exchange["path"], "/mcp", "{exchange}");
+    assert_eq!(
+        exchange["request"]["params"]["name"], "cito_inbox",
+        "{exchange}"
+    );
+    assert_eq!(exchange["status"], 200, "{exchange}");
+    let response = &exchange["response"];
+    assert!(response.get("error").is_none(), "{exchange}");
+    assert_ne!(response["result"]["isError"], true, "{exchange}");
+    let ack: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(ack["ok"], true, "{exchange}");
+    assert_eq!(ack["acknowledged_count"], 1, "{exchange}");
     assert!(
         output.to_string().contains("Hook-only delivery"),
         "{output}"
