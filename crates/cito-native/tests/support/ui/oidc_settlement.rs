@@ -547,7 +547,14 @@ fn bounded_state_receipts_redraw_controls_without_collections_and_keep_drafts() 
 #[test]
 fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
     let _lock = serial();
-    for override_issuer in [false, true] {
+    for (override_issuer, receipt_only, refresh_before_edit) in [
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+        (false, true, false),
+        (true, true, false),
+    ] {
         let f = Fixture::new(json!({}));
         let p = start(&f);
         let mut cfg = settings();
@@ -565,7 +572,21 @@ fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
         cfg["hubs"][0]["issuer"] = json!("https://id-b.example.com");
         cfg["hubs"][0]["client_id"] = json!("b-client");
         cfg["hubs"][0]["redirect_port"] = json!(8500);
-        f.send(p,json!({"op":"settings","ok":true,"committed":true,"source_op":"setup_save_hub","request_id":first["request_id"],"settings":cfg}));
+        let mut receipt = json!({"op":"settings","ok":true,"committed":true,"source_op":"setup_save_hub","request_id":first["request_id"],"settings":cfg});
+        if receipt_only {
+            receipt["settings"]["hubs"][1]["url"] =
+                json!("x".repeat(cito_native::core::daemon::FRAME_LIMIT));
+            receipt =
+                serde_json::from_slice(&cito_native::core::daemon::bounded_frame(receipt).unwrap())
+                    .unwrap();
+            assert!(receipt.get("settings").is_none(), "{receipt}");
+        }
+        f.send(p, receipt);
+        let settled = inspect(&f, p);
+        assert_eq!(settled["pending_hub_save"], "");
+        if receipt_only && refresh_before_edit {
+            f.send(p, json!({"op":"settings","settings":cfg}));
+        }
         let s = inspect(&f, p);
         assert_eq!(
             node(&s, "settings_items", "settings_hub_name")["text"],
@@ -573,7 +594,21 @@ fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
         );
         assert_eq!(
             node(&s, "settings_items", "settings_hub_client_id")["text"],
-            "b-client"
+            if refresh_before_edit {
+                "b-client"
+            } else {
+                "a-client"
+            }
+        );
+        assert_eq!(
+            node(&s, "settings_items", "settings_hub_issuer")["text"],
+            if override_issuer {
+                "https://override.example.com"
+            } else if refresh_before_edit {
+                "https://id-b.example.com"
+            } else {
+                "https://id-a.example.com"
+            }
         );
         input(&f, p, "settings_hub_url", "https://a.example.com");
         control(&f, p, "submit_add_hub");

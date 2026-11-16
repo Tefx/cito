@@ -1598,7 +1598,11 @@ impl DaemonService {
                     }
                 }
                 for name in targets {
-                    if let Err(error) = self.set_auto_listen(&name, false) {
+                    // Bulk stop reports incomplete detaches across all targets.
+                    if let Err(error) = self
+                        .set_auto_listen(&name, false)
+                        .and_then(|projection| projection)
+                    {
                         detach_errors.push(format!("{name}: {error}"));
                     }
                 }
@@ -2005,10 +2009,11 @@ impl DaemonService {
                 let enabled = action["enabled"]
                     .as_bool()
                     .ok_or("INVALID_INPUT: enabled must be a boolean")?;
-                self.set_auto_listen(&hub, enabled)?;
-                if enabled {
-                    self.auto_listen()?;
-                }
+                let projection = self
+                    .set_auto_listen(&hub, enabled)?
+                    .and_then(|_| if enabled { self.auto_listen() } else { Ok(()) })
+                    .and_then(|_| self.reload_slots());
+                return Ok(committed_projection(json!({"ok":true}), projection));
             }
             "refresh_available" => {
                 self.refresh_available()?;

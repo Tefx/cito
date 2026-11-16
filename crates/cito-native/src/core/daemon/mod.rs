@@ -1386,7 +1386,9 @@ impl DaemonService {
         Ok(())
     }
 
-    fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
+    // The outer result owns the config commit; the inner result owns only its
+    // secondary local projection, which cannot turn a confirmed save into failure.
+    fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<Result<(), String>, String> {
         if !self.slots.contains_key(hub) {
             let raw = self.raw_config()?;
             let (_, hubs, _) =
@@ -1407,43 +1409,46 @@ impl DaemonService {
             v["hubs"][hub]["autoListen"] = json!(enabled);
             Ok(())
         })?;
-        if enabled {
-            self.state.db.transaction(|c| {
-                c.execute(
-                    "UPDATE local_listeners SET user_stopped=0 WHERE hub=? AND harness!='human'",
-                    &[json!(hub)],
-                )?;
-                Ok(())
-            })?;
-        }
         if let Some(slot) = self.slots.get_mut(hub) {
             slot.config["autoListen"] = json!(enabled);
         }
-        drop(_registration);
-        if !enabled {
-            let mut errors = Vec::new();
-            for row in self.state.active()?.into_iter().filter(|r| {
-                r["hub"] == hub && r["harness"] != "human" && r["listen_mode"] == "auto"
-            }) {
-                if let Err(error) =
-                    self.retire_id(hub, string(&row, "listener_id"), "auto_disabled")
-                {
-                    errors.push(error);
+        let projection = (|| {
+            if enabled {
+                self.state.db.transaction(|c| {
+                    c.execute(
+                        "UPDATE local_listeners SET user_stopped=0 WHERE hub=? AND harness!='human'",
+                        &[json!(hub)],
+                    )?;
+                    Ok(())
+                })?;
+            }
+            drop(_registration);
+            if !enabled {
+                let mut errors = Vec::new();
+                for row in self.state.active()?.into_iter().filter(|r| {
+                    r["hub"] == hub && r["harness"] != "human" && r["listen_mode"] == "auto"
+                }) {
+                    if let Err(error) =
+                        self.retire_id(hub, string(&row, "listener_id"), "auto_disabled")
+                    {
+                        errors.push(error);
+                    }
+                }
+                if !errors.is_empty() {
+                    return Err(format!("DETACH_PENDING: {}", errors.join("; ")));
                 }
             }
-            if !errors.is_empty() {
-                return Err(format!("DETACH_PENDING: {}", errors.join("; ")));
-            }
-        }
-        if enabled {
-            if let Some(activity) = self.session_activity.as_mut() {
-                for plugin in self.plugins.agent_plugins() {
-                    activity.mark_stale(&plugin.id);
+            if enabled {
+                if let Some(activity) = self.session_activity.as_mut() {
+                    for plugin in self.plugins.agent_plugins() {
+                        activity.mark_stale(&plugin.id);
+                    }
+                    activity.refresh_discovery();
                 }
-                activity.refresh_discovery();
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        Ok(projection)
     }
 
     /// Reconcile source activity independently of discovery scans and Hub heartbeats.

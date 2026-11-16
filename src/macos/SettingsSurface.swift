@@ -40,6 +40,20 @@ extension Companion {
             channelUiStates[key, default: ChannelUiState()].drafts.removeValue(forKey: field.key)
         }
     }
+    func finishHubSave(_ pending: PendingHubSave) {
+        pendingHubSave = nil
+        hubSaveAwaitingSettings = nil
+        if addHubDraftGeneration == pending.generation {
+            addHubFormOpen = false; addHubToken = ""
+        } else if editingExistingHub || proposedHubName(addHubName,url:addHubUrl,existing:settings?.hubs ?? [],creating:false,original:pending.name) == pending.name {
+            // A retained draft edits the committed Hub, even if its projection
+            // was too large for the receipt. Keep the URL and inherited values
+            // as a baseline until canonical settings replace them.
+            editingExistingHub = true; editingOriginalHub = pending.name
+            hubSaveAwaitingSettings = pending
+        }
+    }
+
     @discardableResult
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) -> Bool {
         let previousUi = channelUiStates
@@ -59,30 +73,28 @@ extension Companion {
             let saved = value.hubs.first(where: { $0.name == pending.name })
             pendingHubSave = nil
             addHubError = saved?.error
-            if saved?.error == nil {
-                if addHubDraftGeneration == pending.generation {
-                    addHubFormOpen = false; addHubToken = ""
-                } else if editingExistingHub || proposedHubName(addHubName,url:addHubUrl,existing:value.hubs,creating:false,original:pending.name) == pending.name {
-                    // Newer edits to the acknowledged Hub are an explicit edit,
-                    // not a new create that could overwrite a different URL.
-                    editingExistingHub = true; editingOriginalHub = pending.name
-                    if let saved = saved {
-                        if addHubIssuer == pending.issuer {
-                            addHubIssuer = saved.issuer ?? ""
-                            settingsFieldControls["settings_hub_issuer"]?.stringValue = addHubIssuer
-                        }
-                        if addHubClientId == pending.clientId {
-                            addHubClientId = saved.client_id ?? ""
-                            settingsFieldControls["settings_hub_client_id"]?.stringValue = addHubClientId
-                        }
-                        if addHubRedirectPort == pending.redirectPort {
-                            addHubRedirectPort = saved.redirect_port.map(String.init) ?? ""
-                            settingsFieldControls["settings_hub_redirect_port"]?.stringValue = addHubRedirectPort
-                        }
-                        editingInitialHub = saved
-                    }
-                }
+            if saved?.error == nil { finishHubSave(pending) }
+        }
+        var reconciledHub = false
+        if pendingHubSave == nil, let committed = hubSaveAwaitingSettings,
+           let saved = value.hubs.first(where: { $0.name == committed.name && normalizedHubURL($0.url) == committed.url }) {
+            // A passive canonical refresh also completes a payload-free receipt.
+            // Compare each field with the submitted draft to preserve newer edits.
+            if addHubIssuer == committed.issuer {
+                addHubIssuer = saved.issuer ?? ""
+                settingsFieldControls["settings_hub_issuer"]?.stringValue = addHubIssuer
             }
+            if addHubClientId == committed.clientId {
+                addHubClientId = saved.client_id ?? ""
+                settingsFieldControls["settings_hub_client_id"]?.stringValue = addHubClientId
+            }
+            if addHubRedirectPort == committed.redirectPort {
+                addHubRedirectPort = saved.redirect_port.map(String.init) ?? ""
+                settingsFieldControls["settings_hub_redirect_port"]?.stringValue = addHubRedirectPort
+            }
+            editingInitialHub = saved
+            hubSaveAwaitingSettings = nil
+            reconciledHub = true
         }
         let target = value.settings_hub ?? value.channel_hub ?? hub ?? effectiveChannelHub
         let previousChannels = channelSettingsByHub[target] ?? []
@@ -139,7 +151,7 @@ extension Companion {
             }
             channelUiStates[key] = ui
         }
-        return channelUiStates != previousUi
+        return reconciledHub || channelUiStates != previousUi
     }
 
     @discardableResult
@@ -199,8 +211,8 @@ extension Companion {
            operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation) {
             pendingHubSave = nil
             if failed { addHubError = message ?? "Hub save failed." }
-            else if frame.authority_changed != true && addHubDraftGeneration == pending.generation {
-                addHubFormOpen = false; addHubToken = ""
+            else if frame.authority_changed != true && (frame.committed == true || frame.ok == true) {
+                finishHubSave(pending)
             }
             settled = true
         }
@@ -269,7 +281,7 @@ extension Companion {
         case "command-w": closeSettingsPanel(emitAction:true)
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
-            else if settingsActiveTab == "hubs" && addHubFormOpen { addHubFormOpen = false; inviteParseRequest=""; pendingHubSave=nil; rebuildSettingsPanel() }
+            else if settingsActiveTab == "hubs" && addHubFormOpen { addHubFormOpen = false; inviteParseRequest=""; pendingHubSave=nil; hubSaveAwaitingSettings=nil; rebuildSettingsPanel() }
             else if settingsActiveTab == "channels" && (channelSettingsByHub[effectiveChannelHub] ?? []).contains(where: { channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.editingGateway == true }) {
                 for (hub, channels) in channelSettingsByHub where hub == effectiveChannelHub {
                     for ch in channels where channelUiStates["\(hub)|\(ch.id)"]?.editingGateway == true {
@@ -1140,7 +1152,7 @@ extension Companion {
             guard let self = self else { return }
             let wasEditing = self.editingExistingHub
             self.editingExistingHub=false
-            self.editingOriginalHub=""; self.editingInitialHub=nil
+            self.editingOriginalHub=""; self.editingInitialHub=nil; self.hubSaveAwaitingSettings=nil
             self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubRedirectPort=""; self.addHubAuth="none"; self.addHubAuthExplicit=false
             self.addHubDraftGeneration += 1
             self.addHubError=nil; self.pendingHubSave=nil; self.inviteParseRequest=""
@@ -1235,7 +1247,7 @@ extension Companion {
                 guard let self = self else { return }
                 self.addHubFormOpen = false
                 self.inviteParseRequest=""
-                self.pendingHubSave = nil
+                self.pendingHubSave = nil; self.hubSaveAwaitingSettings = nil
                 self.rebuildSettingsPanel()
             }
             form.addSubview(cancelBtn)
@@ -1280,13 +1292,16 @@ extension Companion {
                     else if self.editingExistingHub { action["redirect_port"] = NSNull() }
                     // A URL-only edit must discover the destination's metadata,
                     // while deliberate overrides and explicit clears retain priority.
-                    if let initial = self.editingInitialHub, url != normalizedHubURL(initial.url) {
-                        if iss == (initial.issuer ?? "") { action.removeValue(forKey:"issuer") }
-                        if cid == (initial.client_id ?? "") { action.removeValue(forKey:"client_id") }
-                        if self.addHubRedirectPort == (initial.redirect_port.map(String.init) ?? "") { action.removeValue(forKey:"redirect_port") }
+                    let committed = self.hubSaveAwaitingSettings
+                    let initial = self.editingInitialHub
+                    let initialURL = committed?.url ?? initial.map { normalizedHubURL($0.url) }
+                    if committed != nil || (initialURL != nil && url != initialURL) {
+                        if iss == (committed?.issuer ?? initial?.issuer ?? "") { action.removeValue(forKey:"issuer") }
+                        if cid == (committed?.clientId ?? initial?.client_id ?? "") { action.removeValue(forKey:"client_id") }
+                        if self.addHubRedirectPort == (committed?.redirectPort ?? initial?.redirect_port.map(String.init) ?? "") { action.removeValue(forKey:"redirect_port") }
                     }
                 }
-                let pending = PendingHubSave(name:name, requestId:UUID().uuidString, generation:self.addHubDraftGeneration,
+                let pending = PendingHubSave(name:name, url:url, requestId:UUID().uuidString, generation:self.addHubDraftGeneration,
                     issuer:self.addHubIssuer, clientId:self.addHubClientId, redirectPort:self.addHubRedirectPort)
                 self.pendingHubSave=pending; self.addHubError=nil
                 action["request_id"]=pending.requestId
@@ -1334,7 +1349,7 @@ extension Companion {
                     self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubRedirectPort=hub.redirect_port.map(String.init) ?? ""; self.addHubToken=""
                     self.addHubDraftGeneration += 1
                     self.pendingHubSave=nil; self.addHubError=nil; self.inviteParseRequest=""
-                    self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.editingInitialHub=hub; self.addHubFormOpen=true
+                    self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.editingInitialHub=hub; self.hubSaveAwaitingSettings=nil; self.addHubFormOpen=true
                     self.rebuildSettingsPanel(revealAddHub: true)
                 }
                 row.addSubview(edit)

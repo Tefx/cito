@@ -80,6 +80,57 @@ fn authoritative_commits_survive_secondary_local_projection_failures() -> Result
             "{rejected}"
         );
         assert_eq!(client.kv_get(id)?.unwrap().0, before);
+        service
+            .state
+            .db
+            .execute("DROP TRIGGER fail_projection", &[])?;
+        service.mutate_config(|raw| {
+            raw["hubs"]["local"]["autoListen"] = json!(false);
+            Ok(())
+        })?;
+        service.slots.get_mut("local").unwrap().config["autoListen"] = json!(false);
+        service.state.db.execute(
+            "UPDATE local_listeners SET user_stopped=1,listen_mode='auto' WHERE hub='local' AND harness='fixture'",
+            &[],
+        )?;
+        service.state.db.execute("CREATE TRIGGER fail_auto_projection BEFORE UPDATE OF user_stopped ON local_listeners BEGIN SELECT RAISE(ABORT,'injected auto-listen projection failure'); END", &[])?;
+        let enabled = service.action(&json!({"op":"set_auto_listen","enabled":true}))?;
+        assert_eq!(enabled["committed"], true, "{enabled}");
+        assert_eq!(enabled["ok"], true, "{enabled}");
+        assert!(
+            string(&enabled, "warning").contains("injected auto-listen projection failure"),
+            "{enabled}"
+        );
+        assert_eq!(service.raw_config()?["hubs"]["local"]["autoListen"], true);
+        assert_eq!(service.slot("local")?.config["autoListen"], true);
+        assert_eq!(
+            service.state.listener("local", agent_id)?.unwrap()["user_stopped"],
+            1
+        );
+        let rejected = service.action(&json!({"op":"set_auto_listen","enabled":"yes"}));
+        assert!(rejected.unwrap_err().starts_with("INVALID_INPUT:"));
+        assert_eq!(service.raw_config()?["hubs"]["local"]["autoListen"], true);
+        assert_eq!(
+            service.state.listener("local", agent_id)?.unwrap()["status"],
+            "ACTIVE"
+        );
+        let disabled = service.action(&json!({"op":"set_auto_listen","enabled":false}))?;
+        assert_eq!(disabled["committed"], true, "{disabled}");
+        assert!(
+            string(&disabled, "warning").contains("injected auto-listen projection failure"),
+            "{disabled}"
+        );
+        assert_eq!(service.raw_config()?["hubs"]["local"]["autoListen"], false);
+        assert_eq!(service.slot("local")?.config["autoListen"], false);
+        assert_eq!(
+            service.state.listener("local", agent_id)?.unwrap()["status"],
+            "ACTIVE"
+        );
+        service
+            .state
+            .db
+            .execute("DROP TRIGGER fail_auto_projection", &[])?;
+        service.state.db.execute("CREATE TRIGGER fail_projection BEFORE UPDATE ON local_listeners BEGIN SELECT RAISE(ABORT,'injected projection failure'); END",&[])?;
         let saved = service.action(&json!({"op":"set_user","user":"bob"}))?;
         assert_eq!(saved["committed"], true, "{saved}");
         assert!(
@@ -518,7 +569,7 @@ print(json.dumps(v))
         };
         assert_eq!(row()?["last_activity_revision"], "10");
         service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
-        service.set_auto_listen("local", false)?;
+        service.set_auto_listen("local", false)??;
         assert_eq!(
             service
                 .state
@@ -538,7 +589,7 @@ print(json.dumps(v))
             )
             .unwrap_err()
             .starts_with("INVALID_INPUT:"));
-        service.set_auto_listen("local", true)?;
+        service.set_auto_listen("local", true)??;
         service.refresh_available()?;
         service.action(
             &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
@@ -752,7 +803,7 @@ print(json.dumps(v))
             json!({"op":"unlisten_all","hub":null}),
             json!({"op":"unlisten_all","hub":"local"}),
         ] {
-            service.set_auto_listen("local", true)?;
+            service.set_auto_listen("local", true)??;
             for candidate in &candidates[..2] {
                 service.listen("local", &json!({"about":"Stop witness"}), candidate)?;
             }
@@ -1842,11 +1893,11 @@ print(json.dumps(result), flush=True)
                         })?;
                         fs::write(dir.join("candidate.json"), "[]").map_err(|e| e.to_string())?;
                         assert!(
-                            service.set_auto_listen("work", false).is_err(),
+                            service.set_auto_listen("work", false)?.is_err(),
                             "Unavailable detach must remain visible"
                         );
                         assert_eq!(service.slot("work")?.config["autoListen"], false);
-                        service.set_auto_listen("work", true)?;
+                        service.set_auto_listen("work", true)??;
                         service.refresh_available()?;
                         if state.db.query("SELECT 1 FROM pending_hub_detaches WHERE hub='work' AND listener_id=?",&[json!(id)])?.len()!=1 {
                                 return Err("Enabling Auto-Listen lost cleanup for an undiscovered session".into());
@@ -1990,7 +2041,7 @@ print(json.dumps(result), flush=True)
                 // discovery alone no longer has that authority.
                 let hubs: Vec<_> = service.slots.keys().cloned().collect();
                 for hub in hubs {
-                    service.set_auto_listen(&hub, true)?;
+                    service.set_auto_listen(&hub, true)??;
                 }
                 service.refresh_available()?;
                 if rebind {

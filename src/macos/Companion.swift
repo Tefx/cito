@@ -142,11 +142,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var addHubError: String?
     struct PendingHubSave {
         let name: String
+        let url: String
         let requestId: String
         let generation: Int
         let issuer: String, clientId: String, redirectPort: String
     }
     var pendingHubSave: PendingHubSave?
+    // A confirmed save can precede its canonical settings projection.
+    var hubSaveAwaitingSettings: PendingHubSave?
     var settingsBannerError: String?
     var menuBannerError: String?
     var inviteParseRequest = ""
