@@ -109,8 +109,14 @@ cito setup --status
 
 # Join a Tailscale multi-Mac hub (auth: none) or team OIDC hub:
 cito setup --hub tailnet --url http://my-mac.tailnet.ts.net:4291
-cito setup --hub work --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id <your-client-id> --default
+cito setup --hub work --url https://hub.example.com --default
+# Optionally override the discovered loopback callback port:
+cito setup --hub work --url https://hub.example.com --redirect-port 8400
 ```
+
+For an OIDC Hub, URL-only setup and **Join from Clipboard** / **Add Hub…** discover authentication settings from the Hub's `GET /health`: its `oidc` object supplies `issuer`, `client_id`, and, when configured, `redirect_port`. Explicit values take precedence. If discovery reports token authentication, supply the token; if the Hub reports `none` or is unreachable, an unspecified mode falls back to `none`. Explicit OIDC setup fails if issuer or client ID remains missing.
+
+Client `cito setup --redirect-port` and `redirectPort` accept `0..=65535`; `0` explicitly selects an ephemeral loopback port. When the field is absent, `CITO_OIDC_REDIRECT_PORT` supplies a `1..=65535` fallback, or an ephemeral port is selected if the variable is also absent. Configure the identity provider to allow the selected callback.
 
 Or edit `~/.cito/config.json` directly:
 
@@ -160,7 +166,7 @@ Or edit `~/.cito/config.json` directly:
 }
 ```
 
-The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command automatically on package load. Before a session hook supplies context, the bridge uses the latest session file for the working directory (or a process-scoped identity) for discovery, wake delivery, and badge updates. When context arrives for that same session, it displays the stored badge and retains delivery deduplication.
+The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live session wake delivery, a footer status badge, and the `/cito` slash command automatically on package load. Before a session hook supplies context, the bridge uses a process-scoped identity.
 
 ### Codex Desktop (`~/.codex/config.toml`)
 
@@ -258,6 +264,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | `CITO_HUB_TOKEN` | Required shared bearer credential in token mode; standalone `--token`. |
 | `CITO_OIDC_ISSUER` | Required HTTPS issuer in OIDC mode; standalone `--issuer`. |
 | `CITO_OIDC_CLIENT_ID` | Required public client ID in OIDC mode; standalone `--client-id`. |
+| `CITO_OIDC_REDIRECT_PORT` | Optional advertised OIDC callback port, `1..=65535`; standalone `--redirect-port` takes precedence. |
 | `CITO_OIDC_ADMIN_USERS` | Empty by default; comma-separated verified owner usernames or OIDC subjects allowed to administer shared channel fields. |
 | `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum cooldown between forced JWKS refreshes for unknown signing keys. |
 | `CITO_PLUGIN_<ID>_<KEY>` | No default; seeds declared Hub-scoped channel fields at startup, including `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. |
@@ -274,7 +281,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | `CITO_USER` | Local username override; otherwise configured user or OS username. OIDC identity comes from verified tokens. |
 | `CITO_HOST_NAME` | Overrides the host display name; otherwise the system hostname. |
 | `CITO_DAEMON_PORT` | `4290`; loopback daemon HTTP port, overrides `daemonPort` in config. |
-| `CITO_OIDC_REDIRECT_PORT` | Loopback callback fallback when a Hub's `redirectPort` is unset/zero; integer `1..65535`. Otherwise a configured port wins, or an ephemeral port is chosen. |
+| `CITO_OIDC_REDIRECT_PORT` | Loopback callback fallback when `redirectPort` is absent; integer `1..=65535`. An explicit `redirectPort: 0` selects an ephemeral port. |
 | `CITO_BROWSER_BIN` | Browser opener used for OIDC login; platform default (`open` on macOS). |
 | `CITO_TAILSCALE_HOST` | Overrides advertised Tailscale host discovery for Hub invitations. |
 | `CITO_DISABLE_TAILSCALE_PROBE` | Set `1` to skip the Tailscale CLI probe. |

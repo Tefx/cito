@@ -95,7 +95,7 @@ Keep secrets out of unit files, shell history, screenshots, and support logs. Re
 
 Any TLS reverse proxy can serve the Hub. Preserve `Authorization`, `Content-Type`, and the public `Host`; stream `/v1/events` without response buffering or caching, allow long-lived connections, and route `/v1/rpc` and `/health` to the same Hub. Do not add a mismatched browser `Origin`. A reconnecting SSE client must be able to pass `Last-Event-ID` through the proxy.
 
-- `GET /health` is unauthenticated and returns `ok`, `pid`, `version`, and `auth_mode`.
+- `GET /health` is unauthenticated and returns `ok`, `pid`, `version`, and `auth_mode`. In OIDC mode it also returns `oidc` with `issuer`, `client_id`, and optional `redirect_port`; other modes omit `oidc`.
 - `POST /v1/rpc` requires `Content-Type: application/json` (`415` otherwise); protected operations require authentication.
 - `GET /v1/events` is the authenticated SSE stream.
 - Authenticated Hubs (`token` or `oidc`) accept any syntactically valid `Host` authority when `Origin` is absent, including `cito.example.com`, whether the upstream binds loopback or a wildcard address. Cross-origin browser requests return `403`.
@@ -130,11 +130,11 @@ location / {
 
 ## OIDC sign-in (PKCE)
 
-Register a public/native OIDC client supporting Authorization Code with PKCE (`S256`), discovery, and ID tokens. Use an HTTPS issuer such as `https://id.example.com`; do not embed a client secret. Register `http://127.0.0.1:8400/callback` as an allowed loopback redirect. This callback runs on each client Mac, independently of the public Hub URL and Hub port. With `redirectPort` unset or zero, `CITO_OIDC_REDIRECT_PORT` supplies a fallback; with neither set, Cito selects an ephemeral loopback port, which requires provider support for dynamic loopback redirects.
+Register a public/native OIDC client supporting Authorization Code with PKCE (`S256`), discovery, and ID tokens. Use an HTTPS issuer such as `https://id.example.com`; do not embed a client secret. Register `http://127.0.0.1:8400/callback` as an allowed loopback redirect. This callback runs on each client Mac, independently of the public Hub URL and Hub port. Client `redirectPort` accepts `0..=65535`; explicit `0` selects an ephemeral loopback port. When absent, `CITO_OIDC_REDIRECT_PORT` supplies a fallback; if both are absent, Cito selects an ephemeral port, which requires provider support for dynamic loopback redirects.
 
-Set `CITO_AUTH_MODE=oidc`, `CITO_OIDC_ISSUER=https://id.example.com`, and `CITO_OIDC_CLIENT_ID=cito` on the server. Set `CITO_OIDC_ADMIN_USERS=alice,bob` to grant shared channel administration to those verified owner usernames or OIDC subjects. Other users can pair their own accounts after an administrator configures the shared service.
+Set `CITO_AUTH_MODE=oidc`, `CITO_OIDC_ISSUER=https://id.example.com`, and `CITO_OIDC_CLIENT_ID=cito` on the server. Optionally set `CITO_OIDC_REDIRECT_PORT=8400` or pass `cito hub --redirect-port 8400` to advertise the callback port via `/health`; the server accepts `1..=65535`. Set `CITO_OIDC_ADMIN_USERS=alice,bob` to grant shared channel administration to those verified owner usernames or OIDC subjects. Other users can pair their own accounts after an administrator configures the shared service.
 
-Join from a Mac with `cito setup --hub work --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id cito --default`, then use **Sign In…** in Cito. To fix the client callback port, configure `~/.cito/config.json`:
+Join from a Mac with `cito setup --hub work --url https://hub.example.com --default`, or enter the URL using **Join from Clipboard** / **Add Hub…**. The client discovers OIDC settings from `/health`; explicit settings override discovered values. If the Hub is unreachable, unspecified authentication falls back to `none`; explicitly requested OIDC requires an issuer and client ID. A discovered token Hub requires a supplied token. Then use **Sign In…** in Cito. To override the callback port, use `cito setup --hub work --url https://hub.example.com --redirect-port 8400` or configure `~/.cito/config.json`:
 
 ```json
 {
@@ -194,6 +194,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | `CITO_HUB_TOKEN` | Required shared bearer credential in token mode; standalone `--token`. |
 | `CITO_OIDC_ISSUER` | Required HTTPS issuer in OIDC mode; standalone `--issuer`. |
 | `CITO_OIDC_CLIENT_ID` | Required public client ID in OIDC mode; standalone `--client-id`. |
+| `CITO_OIDC_REDIRECT_PORT` | Optional advertised OIDC callback port, `1..=65535`; standalone `--redirect-port` takes precedence. |
 | `CITO_OIDC_ADMIN_USERS` | Empty by default; comma-separated verified owner usernames or OIDC subjects allowed to administer shared channel fields. |
 | `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum cooldown between forced JWKS refreshes for unknown signing keys. |
 | `CITO_PLUGIN_<ID>_<KEY>` | No default; seeds declared Hub-scoped channel fields at startup, including `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. |
@@ -210,7 +211,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | `CITO_USER` | Local username override; otherwise configured user or OS username. OIDC identity comes from verified tokens. |
 | `CITO_HOST_NAME` | Overrides the host display name; otherwise the system hostname. |
 | `CITO_DAEMON_PORT` | `4290`; loopback daemon HTTP port, overrides `daemonPort` in config. |
-| `CITO_OIDC_REDIRECT_PORT` | Loopback callback fallback when a Hub's `redirectPort` is unset/zero; integer `1..65535`. Otherwise a configured port wins, or an ephemeral port is chosen. |
+| `CITO_OIDC_REDIRECT_PORT` | Loopback callback fallback when `redirectPort` is absent; integer `1..=65535`. An explicit `redirectPort: 0` selects an ephemeral port. |
 | `CITO_BROWSER_BIN` | Browser opener used for OIDC login; platform default (`open` on macOS). |
 | `CITO_TAILSCALE_HOST` | Overrides advertised Tailscale host discovery for Hub invitations. |
 | `CITO_DISABLE_TAILSCALE_PROBE` | Set `1` to skip the Tailscale CLI probe. |
