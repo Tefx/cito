@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1500);
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const BADGE_TIMEOUT: Duration = Duration::from_millis(1500);
 const BADGE_RETRY: Duration = Duration::from_millis(250);
 const MAX_WORKERS: usize = 4;
@@ -40,6 +40,7 @@ struct Discovery {
     refreshed_revision: u64,
     due: Instant,
     worker: Option<Worker<Vec<Value>>>,
+    complete: Arc<AtomicBool>,
 }
 
 /// A PID addresses one endpoint even when it changes sessions. Without a PID the
@@ -91,9 +92,26 @@ pub struct SessionActivity {
     env: Value,
     discovery: Vec<Discovery>,
     badges: BTreeMap<Target, Badge>,
-    history_loaded: bool,
+    badge_inputs: Option<(i32, Vec<Value>, Instant)>,
     stopping: Arc<AtomicBool>,
     closed: bool,
+    background_discovery: bool,
+    configured: Option<HashSet<String>>,
+    completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+struct DiscoveryFinished {
+    done: Arc<AtomicBool>,
+    completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+impl Drop for DiscoveryFinished {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Ok(mut version) = self.completion.0.lock() {
+            *version = version.wrapping_add(1);
+            self.completion.1.notify_all();
+        }
+        super::daemon::wake_daemon();
+    }
 }
 impl SessionActivity {
     pub fn new(config: &NativeConfig, plugins: &LoadedPlugins) -> Self {
@@ -120,12 +138,33 @@ impl SessionActivity {
                     refreshed_revision: 0,
                     due: Instant::now(),
                     worker: None,
+                    complete: Arc::new(AtomicBool::new(false)),
                 })
                 .collect(),
             badges: BTreeMap::new(),
-            history_loaded: false,
+            badge_inputs: None,
             stopping: Arc::new(AtomicBool::new(false)),
             closed: false,
+            background_discovery: true,
+            configured: None,
+            completion: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+        }
+    }
+
+    pub fn discovery_demand(&mut self, background: bool, configured: HashSet<String>) {
+        self.background_discovery = background;
+        self.configured = Some(configured);
+    }
+    pub fn completion_revision(&self) -> u64 {
+        self.completion.0.lock().map(|v| *v).unwrap_or(0)
+    }
+    pub fn wait_for_completion(&self, observed: u64, deadline: Instant) {
+        if let Ok(version) = self.completion.0.lock() {
+            let _ = self.completion.1.wait_timeout_while(
+                version,
+                deadline.saturating_duration_since(Instant::now()),
+                |v| *v == observed,
+            );
         }
     }
 
@@ -140,10 +179,24 @@ impl SessionActivity {
         self.mark_stale(harness);
         for provider in self.discovery.iter_mut().filter(|p| p.plugin.id == harness) {
             provider.cached.clear();
+            provider.error = None;
+            provider.refreshed_at = 0;
         }
     }
     pub fn discovery_status(&self) -> Vec<Value> {
-        self.discovery.iter().map(|p| json!({"harness":p.plugin.id,"status":if p.worker.is_some(){"scanning"}else if p.error.is_some(){"error"}else{"ready"},"error":p.error})).collect()
+        self.discovery
+            .iter()
+            .map(|p| {
+                let status = if p.error.is_some() {
+                    "error"
+                } else if p.worker.is_some() && p.refreshed_at == 0 {
+                    "scanning"
+                } else {
+                    "ready"
+                };
+                json!({"harness":p.plugin.id,"status":status,"error":p.error})
+            })
+            .collect()
     }
 
     /// Revoke cached enrollment authority while preserving presentation and workers.
@@ -214,6 +267,7 @@ impl SessionActivity {
                 if !seen.insert((
                     provider.plugin.id.clone(),
                     string(candidate, "session_id").to_string(),
+                    endpoint_pid(candidate),
                 )) {
                     continue;
                 }
@@ -266,59 +320,72 @@ impl SessionActivity {
             }
         }
         let changed = self.reap_discovery();
-        for provider in &mut self.discovery {
-            for candidate in &mut provider.cached {
-                if let Some(title) =
-                    state.custom_title(&provider.plugin.id, string(candidate, "session_id"))?
-                {
-                    candidate["title"] = json!(title);
-                    candidate["custom_title"] = json!(true);
+        self.reap_badges();
+        // Retain expiry reconciliation even without local writes; otherwise an
+        // idle, closed UI must not rescan listener history every second.
+        let revision = state.db.mutation_revision()?;
+        let reconcile = changed
+            || self.background_discovery
+            || self
+                .badge_inputs
+                .as_ref()
+                .is_none_or(|(previous, live, at)| {
+                    *previous != revision || live != live_active || at.elapsed() >= REFRESH_INTERVAL
+                });
+        if reconcile {
+            for provider in &mut self.discovery {
+                for candidate in &mut provider.cached {
+                    if let Some(title) =
+                        state.custom_title(&provider.plugin.id, string(candidate, "session_id"))?
+                    {
+                        candidate["title"] = json!(title);
+                        candidate["custom_title"] = json!(true);
+                    }
                 }
             }
-        }
-        self.reap_badges();
-        // One short transaction captures both rows and counts. Persisted ACTIVE
-        // rows alone never establish liveness and never add unread to a badge.
-        let mut desired = desired_badges(state, live_active)?;
-        // Historical endpoints need one bounded clear after startup, not a fresh
-        // retry lifecycle on every DB scan once their badge entry has retired.
-        if self.history_loaded {
-            desired.retain(|target, intent| {
-                intent.badge.is_some() || self.badges.contains_key(target)
-            });
-        }
-        self.history_loaded = true;
-        for (target, badge) in &mut self.badges {
-            if !desired.contains_key(target) && badge.desired.badge.is_some() {
-                badge.desired.badge = None;
-                badge.failures = 0;
-                badge.retry_at = Instant::now();
+            // One short transaction captures both rows and counts. Persisted ACTIVE
+            // rows alone never establish liveness and never add unread to a badge.
+            let mut desired = desired_badges(state, live_active)?;
+            // Historical endpoints need one bounded clear after startup, not a fresh
+            // retry lifecycle on every DB scan once their badge entry has retired.
+            if self.badge_inputs.is_some() {
+                desired.retain(|target, intent| {
+                    intent.badge.is_some() || self.badges.contains_key(target)
+                });
             }
-        }
-        for (target, intent) in desired {
-            if let Some(badge) = self.badges.get_mut(&target) {
-                if badge.desired != intent {
-                    badge.desired = intent;
+            self.badge_inputs = Some((revision, live_active.to_vec(), Instant::now()));
+            for (target, badge) in &mut self.badges {
+                if !desired.contains_key(target) && badge.desired.badge.is_some() {
+                    badge.desired.badge = None;
                     badge.failures = 0;
                     badge.retry_at = Instant::now();
                 }
-            } else if let Some(provider) = self
-                .discovery
-                .iter()
-                .find(|p| p.plugin.id == target.harness)
-            {
-                self.badges.insert(
-                    target,
-                    Badge {
-                        plugin: provider.plugin.clone(),
-                        desired: intent,
-                        sent: None,
-                        retry_at: Instant::now(),
-                        worker: None,
-                        attempted: None,
-                        failures: 0,
-                    },
-                );
+            }
+            for (target, intent) in desired {
+                if let Some(badge) = self.badges.get_mut(&target) {
+                    if badge.desired != intent {
+                        badge.desired = intent;
+                        badge.failures = 0;
+                        badge.retry_at = Instant::now();
+                    }
+                } else if let Some(provider) = self
+                    .discovery
+                    .iter()
+                    .find(|p| p.plugin.id == target.harness)
+                {
+                    self.badges.insert(
+                        target,
+                        Badge {
+                            plugin: provider.plugin.clone(),
+                            desired: intent,
+                            sent: None,
+                            retry_at: Instant::now(),
+                            worker: None,
+                            attempted: None,
+                            failures: 0,
+                        },
+                    );
+                }
             }
         }
         self.badges.retain(|_, badge| {
@@ -334,7 +401,15 @@ impl SessionActivity {
             if capacity == 0 {
                 break;
             }
-            if provider.worker.is_some() || provider.due > Instant::now() {
+            if provider.worker.is_some()
+                || provider.due > Instant::now()
+                || self
+                    .configured
+                    .as_ref()
+                    .is_some_and(|ids| !ids.contains(&provider.plugin.id))
+                || (!self.background_discovery
+                    && provider.requested_generation == provider.started_generation)
+            {
                 continue;
             }
             provider.started_revision = provider
@@ -345,21 +420,36 @@ impl SessionActivity {
             provider.started_at = now_ms();
             provider.started_generation = provider.requested_generation;
             let plugin = provider.plugin.clone();
+            // Restoration must not depend on a provider's recent/display slices.
+            let retained: Vec<Value> = state.db.query(
+                "SELECT DISTINCT session_id FROM local_listeners WHERE harness=? AND user_stopped=0 AND (status='ACTIVE' OR retirement_reason IN ('hard_exit','disconnected'))",
+                &[json!(plugin.id)],
+            )?.into_iter().map(|row| row["session_id"].clone()).collect();
             let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
-                "plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
+                "retained_session_ids":retained,
+                "recent_window_ms":plugin.auto_listen.recent_window_ms.unwrap_or(900_000),"plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
+            provider.complete.store(false, Ordering::Release);
+            let finished = DiscoveryFinished {
+                done: provider.complete.clone(),
+                completion: self.completion.clone(),
+            };
             provider.worker = Some(
                 thread::Builder::new()
                     .name("cito-discovery".into())
                     .spawn(move || {
+                        let _finished = finished;
                         let response = plugin_request_with_progress(
                             &plugin,
                             &request,
                             DISCOVERY_TIMEOUT,
                             |_| check_running(&stopping),
                         )?;
-                        if response["ok"] == false {
-                            return Err(format!("Discovery rejected: {response}"));
+                        if response["ok"] != true {
+                            return Err(crate::support::response_diagnostic(
+                                &response,
+                                "Session discovery failed",
+                            ));
                         }
                         let rows = response["sessions"]
                             .as_array()
@@ -384,7 +474,13 @@ impl SessionActivity {
     fn reap_discovery(&mut self) -> bool {
         let mut changed = false;
         for provider in &mut self.discovery {
-            if !provider.worker.as_ref().is_some_and(|w| w.is_finished()) {
+            if provider.worker.is_none()
+                || (!provider.complete.load(Ordering::Acquire)
+                    && !provider
+                        .worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.is_finished()))
+            {
                 continue;
             }
             if let Some(worker) = provider.worker.take() {
@@ -583,7 +679,10 @@ fn send_badge(
     if response["ok"] == true {
         Ok(())
     } else {
-        Err(format!("Badge rejected: {response}"))
+        Err(crate::support::response_diagnostic(
+            &response,
+            "Session badge update failed",
+        ))
     }
 }
 
@@ -749,6 +848,7 @@ else:
         (root / 'failed').touch()
     response = dict(ok=not fail)
     previous.unlink(missing_ok=True)
+response = opts.get('response', response)
 record('end', response=response)
 print(json.dumps(response), flush=True)
 "#;
@@ -801,6 +901,7 @@ print(json.dumps(response), flush=True)
                 tint: "blue".into(),
                 cli_flag: false,
                 pid_bound: true,
+                auto_listen: Default::default(),
                 plugin_dir: path.clone(),
                 is_builtin: false,
                 channel_env: None,
@@ -907,6 +1008,58 @@ print(json.dumps(response), flush=True)
     }
 
     #[test]
+    fn paused_badges_skip_idle_sql_but_reconcile_mutations_liveness_and_expiry(
+    ) -> Result<(), String> {
+        let f = Fixture::new()?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        activity.discovery_demand(false, HashSet::new());
+        activity.tick(&f.state, &[])?;
+        // DDL does not change SQLite's row-mutation counter. A scan now would
+        // fail, making this sensitive to accidental unconditional reconciliation.
+        f.state.db.execute(
+            "ALTER TABLE local_listeners RENAME TO hidden_listeners",
+            &[],
+        )?;
+        for _ in 0..5 {
+            activity.tick(&f.state, &[])?;
+        }
+        f.state
+            .db
+            .execute("INSERT INTO daemon_owner VALUES(1,42,1234)", &[])?;
+        assert!(
+            activity.tick(&f.state, &[]).is_err(),
+            "A local mutation must request reconciliation"
+        );
+        f.state.db.execute(
+            "ALTER TABLE hidden_listeners RENAME TO local_listeners",
+            &[],
+        )?;
+        activity.tick(&f.state, &[])?;
+        f.state.db.execute(
+            "ALTER TABLE local_listeners RENAME TO hidden_listeners",
+            &[],
+        )?;
+        assert!(
+            activity
+                .tick(&f.state, &[json!({"listener_id":"new"})])
+                .is_err(),
+            "Liveness changes must request reconciliation"
+        );
+        activity.badge_inputs.as_mut().unwrap().2 = Instant::now() - REFRESH_INTERVAL;
+        assert!(
+            activity.tick(&f.state, &[]).is_err(),
+            "Expiry requires slow fallback reconciliation"
+        );
+        f.state.db.execute(
+            "ALTER TABLE hidden_listeners RENAME TO local_listeners",
+            &[],
+        )?;
+        activity.tick(&f.state, &[])?;
+        activity.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
     fn discovery_concurrent_deadline_failure_isolation_and_cache_only_read() -> Result<(), String> {
         let mut f = Fixture::new()?;
         f.provider(
@@ -923,7 +1076,13 @@ print(json.dumps(response), flush=True)
         let started = Instant::now();
         activity.tick(&f.state, &[])?;
         assert!(started.elapsed() < Duration::from_millis(200));
-        pump(&mut activity, &f, &[], |a| a.available(&[], 1).len() == 2)?;
+        pump(&mut activity, &f, &[], |a| a.available(&[], 1).len() == 2).map_err(|e| {
+            format!(
+                "{e}; fast={:?}; other={:?}",
+                f.records("fast"),
+                f.records("other")
+            )
+        })?;
         assert!(
             started.elapsed() < Duration::from_millis(1400),
             "Fast providers waited for slow provider"
@@ -956,6 +1115,72 @@ print(json.dumps(response), flush=True)
     }
 
     #[test]
+    fn discovery_status_only_scans_on_cold_start_and_preserves_errors_during_retry(
+    ) -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider(
+            "agent",
+            json!({"response":{"ok":false,"message":"Provider unavailable"}}),
+        )?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        activity.tick(&f.state, &[])?;
+        assert_eq!(activity.discovery[0].refreshed_at, 0);
+        assert!(activity.discovery[0].worker.is_some());
+        assert_eq!(activity.discovery_status()[0]["status"], "scanning");
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert_eq!(activity.discovery[0].refreshed_at, 0);
+        assert_eq!(activity.discovery_status()[0]["status"], "error");
+        let error = activity.discovery_status()[0]["error"].clone();
+        assert_eq!(error, "Provider unavailable");
+
+        let sessions = vec![json!({"harness":"agent","session_id":"one"})];
+        fs::write(
+            f.dir.join("agent/options.json"),
+            json!({"sessions":sessions}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        activity.refresh_discovery();
+        activity.tick(&f.state, &[])?;
+        assert!(activity.discovery[0].worker.is_some());
+        assert_eq!(activity.discovery_status()[0]["status"], "error");
+        assert_eq!(activity.discovery_status()[0]["error"], error);
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert!(activity.discovery[0].refreshed_at > 0);
+        assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        assert!(activity.discovery_status()[0]["error"].is_null());
+        assert_eq!(activity.available(&[], 1), sessions);
+
+        // Exercise both explicit refresh and the periodic deadline without a 5s sleep.
+        for explicit in [true, false] {
+            if explicit {
+                activity.refresh_discovery();
+            } else {
+                activity.discovery[0].due = Instant::now();
+            }
+            activity.tick(&f.state, &[])?;
+            assert!(activity.discovery[0].worker.is_some());
+            assert_eq!(activity.discovery_status()[0]["status"], "ready");
+            assert_eq!(activity.discovery[0].cached, sessions);
+            assert_eq!(activity.available(&[], 1), sessions);
+            pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+            assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        }
+
+        activity.remove_candidates("agent");
+        assert_eq!(activity.discovery[0].refreshed_at, 0);
+        assert!(activity.discovery[0].cached.is_empty());
+        assert!(activity.discovery[0].error.is_none());
+        activity.tick(&f.state, &[])?;
+        assert!(activity.discovery[0].worker.is_some());
+        assert_eq!(activity.discovery_status()[0]["status"], "scanning");
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        assert_eq!(activity.available(&[], 1), sessions);
+        activity.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
     fn refresh_during_inflight_discovery_runs_the_new_generation_without_reap_delay(
     ) -> Result<(), String> {
         let mut f = Fixture::new()?;
@@ -980,6 +1205,87 @@ print(json.dumps(response), flush=True)
         assert!(!activity.candidates().any(|r| r["session_id"] == "old"));
         assert_eq!(activity.discovery_status()[0]["status"], "ready");
         activity.shutdown()?;
+        Ok(())
+    }
+    #[test]
+    fn subprocess_discovery_badge_and_setup_use_canonical_diagnostics() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        let rejection = json!({"ok":false,"error_code":"PROVIDER_OFFLINE","message":"The provider is unavailable","extra":{"private":"not displayed"}});
+        f.provider("agent", json!({"response":rejection}))?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &[], |a| {
+            a.discovery_status()[0]["status"] == "error"
+        })?;
+        assert_eq!(
+            activity.discovery_status()[0]["error"],
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        let request = badge_request(
+            &f.config.state_dir,
+            &activity.env,
+            &Intent {
+                session_id: "session".into(),
+                endpoint_pid: None,
+                badge: Some("1".into()),
+            },
+        );
+        assert_eq!(
+            send_badge(&f.plugins.plugins[0], &request, &AtomicBool::new(false)).unwrap_err(),
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        activity.remove_candidates("agent");
+        assert!(activity.discovery_status()[0]["error"].is_null());
+        fs::write(
+            f.dir.join("agent/options.json"),
+            json!({"response":{"sessions":[]}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        activity.refresh_discovery();
+        pump(&mut activity, &f, &[], |a| {
+            a.discovery_status()[0]["status"] == "error"
+        })?;
+        assert_eq!(
+            activity.discovery_status()[0]["error"],
+            "Session discovery failed",
+            "A missing ok is not success"
+        );
+        assert_eq!(
+            send_badge(&f.plugins.plugins[0], &request, &AtomicBool::new(false)).unwrap_err(),
+            "Session badge update failed"
+        );
+        activity.shutdown()?;
+        let mut plugin = f.plugins.plugins[0].clone();
+        plugin.command = vec![
+            "/usr/bin/python3".into(),
+            "-c".into(),
+            format!(
+                "import json,sys; json.load(sys.stdin); print({:?})",
+                rejection.to_string()
+            ),
+        ];
+        assert_eq!(
+            crate::setup::try_inspect_plugin_setup(&plugin).unwrap_err(),
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        assert_eq!(
+            crate::setup::apply_plugin_setup(&plugin, false, false).unwrap_err(),
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        let status = crate::setup::inspect_setup_json(
+            &f.config.state_dir,
+            &f.config.config_path,
+            &f.config.home_dir,
+            &LoadedPlugins {
+                plugins: vec![plugin],
+                rejected_ids: HashSet::new(),
+            },
+        );
+        assert_eq!(status["harnesses"][0]["status"], "error");
+        assert!(status["harnesses"][0]["configured"].is_null());
+        assert!(status["harnesses"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("provider is unavailable"));
         Ok(())
     }
     #[test]

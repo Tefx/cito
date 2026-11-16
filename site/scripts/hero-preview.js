@@ -1,11 +1,15 @@
 (() => {
-  // 1-click Copy Command Pills
-  const copyButtons = document.querySelectorAll("[data-copy-command]");
+  // Copy the visible code text, preserving whitespace and decoded HTML entities.
+  const copyButtons = document.querySelectorAll("[data-copy-command], [data-copy-code]");
   for (const btn of copyButtons) {
+    let resetTimer;
     btn.addEventListener("click", async () => {
-      const command = btn.getAttribute("data-copy-command") || "brew install --cask tefx/tap/cito";
+      const command = btn.hasAttribute("data-copy-code")
+        ? btn.closest(".code-block").querySelector("pre code").textContent
+        : btn.getAttribute("data-copy-command") || "brew install --cask tefx/tap/cito";
       const badge = btn.querySelector("[data-copy-badge]");
       if (btn.disabled) return;
+      clearTimeout(resetTimer);
       btn.disabled = true;
       if (badge) badge.setAttribute("aria-live", "polite");
       try {
@@ -16,6 +20,9 @@
         if (badge) badge.textContent = "Copy failed";
       } finally {
         btn.disabled = false;
+        resetTimer = setTimeout(() => {
+          if (badge) badge.textContent = "Copy";
+        }, 2000);
       }
     });
   }

@@ -36,23 +36,25 @@ struct Sidecar {
 impl Drop for Sidecar {
     fn drop(&mut self) {
         self.input.take();
-        let deadline = std::time::Instant::now() + Duration::from_millis(100);
-        loop {
-            if self.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        if !cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100))
+            .unwrap_or(false)
+        {
+            let _ = self.child.kill();
         }
+        let _ = self.child.wait();
     }
 }
 static STDIO_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STDIO_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 extern "C" fn stdio_signal(_: libc::c_int) {
     STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    let fd = STDIO_PIPE.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: the handler uses only an async-signal-safe write to the installed wake pipe.
+        unsafe {
+            libc::write(fd, [1u8].as_ptr().cast(), 1);
+        }
+    }
 }
 fn pop_stdio_line(pending: &mut Vec<u8>) -> Result<Option<String>, String> {
     if let Some(end) = pending.iter().position(|b| *b == b'\n') {
@@ -90,21 +92,28 @@ fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
             Ok(None) => {}
             Err(_) => return None,
         }
-        let mut fd = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: poll receives one valid descriptor structure; read writes only into the live byte array.
-        let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+        let mut fds = [
+            libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: STDIO_READ.load(std::sync::atomic::Ordering::Relaxed),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: poll borrows initialized descriptors owned by run_mcp_stdio.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
         if ready < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
             return None;
         }
-        if ready == 0 {
-            continue;
+        if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
         }
         let mut bytes = [0u8; 8192];
         let count =
@@ -115,8 +124,18 @@ fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
         pending.extend_from_slice(&bytes[..count as usize]);
     }
 }
+static STDIO_READ: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 fn run_mcp_stdio() {
-    // SAFETY: handlers only store a lock-free atomic; owned sidecars are dropped by normal Rust control flow.
+    let wake = match cito_native::support::WakePipe::new() {
+        Ok(wake) => wake,
+        Err(error) => {
+            eprintln!("cito-mcp: {error}");
+            return;
+        }
+    };
+    STDIO_READ.store(wake.read_fd(), std::sync::atomic::Ordering::Relaxed);
+    STDIO_PIPE.store(wake.write_fd(), std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: handlers store a lock-free atomic and write to the live self-pipe.
     unsafe {
         libc::signal(
             libc::SIGINT,
@@ -142,14 +161,13 @@ fn run_mcp_stdio() {
         eprintln!("cito-mcp: {e}");
         std::process::exit(1)
     }
-    let endpoint = env::var("CITO_ENDPOINT_PID")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|p| *p > 0)
-        .unwrap_or_else(|| {
-            // SAFETY: getppid has no pointer arguments or ownership effects.
-            unsafe { libc::getppid() as u32 }
-        });
+    let endpoint = cito_native::support::enclosing_endpoint_pid(
+        env::var("CITO_ENDPOINT_PID")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        // SAFETY: getppid only reads the process parent.
+        unsafe { libc::getppid() as u32 },
+    );
     let lock = Arc::new(Mutex::new(()));
     let mut capabilities = json!({});
     let mut sidecars = vec![];

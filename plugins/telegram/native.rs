@@ -14,6 +14,7 @@ struct ApiFailure {
     message: String,
     retryable: bool,
     effect_unknown: bool,
+    retry_after: Option<u64>,
 }
 impl std::fmt::Display for ApiFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,18 +38,33 @@ fn agent(poll: bool) -> &'static ureq::Agent {
     })
 }
 fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, ApiFailure> {
+    api_with_timeout(
+        config,
+        method,
+        body,
+        Duration::from_secs(if method == "getUpdates" { 35 } else { 25 }),
+    )
+}
+fn api_with_timeout(
+    config: &Value,
+    method: &str,
+    body: Value,
+    timeout: Duration,
+) -> std::result::Result<Value, ApiFailure> {
     use std::io::Read;
     let token = str_at(config, "botToken").ok_or_else(|| ApiFailure {
         message: "Bot Token is required".into(),
         retryable: false,
         effect_unknown: false,
+        retry_after: None,
     })?;
     let base = str_at(config, "apiBaseUrl")
         .unwrap_or("https://api.telegram.org")
         .trim_end_matches('/');
     let response = match agent(method == "getUpdates")
         .post(&format!("{base}/bot{token}/{method}"))
-        .send_json(body)
+        .timeout(timeout)
+        .send_json(body.clone())
     {
         Ok(r) => r,
         Err(ureq::Error::Status(status, response)) => {
@@ -61,6 +77,9 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
                 ),
                 retryable: matches!(status, 408 | 429 | 500..=599),
                 effect_unknown: false,
+                retry_after: (status == 429)
+                    .then(|| v["parameters"]["retry_after"].as_u64())
+                    .flatten(),
             });
         }
         Err(ureq::Error::Transport(e)) => {
@@ -82,17 +101,63 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
                 message: format!("Telegram {method} request failed"),
                 retryable: before_send,
                 effect_unknown: !before_send && method == "sendMessage",
+                retry_after: None,
             });
         }
     };
-    let v: Value =
-        serde_json::from_reader(response.into_reader().take(1_048_576)).map_err(|_| {
-            ApiFailure {
+    let mut bytes = Vec::new();
+    let read = response
+        .into_reader()
+        .take(1_048_577)
+        .read_to_end(&mut bytes);
+    if read.is_err() && bytes.len() <= 1_048_576 {
+        return Err(ApiFailure {
+            message: format!("Telegram {method} transport read was incomplete"),
+            retryable: method == "getUpdates",
+            effect_unknown: method == "sendMessage",
+            retry_after: None,
+        });
+    }
+    let parsed = if bytes.len() <= 1_048_576 {
+        serde_json::from_slice::<Value>(&bytes).ok()
+    } else {
+        None
+    };
+    let v = match parsed {
+        Some(value) => value,
+        None if method == "getUpdates" => {
+            if body["limit"].as_u64().unwrap_or(25) > 1 {
+                let mut single = body;
+                single["limit"] = json!(1);
+                return api(config, method, single);
+            }
+            // The bounded prefix normally contains update_id before the large message.
+            let prefix = String::from_utf8_lossy(&bytes);
+            let update = prefix
+                .split_once("\"update_id\"")
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .map(|(_, rest)| {
+                    rest.trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                })
+                .and_then(|id| id.parse::<u64>().ok())
+                .unwrap_or_else(|| body["offset"].as_u64().unwrap_or(0));
+            eprintln!(
+                "Telegram getUpdates: skipping oversized or malformed single update {update}"
+            );
+            return Ok(json!([{"update_id":update}]));
+        }
+        None => {
+            return Err(ApiFailure {
                 message: format!("Telegram {method} response was incomplete"),
                 retryable: false,
                 effect_unknown: method == "sendMessage",
-            }
-        })?;
+                retry_after: None,
+            })
+        }
+    };
     if v["ok"] != true {
         let status = v["error_code"].as_u64().unwrap_or(400);
         return Err(ApiFailure {
@@ -102,14 +167,32 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
             ),
             retryable: matches!(status, 408 | 429 | 500..=599),
             effect_unknown: false,
+            retry_after: (status == 429)
+                .then(|| v["parameters"]["retry_after"].as_u64())
+                .flatten(),
         });
     }
     Ok(v["result"].clone())
 }
+fn chunks(text: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let (mut start, mut units) = (0, 0);
+    for (offset, character) in text.char_indices() {
+        if units + character.len_utf16() > 4096 {
+            chunks.push(&text[start..offset]);
+            start = offset;
+            units = 0;
+        }
+        units += character.len_utf16();
+    }
+    if start < text.len() {
+        chunks.push(&text[start..]);
+    }
+    chunks
+}
 fn send(config: &Value, chat: &str, text: &str) -> Result<Vec<String>> {
     let mut ids = vec![];
-    for chunk in text.chars().collect::<Vec<_>>().chunks(4096) {
-        let text: String = chunk.iter().collect();
+    for text in chunks(text) {
         let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
         ids.push(id(&r["message_id"]).ok_or("Telegram message_id is missing")?);
     }
@@ -127,20 +210,40 @@ fn delivery(config: &Value, req: &Value) -> Value {
             message: "Chat ID is required".into(),
             retryable: false,
             effect_unknown: false,
+            retry_after: None,
         })?;
         let s = &req["signal"];
         let from = str_at(&s["from"], "title")
             .or_else(|| str_at(&s["from"], "listener_id"))
             .unwrap_or("sender");
         let text = format!("Cito · {from}\n\n{}", s["message"].as_str().unwrap_or(""));
-        let chars: Vec<char> = text.chars().collect();
-        for chunk in chars.chunks(4096).skip(ids.len()) {
-            let text: String = chunk.iter().collect();
-            let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
+        let claim_until = req["claim_until_ms"].as_u64().ok_or_else(|| ApiFailure {
+            message: "Delivery reservation deadline is required".into(),
+            retryable: false,
+            effect_unknown: false,
+            retry_after: None,
+        })?;
+        for text in chunks(&text).into_iter().skip(ids.len()) {
+            let budget = claim_until.saturating_sub(now_ms()).saturating_sub(500);
+            if budget == 0 {
+                return Err(ApiFailure {
+                    message: "Delivery reservation expired before send".into(),
+                    retryable: true,
+                    effect_unknown: false,
+                    retry_after: None,
+                });
+            }
+            let r = api_with_timeout(
+                config,
+                "sendMessage",
+                json!({"chat_id":chat,"text":text}),
+                Duration::from_millis(budget.min(25_000)),
+            )?;
             ids.push(id(&r["message_id"]).ok_or_else(|| ApiFailure {
                 message: "Telegram message_id is missing".into(),
                 retryable: false,
                 effect_unknown: true,
+                retry_after: None,
             })?);
             emit(
                 &json!({"op":"delivered","delivery_id":req["delivery_id"],"progress":true,"external_msg_ids":ids}),
@@ -148,11 +251,17 @@ fn delivery(config: &Value, req: &Value) -> Value {
         }
         Ok(())
     })();
-    let (ok, retryable, effect_unknown, error) = match result {
-        Ok(()) => (true, false, false, None),
-        Err(e) => (false, e.retryable, e.effect_unknown, Some(e.message)),
+    let (ok, retryable, effect_unknown, error, retry_after) = match result {
+        Ok(()) => (true, false, false, None, None),
+        Err(e) => (
+            false,
+            e.retryable,
+            e.effect_unknown,
+            Some(e.message),
+            e.retry_after,
+        ),
     };
-    json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":ok,"retryable":retryable,"effect_unknown":effect_unknown,"external_msg_id":ids.last(),"external_msg_ids":ids,"error":error})
+    json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":ok,"retryable":retryable,"effect_unknown":effect_unknown,"external_msg_id":ids.last(),"external_msg_ids":ids,"error":error,"retry_after":retry_after})
 }
 fn rpc(config: &Value, req: &Value) -> Value {
     let c = if req["hub_config"].is_object() {
@@ -199,7 +308,59 @@ struct Pending {
     key: Option<String>,
     done: bool,
 }
+struct Outbound {
+    deliveries: mpsc::SyncSender<(Value, Value)>,
+    control: mpsc::SyncSender<(Value, Value)>,
+}
+impl Outbound {
+    fn new() -> Self {
+        fn worker() -> mpsc::SyncSender<(Value, Value)> {
+            let (tx, rx) = mpsc::sync_channel::<(Value, Value)>(64);
+            std::thread::spawn(move || {
+                while let Ok((config, request)) = rx.recv() {
+                    match str_at(&request, "op").unwrap_or("") {
+                        "deliver" => emit(&delivery(&config, &request)),
+                        "_send" => {
+                            if let Err(error) = send(
+                                &config,
+                                str_at(&request, "chat").unwrap_or(""),
+                                str_at(&request, "text").unwrap_or(""),
+                            ) {
+                                eprintln!("Telegram confirmation: {error}");
+                            }
+                        }
+                        _ => emit(&rpc(&config, &request)),
+                    }
+                }
+            });
+            tx
+        }
+        Self {
+            deliveries: worker(),
+            control: worker(),
+        }
+    }
+    fn submit(&self, config: &Value, request: Value) {
+        let tx = if request["op"] == "deliver" {
+            &self.deliveries
+        } else {
+            &self.control
+        };
+        if tx.try_send((config.clone(), request.clone())).is_err() {
+            if request["op"] == "deliver" {
+                emit(
+                    &json!({"op":"delivered","delivery_id":request["delivery_id"],"ok":false,"retryable":true,"effect_unknown":false,"error":"Outbound queue is full"}),
+                );
+            } else if request["op"] != "_send" {
+                emit(
+                    &json!({"op":"rpc_result","req_id":request["req_id"],"ok":false,"error":"Outbound queue is full"}),
+                );
+            }
+        }
+    }
+}
 struct Runtime {
+    outbound: Outbound,
     config: Value,
     cursor: u64,
     pending: VecDeque<Pending>,
@@ -319,8 +480,7 @@ impl Runtime {
                         .max(id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0));
                 }
             }
-            "format_pair" | "test" => emit(&rpc(&self.config, &r)),
-            "deliver" => emit(&delivery(&self.config, &r)),
+            "format_pair" | "test" | "deliver" => self.outbound.submit(&self.config, r.clone()),
             "reply_ack" => {
                 if let Some(key) = id(&r["update_id"]) {
                     if let Some(chat) = self.reply_chats.remove(&key) {
@@ -335,9 +495,8 @@ impl Runtime {
                                 str_at(&r, "error").unwrap_or("Target unavailable")
                             )
                         };
-                        if let Err(e) = send(&self.config, &chat, &text) {
-                            eprintln!("Telegram reply confirmation: {e}");
-                        }
+                        self.outbound
+                            .submit(&self.config, json!({"op":"_send","chat":chat,"text":text}));
                         self.done(&key);
                     }
                 }
@@ -356,9 +515,8 @@ impl Runtime {
                                 str_at(&r, "error").unwrap_or("Invalid or expired code")
                             )
                         };
-                        if let Err(e) = send(&self.config, &chat, &text) {
-                            eprintln!("Telegram pairing confirmation: {e}");
-                        }
+                        self.outbound
+                            .submit(&self.config, json!({"op":"_send","chat":chat,"text":text}));
                         self.done(&key);
                     }
                 }
@@ -371,10 +529,44 @@ impl Runtime {
         true
     }
 }
+#[derive(Default)]
+struct PollBackoff {
+    failures: u32,
+}
+impl PollBackoff {
+    fn failed(&mut self, error: &ApiFailure, jitter_ms: u64) -> (bool, Duration) {
+        self.failures = self.failures.saturating_add(1);
+        let permanent = [
+            "HTTP 401:",
+            "HTTP 403:",
+            "HTTP 409:",
+            "API 401:",
+            "API 403:",
+            "API 409:",
+        ]
+        .iter()
+        .any(|code| error.message.contains(code));
+        let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
+        (
+            permanent || self.failures >= 3,
+            Duration::from_millis(delay + jitter_ms.min(499))
+                .max(Duration::from_secs(error.retry_after.unwrap_or(0))),
+        )
+    }
+    fn succeeded(&mut self) {
+        self.failures = 0;
+    }
+}
+
+enum Event {
+    Request(Value),
+    Poll(Value, std::result::Result<Value, ApiFailure>),
+}
 pub fn main() {
-    let input = stdin_watchdog();
-    let (tx, rx) = mpsc::channel::<(Value, std::result::Result<Value, ApiFailure>)>();
+    let (tx, rx) = mpsc::channel::<Event>();
+    stdin_events(tx.clone(), Event::Request);
     let mut runtime = Runtime {
+        outbound: Outbound::new(),
         config: json!({}),
         cursor: 0,
         pending: VecDeque::new(),
@@ -382,18 +574,43 @@ pub fn main() {
         pair_chats: HashMap::new(),
     };
     let mut polling = false;
+    let mut backoff = PollBackoff::default();
     let mut next_poll = std::time::Instant::now();
+    let mut paused = false;
     loop {
-        while let Ok(req) = input.try_recv() {
-            if !runtime.request(req) {
+        let can_poll = !polling
+            && !paused
+            && runtime.pending.is_empty()
+            && str_at(&runtime.config, "botToken").is_some();
+        let event = if can_poll {
+            match rx.recv_timeout(next_poll.saturating_duration_since(std::time::Instant::now())) {
+                Ok(event) => Some(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(_) => return,
+            }
+        } else {
+            match rx.recv() {
+                Ok(event) => Some(event),
+                Err(_) => return,
+            }
+        };
+        if let Some(Event::Request(req)) = event.as_ref() {
+            let configured = req["op"] == "configure";
+            if !runtime.request(req.clone()) {
                 return;
             }
+            if configured {
+                paused = false;
+                backoff.succeeded();
+                next_poll = std::time::Instant::now();
+            }
         }
-        if let Ok((config, result)) = rx.try_recv() {
+        if let Some(Event::Poll(config, result)) = event {
             polling = false;
             if config == runtime.config {
                 match result {
                     Ok(updates) => {
+                        backoff.succeeded();
                         emit(&json!({"op":"health","error":null}));
                         runtime.updates(updates);
                     }
@@ -406,15 +623,34 @@ pub fn main() {
                         } else {
                             "Check the network, Bot Token, and bot permissions."
                         };
-                        emit(
-                            &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
-                        );
-                        next_poll = std::time::Instant::now() + Duration::from_secs(1);
+                        let jitter = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_millis() as u64
+                            % 500;
+                        let (report, delay) = backoff.failed(&e, jitter);
+                        if report {
+                            emit(
+                                &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
+                            );
+                        }
+                        paused = [
+                            "HTTP 401:",
+                            "HTTP 403:",
+                            "HTTP 409:",
+                            "API 401:",
+                            "API 403:",
+                            "API 409:",
+                        ]
+                        .iter()
+                        .any(|code| e.message.contains(code));
+                        next_poll = std::time::Instant::now() + delay;
                     }
                 }
             }
         }
         if !polling
+            && !paused
             && runtime.pending.is_empty()
             && str_at(&runtime.config, "botToken").is_some()
             && std::time::Instant::now() >= next_poll
@@ -427,13 +663,12 @@ pub fn main() {
                 let r = api(
                     &config,
                     "getUpdates",
-                    json!({"offset":cursor,"timeout":25,"allowed_updates":["message"]}),
+                    json!({"offset":cursor,"timeout":25,"limit":25,"allowed_updates":["message"]}),
                 );
-                let _ = tx.send((config, r));
+                let _ = tx.send(Event::Poll(config, r));
             });
             next_poll = std::time::Instant::now() + Duration::from_millis(100);
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -441,8 +676,48 @@ pub fn main() {
 mod tests {
     use super::*;
     #[test]
+    fn polling_hysteresis_backoff_and_permanent_auth_errors() {
+        let failure = |message: &str| ApiFailure {
+            message: message.into(),
+            retryable: false,
+            effect_unknown: false,
+            retry_after: None,
+        };
+        for message in [
+            "Telegram getUpdates request failed",
+            "Telegram getUpdates HTTP 502: Bad gateway",
+        ] {
+            let mut backoff = PollBackoff::default();
+            assert_eq!(
+                backoff.failed(&failure(message), 0),
+                (false, Duration::from_millis(500))
+            );
+            assert_eq!(
+                backoff.failed(&failure(message), 100),
+                (false, Duration::from_millis(1100))
+            );
+            assert_eq!(
+                backoff.failed(&failure(message), 200),
+                (true, Duration::from_millis(2200))
+            );
+            for _ in 0..100 {
+                assert!(backoff.failed(&failure(message), 499).1 <= Duration::from_millis(32499));
+            }
+            backoff.succeeded();
+            assert!(!backoff.failed(&failure(message), 0).0);
+        }
+        for message in [
+            "Telegram getUpdates HTTP 401: Unauthorized",
+            "Telegram getUpdates API 403: Forbidden",
+            "Telegram getUpdates HTTP 409: Conflict",
+        ] {
+            assert!(PollBackoff::default().failed(&failure(message), 0).0);
+        }
+    }
+    #[test]
     fn configure_retains_monotonic_cursor_and_ack_without_keyboard_is_noop() {
         let mut runtime = Runtime {
+            outbound: Outbound::new(),
             config: json!({"botToken":"first"}),
             cursor: 20,
             pending: VecDeque::new(),

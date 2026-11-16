@@ -585,7 +585,7 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
+fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labels() {
     let dir = temp();
     let root = fixture(&dir);
     let path = root.join("fixture/plugin.json");
@@ -618,17 +618,20 @@ fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "pending-destination");
     configure(json!({"user_config":{"address":"42"},"enabled":true}));
-    assert_eq!(binding()["last_delivered_seq"], cursor);
+    assert!(binding()["last_delivered_seq"].as_i64().unwrap() > cursor.as_i64().unwrap());
+    assert!(e
+        .reserve_deliveries(&e.plugin("fixture").unwrap())
+        .unwrap()
+        .is_empty());
+    send(&e, &node, "new-destination");
     wait_for(|| {
-        !e.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='pending-destination' AND status='delivered'", &[]).unwrap().is_empty()
+        !e.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='new-destination' AND status='delivered'", &[]).unwrap().is_empty()
     });
     let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
     let delivery = frames
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|frame| {
-            frame["op"] == "deliver" && frame["signal"]["signal_id"] == "pending-destination"
-        })
+        .find(|frame| frame["op"] == "deliver" && frame["signal"]["signal_id"] == "new-destination")
         .unwrap();
     assert_eq!(delivery["config"]["address"], "42");
     e.inner
@@ -651,13 +654,13 @@ fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
     assert_eq!(warned["channels"][0]["status"], "ready");
     assert!(s(&warned["channels"][0], "detail").contains("409"));
     e.plugin_frame("fixture", &json!({"op":"health","error":null}));
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Response lost' WHERE signal_id='pending-destination'", &[]).unwrap();
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Response lost' WHERE signal_id='new-destination'", &[]).unwrap();
     let unknown = e
         .rpc("human_channels_list", &json!({}), Some(&owner))
         .unwrap();
     assert_eq!(unknown["channels"][0]["warning"], true);
     assert!(s(&unknown["channels"][0], "detail").contains("outcome unknown"));
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='pending-destination'", &[]).unwrap();
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='new-destination'", &[]).unwrap();
     assert_eq!(
         e.rpc("human_channels_list", &json!({}), Some(&owner))
             .unwrap()["channels"][0]["warning"],
@@ -681,7 +684,7 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[]).unwrap();
     e.inner.plugins.lock().unwrap().push(ChannelPlugin{id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
-    e.inner.closed.store(true, Ordering::SeqCst);
+    e.pause_worker();
     let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice"});
     let bob = json!({"principal_id":"none#bob","owner_user":"bob"});
     e.human_rpc(
@@ -845,6 +848,124 @@ fn stopped_channel_process_waits_for_its_reader_callback() {
     drop(process);
     std::fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn pairing_preparation_quiesces_old_credential_frames_before_commit() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    e.pause_worker();
+    let script = r#"
+import json, os, pathlib, sys, time
+credential = None
+for line in sys.stdin:
+    request = json.loads(line)
+    op = request['op']
+    if op == 'configure':
+        credential = request['hub_config'].get('credential')
+    elif op == 'format_pair':
+        print(json.dumps({'op':'rpc_result', 'req_id':request['req_id'],
+                          'ok':True, 'instruction':'Pair with fixture'}), flush=True)
+        following = json.loads(sys.stdin.readline())
+        pathlib.Path('gate.tmp').write_text(json.dumps({'credential':credential, 'following':following}))
+        pathlib.Path('gate.tmp').replace('gate.json')
+        deadline = time.monotonic() + 3
+        while not pathlib.Path('release').exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        frames = [{'op':'cursor_save', 'cursor':'old-credential-cursor'},
+                  {'op':'health', 'error':'Old credential poll failure'}]
+        try:
+            os.write(sys.stdout.fileno(), ''.join(json.dumps(f) + '\n' for f in frames).encode())
+        except BrokenPipeError:
+            pass  # Quiescing preparation can already have closed its reader.
+        if following['op'] == 'shutdown':
+            break
+    elif op == 'test':
+        print(json.dumps({'op':'rpc_result', 'req_id':request['req_id'], 'ok':True}), flush=True)
+    elif op == 'shutdown':
+        break
+"#;
+    let mut plugin = hub_plugins::discover(&[(root, false)], None)
+        .unwrap()
+        .remove(0);
+    plugin.command = vec!["python3".into(), "-c".into(), script.into()];
+    let plugin_dir = plugin.dir.clone();
+    *e.inner.plugins.lock().unwrap() = vec![plugin];
+    e.inner
+        .db
+        .transaction(|c| {
+            save_service(c, "fixture", &json!({"credential":"A"}))?;
+            Ok(())
+        })
+        .unwrap();
+    let caller = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let pairing = {
+        let e = e.clone();
+        let caller = caller.clone();
+        thread::spawn(move || {
+            e.rpc(
+                "human_channel_pair_start",
+                &json!({"plugin_id":"fixture","hub_config":{"credential":"B"}}),
+                Some(&caller),
+            )
+        })
+    };
+    let gate_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(|| plugin_dir.join("gate.json").exists());
+        let gate: Value =
+            serde_json::from_str(&std::fs::read_to_string(plugin_dir.join("gate.json")).unwrap())
+                .unwrap();
+        // Release the queued A frames at the boundary where the old path would
+        // already have committed B and reconfigured this same polling reader.
+        std::fs::write(plugin_dir.join("release"), "").unwrap();
+        gate
+    }));
+    // Always release the child before joining, including a failed gate assertion.
+    std::fs::write(plugin_dir.join("release"), "").unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let paired = pairing.join().unwrap();
+        let gate = gate_result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        assert_eq!(gate["credential"], "A");
+        assert_eq!(gate["following"]["op"], "shutdown");
+        let paired = paired.unwrap();
+        assert_eq!(paired["committed"], true);
+        assert!(paired["code"].is_string());
+        // Synchronize with the restarted process after it has received B.
+        assert_eq!(
+            e.rpc(
+                "human_channels_test",
+                &json!({"plugin_id":"fixture"}),
+                Some(&caller)
+            )
+            .unwrap()["ok"],
+            true
+        );
+        e.inner
+            .db
+            .transaction(|c| {
+                let (cfg, state) = service(c, "fixture")?;
+                assert_eq!(cfg["credential"], "B");
+                assert!(state.get("cursor").is_none(), "{state}");
+                assert!(state.get("reply_floor").is_none(), "{state}");
+                assert!(state.get("poll_error").is_none(), "{state}");
+                assert_eq!(
+                    c.query(
+                        "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+                        &[]
+                    )?
+                    .len(),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    }));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[test]
 fn oidc_admin_can_edit_redacted_service_fields() {
     if std::env::var_os("CITO_TEST_ADMIN_WORKER").is_none() {
@@ -1521,10 +1642,7 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
     let e = HubEngine::open(&dir).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Drive exactly one tick; a background retry must not satisfy this test.
-        e.inner.closed.store(true, Ordering::SeqCst);
-        let worker = e.inner.worker.lock().unwrap().take().unwrap();
-        worker.join().unwrap();
-        e.inner.closed.store(false, Ordering::SeqCst);
+        e.pause_worker();
 
         let healthy = root.join("b");
         std::fs::rename(root.join("fixture"), &healthy).unwrap();
@@ -2441,13 +2559,104 @@ fn accepted_http_connections_wait_for_fragmented_headers() {
     thread::sleep(Duration::from_millis(40));
     client.write_all(b"GET /health HTTP/1.1\r\n").unwrap();
     thread::sleep(Duration::from_millis(40));
-    client.write_all(b"Host: localhost\r\n\r\n").unwrap();
+    write!(client, "Host: {}\r\n\r\n", server.address).unwrap();
     let mut response = String::new();
     client.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     server.shutdown();
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn http_browser_boundary_and_idle_sse_shutdown() {
+    for bind in ["127.0.0.1", "0.0.0.0"] {
+        let dir = temp();
+        let engine = HubEngine::open(&dir).unwrap();
+        engine.set_plugin_roots(&[]).unwrap();
+        let server = engine
+            .start_server(bind, 0, HubAuth::new("none", None, None, None).unwrap())
+            .unwrap();
+        let address = format!("127.0.0.1:{}", server.port());
+        let base = format!("http://{address}");
+        for (host, origin, media, status) in [
+            (address.clone(), None, "application/json", 200),
+            (
+                address.clone(),
+                Some(base.clone()),
+                "application/json; charset=utf-8",
+                200,
+            ),
+            (
+                address.clone(),
+                Some(format!("http://127.0.0.1:{}", server.port() + 1)),
+                "application/json",
+                403,
+            ),
+            (
+                address.clone(),
+                Some(format!("https://{address}")),
+                "application/json",
+                403,
+            ),
+            (
+                format!("127.0.0.1:{}", server.port() + 1),
+                None,
+                "application/json",
+                403,
+            ),
+            (address.clone(), None, "text/plain", 415),
+            (
+                format!("hub.example:{}", server.port()),
+                None,
+                "application/json",
+                if bind == "0.0.0.0" { 200 } else { 403 },
+            ),
+        ] {
+            let mut request = ureq::post(&format!("{base}/v1/rpc"))
+                .set("Host", &host)
+                .set("Content-Type", media);
+            if let Some(origin) = origin {
+                request = request.set("Origin", &origin);
+            }
+            let actual = match request.send_string(r#"{"op":"account_info"}"#) {
+                Ok(response) => response.status(),
+                Err(ureq::Error::Status(status, _)) => status,
+                Err(error) => panic!("{error}"),
+            };
+            assert_eq!(actual, status, "bind={bind} host={host} media={media}");
+        }
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            let mut client = TcpStream::connect(&address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            write!(client, "GET /v1/events HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("200"), "{line}");
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == ":ok\n" {
+                    break;
+                }
+            }
+            clients.push(reader);
+        }
+        let start = std::time::Instant::now();
+        server.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(engine.rpc("account_info", &json!({}), None).is_ok());
+        drop(clients);
+        engine.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 #[test]
 fn http_wire_and_stoppable_shared_engine() {
@@ -2535,6 +2744,71 @@ fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
+    for limit in [2, 1024] {
+        let dir = temp();
+        let e = HubEngine::open(&dir).unwrap();
+        for index in 0..7 {
+            let id = format!("human-{index}");
+            let reg = json!({"listener_id":id,"harness":"human","scope":"workspace",
+                "state":"ACTIVE","about":"x".repeat(600_000),
+                "channels":{"device:human":{"host_id":"device","state":"ACTIVE",
+                    "updated_at_ms":1,"binding_generation":3}}});
+            // Seed expired, unreconciled storage directly so snapshot must write.
+            e.inner.db.execute(
+                "INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,1,CAST(? AS BLOB),'','workspace')",
+                &[json!(id), json!(reg.to_string())],
+            ).unwrap();
+        }
+        let mut cursor = Value::Null;
+        let mut keys = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = e
+                .rpc(
+                    "kv_snapshot",
+                    &json!({"after_key":cursor,"limit":limit}),
+                    None,
+                )
+                .unwrap();
+            assert!(serde_json::to_vec(&page).unwrap().len() <= 2 * 1024 * 1024);
+            let entries = page["entries"].as_array().unwrap();
+            assert!(!entries.is_empty() && entries.len() <= limit as usize);
+            for entry in entries {
+                let reg: Value = serde_json::from_slice(
+                    &B64.decode(entry["value_b64"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reg["state"], "UNLISTENED");
+                assert_eq!(reg["channels"], json!({}));
+                assert_eq!(reg["device_generation_fences"]["device:human"], 3);
+                assert_eq!(reg["human_control_revision"], 1);
+                let stored = e.rpc("kv_get", &json!({"key":entry["key"]}), None).unwrap();
+                assert_eq!(stored["revision"], entry["revision"]);
+                assert_eq!(stored["value_b64"], entry["value_b64"]);
+                keys.push(entry["key"].clone());
+            }
+            pages += 1;
+            cursor = page["next_cursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+            assert_eq!(Some(&cursor), keys.last());
+            assert!(pages < 7);
+        }
+        assert!(pages > 1);
+        assert_eq!(
+            keys,
+            (0..7)
+                .map(|i| json!(format!("human-{i}")))
+                .collect::<Vec<_>>()
+        );
+        e.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 #[test]
 fn binary_payloads_survive_kv_stream_consumers_and_restart() {
     let dir = temp();
@@ -2875,11 +3149,7 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
         e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
     });
     // Control reservation time explicitly; only genuine progress may renew it.
-    e.inner.closed.store(true, Ordering::SeqCst);
-    if let Some(worker) = e.inner.worker.lock().unwrap().take() {
-        worker.join().unwrap();
-    }
-    e.inner.closed.store(false, Ordering::SeqCst);
+    e.pause_worker();
     let old = now_ms() - 180_001;
     e.inner.db.execute("UPDATE hub_channel_deliveries SET status='in_flight',delivered_ms=?,reservation_id='multipart' WHERE signal_id='concurrent'", &[json!(old)]).unwrap();
     e.delivery_result(
@@ -2944,11 +3214,7 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
     e.inner.db.execute("UPDATE hub_channel_deliveries SET status=\'in_flight\',reservation_id=\'crashed\' WHERE signal_id=\'concurrent\'",&[]).unwrap();
     // Stop periodic supervision so Send Test is deterministically the first
     // replacement caller after the crash, rather than racing the supervisor.
-    e.inner.closed.store(true, Ordering::SeqCst);
-    if let Some(worker) = e.inner.worker.lock().unwrap().take() {
-        worker.join().unwrap();
-    }
-    e.inner.closed.store(false, Ordering::SeqCst);
+    e.pause_worker();
     process.shutdown();
     assert_eq!(
         e.rpc(
@@ -3110,10 +3376,16 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .unwrap()[0],
         json!({"status":"effect_unknown","last_error":"Response lost"})
     );
+    // Keep transport unconfigured while exercising configuration-only ledger resets.
+    // The public configure path also performs a synchronous channel tick.
+    e.pause_worker();
+    let mut plugin = plugin.clone();
+    plugin.manifest["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"transport","scope":"hub","type":"secret","required":true}));
     send(&e, &node, "after-binding");
-    e.inner.plugins.lock().unwrap().push(plugin.clone());
-    // Freeze background execution; configuration and ledger reconciliation need no child.
-    e.inner.closed.store(true, Ordering::SeqCst);
+    e.inner.plugins.lock().unwrap().push(plugin);
     e.human_rpc(
         "human_channels_configure",
         &json!({"plugin_id":"fixture","hub_config":{"credential":"new"}}),
@@ -3186,7 +3458,26 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .is_empty(),
         "first identity assignment retires legacy destination mappings"
     );
-    e.inner.closed.store(false, Ordering::SeqCst);
+    e.inner
+        .db
+        .execute("UPDATE hub_human_channels SET enabled=0", &[])
+        .unwrap();
+    send(&e, &node, "while-disabled");
+    let boundary = e.inner.db.transaction(max_seq).unwrap();
+    assert!(boundary > old_boundary.as_i64().unwrap());
+    e.inner.db.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms) VALUES('cito-reenable','fixture','none#alice','alice',?,?)",&[json!(now_ms()),json!(now_ms()+60_000)]).unwrap();
+    e.redeem("fixture",&json!({"code":"cito-reenable","is_private_chat":true,"external_chat_id":"room","external_user_id":"alice","user_config_patch":{}})).unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT last_delivered_seq,enabled FROM hub_human_channels",
+                &[]
+            )
+            .unwrap()[0],
+        json!({"last_delivered_seq":boundary,"enabled":1})
+    );
+    assert!(e.inner.processes.lock().unwrap().is_empty());
     e.inner.plugins.lock().unwrap().clear();
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
@@ -3203,7 +3494,20 @@ fn retention_and_dedup_expire() {
     )
     .unwrap();
     send(&e, "target", "s1");
-    thread::sleep(Duration::from_millis(80));
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_signals SET created_ms=?",
+            &[json!(now_ms() - 1000)],
+        )
+        .unwrap();
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_meta SET int_val=0 WHERE key='last_maintenance_ms'",
+            &[],
+        )
+        .unwrap();
     send(&e, "target", "s1");
     let rows = e
         .inner

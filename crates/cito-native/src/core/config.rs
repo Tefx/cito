@@ -38,7 +38,7 @@ pub fn repair_default_hub(v: &mut Value) {
 
 static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
-fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn publication_target(path: &Path) -> Result<PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -46,8 +46,27 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
             .map_err(|e| e.to_string())?
             .join(path)
     };
-    if let Ok(canonical) = absolute.canonicalize() {
-        return Ok(canonical);
+    // Follow even a dangling leaf symlink before choosing the atomic rename
+    // destination. Bound the walk so a cycle cannot recurse indefinitely.
+    let mut absolute = absolute;
+    for _ in 0..40 {
+        if let Ok(canonical) = absolute.canonicalize() {
+            return Ok(canonical);
+        }
+        let Ok(target) = fs::read_link(&absolute) else {
+            break;
+        };
+        absolute = if target.is_absolute() {
+            target
+        } else {
+            absolute
+                .parent()
+                .ok_or("Configuration path has no parent")?
+                .join(target)
+        };
+    }
+    if fs::read_link(&absolute).is_ok() {
+        return Err("Configuration symlink chain exceeds 40 links".into());
     }
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
@@ -56,12 +75,14 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
             Component::ParentDir => {
                 normalized.pop();
             }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    if let (Some(parent), Some(name)) = (normalized.parent(), normalized.file_name()) {
-        if let Ok(parent) = parent.canonicalize() {
-            return Ok(parent.join(name));
+            _ => {
+                normalized.push(component.as_os_str());
+                // Resolve existing ancestors before a following `..`: walking
+                // through a directory symlink changes which parent it denotes.
+                if let Ok(canonical) = normalized.canonicalize() {
+                    normalized = canonical;
+                }
+            }
         }
     }
     Ok(normalized)
@@ -81,7 +102,7 @@ pub fn with_config_lock_mode<T>(
     dry_run: bool,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let path = absolute_path(path)?;
+    let path = publication_target(path)?;
     let lock = CONFIG_LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()

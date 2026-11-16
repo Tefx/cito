@@ -1,6 +1,6 @@
 use super::{
     http_actions::{dispatch_action, interactive_login},
-    DaemonService,
+    wake_daemon, DaemonService,
 };
 use crate::core::identity::string;
 use crate::setup::resolve_package_root;
@@ -29,10 +29,17 @@ fn cap_text(s: &str, limit: usize) -> String {
 fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
     match v {
         Value::String(s) => {
-            if key == "request_id" {
+            if matches!(
+                key,
+                "request_id" | "url" | "issuer" | "client_id" | "clientId" | "value"
+            ) {
                 return;
             }
-            if matches!(key, "title" | "from_title") {
+            if key == "title" {
+                *s = cap_text(s, 512);
+                return;
+            }
+            if key == "from_title" {
                 *s = cap_text(s, 128);
                 return;
             }
@@ -60,6 +67,9 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
             }
         }
         Value::Object(m) => {
+            if m.get("op").is_some_and(|op| op == "hub_invite") {
+                return;
+            }
             for (k, v) in m {
                 bound_fields(v, k, preserve_collections)
             }
@@ -74,14 +84,28 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
         let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
         bound_fields(&mut frame, "", correlated);
     }
+    let mut receipt_only = false;
     loop {
         let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
         if bytes.len() + 1 < FRAME_LIMIT {
             return Ok(bytes);
         }
-        // A correlated projection is a receipt: dropping rows can strand the
-        // consumer's pending save. Send an explicit correlated failure instead.
+        // Preserve a committed mutation even when its canonical projection
+        // cannot fit. A payload-free settlement releases the pending editor.
         if frame.get("request_id").is_some_and(|id| !id.is_null()) {
+            if frame["ok"] == true && frame["committed"] == true {
+                if receipt_only {
+                    return Err("UI receipt exceeds frame budget".into());
+                }
+                receipt_only = true;
+                frame = json!({"op":frame["op"],"ok":true,"committed":true,
+                    "request_id":frame["request_id"],"hub":frame["hub"],
+                    "channel":frame["channel"],"channel_id":frame["channel_id"],
+                    "action":frame["action"],"source_op":frame["source_op"],
+                    "authority_changed":frame["authority_changed"],
+                    "warning":"Saved successfully; canonical settings exceed the UI frame budget"});
+                continue;
+            }
             if frame["op"] == "error" {
                 return Err("UI receipt exceeds frame budget".into());
             }
@@ -137,7 +161,6 @@ impl UiMailbox {
         // Passive snapshots coalesce; correlated command results stay ordered.
         let key = if string(&frame, "request_id").is_empty()
             && string(&frame, "source_op").is_empty()
-            && frame["confirm_hub_save"] != true
             && matches!(string(&frame, "op"), "state" | "settings" | "directory")
         {
             Some(format!(
@@ -165,14 +188,7 @@ impl UiMailbox {
         }
         if let Ok(mut pending) = self.pending.lock() {
             if let Some(key) = key.as_ref() {
-                if let Some((_, frame)) = pending
-                    .iter_mut()
-                    .find(|(old, _)| old.as_ref() == Some(key))
-                {
-                    *frame = bytes;
-                    self.ready.notify_one();
-                    return;
-                }
+                pending.retain(|(old, _)| old.as_ref() != Some(key));
             }
             const MAX_PENDING: usize = 64;
             if pending.len() >= MAX_PENDING {
@@ -254,10 +270,16 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
             }
         }
     });
-    if let Ok(mut s) = service.lock() {
-        s.ui = Some(mailbox);
-        s.push_ui();
-    }
+    let ui_generation = if let Ok(mut s) = service.lock() {
+        s.set_ui(mailbox.clone());
+        s.ui_generation
+    } else {
+        mailbox.close();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        return None;
+    };
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(output);
         let mut logins: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -292,7 +314,7 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 let run = move || {
                     // Both UI stdout actions and HTTP control callers share the
                     // same closed-loop error frame and refreshed state emission.
-                    let _ = dispatch_action(&service, &action);
+                    let _ = dispatch_action(&service, &action, Some(ui_generation));
                 };
                 if is_login {
                     logins.push(thread::spawn(run));
@@ -310,6 +332,16 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 logins = pending;
             }
         }
+        if let Ok(mut s) = service.lock() {
+            // An old reader must never clear demand belonging to its replacement.
+            if s.ui
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &mailbox))
+            {
+                s.disconnect_ui();
+            }
+        }
+        wake_daemon();
         for login in logins {
             let _ = login.join();
         }

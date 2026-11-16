@@ -486,7 +486,8 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
         .unwrap();
     write!(
         stream,
-        "GET /v1/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n\r\n",
+        server.address
     )
     .unwrap();
     let mut response = String::new();
@@ -540,7 +541,8 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
         .unwrap();
     write!(
         stream,
-        "GET /v1/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n\r\n",
+        server.address
     )
     .unwrap();
     let mut reader = BufReader::new(stream);

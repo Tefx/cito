@@ -53,8 +53,14 @@ impl ChannelInventory {
         // No pre-mutation inventory can satisfy or overwrite this acknowledgement.
         let refresh = self.fetch_locked(slot);
         match result {
-            Ok(value) => {
-                refresh?;
+            Ok(mut value) => {
+                if let Err(error) = refresh {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("inventory_warning".into(), json!(error));
+                    } else {
+                        eprintln!("Channel inventory refresh: {error}");
+                    }
+                }
                 Ok(value)
             }
             Err(error) => Err(error),
@@ -90,14 +96,20 @@ impl ChannelInventory {
     }
 }
 
+pub(super) fn overlay_inbox_state(channel: &mut Value, paused: bool) {
+    channel["inbox_paused"] = json!(paused);
+    channel["delivery_enabled"] =
+        json!(channel["enabled"] == true && channel["configured"] == true && !paused);
+    if paused
+        && channel["warning"] != true
+        && matches!(string(channel, "status"), "ready" | "paused")
+    {
+        channel["detail"] = json!("Delivery is paused while the Human Inbox is paused");
+    }
+}
+
 pub(super) fn remote_channels_identity(slot: &HubClient) -> Value {
-    json!([
-        slot.config["url"],
-        slot.config["authMode"],
-        slot.bearer,
-        slot.identity["owner_user"],
-        slot.identity["principal_id"]
-    ])
+    json!([slot.config["url"], slot.identity["principal_id"]])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,15 +142,26 @@ fn channel_id(action: &Value) -> Result<&str, String> {
         .ok_or_else(|| "INVALID_INPUT: channel_id required".into())
 }
 
-fn channel_rpc(action: &Value) -> &'static str {
-    if action["op"] == "save_hub_service" || action["scope"] == "hub" {
-        "human_channels_configure"
-    } else {
-        match string(action, "op") {
-            "channel_pair" => "human_channel_pair_start",
-            "channel_test" | "test_human_channel" => "human_channels_test",
-            _ => "human_channels_configure",
-        }
+fn channel_rpc(action: &Value) -> Result<&'static str, String> {
+    let op = string(action, "op");
+    let scope = action["scope"].as_str();
+    if scope.is_some_and(|scope| !matches!(scope, "hub" | "user"))
+        || (scope == Some("hub") && !matches!(op, "save_hub_service" | "channel_save"))
+        || (scope == Some("user") && op == "save_hub_service")
+    {
+        return Err("INVALID_INPUT: Channel scope is incompatible with operation".into());
+    }
+    match op {
+        "channel_pair" => Ok("human_channel_pair_start"),
+        "channel_test" | "test_human_channel" => Ok("human_channels_test"),
+        "save_hub_service"
+        | "channel_save"
+        | "channel_toggle"
+        | "channel_unpair"
+        | "channel_cancel_pair"
+        | "clear_channel_service"
+        | "disconnect_human_channel" => Ok("human_channels_configure"),
+        _ => Err("INVALID_INPUT: Unknown channel operation".into()),
     }
 }
 
@@ -147,6 +170,7 @@ fn run_channel_action(
     plugins: &LoadedPlugins,
     action: &Value,
 ) -> Result<Value, String> {
+    let rpc = channel_rpc(action)?;
     let id = channel_id(action)?;
     let op = string(action, "op");
     let mut params = action.clone();
@@ -199,7 +223,6 @@ fn run_channel_action(
             .unwrap_or_else(|| json!({}));
         params = json!({"plugin_id":id,"hub_config":hub_config});
     }
-    let rpc = channel_rpc(action);
     let result = slot.rpc(rpc, &params)?;
     if matches!(rpc, "human_channel_pair_start" | "human_channels_test") && !result.is_object() {
         Err("INVALID_INPUT: Channel result must be an object".into())
@@ -212,9 +235,11 @@ pub(super) fn dispatch_channel_action(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
     kind: ChannelActionKind,
+    ui_generation: Option<u64>,
 ) -> Result<Value, String> {
     let (slot, inventory, plugins, observed_gen) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
             return Err("Shutting down".into());
         }
@@ -227,6 +252,9 @@ pub(super) fn dispatch_channel_action(
             .unwrap_or(&s.config.default_hub)
             .to_string();
         s.active_settings_hub = Some(hub.clone());
+        if kind == ChannelActionKind::Read {
+            s.refresh_available()?;
+        }
         let slot = match s.slot(&hub).cloned() {
             Ok(slot) => slot,
             Err(error) => {
@@ -236,7 +264,7 @@ pub(super) fn dispatch_channel_action(
                     return Ok(json!({"ok":true}));
                 }
                 let result = Err(error);
-                s.finish_channel_action(&hub, action, &result);
+                s.finish_channel_action(&hub, action, &result, true, false);
                 return result;
             }
         };
@@ -260,35 +288,77 @@ pub(super) fn dispatch_channel_action(
         (slot, inventory, s.plugins.clone(), observed_gen)
     };
     // All waits and channel I/O use the shared per-hub owner without service.
-    let result = match kind {
+    let mut result = match kind {
         ChannelActionKind::Read => inventory
             .refresh(&slot, observed_gen)
             .map(|_| json!({"ok":true})),
         ChannelActionKind::Mutation => inventory.mutate(&slot, &plugins, action),
     };
+    if kind == ChannelActionKind::Mutation {
+        if let Ok(value) = &mut result {
+            if value["ok"] != false {
+                value["ok"] = json!(true);
+                value["committed"] = json!(true);
+            }
+            value["hub"] = json!(slot.name);
+            value["channel"] = json!(channel_id(action)?);
+            value["channel_id"] = value["channel"].clone();
+            value["action"] = action["op"].clone();
+            value["request_id"] = action["request_id"].clone();
+            value["authority_changed"] = json!(false);
+            value["receipt_authority"] = json!({"hub":slot.name,"url":slot.config["url"],"principal_id":slot.identity["principal_id"]});
+        }
+    }
     let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
     if s.closing || shutdown_requested() {
-        return Err("Shutting down".into());
+        return after_channel_action(result, kind, "Shutting down after channel request".into());
     }
-    s.reload_slots()?;
-    if slot.closed.load(Ordering::SeqCst)
+    let reload = s.reload_slots();
+    // Reload may replace authority even when it fails later. Check the live
+    // slot before emitting any pairing/test payload from the original owner.
+    let authority_changed = slot.closed.load(Ordering::SeqCst)
         || !s
             .slots
             .get(&slot.name)
-            .is_some_and(|current| remote_channels_identity(current) == inventory.identity)
-    {
-        let result = Err("NATS_UNAVAILABLE: Hub changed during channel request".into());
+            .is_some_and(|current| remote_channels_identity(current) == inventory.identity);
+    if reload.is_err() || authority_changed {
+        let warning = reload
+            .err()
+            .unwrap_or_else(|| "Hub authority changed after channel request committed".into());
+        let result = after_channel_action(result, kind, warning).map(|mut value| {
+            value["authority_changed"] = json!(authority_changed);
+            value
+        });
         if kind == ChannelActionKind::Mutation {
-            s.finish_channel_action(&slot.name, action, &result);
+            s.finish_channel_action(&slot.name, action, &result, false, authority_changed);
         }
         return result;
     }
     if kind == ChannelActionKind::Mutation {
-        s.finish_channel_action(&slot.name, action, &result);
+        s.finish_channel_action(&slot.name, action, &result, true, false);
     } else {
         s.emit(json!({"op":"settings","hub":slot.name,"settings":s.settings_for_hub(&slot.name)}));
     }
     result
+}
+
+fn after_channel_action(
+    result: Result<Value, String>,
+    kind: ChannelActionKind,
+    error: String,
+) -> Result<Value, String> {
+    if kind == ChannelActionKind::Read {
+        return Err(error);
+    }
+    result.map(|mut value| {
+        if let Some(fields) = value.as_object_mut() {
+            fields.insert("committed".into(), json!(true));
+            fields.insert("maintenance_warning".into(), json!(error));
+        } else {
+            eprintln!("Channel maintenance: {error}");
+        }
+        value
+    })
 }
 
 impl DaemonService {
@@ -304,10 +374,18 @@ impl DaemonService {
         entry.clone()
     }
 
-    fn finish_channel_action(&self, hub: &str, action: &Value, result: &Result<Value, String>) {
+    fn finish_channel_action(
+        &self,
+        hub: &str,
+        action: &Value,
+        result: &Result<Value, String>,
+        project_state: bool,
+        authority_changed: bool,
+    ) {
         let id = channel_id(action).unwrap_or_default();
-        let rpc = channel_rpc(action);
+        let rpc = channel_rpc(action).unwrap_or_default();
         match result {
+            _ if authority_changed => {}
             Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
                 let mut frame = result.clone();
                 frame["op"] = json!(if rpc == "human_channel_pair_start" { "pair_code" } else { "channel_test_result" });
@@ -319,7 +397,317 @@ impl DaemonService {
             Err(error) => self.emit(json!({"op":if rpc == "human_channels_test" {"channel_test_result"} else {"error"},"channel_id":id,"channel":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
             _ => {}
         }
-        self.emit(json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings_for_hub(hub)}));
-        self.push_ui();
+        let mut settlement = json!({"op":"settings","hub":hub,"channel_id":id,"channel":id,"action":action["op"],"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"authority_changed":authority_changed});
+        if let Ok(value) = result {
+            settlement["committed"] = json!(value["ok"] != false);
+            for key in ["committed", "maintenance_warning", "receipt_authority"] {
+                if let Some(value) = value.get(key) {
+                    settlement[key] = value.clone();
+                }
+            }
+        }
+        if let Some(warning) = settlement.get("maintenance_warning").cloned() {
+            settlement["warning"] = warning;
+        } else if authority_changed {
+            settlement["warning"] = json!(result
+                .as_ref()
+                .err()
+                .map(String::as_str)
+                .unwrap_or("Hub authority changed after channel request"));
+        }
+        if project_state {
+            settlement["settings"] = self.settings_for_hub(hub);
+        }
+        self.emit(settlement);
+        if project_state {
+            self.push_ui_result(Some(action));
+        }
+    }
+}
+
+#[cfg(test)]
+mod remediation_tests {
+    use super::*;
+    #[test]
+    fn operation_routing_rejects_scope_hijacks() {
+        for op in [
+            "channel_pair",
+            "channel_test",
+            "test_human_channel",
+            "channel_toggle",
+            "channel_unpair",
+        ] {
+            assert!(channel_rpc(&json!({"op":op,"scope":"hub"}))
+                .unwrap_err()
+                .starts_with("INVALID_INPUT:"));
+        }
+        assert_eq!(
+            channel_rpc(&json!({"op":"channel_pair"})).unwrap(),
+            "human_channel_pair_start"
+        );
+        assert_eq!(
+            channel_rpc(&json!({"op":"channel_test"})).unwrap(),
+            "human_channels_test"
+        );
+        assert_eq!(
+            channel_rpc(&json!({"op":"channel_save","scope":"hub"})).unwrap(),
+            "human_channels_configure"
+        );
+    }
+    #[test]
+    fn dispatcher_preserves_committed_receipt_when_hub_is_disabled() -> Result<(), String> {
+        dispatcher_committed_receipt("channel_toggle", false, true)
+    }
+
+    #[test]
+    fn dispatcher_emits_pairing_receipt_when_post_commit_reload_fails() -> Result<(), String> {
+        dispatcher_committed_receipt("channel_pair", true, false)
+    }
+
+    #[test]
+    fn dispatcher_fences_pairing_receipt_when_authority_changes_and_reload_fails(
+    ) -> Result<(), String> {
+        dispatcher_committed_receipt("channel_pair", true, true)
+    }
+
+    #[test]
+    fn dispatcher_fences_test_receipt_when_authority_changes_and_reload_fails() -> Result<(), String>
+    {
+        dispatcher_committed_receipt("channel_test", true, true)
+    }
+
+    #[test]
+    fn dispatcher_settles_save_without_settings_when_reload_fails() -> Result<(), String> {
+        dispatcher_committed_receipt("channel_save", true, false)
+    }
+
+    fn dispatcher_committed_receipt(
+        op: &'static str,
+        reload_failure: bool,
+        replace_authority: bool,
+    ) -> Result<(), String> {
+        use crate::plugins::{random_uuid_v4, NativeConfig};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        let dir = std::env::temp_dir().join(format!("cito-authority-{}", random_uuid_v4()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        let (committed_tx, committed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let post = line.starts_with("POST");
+            let mut length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            if !post {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                continue;
+            }
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            let last = request["op"] == "human_channels_list";
+            let result = if last {
+                committed_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                json!({"channels":[{"id":"messenger","enabled":true}]})
+            } else if request["op"] == "kv_snapshot" || request["op"] == "human_device_attach" {
+                json!({"entries":[]})
+            } else {
+                assert_eq!(request["op"], channel_rpc(&json!({"op":op})).unwrap());
+                json!({"ok":true,"committed":true,"receipt":"original","code":"original-code","instruction":"Pair with original authority"})
+            };
+            let body = if request["op"] == "human_device_attach" {
+                json!({"ok":false,"error":{"code":"FORBIDDEN","message":"Inbox not enrolled in this channel fixture"}})
+            } else { json!({"ok":true,"result":result}) }.to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            if last {
+                break;
+            }
+        });
+        let config = NativeConfig {
+            state_dir: dir.join("state"),
+            config_path: dir.join("config.json"),
+            home_dir: dir.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "work".into(),
+        };
+        let url = format!("http://{address}");
+        std::fs::write(
+            &config.config_path,
+            json!({"default_hub":"work","hubs":{"work":{"url":url,"authMode":"none"}}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let service = Arc::new(Mutex::new(DaemonService::open(&config, &plugins)?));
+        let mailbox = Arc::new(super::super::UiMailbox::default());
+        service.lock().unwrap().ui = Some(mailbox.clone());
+        let dispatcher = {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                dispatch_channel_action(
+                    &service,
+                    &json!({"op":op,"hub":"work","channel_id":"messenger","enabled":true,"request_id":"original-request"}),
+                    ChannelActionKind::Mutation,
+                    None,
+                )
+            })
+        };
+        committed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        {
+            let mut s = service.lock().unwrap();
+            if reload_failure {
+                // Gate the committed receipt until a concurrent config change
+                // and an incomplete external edit have reached the daemon.
+                if replace_authority {
+                    s.mutate_config(|raw| {
+                        raw["hubs"]["work"]["url"] = json!("local://");
+                        Ok(())
+                    })?;
+                    s.reload_slots()?;
+                }
+                std::fs::write(&config.config_path, "{").map_err(|e| e.to_string())?;
+            } else {
+                s.mutate_config(|raw| {
+                    raw["hubs"]["work"]["enabled"] = json!(false);
+                    Ok(())
+                })?;
+                s.reload_slots()?;
+                assert!(!s.slots.contains_key("work"));
+            }
+        }
+        release_tx.send(()).map_err(|e| e.to_string())?;
+        let result = dispatcher.join().map_err(|_| "Dispatcher panicked")??;
+        server.join().map_err(|_| "Authority server panicked")?;
+        assert_eq!(result["receipt"], "original");
+        assert_eq!(result["committed"], true);
+        assert_eq!(result["authority_changed"], replace_authority);
+        assert_eq!(
+            result["receipt_authority"],
+            json!({"hub":"work","url":url,"principal_id":"none#alice"})
+        );
+        assert!(result["maintenance_warning"].is_string());
+        {
+            let mut s = service.lock().unwrap();
+            if replace_authority && reload_failure {
+                assert_eq!(s.slots["work"].config["url"], "local://");
+            }
+            if !replace_authority && op == "channel_pair" {
+                let frame: Value =
+                    serde_json::from_slice(&mailbox.next().unwrap()).map_err(|e| e.to_string())?;
+                assert_eq!(frame["op"], "pair_code");
+                assert_eq!(frame["code"], "original-code");
+                assert_eq!(frame["request_id"], "original-request");
+            }
+            assert_eq!(mailbox.pending.lock().unwrap().len(), 1);
+            let frame: Value =
+                serde_json::from_slice(&mailbox.next().unwrap()).map_err(|e| e.to_string())?;
+            assert_eq!(frame["op"], "settings");
+            assert_eq!(frame["request_id"], "original-request");
+            assert_eq!(frame["hub"], "work");
+            assert_eq!(frame["channel"], "messenger");
+            assert_eq!(frame["action"], op);
+            assert_eq!(frame["committed"], true);
+            assert_eq!(frame["authority_changed"], replace_authority);
+            assert_eq!(frame["receipt_authority"], result["receipt_authority"]);
+            assert!(frame["warning"].is_string());
+            for field in ["settings", "code", "instruction", "detail"] {
+                assert!(frame.get(field).is_none());
+            }
+            assert!(mailbox.pending.lock().unwrap().is_empty());
+            s.shutdown();
+        }
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn committed_channel_result_survives_inventory_failure() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            for expected in ["human_channels_configure", "human_channels_list"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(request["op"], expected);
+                let body = if expected == "human_channels_configure" { json!({"ok":true,"result":{"ok":true,"committed":true}}) } else { json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Inventory unavailable"}}) }.to_string();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let slot = HubClient::new(
+            "work".into(),
+            json!({"url":format!("http://{address}"),"authMode":"none"}),
+            "alice",
+            None,
+        );
+        let inventory = ChannelInventory::new(remote_channels_identity(&slot));
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let result = inventory
+            .mutate(
+                &slot,
+                &plugins,
+                &json!({"op":"channel_toggle","channel_id":"sample","enabled":true}),
+            )
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(result["committed"], true);
+        assert!(result["inventory_warning"]
+            .as_str()
+            .unwrap()
+            .contains("Inventory unavailable"));
+        assert_eq!(inventory.cached.lock().unwrap().value["status"], "error");
     }
 }

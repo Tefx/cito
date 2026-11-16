@@ -105,10 +105,14 @@ fn setup(req: &Value) -> Result<Value> {
     Ok(json!({"ok":true,"actions":actions}))
 }
 fn identify(req: &Value, p: u32) -> Result<Value> {
-    socket_call(
+    let response = socket_call(
         &state(req).join(format!("sockets/pi-pid-{p}.sock")),
         &json!({"op":"identify"}),
-    )
+    )?;
+    if response["ok"] != true {
+        let _ = fs::remove_file(state(req).join(format!("pi/endpoints/{p}.json")));
+    }
+    Ok(response)
 }
 fn allow_process_only(req: &Value) -> bool {
     env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("1")
@@ -118,32 +122,21 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     if req["op"] != "discover_sessions" {
         return Ok(true);
     }
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "tty=,command="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return if alive(pid) {
-            Err("Cannot inspect live Pi process".into())
-        } else {
-            Ok(false)
-        };
+    let command = process_command(pid)?;
+    if has_harness_ancestor(pid, |ancestor, command| {
+        let path = state(req).join(format!("sockets/pi-pid-{ancestor}.sock"));
+        is_agent_harness(command)
+            || (path.exists()
+                && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true))
+    }) {
+        return Ok(false);
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut words = text.split_whitespace();
-    let Some(tty) = words.next() else {
-        return if alive(pid) {
-            Err("Missing live Pi process description".into())
-        } else {
-            Ok(false)
-        };
-    };
-    if matches!(tty, "?" | "??")
+    if !process_has_tty(pid)
         && env_value(req, "CITO_PI_ALLOW_HEADLESS_DISCOVERY").as_deref() != Some("1")
     {
         return Ok(false);
     }
-    let args: Vec<_> = words.collect();
+    let args: Vec<_> = command.split_whitespace().collect();
     Ok(!args.iter().any(|a| {
         matches!(
             *a,
@@ -164,56 +157,35 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     if inspection["configured"] != true {
         return Ok(());
     }
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,uid=,command="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err("Process inspection failed".into());
-    }
-    // SAFETY: geteuid takes no pointers and has no caller obligations.
-    let uid = unsafe { libc::geteuid() };
-    let mut processes: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut columns = line.split_whitespace();
-            let p = columns.next()?.parse().ok()?;
-            (columns.next()?.parse::<u32>().ok()? == uid
-                && !out.iter().any(|(pid, _)| *pid == p)
-                && matches_process(&columns.collect::<Vec<_>>().join(" ")))
-            .then_some(p)
+    let all_processes = user_processes()?;
+    let mut processes: Vec<u32> = all_processes
+        .iter()
+        .copied()
+        .filter(|p| {
+            !out.iter().any(|(pid, _)| pid == p)
+                && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+                && process_command(*p).is_ok_and(|command| matches_process(&command))
         })
         .collect();
     // Stable ordering makes the shared-cwd session assignment consistent across requests.
     processes.sort_unstable();
     for p in processes {
-        if !interactive_candidate(req, p)? {
+        // Socket endpoints own their discovery result; never replace a slow bridge
+        // with a process-only candidate that incorrectly asks the user to reload.
+        if state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+            || !interactive_candidate(req, p).unwrap_or(false)
+        {
             continue;
         }
         let identity = match process_identity(p) {
             Ok(identity) => identity,
-            Err(_) if !alive(p) => continue,
-            Err(error) => return Err(error),
+            Err(_) => continue,
         };
         if !matches_process(str_at(&identity, "command").unwrap_or("")) {
             continue;
         }
-        let cwd_output = match std::process::Command::new("/usr/sbin/lsof")
-            .args(["-a", "-d", "cwd", "-Fn", "-p", &p.to_string()])
-            .output()
-        {
-            Ok(output) if output.status.success() => output,
-            _ if !alive(p) => continue,
-            Ok(_) => return Err("Cannot inspect live Pi working directory".into()),
-            Err(error) => return Err(error.to_string()),
-        };
-        let cwd_text = String::from_utf8_lossy(&cwd_output.stdout);
-        let Some(cwd) = cwd_text.lines().find_map(|l| l.strip_prefix('n')) else {
-            if !alive(p) {
-                continue;
-            }
-            return Err("Missing live Pi working directory".into());
-        };
+        let Ok(cwd) = process_cwd(p) else { continue };
+        let cwd = cwd.as_str();
         let basename = Path::new(cwd)
             .file_name()
             .and_then(|s| s.to_str())
@@ -229,27 +201,40 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         let mut v = json!({"session_id":format!("pid-{p}"),"session_name":basename,"cwd":cwd});
-        if let Some((modified, path)) = latest {
+        // CWD alone cannot attribute a transcript when another live process shares it.
+        let shared_cwd = all_processes.iter().any(|other| {
+            *other != p
+                && process_command(*other).is_ok_and(|cmd| matches_process(&cmd))
+                && process_cwd(*other).is_ok_and(|path| path == cwd)
+        });
+        if let Some((modified, path)) = latest.filter(|_| !shared_cwd) {
             use std::io::BufRead;
-            v["session_id"] = json!(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
-            if let Ok(file) = fs::File::open(path) {
-                for line in std::io::BufReader::new(file)
-                    .lines()
-                    .map_while(std::result::Result::ok)
-                {
+            let projection = cached_file_projection(req, "pi/transcript-cache", &path, || {
+                let mut value =
+                    json!({"session_id":path.file_stem().and_then(|s| s.to_str()).unwrap_or("")});
+                let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+                for line in std::io::BufReader::new(file).lines() {
+                    let line = line.map_err(|e| e.to_string())?;
                     let Ok(row) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
                     if row["type"] == "session" || row.get("type").is_none() {
                         if let Some(id) = str_at(&row, "id") {
-                            v["session_id"] = json!(id);
+                            value["session_id"] = json!(id);
                         }
                     }
                     if let Some(name) =
                         str_at(&row, "session_name").or_else(|| str_at(&row, "name"))
                     {
-                        v["session_name"] = json!(name);
+                        value["session_name"] = json!(name);
                     }
+                }
+                Ok(value)
+            });
+            if let Ok(projection) = projection {
+                v["session_id"] = projection["session_id"].clone();
+                if let Some(name) = projection.get("session_name") {
+                    v["session_name"] = name.clone();
                 }
             }
             v["updated_at_ms"] = json!(modified
@@ -268,52 +253,57 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             v["needs_reload"] = json!(true);
             v["reload_hint"] = json!("Run /reload in Pi to enable 1-click listen");
         }
-        // Fence PID reuse while lsof and session metadata were read.
+        // Fence PID reuse while vnode and session metadata were read.
         match process_identity(p) {
             Ok(current) if current == identity => out.push((p, v)),
             Ok(_) => {}
-            Err(_) if !alive(p) => {}
-            Err(error) => return Err(error),
+            Err(_) => {}
         }
     }
     Ok(())
 }
 fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
-    let mut out = vec![];
-    let entries = match fs::read_dir(state(req).join("sockets")) {
-        Ok(entries) => Some(entries),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.to_string()),
-    };
-    if let Some(entries) = entries {
-        for e in entries {
-            let e = e.map_err(|e| e.to_string())?;
-            let n = e.file_name().to_string_lossy().into_owned();
-            if let Some(p) = n
-                .strip_prefix("pi-pid-")
-                .and_then(|s| s.strip_suffix(".sock"))
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                let response = identify(req, p);
-                if let Ok(v) = response {
-                    if v["ok"] == false {
-                        continue;
-                    }
-                    if interactive_candidate(req, p)?
-                        && v["ok"] == true
-                        && str_at(&v, "session_id").is_some()
-                        && str_at(&v, "cwd").is_some()
-                    {
-                        out.push((p, v));
+    let request = req.clone();
+    inspect_socket_endpoints(req, "pi-pid-", move |p, _| {
+        let req = &request;
+        let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
+        let response = match identify(req, p) {
+            Ok(v) => {
+                if v["ok"] == true {
+                    if let Ok(identity) = process_identity(p) {
+                        let entry = json!({"identity":identity,"session":v});
+                        if read_json(&cache_path).ok().as_ref() != Some(&entry) {
+                            let _ = atomic_write(&cache_path, entry.to_string().as_bytes());
+                        }
                     }
                 }
+                Ok(v)
             }
-        }
-    }
-    out.sort_by_key(|(pid, _)| *pid);
-    Ok(out)
+            Err(error) if error == "Socket request timed out" => {
+                let cached = read_json(&cache_path).ok();
+                match (cached, process_identity(p)) {
+                    (Some(cached), Ok(identity))
+                        if alive(p)
+                            && cached["identity"] == identity
+                            && matches_process(str_at(&identity, "command").unwrap_or("")) =>
+                    {
+                        Ok(cached["session"].clone())
+                    }
+                    _ => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let v = response.ok()?;
+        (v["ok"] == true
+            && interactive_candidate(req, p).unwrap_or(false)
+            && str_at(&v, "session_id").is_some()
+            && str_at(&v, "cwd").is_some())
+        .then_some(v)
+    })
 }
-fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
+type Candidates = (Vec<(u32, Value)>, bool, Option<String>);
+fn candidates(req: &Value) -> Result<Candidates> {
     let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
     if resolve || pid(req).is_some() {
         let roots = if resolve {
@@ -325,17 +315,32 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
         let mut searched = Vec::new();
         for mut p in roots {
             for _ in 0..=if resolve { 5 } else { 0 } {
+                if process_command(p)
+                    .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
+                {
+                    break;
+                }
                 searched.push(p);
                 if let Ok(v) = identify(req, p) {
                     responded = true;
+                    if v["ok"] != true {
+                        return Ok((
+                            vec![],
+                            true,
+                            Some(response_diagnostic(&v, "Pi bridge rejected identification")),
+                        ));
+                    }
                     if v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
                         && v.get("pi_pid")
                             .is_none_or(|id| id.as_u64() == Some(p as u64))
                     {
-                        return Ok((vec![(p, v)], true));
+                        return Ok((vec![(p, v)], true, None));
                     }
+                }
+                if process_command(p).is_ok_and(|command| matches_process(&command)) {
+                    break;
                 }
                 let Some(parent) = process_parent(p) else {
                     break;
@@ -356,14 +361,15 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
                 .into_iter()
                 .collect();
         }
-        return Ok((live, responded));
+        return Ok((live, responded, None));
     }
     let mut out = socket_candidates(req)?;
     process_candidates(req, &mut out)?;
-    Ok((out, false))
+    Ok((out, false, None))
 }
-fn as_caller(p: u32, v: &Value) -> Value {
+fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
     caller(
+        req,
         "pi",
         str_at(v, "session_id").unwrap_or(""),
         str_at(v, "cwd").unwrap_or(""),
@@ -379,27 +385,20 @@ pub fn handle(input: &Value) -> Result<Value> {
     }
     if matches!(op, "resolve_caller" | "verify") {
         if let Err(e) = explicit_pid(req) {
-            return Ok(error(
-                if e.starts_with("Invalid") {
-                    "PI_BRIDGE_UNAVAILABLE"
-                } else {
-                    "INVALID_INPUT"
-                },
-                e,
-            ));
+            return Ok(error("INVALID_INPUT", e));
         }
     }
-    let (cs, endpoint_responded) = if matches!(
+    let (cs, endpoint_responded, rejection) = if matches!(
         op,
         "resolve_caller" | "verify" | "probe" | "discover_sessions"
     ) {
         candidates(req)?
     } else {
-        (vec![], false)
+        (vec![], false, None)
     };
     match op {
         "discover_sessions" => Ok(
-            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c["reload_hint"]=v["reload_hint"].clone();c}).collect::<Vec<_>>()}),
+            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(req,*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c["reload_hint"]=v["reload_hint"].clone();c}).collect::<Vec<_>>()}),
         ),
         "resolve_caller" | "verify" => {
             if cs.iter().any(|(_, v)| v["needs_reload"] == true) {
@@ -411,16 +410,17 @@ pub fn handle(input: &Value) -> Result<Value> {
             if cs.is_empty() && endpoint_responded {
                 return Ok(error(
                     "PI_BRIDGE_UNAVAILABLE",
-                    "No caller socket bridge found",
+                    rejection.unwrap_or_else(|| "No caller socket bridge found".into()),
                 ));
             }
             if cs.is_empty() {
-                match cached_caller(req, "pi", None, matches_process) {
+                match cached_caller(req, "pi", None, matches_process, |_| Ok(())) {
                     Ok(Some(c)) => {
                         if !allow_process_only(req)
                             && !pid(&c).is_some_and(|p| {
                                 identify(req, p).is_ok_and(|v| {
-                                    v["ok"] == true && v["session_id"] == c["session_id"]
+                                    v["ok"] == true
+                                        && str_at(&v, "session_id") == str_at(&c, "session_id")
                                 })
                             })
                         {
@@ -435,40 +435,60 @@ pub fn handle(input: &Value) -> Result<Value> {
                     Ok(None) => {}
                 }
             }
-            let had_live = !cs.is_empty();
-            let matches: Vec<_> = cs
-                .into_iter()
-                .filter(|(_, v)| {
-                    str_at(req, "explicit_session_id")
-                        .or_else(|| str_at(&req["meta"], "expected_session_id"))
-                        .map(|s| v["session_id"] == s)
-                        .unwrap_or(true)
-                })
-                .collect();
-            if matches.len() != 1 {
+            if cs.len() != 1 {
                 return Ok(error(
-                    if had_live && matches.is_empty() {
-                        "INVALID_INPUT"
-                    } else if explicit_pid(req).ok().flatten().is_some() {
+                    if pid(req)
+                        .is_some_and(|p| process_command(p).is_ok_and(|cmd| matches_process(&cmd)))
+                    {
                         "PI_BRIDGE_UNAVAILABLE"
                     } else {
                         "BINDING_REQUIRED"
                     },
-                    if had_live && matches.is_empty() {
-                        "Conflicting caller metadata"
-                    } else {
-                        "No caller socket bridge found"
-                    },
+                    "No caller socket bridge found",
                 ));
             }
-            let (p, v) = &matches[0];
-            let c = as_caller(*p, v);
+            let (p, v) = &cs[0];
+            let c = as_caller(req, *p, v);
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }
-            Ok(json!({"ok":true,"caller":remember_process(c)}))
+            let c = remember_process(c);
+            if c["process_identity"].is_object() {
+                // Manual process-only enrollment has no socket-discovery cache.
+                // Persist the invocation identity for subsequent background probes.
+                let entry = json!({"identity":c["process_identity"],"session":v});
+                atomic_write(
+                    &state(req).join(format!("pi/endpoints/{p}.json")),
+                    entry.to_string().as_bytes(),
+                )?;
+            }
+            Ok(json!({"ok":true,"caller":c}))
         }
         "probe" => {
+            if let Some(reason) = rejection {
+                return Ok(json!({"ok":true,"status":"transient_error","reason":reason}));
+            }
+            if let Some(p) = pid(req) {
+                if let Ok(current) = process_identity(p) {
+                    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json"))).ok();
+                    if !matches_process(str_at(&current, "command").unwrap_or(""))
+                        || cached.as_ref().is_some_and(|cached| {
+                            cached["identity"].is_object() && cached["identity"] != current
+                        })
+                        || (req["process_identity"].is_object()
+                            && req["process_identity"] != current)
+                    {
+                        return Ok(
+                            json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
+                        );
+                    }
+                }
+            }
+            if endpoint_responded && cs.is_empty() {
+                return Ok(
+                    json!({"ok":true,"status":"closed_definitive","reason":"No open session"}),
+                );
+            }
             if pid(req).is_some_and(|p| {
                 alive(p) && state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
             }) && cs.first().is_none_or(|(_, v)| v["needs_reload"] == true)
@@ -527,7 +547,12 @@ pub fn handle(input: &Value) -> Result<Value> {
                     Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
                         return Ok(json!({"ok":true,"outcome":"session_switched","reason":null}))
                     }
-                    _ => {}
+                    Ok(reply) => {
+                        return Ok(
+                            json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&reply,"Pi bridge rejected delivery")}),
+                        );
+                    }
+                    Err(_) => {}
                 }
                 if attempt < 2 {
                     std::thread::sleep(std::time::Duration::from_secs(attempt + 1));

@@ -19,27 +19,79 @@ extension Companion: NSMenuDelegate {
         return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
     }
 
+    func updateMenuErrorRow() {
+        if let item = cardMenu.items.first(where: { $0.view?.identifier?.rawValue == "menu_error_row" }) {
+            cardMenu.removeItem(item)
+        }
+        guard let error = menuBannerError else { return }
+        let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
+        row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
+        row.appearance = testAppearance
+        let label = textLabel(presentationError(error),NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
+        label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=label.stringValue
+        row.addSubview(label)
+        let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
+        dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
+        dismiss.style = .subtleHeader
+        dismiss.toolTip = "Dismiss error"; dismiss.setAccessibilityLabel("Dismiss error")
+        dismiss.pressed = { [weak self] in self?.menuBannerError = nil; self?.rebuild() }
+        row.addSubview(dismiss)
+        let item = NSMenuItem(); item.view = row
+        cardMenu.insertItem(item, at: min(1, cardMenu.numberOfItems))
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
-        emit(["op": "refresh_available"])
+        menuOpen = true
+        MenuControl.menuTracking = true
+        emit(["op": "open_menu"], userInitiated: false)
+        if menuDirty { rebuild() }
     }
     func menuDidClose(_ menu: NSMenu) {
+        menuOpen = false
+        MenuControl.menuTracking = false
+        let hadRename = renamingSessionKey != nil
         renamingSessionKey = nil
+        if hadRename {
+            renameField?.window?.makeFirstResponder(nil)
+            renameField?.removeFromSuperview()
+            renameField = nil
+            menuRebuildDeferred = false
+            menuDirty = true
+        }
+        emit(["op": "close_menu"], userInitiated: false)
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
     }
 
-    func updateStatusTooltip(_ button: NSButton) {
+    var statusTooltip: String {
         let attention=hubs.contains { $0.status != "connected" || $0.error != nil }
         let count=uniqueSessionCount
         var detail=count > 0 ? "\(count) session\(count == 1 ? "" : "s") listening" : (humanListening ? "Personal inbox active" : (hubs.first { $0.name == effectiveTargetHub }?.human_paused == true ? "Inbox paused" : "Not listening"))
         if unreadCount > 0 { detail += " · \(unreadCount) unread" }
         if attention { detail="Hub connection needs attention" }
-        button.toolTip="Cito · " + detail; button.setAccessibilityLabel(button.toolTip)
+        return "Cito · " + detail
+    }
+
+    func updateStatusItem() {
+        let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
+        let icon: StatusIconState = warning ? .warning : (listeners.contains { $0.harness != "human" } || unreadCount > 0) ? .active : .idle
+        let tooltip = statusTooltip
+        guard lastStatusPresentation?.icon != icon || lastStatusPresentation?.unread != unreadCount || lastStatusPresentation?.tooltip != tooltip,
+              let button = status?.button ?? headlessStatusButton else { return }
+        statusImage = Self.statusIcons[icon]
+        formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
+        button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
+        lastStatusPresentation = (icon, unreadCount, tooltip)
+        statusUpdateCount += 1
     }
     func scopeToggle(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl? {
-        let hasOtherUsers = directoryAllPeers.contains { $0.hub == hub && !$0.user.isEmpty && $0.user != user }
-            || listeners.contains { $0.hub == hub && !($0.user ?? "").isEmpty && $0.user != user }
-        guard hubs.first(where: { $0.name == hub })?.auth_mode == "oidc" || hasOtherUsers else { return nil }
+        guard let authority = hubs.first(where: { $0.name == hub }),
+              authority.supports_workspace_scope == true else { return nil }
+        let allowed = authority.human_listener_id == id
+            ? authority.human_can_set_scope == true
+            : listeners.first(where: { $0.hub == hub && ($0.scoped_id == id || $0.listener_id == id) })?.can_set_scope == true
+        guard allowed else { return nil }
         let team = scope == "workspace"
         let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill")
         control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
@@ -59,15 +111,19 @@ extension Companion: NSMenuDelegate {
     }
 
     func rebuild() {
+        updateStatusItem()
+        menuDirty = true
+        guard menuOpen || renderingForInspection else { return }
+        let count = uniqueSessionCount
+        if renamingSessionKey != nil, renameField?.currentEditor() != nil {
+            updateMenuErrorRow()
+            menuRebuildDeferred = true
+            return
+        }
+        menuRebuildDeferred = false
+        menuDirty = false
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
         rebuildCount += 1
-        let count = uniqueSessionCount
-        let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
-        statusImage = makeCitoStatusIcon(warning ? .warning : (listeners.contains { $0.harness != "human" } || unreadCount > 0) ? .active : .idle)
-        if let button = status?.button ?? headlessStatusButton {
-            formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
-            updateStatusTooltip(button)
-        }
         let menu = cardMenu
         let existingRenameField = renamingSessionKey == nil ? nil : renameField
         let renameEditor = existingRenameField?.currentEditor() as? NSTextView
@@ -128,28 +184,16 @@ extension Companion: NSMenuDelegate {
         subLabel.lineBreakMode = .byTruncatingMiddle; subLabel.toolTip = subtitleText
         header.addSubview(subLabel)
         _ = host(header, id: "header")
-        if let error = menuBannerError {
-            let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
-            let label = textLabel(presentationError(error),NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
-            label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=label.stringValue
-            row.addSubview(label)
-            let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
-            dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
-            dismiss.style = .subtleHeader
-            dismiss.toolTip = "Dismiss error"; dismiss.setAccessibilityLabel("Dismiss error")
-            dismiss.pressed = { [weak self] in self?.menuBannerError = nil; self?.rebuild() }
-            row.addSubview(dismiss)
-            _ = host(row,id:"menu_error_row")
-        }
+        updateMenuErrorRow()
         var drawerItems: [String: NSMenuItem] = [:]
         let showHubControls = hubs.count != 1 || hubs.contains {
-            !(["local", "default"].contains($0.name) && $0.auth_mode == "none" && $0.status == "connected" && $0.error == nil)
+            !($0.is_builtin == true && $0.status == "connected" && $0.error == nil)
         }
         for hub in hubs where showHubControls {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 32))
             let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": hub.status == "connected" ? "switch_account" : "login"]) }
             let reconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "reconnect"]) }
-            let disconnectRun = { self.settingsActiveTab="hubs"; self.openSettingsPanel() }
+            let disconnectRun = { self.cardMenu.cancelTracking(); self.settingsActiveTab="hubs"; self.openSettingsPanel() }
             let buttons: [(String, String, Bool, () -> Void)]
             switch hub.status {
             case "connected" where hub.error != nil:
@@ -161,11 +205,9 @@ extension Companion: NSMenuDelegate {
             case "connecting":
                 buttons = [("Hub Settings…", "open_hub_settings", false, disconnectRun)]
             case "auth_required":
-                buttons = [("Sign In…", "login", true, loginRun), ("Hub Settings…", "open_hub_settings", false, disconnectRun)]
+                buttons = (hub.can_login == true ? [("Sign In…", "login", true, loginRun)] : []) + [("Hub Settings…", "open_hub_settings", false, disconnectRun)]
             default:
-                buttons = hub.auth_mode == "oidc"
-                    ? [("Connect", "reconnect", true, reconnectRun), ("Sign In…", "login", false, loginRun)]
-                    : [("Connect", "reconnect", true, reconnectRun)]
+                buttons = [("Connect", "reconnect", true, reconnectRun)] + (hub.can_login == true ? [("Sign In…", "login", false, loginRun)] : []) + [("Hub Settings…", "open_hub_settings", false, disconnectRun)]
             }
             var drawerControls: [NSView] = []
             for (title, action, primary, run) in buttons {
@@ -186,7 +228,8 @@ extension Companion: NSMenuDelegate {
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = statusText; drawer.addSubview(detail)
-            if hub.error != nil {
+            layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
+            if hub.error != nil || measureTextWidth(statusText,font:detail.font ?? .systemFont(ofSize:11)) > detail.frame.width {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
@@ -198,7 +241,7 @@ extension Companion: NSMenuDelegate {
                 layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
             }
             let item = host(drawer, id: "drawer:\(hub.name)")
-            let autoExpand = hub.status != "connected" || hub.error != nil
+            let autoExpand = (hub.status != "connected" && hub.status != "connecting") || hub.error != nil
             item.isHidden = !(hubDrawerVisibility[hub.name] ?? autoExpand)
             drawerItems[hub.name] = item
         }
@@ -207,7 +250,7 @@ extension Companion: NSMenuDelegate {
         var hubPills: [NSView] = []
         for hub in hubs where showHubControls {
             let color = hub.name == effectiveTargetHub && hub.status == "connected" && hub.error == nil ? NSColor.white : statusColor(hub.status)
-            let isSingleDefault = hubs.count == 1 && (hub.name == "default" || hub.name == "local")
+            let isSingleDefault = hubs.count == 1 && hub.is_builtin == true
             let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
             let title: String
             if isCompactIcon {
@@ -356,6 +399,19 @@ extension Companion: NSMenuDelegate {
             let path = textLabel(pathText,
                 NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
+            if listener.can_pin == true && (hubs.first(where: { $0.name == listener.hub })?.auto_listen == true || listener.listen_mode == "auto") {
+                let pinned = listener.listen_mode != "auto"
+                let activityTimed = map[listener.harness]?.idle_timeout_ms != nil
+                let pin = MenuControl("Pin", frame:NSRect(x:0,y:cardHeight-28,width:22,height:22), symbol:pinned ? "pin.fill" : "pin")
+                pin.identifier = NSUserInterfaceItemIdentifier("pin:\(listener.scoped_id)")
+                pin.style = pinned ? .neutral : .subtleHeader
+                pin.normalColor = pinned ? CitoPalette.infoText : CitoPalette.secondaryText
+                let lifetime = activityTimed ? "Unpinned sessions auto-retire after the idle timeout." : "Unpinned sessions stay listening while their endpoint is available; no idle timeout applies."
+                pin.toolTip = (pinned ? "Pinned. Unpin to follow Auto-Listen. " : "Pin this session. ") + lifetime + " Pinned sessions stay listening when Auto-Listen is turned off."
+                pin.setAccessibilityLabel(pinned ? "Unpin session" : "Pin session")
+                pin.pressed = { [weak self] in self?.emit(["op":"set_listen_mode","hub":listener.hub,"listener_id":listener.listener_id,"listen_mode":pinned ? "auto" : "manual"]) }
+                card.addSubview(pin); sessionActions.append(pin)
+            }
             if let scopeBtn = scopeToggle(hub:listener.hub,user:user,scope:listener.scope,id:listener.scoped_id,y:cardHeight-28) {
                 var scope = listener.scope
                 scopeBtn.pressed = { [weak self, weak scopeBtn] in
@@ -367,40 +423,43 @@ extension Companion: NSMenuDelegate {
                 }
                 card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
             }
-            let stop = MenuControl("Stop", frame: NSRect(x: 0, y: cardHeight - 28, width: 52, height: 22))
-            stop.toolTip = "Stop listening to this session and disable Auto-Listen on \(listener.hub)"
-            stop.style = .neutral
+            let stop = MenuControl("Stop", frame: NSRect(x: 0, y: cardHeight - 28, width: 48, height: 22))
+            stop.toolTip = "Stop only this session and keep it stopped. Auto-Listen on \(listener.hub) stays unchanged."
+            stop.style = .neutral; stop.maximumWidth = 48
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
+            stop.isHidden = listener.can_stop != true
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
-            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: CitoMetrics.gap, trailing: sessionActions)
-            let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
+            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: 4, trailing: sessionActions)
+            let rightEdge = sessionActions.filter { !$0.isHidden }.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
             if renamingSessionKey == sessionKey {
                 title.isHidden = true
                 let field = existingRenameField ?? NSTextField(string: renameDraft ?? listener.title)
                 field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
                 field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(listener.scoped_id)")
+                field.setAccessibilityLabel("Session title")
                 field.delegate = self; field.font = .systemFont(ofSize: 13)
                 if let draft = renameDraft, field.stringValue != draft { field.stringValue = draft }
                 card.addSubview(field); renameField = field
                 if existingRenameField == nil || renameSelection != nil {
                     RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self, weak field] in
-                        guard let self = self, let field = field, self.renameField === field else { return }
+                        guard let self = self, let field = field, self.renameField === field, field.currentEditor() == nil else { return }
                         field.window?.makeFirstResponder(field)
                         if let selection = renameSelection { (field.currentEditor() as? NSTextView)?.setSelectedRange(selection) }
                         else { field.selectText(nil) }
                     }
                 }
             } else {
-                let titleW = max(24, min(rightEdge - titleX - 24, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
+                let titleW = max(122, min(rightEdge - titleX - 28, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
                 title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
-                let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 2, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
+                let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 6, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
                 renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")
                 renameBtn.style = .subtleHeader; renameBtn.toolTip = "Rename session"
                 renameBtn.pressed = { [weak self] in self?.renameField = nil; self?.renamingSessionKey = sessionKey; self?.rebuild() }
+                renameBtn.isHidden = listener.can_rename != true
                 card.addSubview(renameBtn)
             }
-            layoutBar(in: card, insetLeft: titleX, insetRight: 10, y: 7, height: 19, leading: [copy], flexible: path)
+            layoutBar(in: card, insetLeft: titleX, insetRight: CitoMetrics.cardInset, y: 7, height: 19, leading: [copy], flexible: path)
         }
         if activeRows.count <= 4 {
             for (id, row) in activeRows { _ = host(row, id: id) }
@@ -419,7 +478,6 @@ extension Companion: NSMenuDelegate {
             scroll.documentView = doc; _ = host(scroll, id: "active_scroll")
         }
         if orderedListeners.isEmpty {
-            if available.isEmpty {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 92))
                 let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 86), radius: 10, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
@@ -432,23 +490,13 @@ extension Companion: NSMenuDelegate {
                 card.addSubview(emptyHint)
                 let apps=MenuControl("Set Up Agent Apps…",frame:NSRect(x:44,y:8,width:148,height:22),radius:6)
                 apps.identifier=NSUserInterfaceItemIdentifier("empty_open_setup")
-                apps.pressed={ [weak self] in self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
+                apps.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
                 card.addSubview(apps)
                 let channels=MenuControl("Human Channels…",frame:NSRect(x:198,y:8,width:148,height:22),radius:6)
                 channels.identifier=NSUserInterfaceItemIdentifier("empty_open_channels")
-                channels.pressed={ [weak self] in self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
+                channels.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
                 card.addSubview(channels)
                 row.addSubview(card); _ = host(row, id: "empty")
-            } else {
-                let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 34))
-                let pill = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 28), radius: 8, color: .labelColor.withAppearanceAlpha(0.045))
-                let icon = NSImageView(frame: NSRect(x: 12, y: 7, width: 14, height: 14))
-                icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
-                icon.contentTintColor = CitoPalette.secondaryText; pill.addSubview(icon)
-                pill.addSubview(textLabel("No agent sessions listening — click + Listen below",
-                    NSRect(x: 32, y: 6, width: 316, height: 16), size: 11, color: CitoPalette.secondaryText))
-                row.addSubview(pill); _ = host(row, id: "empty")
-            }
         }
         // Zone 2 — My Other Hosts
         if !myRemote.isEmpty {
@@ -535,7 +583,7 @@ extension Companion: NSMenuDelegate {
             let auto = MenuControl(autoTitle, frame: NSRect(x: 368 - autoWidth, y: 2, width: autoWidth, height: 18), radius: 9)
             auto.identifier = NSUserInterfaceItemIdentifier("toggle_auto_listen")
             auto.style = autoListen ? .prominent : .neutral
-            auto.toolTip = "Automatically listen to newly discovered sessions on \(targetHub). Stop disables Auto-Listen for this Hub."
+            auto.toolTip = "Automatically listen to eligible sessions on \(targetHub). Turning Auto-Listen off stops unpinned auto-listened sessions and keeps pinned sessions listening."
             auto.isEnabled = !targetHub.isEmpty
             auto.pressed = { [weak self] in self?.emit(["op": "set_auto_listen", "hub": targetHub, "enabled": !autoListen]) }
             availHeader.addSubview(auto)
@@ -547,9 +595,10 @@ extension Companion: NSMenuDelegate {
             for item in discovery where item.status == "scanning" || item.status == "error" {
                 let visual = resolveHarnessVisual(item.harness,harnesses:map)
                 let text = item.status == "scanning" ? "\(visual.name) · Scanning sessions…" : "\(visual.name) · " + presentationError(item.error ?? "Session discovery failed. Try refreshing.")
-                let row = NSView(frame:NSRect(x:0,y:0,width:380,height:32))
-                let label = textLabel(text,NSRect(x:46,y:4,width:244,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
-                label.maximumNumberOfLines = 2; label.toolTip = text
+                let label = textLabel(text,NSRect(x:46,y:4,width:322,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
+                label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = text
+                label.frame.size.height = max(26, ceil((text as NSString).boundingRect(with:NSSize(width:322,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:label.font!]).height) + 4)
+                let row = NSView(frame:NSRect(x:0,y:0,width:CitoMetrics.menuWidth,height:label.frame.height + 8))
                 row.addSubview(label); _ = host(row,id:"discovery:\(item.harness)")
             }
             if !discoveryBusy && visibleAvailable.isEmpty && listeners.contains(where: { $0.harness != "human" }) {
@@ -575,10 +624,13 @@ extension Companion: NSMenuDelegate {
                 let vb = resolveHarnessVisual(b, harnesses: map)
                 return va.order != vb.order ? va.order < vb.order : a < b
             }
+            func candidateIsOpen(_ candidate: Candidate) -> Bool {
+                candidate.needs_reload == true || candidate.endpoint_pid != nil || map[candidate.harness]?.pid_bound == false
+            }
             let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
             for (harness, items) in groupedCandidates {
                 let recentKey = "\(targetHub):\(harness)"
-                if autoListen && map[harness]?.pid_bound != false && items.allSatisfy({ $0.endpoint_pid == nil && $0.needs_reload != true }) && autoCollapsedRecentGroups.insert(recentKey).inserted {
+                if autoListen && items.allSatisfy({ !candidateIsOpen($0) }) && autoCollapsedRecentGroups.insert(recentKey).inserted {
                     collapsedGroups.insert(recentKey)
                 }
             }
@@ -587,7 +639,7 @@ extension Companion: NSMenuDelegate {
                 let groupKey = "\(targetHub):\(harness)"
                 let isCollapsed = collapsedGroups.contains(groupKey)
                 let visual = resolveHarnessVisual(harness, harnesses: map)
-                let openCount = items.filter { $0.endpoint_pid != nil }.count
+                let openCount = items.filter { candidateIsOpen($0) }.count
                 let noun = openCount == items.count ? "open" : openCount == 0 ? "recent" : "sessions"
                 let groupTitle = "\(visual.name) · \(items.count) \(noun)"
                 let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 28))
@@ -744,6 +796,7 @@ extension Companion: NSMenuDelegate {
         let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: MenuControl.intrinsicWidth("Settings…", leadingSymbol: "gearshape", paddingX: 6), height: 24), leadingSymbol: "gearshape")
         openSettings.identifier = NSUserInterfaceItemIdentifier("open_settings")
         openSettings.style = .subtleHeader
+        openSettings.toolTip = "Settings… (⌘,)"
         openSettings.pressed = { [weak self, weak menu] in
             guard let self = self else { return }
             menu?.cancelTracking()
@@ -770,7 +823,6 @@ extension Companion: NSMenuDelegate {
         directoryShortcut.target = self; directoryShortcut.keyEquivalentModifierMask = [.command]
         directoryShortcut.isHidden = true; directoryShortcut.allowsKeyEquivalentWhenHidden = true
         menu.addItem(directoryShortcut)
-        menu.update()
     }
     @objc func openDirectoryShortcut() { cardMenu.cancelTracking(); openDirectoryPanel(mode:"directory") }
     @objc func openSettingsShortcut() { cardMenu.cancelTracking(); openSettingsPanel() }

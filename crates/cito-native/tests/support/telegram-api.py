@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import socketserver
+import threading
 
 sent = []
 polls = 0
@@ -34,10 +35,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = dict(username='example_bot')
         elif method == 'sendMessage':
             chat = str(body['chat_id'])
+            if chat == 'stall':
+                threading.Event().wait(3)
             attempts[chat] = attempts.get(chat, 0) + 1
             status = int(chat.split(':')[1]) if chat.startswith('status:') else (429 if chat == 'partial' and attempts[chat] == 2 else None)
             if status:
-                data = json.dumps(dict(ok=False, description='Rejected by fixture', error_code=status)).encode()
+                data = json.dumps(dict(ok=False, description='Rejected by fixture', error_code=status, parameters={'retry_after': 7} if status == 429 else {})).encode()
                 self.send_response(status)
                 self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
@@ -62,6 +65,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 # A loopback fixture must not perform HTTPServer's reverse-DNS lookup at bind time.
-server = socketserver.TCPServer(('127.0.0.1',0),Handler)
+class Server(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+server = Server(('127.0.0.1',0),Handler)
 print(json.dumps(dict(port=server.server_address[1])), flush=True)
 server.serve_forever()

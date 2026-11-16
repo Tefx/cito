@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, watch } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -139,6 +139,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     const port = candidatePorts.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
@@ -194,29 +195,9 @@ export default function citoBridge(pi: BridgeAPI): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     ownsSocket = false;
   }
+  // Without a live SessionManager, a shared CWD cannot prove transcript ownership.
   function fallbackIdentity(): { session_id: string; session_name: string; cwd: string } {
     const cwd = process.cwd();
-    const folder = join(piHome, "sessions", `--${cwd.replace(/^\//, "").replaceAll("/", "-")}--`);
-    let latest: { path: string; modified: number } | undefined;
-    try {
-      for (const entry of readdirSync(folder)) {
-        if (!entry.endsWith(".jsonl")) continue;
-        const path = join(folder, entry), modified = statSync(path).mtimeMs;
-        if (!latest || modified > latest.modified || (modified === latest.modified && path > latest.path)) latest = { path, modified };
-      }
-      if (latest) {
-        let id = basename(latest.path, ".jsonl"), name = basename(cwd);
-        for (const line of readFileSync(latest.path, "utf8").split("\n")) {
-          try {
-            const row = JSON.parse(line);
-            if ((row.type === "session" || row.type == null) && typeof row.id === "string" && row.id) id = row.id;
-            if (typeof row.name === "string" && row.name) name = row.name;
-            if (typeof row.session_name === "string" && row.session_name) name = row.session_name;
-          } catch {} // A concurrent trailing partial JSON line is not an identity.
-        }
-        return { session_id: id, session_name: name, cwd };
-      }
-    } catch {} // Missing session storage still has a stable process-scoped identity.
     return { session_id: `pid-${process.pid}`, session_name: basename(cwd), cwd };
   }
   function handle(req: Record<string, unknown>): Record<string, unknown> {
@@ -257,7 +238,9 @@ export default function citoBridge(pi: BridgeAPI): void {
     return serverReady ??= startServer().catch(error => { serverReady = undefined; throw error; });
   }
   async function startServer(): Promise<void> {
-    if (server || shuttingDown) return;
+    const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
+      || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
+    if (server || shuttingDown || process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY !== "1" && (headless || !process.stdin.isTTY)) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     const instance = createServer(socket => {
@@ -342,7 +325,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   // Load-time startup also serves hosts that loaded the extension after session_start.
   void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
   let repairing = false;
-  const repairTimer = setInterval(() => {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const repairWatcher = watch(directory, { persistent: false }, () => {
     if (shuttingDown || repairing || existsSync(socketPath)) return;
     let configured = false;
     try {
@@ -369,7 +353,8 @@ export default function citoBridge(pi: BridgeAPI): void {
       serverReady = undefined;
       await ensureServer();
     })().catch(() => {}).finally(() => { repairing = false; }); // Retry transient bind failures on the next tick.
-  }, 2000).unref();
+  });
+  repairWatcher.on("error", () => {}); // Session lifecycle events can still retry failed recovery.
   pi.on("session_start", async (_event, ctx) => {
     registerMcpServer();
     lastActiveMs = Date.now();
@@ -472,7 +457,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
-    clearInterval(repairTimer);
+    repairWatcher.close();
     await serverReady?.catch(() => {});
     context = undefined;
     activeBadge = undefined;

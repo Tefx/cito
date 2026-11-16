@@ -35,7 +35,7 @@ pub fn parse_cli(
         {
             if let Some(old) = meta.get("expected_harness") {
                 if old != &plugin.id {
-                    return Err("Conflicting harness flags".into());
+                    return Err("INVALID_INPUT: Conflicting harness flags".into());
                 }
             }
             meta.insert("expected_harness".into(), json!(plugin.id));
@@ -59,10 +59,14 @@ pub fn parse_cli(
                 input.insert("hub".into(), json!(read_value(args, &mut i, flag)?));
             }
             "--harness" => {
-                meta.insert(
-                    "expected_harness".into(),
-                    json!(read_value(args, &mut i, flag)?),
-                );
+                let harness = read_value(args, &mut i, flag)?;
+                if meta
+                    .get("expected_harness")
+                    .is_some_and(|old| old != &harness)
+                {
+                    return Err("INVALID_INPUT: Conflicting harness flags".into());
+                }
+                meta.insert("expected_harness".into(), json!(harness));
             }
             "--session" => {
                 meta.insert(
@@ -173,9 +177,11 @@ pub fn parse_cli(
     }
     if matches!(cmd, "listen" | "unlisten")
         && meta.get("expected_harness") == Some(&json!("human"))
-        && (input.contains_key("scope") || !positionals.is_empty())
+        && (input.contains_key("scope")
+            || !positionals.is_empty()
+            || meta.contains_key("expected_session_id"))
     {
-        return Err("INVALID_INPUT: Human device commands do not accept policy flags or descriptions; use cito inbox".into());
+        return Err("INVALID_INPUT: Human device commands do not accept session selectors, policy flags or descriptions; use cito inbox".into());
     }
     if cmd == "unlisten" && input.contains_key("scope") {
         return Err("INVALID_INPUT: Use cito inbox for scope policy".into());
@@ -239,10 +245,10 @@ pub fn parse_cli(
     }
     meta.insert(
         "_stdio".into(),
-        json!({"endpoint_pid":std::env::var("CITO_ENDPOINT_PID")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or_else(|| unsafe { libc::getppid() as u32 })}),
+        json!({"endpoint_pid":crate::support::enclosing_endpoint_pid(
+            std::env::var("CITO_ENDPOINT_PID").ok().and_then(|s|s.parse().ok()),
+            // SAFETY: getppid only reads the process parent.
+            unsafe { libc::getppid() as u32 })}),
     );
     meta.insert("cli_cmd".into(), json!(cmd));
     meta.insert(
@@ -251,33 +257,99 @@ pub fn parse_cli(
     );
     Ok((Value::Object(input), Value::Object(meta)))
 }
-fn presentation_error(raw: &str) -> String {
-    if raw.starts_with("CONTROL_REVISION_CONFLICT:") {
-        return "Inbox changed on another device. Review the current state and try again.".into();
-    }
-    let mut message = raw;
-    let mut candidate = raw;
-    if let Some((hub, rest)) = raw.split_once(": ") {
-        if hub.starts_with(|c: char| c.is_ascii_lowercase())
-            && hub
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
-            candidate = rest;
+pub(super) fn presentation_error(raw: &str) -> String {
+    let protocol_code = |code: &str| {
+        code.len() >= 3
+            && ((code.starts_with(|c: char| c.is_ascii_uppercase())
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
+                || code.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut unwrapped = raw.trim().to_owned();
+    loop {
+        if unwrapped.starts_with("CONTROL_REVISION_CONFLICT:") {
+            return "Inbox changed on another device. Review the current state and try again."
+                .into();
         }
-    }
-    while let Some((code, rest)) = candidate.split_once(':') {
-        if code.len() < 2
-            || !code.starts_with(|c: char| c.is_ascii_uppercase())
-            || !code
+        let lower = unwrapped.to_ascii_lowercase();
+        if [
+            "sqlite_",
+            "sqlite3",
+            "(sqlite",
+            "unable to open database",
+            "database is locked",
+            "database disk image is malformed",
+            "no such table:",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+        {
+            return "App database is unavailable. Check the app and its data location.".into();
+        }
+        if unwrapped.starts_with(['{', '[']) {
+            let detail = serde_json::from_str::<Value>(&unwrapped)
+                .ok()
+                .and_then(|v| {
+                    v["message"]
+                        .as_str()
+                        .or_else(|| v["error"]["message"].as_str())
+                        .or_else(|| v["error"].as_str())
+                        .map(str::to_owned)
+                });
+            match detail {
+                Some(detail) if !detail.is_empty() && detail != unwrapped => {
+                    unwrapped = detail;
+                    continue;
+                }
+                _ => return "The request failed. Try again.".into(),
+            }
+        }
+        let Some((code, rest)) = unwrapped.split_once(':') else {
+            break;
+        };
+        let label = code.starts_with(|c: char| c.is_ascii_lowercase())
+            && code
                 .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        let wrapper = ["discovery rejected", "badge rejected", "error"]
+            .contains(&code.to_ascii_lowercase().as_str());
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace))
+            || !(protocol_code(code) || label || wrapper)
         {
             break;
         }
-        candidate = rest.trim_start();
-        message = candidate;
+        unwrapped = rest.trim_start().to_owned();
     }
+    // Strip protocol tokens anywhere, preserving word boundaries and URL/time colons.
+    let mut stripped = String::new();
+    let mut chars = unwrapped.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            let mut word = String::from(c);
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                word.push(chars.next().unwrap());
+            }
+            let mut after = chars.clone();
+            if protocol_code(&word)
+                && after.next() == Some(':')
+                && after.peek().is_none_or(|c| c.is_whitespace())
+            {
+                chars.next();
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                stripped.push_str(&word);
+            }
+        } else {
+            stripped.push(c);
+        }
+    }
+    let mut message = stripped.as_str();
     if let Some((prefix, suffix)) = message.rsplit_once("(os error ") {
         if suffix
             .strip_suffix(')')
@@ -309,7 +381,28 @@ fn presentation_error(raw: &str) -> String {
         ("CITO_AUTH_MODE", "access mode"),
         (" (http://127.0.0.1 is allowed for tests)", ""),
     ] {
-        message = message.replace(token, copy);
+        if token.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') {
+            let mut replaced = String::new();
+            let mut cursor = 0;
+            for (start, _) in message.match_indices(token) {
+                let end = start + token.len();
+                let word = |c: char| c.is_alphanumeric() || c == '_';
+                if message[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !word(c))
+                    && message[end..].chars().next().is_none_or(|c| !word(c))
+                {
+                    replaced.push_str(&message[cursor..start]);
+                    replaced.push_str(copy);
+                    cursor = end;
+                }
+            }
+            replaced.push_str(&message[cursor..]);
+            message = replaced;
+        } else {
+            message = message.replace(token, copy);
+        }
     }
     message
 }
@@ -342,7 +435,18 @@ pub fn format_status(payload: &Value) -> String {
         );
     }
     let _ = writeln!(text, "AVAILABLE SESSIONS");
-    for row in payload["available"].as_array().into_iter().flatten() {
+    for row in payload["available"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|candidate| {
+            !candidate["listening_hubs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|hub| hub == &payload["hub"])
+        })
+    {
         let _ = writeln!(
             text,
             "  {} · {} · {}{}",
@@ -460,13 +564,18 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
             let rpc = crate::extract_jsonrpc_from_http_body(&response.body)
                 .ok_or_else(|| format!("HTTP {}", response.status))?;
             if let Some(error) = rpc.get("error") {
-                return Err(error.to_string());
+                return Err(crate::support::response_diagnostic(
+                    &json!({"error":error}),
+                    "The request failed",
+                ));
             }
             let text = rpc["result"]["content"][0]["text"]
                 .as_str()
                 .ok_or("Invalid daemon response")?;
             if rpc["result"]["isError"] == true {
-                return Err(text.into());
+                return Err(serde_json::from_str::<Value>(text)
+                    .map(|v| crate::support::response_diagnostic(&v, "The request failed"))
+                    .unwrap_or_else(|_| text.to_owned()));
             }
             serde_json::from_str(text).map_err(|e| e.to_string())?
         };
@@ -490,13 +599,41 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
         Ok(())
     })();
     if let Err(e) = result {
-        eprintln!("{e}");
+        if args.iter().any(|a| a == "--json") {
+            eprintln!("{e}");
+        } else {
+            eprintln!("{}", presentation_error(&e));
+        }
         std::process::exit(1);
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_and_plugin_harness_selectors_conflict_in_both_orders() {
+        let descriptor = super::super::plugins::parse_manifest(
+            std::path::Path::new("/tmp/editor"),
+            false,
+            &json!({"id":"editor","displayName":"Editor","cliFlag":true,"command":["./driver"]}),
+        )
+        .unwrap();
+        let plugins = LoadedPlugins {
+            plugins: vec![descriptor],
+            rejected_ids: Default::default(),
+        };
+        for args in [
+            vec!["--editor", "--harness", "human"],
+            vec!["--harness", "human", "--editor"],
+        ] {
+            let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(parse_cli("listen", &args, &plugins)
+                .unwrap_err()
+                .starts_with("INVALID_INPUT: Conflicting harness"));
+        }
+        let args = ["--editor", "--harness", "editor"].map(str::to_owned);
+        assert!(parse_cli("listen", &args, &plugins).is_ok());
+    }
     #[test]
     fn human_device_policy_rejection_distinguishes_generated_description() {
         let plugins = LoadedPlugins {
@@ -509,6 +646,8 @@ mod tests {
                 vec!["--team"],
                 vec!["Description"],
                 vec!["--about", "Description"],
+                vec!["--session", "default"],
+                vec!["--session", "session-a"],
             ] {
                 let args = [vec!["--harness", "human"], extra]
                     .concat()
@@ -548,6 +687,22 @@ mod tests {
                 && !formatted.contains("os error")
                 && !formatted.contains("auth_required")
         );
+    }
+    #[test]
+    fn diagnostics_use_word_boundaries_and_strip_protocol_wrappers() {
+        for (input,expected) in [
+            ("INACTIVE EXPIRED_UNSENT ACTIVE EXPIRED","INACTIVE EXPIRED_UNSENT Active Offline"),
+            ("work: PLUGIN_EXEC_FAILED: fixture: Discovery rejected: OFFLINE: Retry; AUTH_FAILED: Sign in","Retry; Sign in"),
+            ("10071: 10037: Conflict","Conflict"),
+            ("Badge rejected: BADGE_UNAVAILABLE: Retry later","Retry later"),
+            (r#"{"ok":false,"error_code":"OFFLINE","message":"Retry later"}"#,"Retry later"),
+            ("SQLITE_CANTOPEN: unable to open database file (SQLite 14)","App database is unavailable. Check the app and its data location."),
+        ] { assert_eq!(presentation_error(input),expected,"{input}"); }
+        let vectors: Vec<[String; 2]> =
+            serde_json::from_str(include_str!("../../tests/support/diagnostics.json")).unwrap();
+        for [input, expected] in vectors {
+            assert_eq!(presentation_error(&input), expected, "{input}");
+        }
     }
     #[test]
     fn flag_errors_precede_effects() {

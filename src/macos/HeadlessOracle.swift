@@ -1,6 +1,24 @@
 import AppKit
 
+// Record real tracking cancellation without opening a native menu in tests.
+final class HeadlessMenu: NSMenu {
+    var trackingCancellations = 0
+    override func cancelTracking() {
+        trackingCancellations += 1
+        super.cancelTracking()
+    }
+}
+
 extension Companion {
+    func flushDirtyViews() {
+        guard headless else { return }
+        renderingForInspection = true
+        defer { renderingForInspection = false }
+        if menuDirty && hasRenderedState { rebuild() }
+        if settingsDirty, settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+        if directoryDirty, directoryPanel != nil { refreshDirectoryViews() }
+    }
+
     func handleHeadlessTestCommand(_ data: Data) -> Bool {
         // Headless hooks exercise the same four-surface control handlers.
         if headless, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -14,9 +32,88 @@ extension Companion {
                     window.contentView?.appearance = testAppearance
                 }
             }
+            if op == "test_key_event", let character = object["character"] as? String {
+                let modifiers = object["modifiers"] as? [String] ?? []
+                var flags: NSEvent.ModifierFlags = []
+                for (name, flag) in [("command", NSEvent.ModifierFlags.command), ("shift", .shift), ("option", .option), ("control", .control), ("capsLock", .capsLock)] where modifiers.contains(name) { flags.insert(flag) }
+                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0) {
+                    NSApp.sendEvent(event)
+                }
+                return true
+            }
+            if op == "test_tab" {
+                let window = object["surface"] as? String == "directory" ? directoryPanel : settingsPanel
+                if let editor = window?.firstResponder as? NSTextView {
+                    if object["backward"] as? Bool == true { editor.insertBacktab(nil) }
+                    else { editor.insertTab(nil) }
+                }
+                return true
+            }
+            if op == "test_open_panel" {
+                if object["surface"] as? String == "settings" { openSettingsPanel() }
+                else { openDirectoryPanel(mode: object["mode"] as? String ?? "directory") }
+                return true
+            }
+            if op == "test_render_state" {
+                func containsRename(_ view: NSView) -> Bool {
+                    view.identifier?.rawValue.hasPrefix("rename_field:") == true || view.subviews.contains(where: containsRename)
+                }
+                let snapshot: [String: Any] = [
+                    "menu_open": menuOpen, "menu_dirty": menuDirty, "menu_rebuilds": rebuildCount,
+                    "mounted_rename": cardMenu.items.compactMap { $0.view }.contains(where: containsRename),
+                    "directory_open": directoryVisible, "directory_dirty": directoryDirty, "directory_reloads": directoryReloadCount,
+                    "settings_open": settingsVisible, "settings_dirty": settingsDirty, "settings_rebuilds": settingsRebuildCount,
+                    "status_updates": statusUpdateCount, "unread_count": unreadCount,
+                    "status_image": statusImage.map { String(describing: ObjectIdentifier($0)) } ?? "",
+                    "button_tooltip": (status?.button ?? headlessStatusButton)?.toolTip ?? "",
+                    "listeners": listeners.count, "directory_peers": directoryAllPeers.count,
+                    "settings_launch_at_login": settings?.launch_at_login ?? false,
+                    "hover_watch_active": MenuControl.hoverWatchActive,
+                    "hovered": MenuControl.activeHovered?.identifier?.rawValue ?? "",
+                    "panel_effect_states": [settingsPanel, directoryPanel].compactMap { $0?.contentView }.flatMap { $0.subviews.compactMap { ($0 as? NSVisualEffectView)?.state.rawValue } }
+                ]
+                diagnostic("render-state " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
+                return true
+            }
+            if op == "test_text_metrics" {
+                let strings = object["strings"] as? [String] ?? []
+                let widths = [CGFloat(10.5), 11, 12, 13, 15].flatMap { size in
+                    [NSFont.Weight.regular, .medium, .semibold, .bold].flatMap { weight in
+                        strings.map { text -> [String: Any] in
+                            let font = NSFont.systemFont(ofSize: size, weight: weight)
+                            let reference = NSTextField(labelWithString: text); reference.font = font
+                            return ["text": text, "size": size, "expected": ceil(reference.fittingSize.width), "actual": measureTextWidth(text, font: font)]
+                        }
+                    }
+                }
+                let dates = (object["timestamps"] as? [String] ?? []).map { timestamp -> [String: Any] in
+                    let reference = ISO8601DateFormatter()
+                    reference.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                    let date = reference.date(from: timestamp) ?? {
+                        reference.formatOptions = [.withInternetDateTime]
+                        return reference.date(from: timestamp)
+                    }()
+                    return ["timestamp": timestamp, "expected": date?.timeIntervalSince1970 as Any? ?? NSNull(), "actual": activityDate(timestamp)?.timeIntervalSince1970 as Any? ?? NSNull(), "relative": relativeTime(timestamp)]
+                }
+                diagnostic("text-metrics " + String(data: try! JSONSerialization.data(withJSONObject: ["widths": widths, "dates": dates], options: [.sortedKeys]), encoding: .utf8)!)
+                return true
+            }
+            if op == "test_hover_exit" {
+                if let control = MenuControl.activeHovered,
+                   let event = NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                       windowNumber: control.window?.windowNumber ?? 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+                    control.mouseExited(with: event)
+                }
+                return true
+            }
+            if op == "test_panel_resign_key" {
+                (object["surface"] as? String == "directory" ? directoryPanel : settingsPanel)?.resignKey()
+                return true
+            }
+            if op.hasPrefix("test_"), !["test_menu_open", "test_menu_close"].contains(op) { flushDirtyViews() }
             if op == "test_inspect" || op == "test_inspect_menu" { inspectMenu(); return true }
             if op == "test_oracle_calibration", let kind = object["kind"] as? String {
-                if kind == "reset" { rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; updateDirectoryFacetStyles(); return true }
+                if kind == "reset" { lastStatusPresentation = nil; rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; updateDirectoryFacetStyles(); flushDirtyViews(); return true }
                 let roots = cardMenu.items.compactMap { $0.view } + [settingsPanel?.contentView,directoryPanel?.contentView].compactMap { $0 }
                 func control(_ id: String) -> MenuControl? {
                     for root in roots { if let c = findControl(in:root,id:id) { return c } }
@@ -33,6 +130,22 @@ extension Companion {
                     if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
                 }
                 if kind == "bar_anchor", let c = control(object["id"] as? String ?? "quit") { c.frame.origin.x -= 24 }
+                if kind == "bar_midY", let c = control("toggle_inbox") { c.frame.origin.y -= 4 }
+                if kind == "footer_midY", let c = control("open_uninstall_confirm") { c.frame.origin.y -= 10 }
+                if let bar = control("toggle_inbox")?.superview {
+                    if kind == "borderless_padding" { bar.subviews.first { $0.identifier?.rawValue == "inbox_control_title" }?.frame.origin.x = 2 }
+                    if kind == "nested_overlap", let button = control("toggle_inbox") {
+                        let stack = NSView(frame:bar.bounds)
+                        let label = textLabel("Nested label",button.frame,size:11)
+                        label.identifier = NSUserInterfaceItemIdentifier("nested_label_probe")
+                        stack.addSubview(label); bar.addSubview(stack)
+                    }
+                    if kind == "data_row_truncation" {
+                        let label = textLabel("Unprotected data label",NSRect(x:12,y:6,width:10,height:15),size:11)
+                        label.identifier = NSUserInterfaceItemIdentifier("dir_oracle_probe")
+                        bar.addSubview(label)
+                    }
+                }
                 if kind == "card_padding", let card = roots.flatMap({$0.subviews}).first(where:{$0 is SurfaceView && ($0.layer?.borderWidth ?? 0)>0 && $0.frame.width>=60 && $0.frame.height>=32}), let child = card.subviews.first(where:{!$0.isHidden && !($0 is NSVisualEffectView)}) { child.frame.origin.x = 2 }
                 if kind == "address_mismatches", let listener = listeners.first { control("copy:\(listener.scoped_id)")?.label.stringValue = "wrong address" }
                 let row = object["row"] as? Int ?? 0
@@ -110,10 +223,43 @@ extension Companion {
                 let parts = id.split(separator: ":")
                 if parts.count > 1 { channelUiStates["\(effectiveChannelHub)|\(parts[1])", default: ChannelUiState()].editingPersonal = true; rebuildSettingsPanel() }
             }
+            if op == "test_editor_marked", let value = object["value"] as? String {
+                let window = object["surface"] as? String == "menu" ? headlessMenuPanel : settingsPanel
+                if let editor = window?.firstResponder as? NSTextView {
+                    editor.setMarkedText(value, selectedRange:NSRange(location:value.utf16.count,length:0), replacementRange:editor.selectedRange())
+                }
+                return true
+            }
+            if op == "test_end_editing" {
+                for window in [settingsPanel, headlessMenuPanel].compactMap({ $0 }) { window.makeFirstResponder(nil) }
+                return true
+            }
+            if op == "test_reconfigure_rows", let table = directoryTableView {
+                for row in 0..<table.numberOfRows {
+                    guard let cell = table.view(atColumn:0,row:row,makeIfNecessary:false) as? DirectoryPeerCellView else { continue }
+                    if directoryMode == "activity", activityFilteredItems.indices.contains(row) {
+                        let item = activityFilteredItems[row]
+                        cell.configureActivity(with:item,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
+                    } else if directoryFilteredPeers.indices.contains(row) {
+                        let peer = directoryFilteredPeers[row]
+                        cell.configure(with:peer,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] text,c in self?.copyText(text,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
+                    }
+                }
+                return true
+            }
             if op == "test_focus_field", let id = object["id"] as? String {
+                if id.hasPrefix("rename_field:"), let field = renameField, let root = cardMenu.items.compactMap({ $0.view }).first(where: { findTextField(in:$0,id:id) != nil }) {
+                    let panel = headlessMenuPanel ?? KeyPanel(contentRect:NSRect(x:0,y:0,width:380,height:600),styleMask:[.titled],backing:.buffered,defer:false)
+                    headlessMenuPanel = panel
+                    panel.contentView?.addSubview(root)
+                    panel.makeFirstResponder(field); field.selectText(nil)
+                    return true
+                }
                 if id == "directory_table" { directoryPanel?.makeFirstResponder(directoryTableView); return true }
                 for window in [settingsPanel, directoryPanel].compactMap({ $0 }) {
                     if let root = window.contentView, let field = findTextField(in: root, id: id), field.isEditable, field.isEnabled {
+                        // Hidden panels never receive AppKit's order-front key-loop pass.
+                        window.recalculateKeyViewLoop()
                         window.makeFirstResponder(field)
                         field.selectText(nil)
                         return true
@@ -154,7 +300,8 @@ extension Companion {
                 return true
             }
             if op == "test_menu_key", let key = object["key"] as? String, let field = renameField {
-                let editor = NSTextView(); editor.string = field.stringValue
+                let editor = (field.currentEditor() as? NSTextView) ?? NSTextView()
+                if field.currentEditor() == nil { editor.string = field.stringValue }
                 _ = control(field, textView: editor, doCommandBy: key == "escape" ? #selector(NSResponder.cancelOperation(_:)) : #selector(NSResponder.insertNewline(_:)))
                 return true
             }
@@ -216,6 +363,7 @@ extension Companion {
 
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
     func renderPNG(surface: String, path: String) {
+        flushDirtyViews()
         var restored: [(NSMenuItem, NSView, NSView?, NSRect)] = []
         let view: NSView
         var compositeWindow: NSPanel?
@@ -303,13 +451,16 @@ extension Companion {
     }
 
     func inspectMenu() {
+        flushDirtyViews()
         var truncatedLabels: [String] = []
         var overlappingSiblings: [String] = []
         var clippedViews: [String] = []
+        var tightPadding: [String] = []
+        var nonAnchoredActionBars: [String] = []
         var lowContrastLabels: [String] = []
         var jargonLeaks: [String] = []
         var addressMismatches: [String] = []
-        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\bPassive\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
+        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\bPassive\\b|\\[Passive\\]|\\b(?:[A-Z][A-Z0-9_]{2,}|[0-9]{3,}):(?:\\s+|$)|\\b(?:ACTIVE|UNLISTENED|DISCONNECTED_RETAINED|EXPIRED)\\b|\"error_code\"|(?i:SQLITE_|sqlite3|\\(SQLite\\b|unable to open database|database is locked|database disk image is malformed|no such table:)"
         func name(_ view: NSView) -> String {
             view.identifier?.rawValue ?? (view as? NSTextField)?.stringValue ?? String(describing:type(of:view))
         }
@@ -317,7 +468,7 @@ extension Companion {
             var ancestor: NSView? = view
             while let current = ancestor {
                 let id = current.identifier?.rawValue ?? ""
-                if id == "host_hub_endpoint" || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || id.hasPrefix("channel_summary:") || current is DirectoryPeerCellView { return true }
+                if ["host_hub_endpoint","inbox_control_title","inbox_control_summary"].contains(id) || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || id.hasPrefix("channel_summary:") || current is DirectoryPeerCellView { return true }
                 ancestor = current.superview
             }
             return false
@@ -376,7 +527,8 @@ extension Companion {
                 if label.frame.width < 48 || measureTextWidth(label.placeholderString ?? "", font:label.font ?? .systemFont(ofSize:12)) > label.frame.width - 8 { truncatedLabels.append(name(label)) }
             }
             if visible, let label = view as? NSTextField, !label.isEditable,
-               (label.superview is MenuControl || !isDataRow(label) || name(label).hasPrefix("dir_user:")) {
+               (!isDataRow(label) || label.maximumNumberOfLines == 1),
+               !(isDataRow(label) && (label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail) && !(label.toolTip ?? "").isEmpty) {
                 let font = label.font ?? .systemFont(ofSize:12)
                 let truncated: Bool
                 if label.maximumNumberOfLines == 1 {
@@ -437,7 +589,7 @@ extension Companion {
                 let defaultLayout: Bool
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
-                case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && !channelUiStates.values.contains(where: { $0.editingGateway || $0.editingPersonal || $0.manualEntry }) && (settings?.channels ?? []).allSatisfy { (channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.pairingInstruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.testResult == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
+                case "settings_channels_tab": defaultLayout = settings?.channel_inventory_error == nil && settings?.channels?.count == 1 && !channelUiStates.values.contains(where: { $0.editingGateway || $0.editingPersonal || $0.manualEntry }) && (settings?.channels ?? []).allSatisfy { (channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.pairingInstruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.testResult == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
                 case "settings_hubs_tab": defaultLayout = !addHubFormOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
@@ -474,28 +626,69 @@ extension Companion {
                     // are all zero. Compare them in the table's coordinate space.
                     view is NSTableView ? child.convert(child.bounds,to:view) : child.frame
                 }
-                let edgeItems = children.filter { child in child.frame.height > 5 && (child is NSControl || ["settings_app_tier:","stratum_hub_status:"].contains { child.identifier?.rawValue.hasPrefix($0) == true }) }
+                let edgeItems = children.filter { child in child.frame.height > 5 && (child is NSControl || ["settings_app_tier:","stratum_hub_status:","settings_channel_status:","settings_channel_badge:"].contains { child.identifier?.rawValue.hasPrefix($0) == true }) }
                 let id = name(view)
                 if ["header_hub_strip", "targetStrip"].contains(id), let scroll = view as? NSScrollView, !children.isEmpty {
                     let trailingInset: CGFloat = id == "header_hub_strip" ? 2 : 0
                     if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - trailingInset - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
                 }
                 let stratum = ["stratum_hub:","stratum_user:"].contains(where: { id.hasPrefix($0) })
-                if ["footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
+                if ["inbox_control_bar","footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_channel:","settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
+                    let barItems = edgeItems.filter { item in
+                        if id == "inbox_control_bar" { return item is MenuControl }
+                        return !((item as? NSTextField)?.isEditable ?? false)
+                    }
+                    if id == "inbox_control_bar", barItems.contains(where: { abs($0.frame.midY-parentBounds.midY)>1.5 }) {
+                        let issue = id + ": controls are not centered in the bar"
+                        nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                    }
                     var rows: [(String,CGFloat)] = []
-                    if let top = edgeItems.map({ $0.frame.midY }).max() { rows.append(("top",top)) }
-                    if stratum, let bottom = edgeItems.map({ $0.frame.midY }).min(), bottom != rows.first?.1 { rows.append(("bottom",bottom)) }
+                    if let top = barItems.map({ $0.frame.midY }).max() { rows.append(("top",top)) }
+                    if stratum, let bottom = barItems.map({ $0.frame.midY }).min(), bottom != rows.first?.1 { rows.append(("bottom",bottom)) }
                     for (row,y) in rows {
-                        let items = edgeItems.filter { abs($0.frame.midY - y) <= 8 }
-                        if (items.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 { clippedViews.append(id + ": " + row + " row is not edge anchored") }
+                        // Cards contain authored title, field, and action rows.
+                        // Single-row bars/footers must retain every sibling,
+                        // including controls displaced beyond a row tolerance.
+                        let singleRow = ["inbox_control_bar","footer","settings_footer","directory_footer","directory_facet_bar"].contains(id)
+                        let items = singleRow ? barItems : barItems.filter { abs($0.frame.midY-y) <= 8 }
+                        if (items.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 {
+                            let issue = id + ": " + row + " row is not edge anchored"
+                            nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                        }
+                        if let minY = items.map({ $0.frame.midY }).min(), let maxY = items.map({ $0.frame.midY }).max(), maxY-minY > 1.5 {
+                            let issue = id + ": " + row + " row controls are not vertically centered"
+                            nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                        }
+                    }
+                }
+                // Compare authored leaf labels with controls even through nested
+                // layout groups, including rounded text/status containers.
+                if view is SurfaceView || view is DirectoryPeerCellView || view.identifier != nil {
+                    func leaves(_ parent: NSView) -> [NSView] {
+                        parent.subviews.filter { !$0.isHidden }.flatMap { child -> [NSView] in
+                            if child is NSTextField || child is MenuControl || child is NSButton || child is NSSegmentedControl || child is NSSwitch { return [child] }
+                            if child is DirectoryPeerCellView || child is NSScrollView { return [] }
+                            return leaves(child)
+                        }
+                    }
+                    let descendants = leaves(view)
+                    let labels = descendants.compactMap { $0 as? NSTextField }.filter { !$0.isEditable }
+                    let controls = descendants.filter { $0 is MenuControl || $0 is NSButton || $0 is NSSegmentedControl || $0 is NSSwitch }
+                    for label in labels {
+                        let labelFrame = label.convert(label.bounds,to:view).insetBy(dx:0.5,dy:0.5)
+                        for control in controls where labelFrame.intersects(control.convert(control.bounds,to:view).insetBy(dx:0.5,dy:0.5)) {
+                            overlappingSiblings.append("\(id): \(name(label)) / \(name(control)) (nested)")
+                        }
                     }
                 }
                 for (index, child) in children.enumerated() {
                     let f = frame(child)
-                    if view is SurfaceView && (view.layer?.borderWidth ?? 0)>0 && view.frame.width>=60 && view.frame.height>=32
-                       && !["settings_panel","directory_panel"].contains(id),
-                       f.minX<5.5 || f.minY<5.5 || f.maxX>parentBounds.width-5.5 || f.maxY>parentBounds.height-5.5 {
-                        clippedViews.append("\(name(view)) > \(name(child)): card padding < 6pt")
+                    let paddedSurface = (view as? SurfaceView).map { $0.fillColor.alphaComponent > 0 || ($0.layer?.borderWidth ?? 0)>0 } ?? false
+                    if (paddedSurface || view is DirectoryPeerCellView) && view.frame.width>=60 && view.frame.height>=32
+                       && !["settings_panel","directory_panel"].contains(id) && f.width>5 && f.height>5,
+                       f.minX<6 || f.minY<6 || f.maxX>parentBounds.width-6 || f.maxY>parentBounds.height-6 {
+                        let issue = "\(name(view)) > \(name(child)): card padding < 6pt"
+                        tightPadding.append(issue); clippedViews.append(issue)
                     }
                     if f.minX < -0.5 || f.minY < -0.5 || f.maxX > parentBounds.width + 0.5 || f.maxY > parentBounds.height + 0.5 {
                         clippedViews.append("\(name(view)) > \(name(child))")
@@ -505,7 +698,7 @@ extension Companion {
                     }
                 }
             }
-            var result: [String: Any] = ["id": (view as? DirectoryPeerCellView)?.inspectionId ?? view.identifier?.rawValue ?? "", "width": view.frame.width,
+            var result: [String: Any] = ["instance": String(describing:ObjectIdentifier(view)), "id": (view as? DirectoryPeerCellView)?.inspectionId ?? view.identifier?.rawValue ?? "", "width": view.frame.width,
                 "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
                 "children": childViews.map { project($0, visible: visible, background: surface, opacity: opacity, enabled: enabled) }]
@@ -537,7 +730,12 @@ extension Companion {
                 result["label_width"] = label.cell?.drawingRect(forBounds: label.bounds).width ?? label.bounds.width
                 result["label_measured_width"] = label.cell?.cellSize.width ?? label.attributedStringValue.size().width
             }
-            if let control = view as? NSControl { result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue }
+            if let control = view as? NSControl {
+                result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue
+                result["accessibility_label"] = control.accessibilityLabel() ?? ""
+                result["accessibility_role"] = control.accessibilityRole()?.rawValue ?? ""
+                if let value = control.accessibilityValue() as? NSNumber { result["accessibility_value"] = value }
+            }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
                 result["accessibility_label"] = control.accessibilityLabel() ?? ""
@@ -622,25 +820,29 @@ extension Companion {
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
-        let snapshot: [String: Any] = ["items": items, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
+        let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "overlapping_views": overlappingSiblings, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "rename_field_identity": renameField.map { String(describing:ObjectIdentifier($0)) } ?? "",
+            "tracking_cancellations": (cardMenu as? HeadlessMenu)?.trackingCancellations ?? 0,
             "low_contrast_labels": lowContrastLabels, "jargon_leaks":jargonLeaks, "address_mismatches":addressMismatches,
             "edit_menu": NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "Edit" })?.submenu?.items.map { ["title": $0.title, "key": $0.keyEquivalent, "action": $0.action.map(NSStringFromSelector) ?? "", "shift": $0.keyEquivalentModifierMask.contains(.shift)] as [String: Any] } ?? [],
             "key_panels": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in
                 guard let window = window else { return nil }
                 return ["titled": window.styleMask.contains(.titled), "full_size_content": window.styleMask.contains(.fullSizeContentView),
+                    "automatic_key_view_loop": window.autorecalculatesKeyViewLoop,
                     "hidden_title": window.titleVisibility == .hidden, "transparent_titlebar": window.titlebarAppearsTransparent,
                     "hidden_window_buttons": [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].allSatisfy { window.standardWindowButton($0)?.isHidden != false }]
             },
-            "field_editors": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in
+            "field_editors": [settingsPanel, directoryPanel, headlessMenuPanel].compactMap { window -> [String: Any]? in
                 guard let editor = window?.firstResponder as? NSTextView else { return nil }
-                return ["id": (editor.delegate as? NSTextField)?.identifier?.rawValue ?? "", "selection_length": editor.selectedRange().length,
+                return ["id": (editor.delegate as? NSTextField)?.identifier?.rawValue ?? "", "instance": String(describing:ObjectIdentifier(editor)),
+                    "marked": editor.hasMarkedText(), "selection_length": editor.selectedRange().length,
                     "selection_location": editor.selectedRange().location, "editable": editor.isEditable,
                     "can_undo": editor.undoManager?.canUndo ?? false, "undo_groups": editor.undoManager?.groupingLevel ?? -1,
                     "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
             },
+            "activity_copy_remaining": activityCopiedUntil.mapValues { max(0,$0.timeIntervalSinceNow) },
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),
@@ -651,6 +853,9 @@ extension Companion {
             "directory_selected_id": selectedId, "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
             "directory_selection_visible": directoryTableView.map { table in directorySelectedIndex >= 0 && directorySelectedIndex < table.numberOfRows && table.visibleRect.contains(table.rect(ofRow:directorySelectedIndex)) } ?? false,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
+            "pending_channel_saves": Array(pendingChannelValues.keys).sorted(),
+            "pending_controls": Array(pendingControls.keys).sorted(),
+            "settings_rebuild_deferred": settingsRebuildDeferred,
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
             "icon_height": statusImage?.size.height ?? 0, "clipboard": effectiveClipboard,

@@ -27,7 +27,7 @@ pub fn evaluate_node_lease(registration: &Value, now: u64) -> &'static str {
     }
     let now = registration_now(registration, now);
     let channels = registration["channels"].as_object();
-    if channels.is_none_or(|c| c.is_empty()) {
+    if channels.is_none() {
         if registration["state"] != "ACTIVE" {
             return "UNLISTENED";
         }
@@ -144,6 +144,23 @@ pub fn attachments(reg: &Value, local_host: &str, now: u64) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_empty_channels_never_use_legacy_active_summary() {
+        let mut reg = json!({"harness":"human","state":"ACTIVE","channels":{
+            "host:human":{"host_id":"host","state":"ACTIVE","updated_at_ms":1,"binding_generation":4}
+        }});
+        reconcile_registration_state(&mut reg, 1_900_000);
+        assert_eq!(reg["channels"], json!({}));
+        assert_eq!(reg["state"], "UNLISTENED");
+        assert_eq!(evaluate_node_lease(&reg, 1_900_001), "UNLISTENED");
+        assert_eq!(
+            evaluate_node_lease(
+                &json!({"state":"ACTIVE","updated_at_ms":1_900_000}),
+                1_900_001
+            ),
+            "ACTIVE"
+        );
+    }
     #[test]
     fn projection_deduplicates_live_attachments_and_pruning_retains_fences() {
         let mut reg = json!({"harness":"human","human_paused":false,"scope":"self","human_control_revision":4,"channels":{

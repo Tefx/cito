@@ -4,7 +4,6 @@ use super::{
 };
 use crate::core::{
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
-    receiver::plugin_request,
     registration::{distinct_label, is_generic_session_label},
 };
 use crate::plugins::{now_ms, random_uuid_v4};
@@ -37,53 +36,6 @@ pub(super) fn default_session_title(
     distinct_label(about, title, user, home_basename)
         .unwrap_or(harness_name)
         .to_owned()
-}
-
-fn caller_pid_hint(meta: &Value) -> Result<Option<u64>, String> {
-    let mut pending = vec![(meta, 0usize)];
-    let mut pid = None;
-    let mut visited = 0;
-    while let Some((value, depth)) = pending.pop() {
-        visited += 1;
-        if visited > 512 {
-            return Err("INVALID_INPUT: Caller metadata is too complex".into());
-        }
-        if depth > 8 {
-            continue;
-        }
-        match value {
-            Value::Object(fields) => {
-                for (key, value) in fields {
-                    if key != "http_client_pid"
-                        && (key == "pid"
-                            || key.ends_with("_pid")
-                            || key.ends_with("Pid")
-                            || key.ends_with("PID"))
-                        && !value.is_null()
-                    {
-                        let next = value
-                            .as_u64()
-                            .filter(|value| *value > 0 && *value <= i32::MAX as u64)
-                            .ok_or("INVALID_INPUT: Caller PID must be a positive process ID")?;
-                        if pid.is_some_and(|previous| previous != next) {
-                            return Err("INVALID_INPUT: Conflicting caller PID claims".into());
-                        }
-                        pid = Some(next);
-                    }
-                    if value.is_object() || value.is_array() {
-                        pending.push((value, depth + 1));
-                    }
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    pending.push((value, depth + 1));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(pid)
 }
 
 pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String> {
@@ -206,7 +158,14 @@ pub(super) fn tools_list() -> Value {
     tools
 }
 
-pub(super) fn wait_send_receipt(
+pub(super) fn wait_send_receipt(service: &Arc<Mutex<DaemonService>>, payload: &mut Value) {
+    if let Err(error) = read_send_receipt(service, payload) {
+        payload["receipt_status"] = json!("unknown");
+        payload["receipt_warning"] = json!(error);
+    }
+}
+
+fn read_send_receipt(
     service: &Arc<Mutex<DaemonService>>,
     payload: &mut Value,
 ) -> Result<(), String> {
@@ -224,6 +183,7 @@ pub(super) fn wait_send_receipt(
         if shutdown_requested() || slot.closed.load(Ordering::SeqCst) {
             return Err("Send interrupted".into());
         }
+        let revision = slot.event_revision();
         let remote = slot.rpc(
             "stream_get_message",
             &json!({"stream":"CITO_SIGNALS","seq":payload["seq"]}),
@@ -236,7 +196,7 @@ pub(super) fn wait_send_receipt(
             payload["held_reason"] = json!("sender_ack_timeout");
             break;
         }
-        thread::sleep(Duration::from_millis(25));
+        slot.wait_for_event(revision, deadline);
     }
     state.db.execute(
         "UPDATE local_sent_idempotency SET status=?,held_reason=? WHERE hub=? AND signal_id=?",
@@ -252,25 +212,51 @@ pub(super) fn wait_send_receipt(
 
 impl DaemonService {
     pub(super) fn caller(&self, meta: &Value, required: bool) -> Result<Option<Value>, String> {
-        let requested_pid = caller_pid_hint(meta)?.or_else(|| meta["_http_client"].as_u64());
-        let explicit_pid = meta
-            .as_object()
-            .is_some_and(|m| m.keys().any(|k| k.ends_with("_pid") || k.ends_with("Pid")));
+        self.caller_until(meta, required, Instant::now() + Duration::from_millis(1500))
+    }
+
+    fn caller_until(
+        &self,
+        meta: &Value,
+        required: bool,
+        deadline: Instant,
+    ) -> Result<Option<Value>, String> {
+        let pid_hint = crate::support::caller_pid_hint(meta, true)?.map(u64::from);
+        let requested_pid = pid_hint.or_else(|| meta["_http_client"].as_u64());
+        let explicit_pid = pid_hint.is_some();
         let expected = string(meta, "expected_harness");
         if expected == "human" {
-            if !matches!(string(meta, "expected_session_id"), "" | "default") {
-                return Err("INVALID_INPUT: Human node session_id must be 'default'".into());
-            }
-            return Ok(Some(
-                json!({"harness":"human","session_id":"default","cwd":"","title":"Human"}),
-            ));
+            return Err("FORBIDDEN: MCP callers must be agent sessions".into());
+        }
+        if !required
+            && requested_pid.is_none()
+            && expected.is_empty()
+            && string(meta, "expected_session_id").is_empty()
+        {
+            return Ok(None);
+        }
+        if !expected.is_empty()
+            && !self
+                .plugins
+                .agent_plugins()
+                .iter()
+                .any(|plugin| plugin.id == expected)
+        {
+            return Err("UNSUPPORTED_HARNESS: Unknown harness".into());
         }
         let mut failures = Vec::new();
-        for plugin in self.plugins.agent_plugins() {
+        let mut plugins = self.plugins.agent_plugins();
+        if expected.is_empty() && explicit_pid {
+            plugins.sort_by_key(|plugin| !plugin.pid_bound);
+        }
+        for plugin in plugins {
             if !expected.is_empty() && plugin.id != expected {
                 continue;
             }
-            let mut request = json!({"op":"resolve_caller","meta":meta,"headers":meta["headers"],"cwd":meta["cwd"],"http_transport":true,"http_client_pid":requested_pid,"require_open":required,"explicit_session_id":meta["expected_session_id"],"cli_cmd":meta["cli_cmd"],"state_dir":self.config.state_dir,"env":{}});
+            if Instant::now() >= deadline {
+                return Err("TOOL_TIMEOUT: Caller resolution exceeded 1500ms budget".into());
+            }
+            let mut request = json!({"op":"resolve_caller","meta":meta,"headers":meta["headers"],"cwd":meta["cwd"],"http_transport":true,"http_client_pid":requested_pid,"require_open":required,"explicit_session_id":if expected == plugin.id { meta["expected_session_id"].clone() } else { Value::Null },"cli_cmd":meta["cli_cmd"],"state_dir":self.config.state_dir,"env":{}});
             if !required {
                 if let Some(cached) = requested_pid.and_then(|pid| {
                     self.caller_cache.lock().ok().and_then(|cache| {
@@ -283,7 +269,18 @@ impl DaemonService {
                     request["cached_caller"] = cached;
                 }
             }
-            match plugin_request(plugin, &request, None, None) {
+            match crate::plugins::plugin_request_with_progress(
+                plugin,
+                &request,
+                deadline.saturating_duration_since(Instant::now()),
+                |_| {
+                    if shutdown_requested() {
+                        Err("Caller discovery cancelled".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            ) {
                 Ok(reply) if reply["ok"] == true => {
                     let caller = reply["caller"].clone();
                     if string(&caller, "harness") != plugin.id
@@ -303,7 +300,11 @@ impl DaemonService {
                         .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
                     {
                         if let Ok(mut cache) = self.caller_cache.lock() {
-                            cache.retain(|pid, _| crate::plugins::pid_alive(*pid as i32));
+                            cache.retain(|pid, _| {
+                                i32::try_from(*pid)
+                                    .ok()
+                                    .is_some_and(crate::plugins::pid_alive)
+                            });
                             cache.insert(pid, caller.clone());
                             if let Some(requested_pid) = requested_pid {
                                 cache.insert(requested_pid, caller.clone());
@@ -330,6 +331,9 @@ impl DaemonService {
                 }
             }
         }
+        if Instant::now() >= deadline {
+            return Err("TOOL_TIMEOUT: Caller resolution exceeded 1500ms budget".into());
+        }
         if !expected.is_empty() || explicit_pid || !string(meta, "expected_session_id").is_empty() {
             return Err(failures
                 .first()
@@ -340,7 +344,7 @@ impl DaemonService {
                         string(reply, "message")
                     )
                 })
-                .unwrap_or_else(|| "UNSUPPORTED_HARNESS: Unknown harness".into()));
+                .unwrap_or_else(|| "BINDING_REQUIRED: No caller socket bridge found".into()));
         }
         if required {
             return Err("BINDING_REQUIRED: No caller socket bridge found".into());
@@ -423,7 +427,7 @@ impl DaemonService {
         )?;
         // The new remote/local binding commits before the previous endpoint is revoked.
         for row in previous {
-            self.unlisten_id(hub, string(&row, "listener_id"))?;
+            self.retire_id(hub, string(&row, "listener_id"), "hard_exit")?;
         }
         // Registration commits the Hub-scoped PID and transition timestamp together.
         // Do not rewrite binding metadata after releasing registration authority.
@@ -432,22 +436,31 @@ impl DaemonService {
         Ok(result)
     }
 
-    pub(super) fn pause_listener(&mut self, hub: &str, id: &str) -> Result<bool, String> {
-        if self
-            .state
-            .listener(hub, id)?
-            .is_some_and(|row| row["harness"] != "human" && row["status"] == "ACTIVE")
-            && self
-                .slots
-                .get(hub)
-                .is_some_and(|slot| slot.config["autoListen"] == true)
-        {
-            self.set_auto_listen(hub, false)?;
+    /// Stop intent exists even if this session has never been enrolled.
+    pub(super) fn ensure_agent_stop_row(
+        &self,
+        hub: &str,
+        harness: &str,
+        session: &str,
+    ) -> Result<String, String> {
+        if harness.is_empty() || harness == "human" || session.is_empty() {
+            return Err("INVALID_INPUT: An agent session is required".into());
         }
-        self.unlisten_id(hub, id)
+        let slot = self.slot(hub)?;
+        let lock = self.state.registration_lock(hub)?;
+        let _guard = lock
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        let id = super::super::registration::local_node_id(&self.state, slot, harness, session)?;
+        self.state.db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,user_stopped,retirement_reason,hub_url) VALUES(?,?,?,?,?,?,?,?,?,'','','','self','UNLISTENED',1,'user',?)", &[json!(hub),json!(id),json!(crate::core::identity::public_listener_id(string(&slot.identity,"owner_user"),&id)),slot.identity["principal_id"].clone(),slot.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name()),json!(harness),json!(session),slot.config["url"].clone()])?;
+        Ok(id)
     }
 
     pub(super) fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
+        self.retire_id(hub, id, "user")
+    }
+
+    pub(super) fn retire_id(&self, hub: &str, id: &str, reason: &str) -> Result<bool, String> {
         let client = self.slots.get(hub);
         let hub_url = if let Some(client) = client {
             Some(string(&client.config, "url").to_owned())
@@ -468,7 +481,7 @@ impl DaemonService {
         self.state.db.transaction(|c| {
             if row.is_some() {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
-                c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(hub),json!(id)])?;
+                c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=?,user_stopped=CASE WHEN harness!='human' AND ?='user' THEN 1 ELSE user_stopped END,retirement_reason=CASE WHEN harness!='human' THEN ? ELSE NULL END,retired_activity_revision=CASE WHEN ?='idle' THEN last_activity_revision ELSE retired_activity_revision END,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(reason),json!(reason),json!(reason),json!(hub),json!(id)])?;
             } else if let Some(client) = client.filter(|client|id==listener_id(string(&client.identity,"principal_id"),"human","default")) {
                 // Persist intent before queued automatic enrollment can obtain the lock.
                 c.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','Human','self','UNLISTENED')",&[
@@ -706,8 +719,8 @@ impl DaemonService {
     }
 
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
-        if matches!(name, "cito_listen" | "cito_unlisten")
-            && (args["harness"] == "human" || meta["expected_harness"] == "human")
+        if (name != "cito_find" && args["harness"] == "human")
+            || meta["expected_harness"] == "human"
         {
             return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
         }
@@ -764,8 +777,10 @@ impl DaemonService {
                 Ok(result)
             }
             "cito_status" => {
+                let deadline = Instant::now() + Duration::from_millis(1500);
+                self.refresh_available_until(deadline)?;
                 let caller = self
-                    .caller(meta, false)?
+                    .caller_until(meta, false, deadline)?
                     .ok_or("BINDING_REQUIRED: Caller required")?;
                 let row = self.state.active()?.into_iter().find(|r| {
                     r["hub"] == hub
@@ -798,14 +813,12 @@ impl DaemonService {
                 let mut removed = 0;
                 let mut detach_errors = Vec::new();
                 for hub in hubs {
-                    let slot = self.slot(&hub)?;
-                    let id = crate::core::registration::local_node_id(
-                        &self.state,
-                        slot,
+                    let id = self.ensure_agent_stop_row(
+                        &hub,
                         string(&caller, "harness"),
                         string(&caller, "session_id"),
                     )?;
-                    match self.pause_listener(&hub, &id) {
+                    match self.unlisten_id(&hub, &id) {
                         Ok(true) => removed += 1,
                         Ok(false) => {}
                         Err(error) => detach_errors.push(format!("{hub}: {error}")),
@@ -819,7 +832,7 @@ impl DaemonService {
                 )
             }
             "cito_find" => {
-                let _ = self.caller(meta, false)?;
+                let _ = crate::support::caller_pid_hint(meta, true)?;
                 self.find_listeners(args, |_| true)
             }
             "cito_send" => {
@@ -833,8 +846,13 @@ impl DaemonService {
                     }
                     result => result,
                 };
-                self.poll()?;
-                result
+                let maintenance = self.poll();
+                result.map(|mut value| {
+                    if let Err(error) = maintenance {
+                        value["maintenance_warning"] = json!(error);
+                    }
+                    value
+                })
             }
             "cito_inbox" => self.inbox(&hub, args, meta),
             _ => Err(format!("INVALID_INPUT: Unknown tool: {name}")),
@@ -842,6 +860,17 @@ impl DaemonService {
     }
 
     pub(super) fn send(&self, default: &str, args: &Value, meta: &Value) -> Result<Value, String> {
+        let caller = self.caller(meta, false)?;
+        self.send_from(default, args, caller)
+    }
+
+    /// The UI action boundary supplies Human authority directly, never through MCP metadata.
+    pub(super) fn send_from(
+        &self,
+        default: &str,
+        args: &Value,
+        caller: Option<Value>,
+    ) -> Result<Value, String> {
         let message = sanitize_message(
             args["message"]
                 .as_str()
@@ -856,7 +885,6 @@ impl DaemonService {
             return Err("INVALID_INPUT: Conflicting hub prefixes".into());
         }
         let slot = self.slot(hub)?;
-        let caller = self.caller(meta, false)?;
         let mut directory = slot.directory()?;
         let alias = crate::core::identity::readable_alias(to);
         let canonical_target = if to.starts_with('@') || alias.is_some() {
@@ -1269,11 +1297,32 @@ impl DaemonService {
     }
     pub(super) fn flush_acks(&self) {
         for (hub, slot) in &self.slots {
+            let key = json!([hub, slot.config["url"], slot.identity["principal_id"]]).to_string();
+            if self.ack_backoff.lock().is_ok_and(|retries| {
+                retries
+                    .get(&key)
+                    .is_some_and(|(at, _)| *at > Instant::now())
+            }) {
+                continue;
+            }
             // Identity filtering precedes the page limit: retained rows for an
             // unavailable/replaced profile must not starve this profile's ACKs.
             let Ok(rows) = self.state.db.query("SELECT * FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?,?) ORDER BY acked_at_ms LIMIT 256",&[json!(hub),slot.config["url"].clone(),slot.identity["principal_id"].clone(),slot.identity["legacy_principal_id"].clone(),slot.identity["canonical_principal_id"].clone()]) else { continue; };
+            let mut failed = false;
             for row in rows {
-                if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok(){let _=self.state.db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone()]);}
+                if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok() {
+                    let _=self.state.db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone()]);
+                } else { failed = true; break; }
+            }
+            if let Ok(mut retries) = self.ack_backoff.lock() {
+                if failed {
+                    let retry = retries.entry(key).or_insert_with(|| {
+                        (Instant::now(), crate::support::RetryBackoff::default())
+                    });
+                    retry.0 = Instant::now() + retry.1.failed();
+                } else {
+                    retries.remove(&key);
+                }
             }
         }
     }

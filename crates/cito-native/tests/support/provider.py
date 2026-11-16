@@ -23,6 +23,8 @@ result = dict(ok=True)
 if op == "resolve_caller":
     result = dict(ok=True, caller=caller) if request.get("meta", {}).get("expected_harness") == "fixture" else dict(ok=False, error_code="BINDING_REQUIRED", message="Explicit fixture identity required")
 elif op == "discover_sessions":
+    if options.get("discover_delay_ms"):
+        time.sleep(options["discover_delay_ms"] / 1000)
     if options.get("discover_error"):
         result = dict(ok=False, error_code="DISCOVERY_UNAVAILABLE", message="Discovery is temporarily unavailable")
     else:

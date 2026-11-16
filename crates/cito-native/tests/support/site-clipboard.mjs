@@ -3,23 +3,40 @@
 // effects: none outside VM contexts.
 // requires: Node.js standard library only.
 import assert from 'node:assert/strict';
-import {readFileSync, readdirSync} from 'node:fs';
+import {existsSync, readFileSync, readdirSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 const site = new URL('../../../../site/', import.meta.url);
 const source = readFileSync(new URL('scripts/hero-preview.js', site), 'utf8');
 
-function fixture(writeText, command = 'brew install --cask tefx/tap/cito') {
+function fixture(writeText, command = 'brew install --cask tefx/tap/cito', code = null) {
   const badge = {textContent: 'Copy', setAttribute() {}};
-  let click;
+  let click, now = 0, nextTimer = 0;
+  const timers = new Map();
   const button = {
     disabled: false, getAttribute: () => command, querySelector: () => badge,
+    hasAttribute: name => name === 'data-copy-code' && code !== null,
+    closest: selector => {
+      assert.equal(selector, '.code-block');
+      return {querySelector: selector => {
+        assert.equal(selector, 'pre code');
+        return {textContent: code};
+      }};
+    },
     addEventListener: (_event, handler) => { click = handler; }
   };
   runInNewContext(source, {
-    document: {querySelectorAll: selector => selector === '[data-copy-command]' ? [button] : [], querySelector: () => null},
-    navigator: {clipboard: writeText ? {writeText} : undefined}
+    document: {querySelectorAll: selector => selector === '[data-copy-command], [data-copy-code]' ? [button] : [], querySelector: () => null},
+    navigator: {clipboard: writeText ? {writeText} : undefined},
+    setTimeout: (callback, delay) => { timers.set(++nextTimer, {at: now + delay, callback}); return nextTimer; },
+    clearTimeout: timer => timers.delete(timer)
   });
-  return {badge, button, click: () => click()};
+  return {badge, button, click: () => click(), advance(ms) {
+    now += ms;
+    for (const [id, timer] of timers) if (timer.at <= now) {
+      timers.delete(id);
+      timer.callback();
+    }
+  }};
 }
 let resolve;
 const writes = [];
@@ -33,6 +50,10 @@ resolve();
 await pending;
 assert.equal(f.badge.textContent, 'Copied ✓');
 assert.equal(f.button.disabled, false);
+f.advance(1999);
+assert.equal(f.badge.textContent, 'Copied ✓');
+f.advance(1);
+assert.equal(f.badge.textContent, 'Copy');
 const fallback = fixture(async command => assert.equal(command, 'brew install --cask tefx/tap/cito'), null);
 await fallback.click();
 assert.equal(fallback.badge.textContent, 'Copied ✓');
@@ -48,24 +69,103 @@ await missing.click();
 assert.equal(missing.badge.textContent, 'Copy failed');
 assert.equal(missing.button.disabled, false);
 
-for (const page of ['styles/main.css', 'index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)]) {
-  const content = readFileSync(new URL(page, site), 'utf8');
-  for (const retired of ['docs-figure-stage--compact', '245, 158, 11', 'Paste Invite Code', '$1', 'My Macs', 'BannerWindow', 'Desktop Banner', 'plugins/human']) {
-    assert.ok(!content.includes(retired), `${page} contains retired UI markup: ${retired}`);
-  }
+const pages = ['index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)];
+for (const required of ['index.html', 'docs/guide.html', 'docs/hosting.html', 'docs/plugins.html', 'docs/architecture.html']) {
+  assert.ok(pages.includes(required), `Missing required page: ${required}`);
 }
-const homepage = readFileSync(new URL('index.html', site), 'utf8');
+const documents = new Map(pages.map(page => [new URL(page, site).href, readFileSync(new URL(page, site), 'utf8')]));
+const homepage = documents.get(new URL('index.html', site).href);
 const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
-for (const page of ['index.html', 'docs/guide.html', 'docs/plugins.html', 'docs/architecture.html']) {
-  const html = readFileSync(new URL(page, site), 'utf8');
-  for (const anchor of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)) {
-    const attrs = Object.fromEntries([...anchor[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
-    if (!attrs.href?.startsWith('https://github.com/Tefx/cito')) continue;
-    assert.equal(attrs.target, '_blank', page);
-    assert.ok(attrs.rel.split(' ').includes('noopener') && attrs.rel.split(' ').includes('noreferrer'), page);
-    if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(anchor[2])) assert.equal(attrs.href, download, page);
+for (const [page, html] of documents) {
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(new Set(ids).size, ids.length, `${page}: duplicate IDs`);
+  assert.doesNotMatch(html, /class="[^"]*\bdocs-figure-stage--compact\b/, page);
+  for (const control of html.matchAll(/<(?:button|input)\b([^>]*)(?:>([\s\S]*?)<\/button>|\s*\/?>)/g)) {
+    assert.doesNotMatch(`${control[1]} ${control[2] || ''}`, /Paste Invite Code|My Macs|Desktop Banner|BannerWindow/, page);
+  }
+  for (const link of html.matchAll(/<(a|link)\b([^>]*)>(?:([\s\S]*?)<\/a>)?/g)) {
+    const attrs = Object.fromEntries([...link[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
+    assert.ok(attrs.href, `${page}: ${link[1]} missing href`);
+    const target = new URL(attrs.href.replaceAll('&amp;', '&'), page);
+    if (target.protocol === 'file:') {
+      const fragment = decodeURIComponent(target.hash.slice(1));
+      target.hash = '';
+      target.search = '';
+      assert.ok(existsSync(target), `${page}: broken link ${attrs.href}`);
+      if (fragment) {
+        const destination = documents.get(target.href);
+        assert.ok(destination, `${page}: fragment points outside site pages: ${attrs.href}`);
+        assert.ok([...destination.matchAll(/\bid="([^"]+)"/g)].some(match => match[1] === fragment), `${page}: missing anchor ${attrs.href}`);
+      }
+    } else {
+      assert.ok(['https:', 'http:', 'mailto:'].includes(target.protocol), `${page}: unsupported link ${attrs.href}`);
+    }
+    if (link[1] === 'a' && attrs.href.startsWith('https://github.com/Tefx/cito')) {
+      assert.equal(attrs.target, '_blank', page);
+      assert.ok(attrs.rel?.split(/\s+/).includes('noopener') && attrs.rel?.split(/\s+/).includes('noreferrer'), page);
+      if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(link[3] || '')) assert.equal(attrs.href, download, page);
+    }
   }
 }
+// Exercise every shipped documentation code block through the shared handler.
+// Decode HTML text as the browser does, so copying escaped examples proves the boundary.
+function decodedCode(html) {
+  return html.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_match, entity) => {
+    const named = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"};
+    if (entity.startsWith('#')) return String.fromCodePoint(entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : Number(entity.slice(1)));
+    return named[entity];
+  });
+}
+for (const [page, html] of documents) {
+  assert.match(html, /<a class="skip-link" href="#main-content">/);
+  if (!page.includes('/docs/')) continue;
+  const blocks = [...html.matchAll(/<div class="code-block">\s*<button\b([^>]*)>([\s\S]*?)<\/button>\s*<pre><code(?: [^>]*)?>([\s\S]*?)<\/code><\/pre>\s*<\/div>/g)];
+  assert.equal(blocks.length, [...html.matchAll(/<pre>/g)].length, `${page}: every pre needs a copy control`);
+  assert.ok(blocks.length > 0, `${page}: no code examples`);
+  for (const [, attrs, label, code] of blocks) {
+    assert.match(attrs, /\bdata-copy-code\b/);
+    assert.match(attrs, /type="button"/);
+    assert.match(attrs, /aria-label="Copy code block"/);
+    assert.match(label, /<span data-copy-badge>Copy<\/span>/);
+    const expected = decodedCode(code);
+    const writes = [];
+    const block = fixture(async text => writes.push(text), null, expected);
+    await block.click();
+    assert.deepEqual(writes, [expected], page);
+    assert.equal(block.badge.textContent, 'Copied ✓');
+    block.advance(1999);
+    assert.equal(block.badge.textContent, 'Copied ✓');
+    block.advance(1);
+    assert.equal(block.badge.textContent, 'Copy');
+  }
+}
+const exact = '<tag key="value"> & text\n  indented\n';
+let finishCode;
+const codeWrites = [];
+const code = fixture(text => { codeWrites.push(text); return new Promise(resolve => { finishCode = resolve; }); }, null, exact);
+const copy = code.click();
+await code.click();
+assert.deepEqual(codeWrites, [exact]);
+assert.equal(code.button.disabled, true);
+finishCode();
+await copy;
+code.advance(1500);
+const secondCopy = code.click();
+code.advance(500);
+assert.equal(code.badge.textContent, 'Copied ✓', 'An old reset must not run during a newer pending copy');
+finishCode();
+await secondCopy;
+code.advance(1999);
+assert.equal(code.badge.textContent, 'Copied ✓');
+code.advance(1);
+assert.equal(code.badge.textContent, 'Copy');
+const codeRetry = fixture(async () => { throw Error('Permission denied'); }, null, exact);
+await codeRetry.click();
+assert.equal(codeRetry.badge.textContent, 'Copy failed');
+assert.equal(codeRetry.button.disabled, false);
+codeRetry.advance(2000);
+assert.equal(codeRetry.badge.textContent, 'Copy');
+
 const diagram = readFileSync(new URL('assets/art/architecture-topology.svg', site), 'utf8');
 assert.match(diagram, /<title id="title">[^<]+<\/title>/);
 assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);

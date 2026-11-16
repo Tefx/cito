@@ -21,6 +21,24 @@ fn matches_process(command: &str) -> bool {
     matches!(name, "claude" | "claude.js" | "claude.mjs")
         || (entry.contains("/claude-code/") && matches!(name, "cli.js" | "cli.mjs"))
 }
+fn interactive_candidate(req: &Value, p: u32) -> bool {
+    let Ok(command) = process_command(p) else {
+        return false;
+    };
+    if has_harness_ancestor(p, |ancestor, command| {
+        is_agent_harness(command) || live_bridge(req, ancestor)
+    }) {
+        return false;
+    }
+    let args: Vec<_> = command.split_whitespace().collect();
+    !args
+        .iter()
+        .any(|arg| matches!(*arg, "-p" | "--print" | "--output-format=stream-json"))
+        && !args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"])
+        && process_has_tty(p)
+}
 use std::time::Duration;
 const EVENTS: [&str; 3] = ["Stop", "SessionStart", "UserPromptSubmit"];
 fn hook_cmd(v: &Value) -> bool {
@@ -171,7 +189,7 @@ pub fn append_wake(req: &Value, sid: &str) -> Result<()> {
             f.write_all(b"\n").map_err(|e| e.to_string())?;
         }
     }
-    let row = json!({"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"created_at_ms":now_ms()});
+    let row = json!({"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"created_at_ms":now_ms(),"expected_ack_count":req["signals"].as_array().map(|signals|signals.len().max(1)).unwrap_or(1)});
     writeln!(f, "{row}").map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
@@ -202,19 +220,20 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
             }
         }
         staged.sort();
-        paths.extend(staged);
-        paths.push(path);
+        paths.extend(staged.into_iter().map(|path| ((*sid).to_owned(), path)));
+        paths.push(((*sid).to_owned(), path));
     }
     let mut rows = vec![];
     let mut seen = HashSet::new();
-    for p in paths {
+    for (source_session, p) in paths {
         let Some(s) = read_optional(&p)? else {
             continue;
         };
         for line in s.lines() {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Ok(mut v) = serde_json::from_str::<Value>(line) {
                 if let (Some(id), Some(_)) = (str_at(&v, "batch_id"), v["content"].as_str()) {
-                    if seen.insert(id.to_string()) {
+                    if seen.insert((source_session.clone(), id.to_string())) {
+                        v["ack_session"] = json!(source_session);
                         rows.push(v)
                     }
                 }
@@ -224,7 +243,10 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
     Ok(rows)
 }
 fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool) -> Result<()> {
-    let ids: HashSet<_> = wakes.iter().filter_map(|w| str_at(w, "batch_id")).collect();
+    let ids: HashSet<_> = wakes
+        .iter()
+        .filter_map(|w| Some((str_at(w, "ack_session")?, str_at(w, "batch_id")?)))
+        .collect();
     let mut sessions = sessions.to_vec();
     sessions.sort();
     sessions.dedup();
@@ -257,7 +279,9 @@ fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool)
             let mut retained = Vec::new();
             for line in content.lines() {
                 if let Ok(mut value) = serde_json::from_str::<Value>(line) {
-                    if str_at(&value, "batch_id").is_some_and(|id| ids.contains(id)) {
+                    if str_at(&value, "batch_id")
+                        .is_some_and(|id| ids.contains(&(sid.as_str(), id)))
+                    {
                         if !retire {
                             value["output_delivered"] = json!(true);
                             retained.push(value.to_string());
@@ -290,7 +314,9 @@ fn persist_hook_acks(req: &Value, sessions: &[String], wakes: &[Value]) -> Resul
                     str_at(&row, "listener_id").unwrap_or(""),
                 )?
                 .ok_or("ACK listener missing")?;
-            if !sessions.iter().any(|sid| listener["session_id"] == *sid) {
+            if !sessions.iter().any(|sid| listener["session_id"] == *sid)
+                || listener["session_id"] != wake["ack_session"]
+            {
                 return Err("ACK session mismatch".into());
             }
             local.acknowledge(
@@ -312,30 +338,21 @@ fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
         .join("projects")
         .join(slug)
 }
+fn live_bridge(req: &Value, pid: u32) -> bool {
+    let path = state(req).join(format!("sockets/claude-pid-{pid}.sock"));
+    path.exists()
+        && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true)
+}
 fn hook_endpoint(req: &Value) -> u32 {
     if let Some(p) = env_value(req, "CITO_ENDPOINT_PID").and_then(|s| s.parse().ok()) {
-        return p;
+        return enclosing_endpoint_pid(Some(p), unsafe { libc::getppid() as u32 });
     }
     // SAFETY: getppid has no pointer arguments or ownership effects.
     let first = unsafe { libc::getppid() as u32 };
-    if !fs::read_dir(state(req).join("sockets"))
-        .ok()
-        .is_some_and(|entries| {
-            entries.flatten().any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("claude-pid-")
-            })
-        })
-    {
-        return first;
-    }
+
     let mut p = first;
     for _ in 0..16 {
-        if state(req)
-            .join(format!("sockets/claude-pid-{p}.sock"))
-            .exists()
+        if process_command(p).is_ok_and(|command| matches_process(&command)) || live_bridge(req, p)
         {
             return p;
         }
@@ -350,29 +367,89 @@ fn hook_endpoint(req: &Value) -> u32 {
 fn binding_path(req: &Value, p: u32) -> PathBuf {
     state(req).join(format!("claude/endpoints/{p}.json"))
 }
-fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<()> {
+fn hook_parent_matches(p: u32) -> bool {
+    // SAFETY: getppid only reads the current process's parent ID.
+    let parent = unsafe { libc::getppid() as u32 };
+    parent == p
+        || (process_parent(parent) == Some(p)
+            && process_command(parent).is_ok_and(|command| {
+                process_entrypoint(&command).is_some_and(|(program, _)| {
+                    matches!(
+                        Path::new(program)
+                            .file_name()
+                            .and_then(|name| name.to_str()),
+                        Some("sh" | "bash" | "zsh" | "dash" | "fish")
+                    )
+                })
+            }))
+}
+fn binding_snapshot(path: &Path) -> Option<Value> {
+    read_json(path)
+        .ok()
+        .map(|v| json!([v["session_id"], v["cwd"], v["start"], v["source"]]))
+}
+fn remove_rejected_binding(path: &Path, snapshot: Option<Value>) -> Result<()> {
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    if snapshot.is_some() && binding_snapshot(path) == snapshot {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Value>> {
+    let channel = str_at(req, "_binding_source") == Some("channel");
+    // Endpoint file locks are leaves: ancestry and bridge I/O must finish first.
+    if !channel
+        && (!hook_parent_matches(p)
+            || hook_endpoint(req) != p
+            || has_harness_ancestor(p, |ancestor, command| {
+                is_agent_harness(command) || live_bridge(req, ancestor)
+            }))
+    {
+        return Err("SESSION_MISMATCH: A descendant hook cannot claim a parent endpoint".into());
+    }
     let identity = process_identity(p).ok();
+    let start = identity.as_ref().and_then(|v| str_at(v, "started_at"));
+    let path = binding_path(req, p);
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    let previous = read_json(&path).ok();
+    if channel {
+        if let Some(previous) = &previous {
+            // Canonical hooks own the identity across workspace changes.
+            if start.is_some()
+                && str_at(previous, "start") == start
+                && (previous["source"] != "channel"
+                    || (previous["cwd"] == cwd && previous["session_id"] == sid))
+            {
+                return Ok(Some(previous.clone()));
+            }
+        }
+    }
     let v = json!({"session_id":validate_session(sid)?,"cwd":cwd,"start":identity.as_ref().and_then(|v|str_at(v,"started_at")),"process_identity":identity,"source":str_at(req,"_binding_source").unwrap_or("hook")});
-    atomic_write(&binding_path(req, p), v.to_string().as_bytes())
+    atomic_write(&path, v.to_string().as_bytes())?;
+    Ok(previous)
 }
 fn metadata_session(req: &Value) -> Result<Option<String>> {
     let mut explicit = vec![];
     for s in [
         str_at(req, "explicit_session_id"),
-        str_at(&req["meta"], "claudeSessionId"),
-        str_at(&req["meta"], "sessionId"),
-        str_at(&req["meta"], "claude_session_id"),
         str_at(&req["headers"], "x-claude-session-id"),
-        if req["meta"]["expected_harness"] == "claude" {
-            str_at(&req["meta"], "expected_session_id")
-        } else {
-            None
-        },
     ]
     .into_iter()
     .flatten()
     {
         explicit.push(validate_session(s)?)
+    }
+    for source in [&req["meta"], &req["_meta"]] {
+        for key in ["claudeSessionId", "sessionId", "claude_session_id"] {
+            if let Some(s) = str_at(source, key) {
+                explicit.push(validate_session(s)?);
+            }
+        }
+        if str_at(source, "expected_harness") == Some("claude") {
+            if let Some(s) = str_at(source, "expected_session_id") {
+                explicit.push(validate_session(s)?);
+            }
+        }
     }
     if let Some(s) = env_value(req, "CLAUDE_SESSION_ID") {
         if !s.trim().is_empty() {
@@ -414,6 +491,14 @@ fn resolve(req: &Value) -> Result<String> {
         }
     }
     if let Some(s) = explicit {
+        if let Some(p) = pid(req) {
+            if (caller_supplied_pid(req)?.is_some()
+                || (explicit_pid(req)?.is_some() && !req["cli_cmd"].is_string()))
+                && !process_command(p).is_ok_and(|command| matches_process(&command))
+            {
+                return Err("A verified endpoint process is required for caller metadata".into());
+            }
+        }
         return Ok(s);
     }
     let mut transcripts = vec![];
@@ -435,26 +520,33 @@ fn resolve(req: &Value) -> Result<String> {
 }
 fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
     let p = transcript_dir(req, cwd).join(format!("{sid}.jsonl"));
-    let mut f = fs::File::open(p).ok()?;
-    let size = f.metadata().ok()?.len();
-    let start = size.saturating_sub(128 * 1024);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    s.lines()
-        .rev()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find_map(|v| {
-            if v["type"] != "custom-title" {
-                return None;
-            }
-            str_at(&v, "customTitle").map(|s| {
-                s.chars()
-                    .map(|c| if c.is_control() { ' ' } else { c })
-                    .take(200)
-                    .collect()
-            })
-        })
+    let value = cached_file_projection(req, "claude/transcript-cache", &p, || {
+        let mut f = fs::File::open(&p).map_err(|e| e.to_string())?;
+        let size = f.metadata().map_err(|e| e.to_string())?.len();
+        f.seek(SeekFrom::Start(size.saturating_sub(128 * 1024)))
+            .map_err(|e| e.to_string())?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).map_err(|e| e.to_string())?;
+        let title: Option<String> = s
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find_map(|v| {
+                (v["type"] == "custom-title")
+                    .then(|| {
+                        str_at(&v, "customTitle").map(|s| {
+                            s.chars()
+                                .map(|c| if c.is_control() { ' ' } else { c })
+                                .take(200)
+                                .collect()
+                        })
+                    })
+                    .flatten()
+            });
+        Ok(json!(title))
+    })
+    .ok()?;
+    value.as_str().map(str::to_owned)
 }
 fn badge(req: &Value, sid: &str) -> Result<()> {
     let path = state(req)
@@ -474,13 +566,22 @@ fn bridge(req: &Value) -> Result<Value> {
     let mut p = pid(req).ok_or("Endpoint PID is required")?;
     let mut visited = HashSet::new();
     while p > 1 && visited.insert(p) {
+        if process_command(p)
+            .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
+        {
+            break;
+        }
         if let Ok(response) = socket_call(
             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
             &json!({"op":"identify"}),
         ) {
-            if response["ok"] == true {
-                return Ok(response);
-            }
+            // A live responder's rejection is authoritative, unlike no response.
+            let mut response = response;
+            response["endpoint_pid"] = json!(p);
+            return Ok(response);
+        }
+        if process_command(p).is_ok_and(|command| matches_process(&command)) {
+            break;
         }
         if !matches!(str_at(req, "op"), Some("resolve_caller" | "verify")) {
             break;
@@ -504,43 +605,68 @@ pub fn handle(req: &Value) -> Result<Value> {
     }
     match op {
         "discover_sessions" => {
-            let mut sessions = vec![];
-            let entries = match fs::read_dir(state(req).join("sockets")) {
-                Ok(entries) => Some(entries),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e.to_string()),
-            };
-            if let Some(entries) = entries {
-                for e in entries {
-                    let e = e.map_err(|e| e.to_string())?;
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    if let Some(p) = n
-                        .strip_prefix("claude-pid-")
-                        .and_then(|s| s.strip_suffix(".sock"))
-                        .and_then(|s| s.parse::<u32>().ok())
+            let request = req.clone();
+            let sessions = inspect_socket_endpoints(req, "claude-pid-", move |p, path| {
+                if !interactive_candidate(&request, p) {
+                    return None;
+                }
+                let mut r = request.clone();
+                r["endpoint_pid"] = json!(p);
+                let binding_before = binding_snapshot(&binding_path(&r, p));
+                let response = match socket_call(path, &json!({"op":"identify"})) {
+                    Ok(v) if v["ok"] != true => {
+                        remove_rejected_binding(&binding_path(&r, p), binding_before).ok()?;
+                        return None;
+                    }
+                    response => response,
+                }
+                .or_else(|error| {
+                    if error != "Socket request timed out" || !alive(p) {
+                        return Err(error);
+                    }
+                    let binding = read_json(&binding_path(&r, p))?;
+                    let identity = process_identity(p)?;
+                    if str_at(&binding, "start").is_none()
+                        || str_at(&binding, "start").map(str::to_owned) != process_start(p)
+                        || !matches_process(str_at(&identity, "command").unwrap_or(""))
+                        || (binding["process_identity"].is_object()
+                            && binding["process_identity"] != identity)
+                        || str_at(&binding, "session_id").is_none()
+                        || str_at(&binding, "cwd").is_none()
                     {
-                        let mut r = req.clone();
-                        r["endpoint_pid"] = json!(p);
-                        let response = bridge(&r);
-                        if let Ok(v) = response {
-                            if v["ok"] == false {
-                                continue;
-                            }
-                            if v["ok"] == true {
-                                let mut session = caller(
-                                    "claude",
-                                    str_at(&v, "session_id").unwrap_or(""),
-                                    str_at(&v, "cwd").unwrap_or(""),
-                                    Some(p),
-                                    str_at(&v, "session_name"),
-                                );
-                                session["updated_at_ms"] = v["updated_at_ms"].clone();
-                                sessions.push(session);
-                            }
-                        }
+                        return Err(error);
+                    }
+                    let mut session = binding;
+                    session["ok"] = json!(true);
+                    Ok(session)
+                });
+                let v = response.ok().filter(|v| v["ok"] == true)?;
+                let binding_path = binding_path(&r, p);
+                let _lock = FileLock::acquire(&binding_path.with_extension("lock")).ok()?;
+                if let Ok(mut binding) = read_json(&binding_path) {
+                    if binding["session_id"] == v["session_id"]
+                        && (binding["updated_at_ms"] != v["updated_at_ms"]
+                            || binding["session_name"] != v["session_name"])
+                    {
+                        binding["updated_at_ms"] = v["updated_at_ms"].clone();
+                        binding["session_name"] = v["session_name"].clone();
+                        let _ = atomic_write(&binding_path, binding.to_string().as_bytes());
                     }
                 }
-            }
+                let mut session = caller(
+                    &r,
+                    "claude",
+                    str_at(&v, "session_id").unwrap_or(""),
+                    str_at(&v, "cwd").unwrap_or(""),
+                    Some(p),
+                    str_at(&v, "session_name"),
+                );
+                session["updated_at_ms"] = v["updated_at_ms"].clone();
+                Some(session)
+            })?
+            .into_iter()
+            .map(|(_, session)| session)
+            .collect::<Vec<_>>();
             Ok(json!({"ok":true,"sessions":sessions}))
         }
         "resolve_caller" | "verify" => {
@@ -550,11 +676,16 @@ pub fn handle(req: &Value) -> Result<Value> {
             };
             let response = bridge(req).ok();
             let endpoint_responded = response.is_some();
+            let rejection = response
+                .as_ref()
+                .filter(|v| v["ok"] != true)
+                .map(|v| response_diagnostic(v, "Claude bridge rejected the request"));
             let live = response.filter(|v| v["ok"] == true);
-            if live.is_none() && endpoint_responded && req.get("cached_caller").is_some() {
+            if live.is_none() && endpoint_responded {
                 return Ok(error(
                     "SESSION_NOT_OPEN",
-                    "Claude bridge did not identify an open session",
+                    rejection
+                        .unwrap_or_else(|| "Claude bridge did not identify an open session".into()),
                 ));
             }
             if live.is_none()
@@ -562,12 +693,23 @@ pub fn handle(req: &Value) -> Result<Value> {
                 && req["cached_caller"].is_object()
                 && !req["cli_cmd"].is_string()
             {
-                let resolved = match resolve(req) {
-                    Ok(s) => Some(s),
-                    Err(e) if e.starts_with("Conflicting") => return Ok(error("INVALID_INPUT", e)),
-                    Err(_) => hint.clone(),
-                };
-                match cached_caller(req, "claude", resolved.as_deref(), matches_process) {
+                match cached_caller(req, "claude", hint.as_deref(), matches_process, |c| {
+                    if let Some(p) = pid(req) {
+                        if let Ok(binding) = read_json(&binding_path(req, p)) {
+                            if str_at(&binding, "start").is_some()
+                                && str_at(&binding, "start").map(str::to_owned) == process_start(p)
+                                && str_at(&binding, "session_id")
+                                    .is_some_and(|sid| c["session_id"] != sid)
+                            {
+                                return Err(error(
+                                    "BINDING_REQUIRED",
+                                    "Endpoint session binding changed",
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                }) {
                     Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),
                     Ok(None) => {}
@@ -606,7 +748,19 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .or_else(|| str_at(req, "cwd"))
                 .unwrap_or("");
             let t = title(req, &sid, cwd);
-            let c = caller("claude", &sid, cwd, pid(req), t.as_deref());
+            let endpoint = live
+                .as_ref()
+                .and_then(|v| v["endpoint_pid"].as_u64())
+                .and_then(|p| u32::try_from(p).ok())
+                .or_else(|| {
+                    pid(req).filter(|p| {
+                        process_command(*p).is_ok_and(|command| matches_process(&command))
+                    })
+                });
+            let c = caller(req, "claude", &sid, cwd, endpoint, t.as_deref());
+            if live.is_none() && hint.is_none() && has_generic_session_mismatch(req, &sid) {
+                return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
+            }
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }
@@ -632,14 +786,23 @@ pub fn handle(req: &Value) -> Result<Value> {
                     }
                 }
             }
+            let binding_before = pid(req).and_then(|p| binding_snapshot(&binding_path(req, p)));
             match bridge(req) {
                 Ok(v) if v["ok"] == true => Ok(
                     json!({"ok":true,"status":if v["session_id"]==req["session_id"]{"alive"}else{"switched"},"current_session_id":v["session_id"],"reason":null}),
                 ),
-                _ if pid(req).is_some_and(|p| !alive(p)) => Ok(
+                Ok(v) => {
+                    if let Some(p) = pid(req) {
+                        remove_rejected_binding(&binding_path(req, p), binding_before)?;
+                    }
+                    Ok(
+                        json!({"ok":true,"status":"transient_error","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
+                    )
+                }
+                Err(_) if pid(req).is_some_and(|p| !alive(p)) => Ok(
                     json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process is closed"}),
                 ),
-                _ => match resolve(req) {
+                Err(_) => match resolve(req) {
                     Ok(current) => Ok(
                         json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
                     ),
@@ -671,9 +834,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                             &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false}),
                         )?;
                         return Ok(
-                            json!({"ok":true,"outcome":if r["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":null}),
+                            json!({"ok":true,"outcome":if r["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":if r["ok"]==true {Value::Null} else {json!(response_diagnostic(&r,"Claude bridge rejected delivery"))}}),
                         );
                     }
+                    return Ok(
+                        json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
+                    );
                 }
             }
             append_wake(req, &sid)?;
@@ -684,6 +850,26 @@ pub fn handle(req: &Value) -> Result<Value> {
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
     }
 }
+fn hook_ack_confirmed(response: &Value, expected: usize) -> bool {
+    response.get("error").is_none()
+        && response["result"]["isError"] != true
+        && response["result"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| {
+                item["text"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .is_some_and(|value| {
+                        value["ok"] == true
+                            && value["acknowledged_count"]
+                                .as_u64()
+                                .is_some_and(|count| count >= expected as u64)
+                    })
+            })
+}
+
 pub fn hook_main() {
     if std::env::args().any(|s| s == "--help" || s == "-h") {
         eprintln!("Usage: cito-claude-hook (reads a hook JSON payload on stdin)");
@@ -716,9 +902,10 @@ pub fn hook_main() {
             },
         };
         req["endpoint_pid"] = json!(p);
+        let previous = record_binding(&req, p, &sid, str_at(&req, "cwd").unwrap_or(""))?;
         let fallback = format!("claude-{p}");
         if sid != fallback {
-            if let Ok(previous) = read_json(&binding_path(&req, p)) {
+            if let Some(previous) = previous {
                 if previous["session_id"] == fallback
                     && str_at(&previous, "start").map(str::to_string) == process_start(p)
                     && UnixStream::connect(state(&req).join(format!("sockets/claude-pid-{p}.sock")))
@@ -734,7 +921,6 @@ pub fn hook_main() {
                 }
             }
         }
-        record_binding(&req, p, &sid, str_at(&req, "cwd").unwrap_or(""))?;
         let alias = read_optional(&state(&req).join("claude/aliases").join(&sid))?
             .and_then(|s| validate_session(&s).ok())
             .filter(|s| s.starts_with("claude-") && s != &sid);
@@ -754,11 +940,7 @@ pub fn hook_main() {
         let mut wakes = drain_wakes(&req, &sessions)?;
         // Drain order follows recovered staging files, then the active queue.
         let mut seen = HashSet::new();
-        wakes.retain(|w| {
-            str_at(w, "batch_id")
-                .map(|s| seen.insert(s.to_string()))
-                .unwrap_or(false)
-        });
+        wakes.retain(|w| seen.insert((w["ack_session"].clone(), w["batch_id"].clone())));
         if wakes.is_empty() {
             return Ok(json!({}));
         }
@@ -799,14 +981,20 @@ pub fn hook_main() {
                     .filter(|p| *p > 0)
             })
             .unwrap_or(4290);
-        let ack_session = alias.as_deref().unwrap_or(&sid);
-        let ack = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":wakes.iter().map(|r|r["batch_id"].clone()).collect::<Vec<_>>()},"_meta":{"claudeSessionId":ack_session,"cwd":req["cwd"]}}});
+        let acks: Vec<_> = sessions.iter().filter_map(|session| {
+            let ids: Vec<_> = wakes.iter().filter(|wake| wake["ack_session"] == *session).map(|wake| wake["batch_id"].clone()).collect();
+            if ids.is_empty() { return None; }
+            let expected = wakes.iter().filter(|wake| wake["ack_session"] == *session)
+                .map(|wake| wake["expected_ack_count"].as_u64().unwrap_or(1).max(1) as usize)
+                .fold(0usize, usize::saturating_add);
+            Some((expected, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":ids},"_meta":{"claudeSessionId":session,"cwd":req["cwd"]}}})))
+        }).collect();
         continuation = Some((
             req.clone(),
             sessions.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             wakes.clone(),
             port,
-            ack,
+            acks,
         ));
         if content.is_empty() {
             Ok(json!({}))
@@ -830,21 +1018,22 @@ pub fn hook_main() {
             {
                 return;
             }
-            if let Some((req, sessions, wakes, port, ack)) = continuation {
+            if let Some((req, sessions, wakes, port, acks)) = continuation {
                 if let Err(error) = settle_wakes(&req, &sessions, &wakes, false) {
                     eprintln!("cito-claude-hook: {error}");
                     return;
                 }
-                let confirmed = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
-                    .timeout(Duration::from_millis(500))
-                    .send_json(ack)
-                    .ok()
-                    .and_then(|r| r.into_json::<Value>().ok())
-                    .is_some_and(|r| {
-                        r.get("result").is_some()
-                            && r.get("error").is_none()
-                            && r["result"]["isError"] != true
-                    });
+                let mut confirmed = true;
+                for (expected, ack) in acks {
+                    let response = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
+                        .timeout(Duration::from_millis(500))
+                        .send_json(ack)
+                        .ok()
+                        .and_then(|r| r.into_json::<Value>().ok());
+                    confirmed &= response
+                        .as_ref()
+                        .is_some_and(|r| hook_ack_confirmed(r, expected));
+                }
                 if confirmed || persist_hook_acks(&req, &sessions, &wakes).is_ok() {
                     if let Err(error) = settle_wakes(&req, &sessions, &wakes, true) {
                         eprintln!("cito-claude-hook: {error}");
@@ -914,11 +1103,28 @@ impl SidecarCleanup {
         }
     }
 }
+static SIDECAR_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 static SIDECAR_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 extern "C" fn sidecar_signal(_: libc::c_int) {
     SIDECAR_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    let fd = SIDECAR_PIPE.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: only an async-signal-safe write touches the installed nonblocking pipe.
+        unsafe {
+            libc::write(fd, [1u8].as_ptr().cast(), 1);
+        }
+    }
 }
 fn sidecar_watchdog(cleanup: std::sync::Arc<SidecarCleanup>) {
+    let wake = match WakePipe::new() {
+        Ok(wake) => wake,
+        Err(error) => {
+            eprintln!("Cannot create sidecar shutdown pipe: {error}");
+            cleanup.stop();
+            std::process::exit(1);
+        }
+    };
+    SIDECAR_PIPE.store(wake.write_fd(), std::sync::atomic::Ordering::Relaxed);
     let eof = cleanup.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -929,7 +1135,7 @@ fn sidecar_watchdog(cleanup: std::sync::Arc<SidecarCleanup>) {
         eof.stop();
         std::process::exit(0);
     });
-    // SAFETY: the signal handler only sets a lock-free AtomicBool. Filesystem cleanup
+    // SAFETY: the signal handler sets a lock-free atomic and writes a wake byte. Filesystem cleanup
     // and process exit run on an ordinary thread, never inside the signal handler.
     unsafe {
         libc::signal(
@@ -942,8 +1148,15 @@ fn sidecar_watchdog(cleanup: std::sync::Arc<SidecarCleanup>) {
         );
     }
     std::thread::spawn(move || {
-        while !SIDECAR_STOP.load(std::sync::atomic::Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(2));
+        if !SIDECAR_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = poll_until(
+                &mut [libc::pollfd {
+                    fd: wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                None,
+            );
         }
         cleanup.stop();
         std::process::exit(0);
@@ -991,6 +1204,9 @@ fn sidecar(req: Value) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     use std::sync::{Arc, Mutex};
     let p = pid(&req).ok_or("Endpoint PID is required")?;
+    if !interactive_candidate(&req, p) {
+        return Ok(());
+    }
     let cwd = str_at(&req, "cwd").unwrap_or("");
     let path = state(&req).join(format!("sockets/claude-pid-{p}.sock"));
     let parent = path.parent().ok_or("Invalid socket path")?;
@@ -1070,10 +1286,13 @@ fn sidecar(req: Value) -> Result<()> {
             if next.is_none() {
                 if let Ok(binding) = read_json(&binding_path(&req, p)) {
                     if binding["source"] != "channel"
-                        && binding["cwd"] == cwd
+                        && str_at(&binding, "start").is_some()
                         && str_at(&binding, "start").map(str::to_string) == process_start(p)
                     {
                         next = str_at(&binding, "session_id").map(str::to_string);
+                        alias_active = next.as_deref().is_some_and(|sid| {
+                            alias_for_fallback(&req, &fallback).as_deref() == Some(sid)
+                        });
                     }
                 }
             }
@@ -1098,7 +1317,9 @@ fn sidecar(req: Value) -> Result<()> {
                         let Ok(binding) = read_json(&binding_path(&req, other)) else {
                             return false;
                         };
-                        binding["cwd"] == cwd && UnixStream::connect(entry.path()).is_ok()
+                        binding["cwd"] == cwd
+                            && alive(other)
+                            && str_at(&binding, "start").map(str::to_owned) == process_start(other)
                     });
                 if other_endpoint {
                     next = Some(current.clone());
@@ -1142,18 +1363,26 @@ fn sidecar(req: Value) -> Result<()> {
                     }
                 }
             }
-            let next = next.unwrap_or_else(|| fallback.clone());
-            if next != current {
-                last_active = now_ms();
-                current = next;
-            }
+            let mut next = next.unwrap_or_else(|| fallback.clone());
             let mut channel_req = req.clone();
             channel_req["_binding_source"] = json!("channel");
-            if read_json(&binding_path(&req, p))
-                .map(|b| b["session_id"] != current)
-                .unwrap_or(true)
-            {
-                record_binding(&channel_req, p, &current, cwd)?;
+            if let Some(binding) = record_binding(&channel_req, p, &next, cwd)? {
+                if binding["source"] != "channel"
+                    && str_at(&binding, "start").is_some()
+                    && str_at(&binding, "start").map(str::to_owned) == process_start(p)
+                {
+                    if let Some(sid) = str_at(&binding, "session_id") {
+                        // A hook can commit while this request waits for the leaf lock.
+                        // Keep an established fallback alias, otherwise adopt its identity.
+                        alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
+                        let selected = if alias_active { &fallback } else { sid };
+                        next = selected.to_string();
+                    }
+                }
+            }
+            if next != current {
+                current = next;
+                last_active = now_ms();
             }
             let transcript = if alias_active {
                 first_transcript.as_deref().unwrap_or(&current)

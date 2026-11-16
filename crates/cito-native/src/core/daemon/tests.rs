@@ -23,6 +23,481 @@ fn settle_setup_inspections(service: &mut DaemonService) {
 }
 
 #[test]
+fn activity_auto_listen_pin_stop_idle_and_reopen_follow_orthogonal_intent() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-lifecycle-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(
+        &config.config_path,
+        json!({"hubs":{"local":{"url":"local://","autoListen":true}}}).to_string(),
+    )
+    .map_err(|e| e.to_string())?;
+    let script = dir.join("provider.py");
+    fs::write(
+        &script,
+        r#"import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+r = json.loads(sys.stdin.readline())
+op = r['op']
+v = dict(ok=True)
+if op == 'setup_inspect': v.update(installed=True, configured=True, paths=[])
+elif op == 'discover_sessions': v['sessions'] = json.loads((root/'sessions.json').read_text())
+elif op == 'probe': v['status'] = (root/'probe.txt').read_text()
+print(json.dumps(v))
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let plugin = crate::plugins::PluginDescriptor {
+        id: "fixture".into(),
+        kind: "agent-harness".into(),
+        display_name: "Fixture".into(),
+        tier: "test".into(),
+        order: 0,
+        sf_symbol: "terminal".into(),
+        tint: "blue".into(),
+        cli_flag: false,
+        pid_bound: false,
+        auto_listen: crate::plugins::AutoListen {
+            mode: crate::plugins::AutoListenMode::Activity,
+            recent_window_ms: Some(900_000),
+            idle_timeout_ms: Some(3_600_000),
+        },
+        plugin_dir: dir.clone(),
+        is_builtin: false,
+        command: vec![
+            "/usr/bin/python3".into(),
+            script.to_string_lossy().into_owned(),
+        ],
+        channel_env: None,
+        fields: vec![],
+        post_setup_hint: None,
+        post_disconnect_hint: None,
+    };
+    let plugins = LoadedPlugins {
+        plugins: vec![plugin.clone()],
+        rejected_ids: HashSet::new(),
+    };
+    let mut candidates:Vec<Value>=(0..12).map(|i|json!({"harness":"fixture","session_id":format!("s{i}"),"title":"Work","cwd":"/workspace","activity":{"revision":10,"at_ms":now_ms(),"kind":"unknown"}})).collect();
+    let save = |rows: &Vec<Value>| {
+        fs::write(dir.join("sessions.json"), json!(rows).to_string()).map_err(|e| e.to_string())
+    };
+    save(&candidates)?;
+    fs::write(dir.join("probe.txt"), "alive").map_err(|e| e.to_string())?;
+    let mut service = DaemonService::open(&config, &plugins)?;
+    service.local.set_plugin_roots(&[])?;
+    let result = (|| {
+        settle_setup_inspections(&mut service);
+        service.refresh_available()?;
+        let agents = || {
+            service.state.active().map(|rows| {
+                rows.into_iter()
+                    .filter(|r| r["harness"] == "fixture")
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            agents()?.len(),
+            12,
+            "Activity candidates must not inherit the eight-card menu limit"
+        );
+        assert!(agents()?.iter().all(|r| r["listen_mode"] == "auto"));
+        let id = listener_id("none#alice", "fixture", "s0");
+        let row = || {
+            service
+                .state
+                .listener("local", &id)
+                .and_then(|r| r.ok_or("Missing row".into()))
+        };
+        assert_eq!(row()?["last_activity_revision"], "10");
+        service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
+        service.set_auto_listen("local", false)?;
+        assert_eq!(
+            service
+                .state
+                .active()?
+                .iter()
+                .filter(|r| r["harness"] == "fixture")
+                .count(),
+            1
+        );
+        assert_eq!(
+            service.state.listener("local", &id)?.ok_or("Missing pin")?["listen_mode"],
+            "manual"
+        );
+        assert!(service
+            .action(
+                &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"})
+            )
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+        service.set_auto_listen("local", true)?;
+        service.refresh_available()?;
+        service.action(
+            &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
+        )?;
+        service.action(
+            &json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"s0"}),
+        )?;
+        assert_eq!(service.slot("local")?.config["autoListen"], true);
+        candidates[0]["activity"]["revision"] = json!(11);
+        save(&candidates)?;
+        service.refresh_available()?;
+        let reopened = LocalState::open(&config.state_dir)?;
+        let stopped = reopened
+            .listener("local", &id)?
+            .ok_or("Missing stopped row")?;
+        assert_eq!(stopped["user_stopped"], 1);
+        assert_eq!(stopped["status"], "UNLISTENED");
+        service.listen("local", &json!({"about":"Manual resume"}), &candidates[0])?;
+        let manual = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing manual row")?;
+        assert_eq!(manual["listen_mode"], "manual");
+        assert_eq!(manual["user_stopped"], 0);
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=? WHERE listener_id=?",
+            &[json!(now_ms() - 3_600_001), json!(id)],
+        )?;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing pinned row")?["status"],
+            "ACTIVE"
+        );
+        service.action(
+            &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
+        )?;
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=?,lease_until_ms=? WHERE listener_id=?",
+            &[
+                json!(now_ms() - 3_600_001),
+                json!(now_ms() + 30_000),
+                json!(id),
+            ],
+        )?;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing leased row")?["status"],
+            "ACTIVE"
+        );
+        service.state.db.execute(
+            "UPDATE local_listeners SET lease_until_ms=0 WHERE listener_id=?",
+            &[json!(id)],
+        )?;
+        service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,delivered_at_ms) VALUES('local','grace',?,1,1,'bob','host','Sender','hello','',?,'DISPATCHED',?)",&[json!(id),json!(now_ms()+1000),json!(now_ms())])?;
+        candidates[0]["activity"] = json!({"revision":12,"at_ms":now_ms(),"kind":"cito_effect"});
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing grace row")?["status"],
+            "ACTIVE"
+        );
+        service.state.db.execute(
+            "UPDATE local_signals SET delivered_at_ms=? WHERE signal_id='grace'",
+            &[json!(now_ms() - 300_001)],
+        )?;
+        service.auto_listen()?;
+        let retired = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing idle row")?;
+        assert_eq!(retired["status"], "UNLISTENED");
+        assert_eq!(retired["retirement_reason"], "idle");
+        assert_eq!(retired["retired_activity_revision"], "11");
+        assert_eq!(retired["user_stopped"], 0);
+        candidates[0]["activity"] = json!({"revision":11,"at_ms":now_ms(),"kind":"user_turn"});
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing idle row")?["status"],
+            "UNLISTENED"
+        );
+        candidates[0]["activity"]["revision"] = json!(13);
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing reactivated row")?["status"],
+            "ACTIVE"
+        );
+        // A long provider closure must not renew an expired automatic lease.
+        service.retire_id("local", &id, "hard_exit")?;
+        let old = now_ms() - 3_600_001;
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=? WHERE listener_id=?",
+            &[json!(old), json!(id)],
+        )?;
+        candidates[0]["activity"]["at_ms"] = json!(old);
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing expired row")?["status"],
+            "UNLISTENED"
+        );
+        candidates[0]["activity"] = json!({"revision":14,"at_ms":now_ms(),"kind":"user_turn"});
+        save(&candidates)?;
+        service.refresh_available()?;
+        service.auto_listen()?;
+        let renewed = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing renewed row")?;
+        assert_eq!(renewed["status"], "ACTIVE");
+        assert!(renewed["last_activity_at_ms"]
+            .as_u64()
+            .is_some_and(|at| at > old));
+        service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
+        let captured = service.state.listener("local", &id)?.ok_or("Missing pin")?;
+        fs::write(dir.join("probe.txt"), "closed_definitive").map_err(|e| e.to_string())?;
+        super::super::receiver::probe_listener(
+            &service.state,
+            service.slot("local")?,
+            &captured,
+            &plugin,
+            &config.state_dir,
+        )?;
+        let closed = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing closed row")?;
+        assert_eq!(closed["user_stopped"], 0);
+        assert_eq!(closed["status"], "UNLISTENED");
+        fs::write(dir.join("probe.txt"), "alive").map_err(|e| e.to_string())?;
+        service.refresh_available()?;
+        let restored = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing restored row")?;
+        assert_eq!(restored["listen_mode"], "manual");
+        assert_eq!(
+            restored["last_activity_at_ms"],
+            closed["last_activity_at_ms"]
+        );
+        service.action(
+            &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
+        )?;
+        // A still-pending wake protects the listener even without a dispatch lease.
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=? WHERE listener_id=?",
+            &[json!(now_ms() - 3_600_001), json!(id)],
+        )?;
+        service.state.db.execute("UPDATE local_signals SET state='DISPATCHING',held_reason=NULL,acknowledged_at_ms=NULL,expires_at_ms=? WHERE signal_id='grace'",&[json!(now_ms()+30_000)])?;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing pending row")?["status"],
+            "ACTIVE"
+        );
+        service.state.db.execute("UPDATE local_signals SET state='DISPATCHED',acknowledged_at_ms=? WHERE signal_id='grace'",&[json!(now_ms())])?;
+        service
+            .plugins
+            .plugins
+            .iter_mut()
+            .find(|p| p.id == "fixture")
+            .ok_or("Missing plugin")?
+            .auto_listen
+            .idle_timeout_ms = None;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing timeless row")?["status"],
+            "ACTIVE"
+        );
+        for action in [
+            json!({"op":"unlisten_all"}),
+            json!({"op":"unlisten_all","hub":null}),
+            json!({"op":"unlisten_all","hub":"local"}),
+        ] {
+            service.set_auto_listen("local", true)?;
+            for candidate in &candidates[..2] {
+                service.listen("local", &json!({"about":"Stop witness"}), candidate)?;
+            }
+            let auto_id = listener_id("none#alice", "fixture", "s1");
+            service.action(&json!({"op":"set_listen_mode","hub":"local","listener_id":auto_id,"listen_mode":"auto"}))?;
+            let expected = service
+                .state
+                .active()?
+                .iter()
+                .filter(|r| r["harness"] == "fixture")
+                .count();
+            assert!(expected >= 2);
+            assert_eq!(service.action(&action)?["removed"], expected, "{action}");
+            assert_eq!(service.action(&action)?["removed"], 0, "{action}");
+            assert_eq!(service.slot("local")?.config["autoListen"], false);
+            assert!(service
+                .state
+                .active()?
+                .iter()
+                .all(|r| r["harness"] != "fixture"));
+            for session in ["s0", "s1"] {
+                let row = service
+                    .state
+                    .listener("local", &listener_id("none#alice", "fixture", session))?
+                    .ok_or("Missing stopped row")?;
+                assert_eq!(row["user_stopped"], 1, "{action}");
+            }
+        }
+        Ok(())
+    })();
+    if let Some(mut activity) = service.session_activity.take() {
+        activity.shutdown()?;
+    }
+    drop(service);
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
+fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacement(
+) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-renewal-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    let raw = json!({"hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":"https://id.example.com","clientId":"client","token":"old"}}});
+    fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+    let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+    let hub = hubs["work"].clone();
+    let mut old = HubClient::new(
+        "work".into(),
+        hub.clone(),
+        "alice",
+        Some(service.local.clone()),
+    );
+    old.directory()?;
+    old.local = None;
+    old.expires_at = now_ms() / 1000 + 20;
+    let identity = old.identity.clone();
+    let closed = old.closed.clone();
+    let rows = old.cached_directory();
+    let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&old)));
+    inventory.cached.lock().map_err(|e| e.to_string())?.value =
+        json!({"channels":[{"id":"messenger","status":"ready"}]});
+    service
+        .channel_inventories
+        .insert("work".into(), inventory.clone());
+    service.slots.insert("work".into(), old);
+    service
+        .receivers
+        .insert("auto:work".into(), thread::spawn(|| {}));
+    let (tx, rx) = std::sync::mpsc::channel();
+    service.oidc_recoveries.insert(
+        "work".into(),
+        OidcRecovery {
+            config: hub.clone(),
+            rejected: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            worker: thread::spawn(move || rx.recv().unwrap()),
+        },
+    );
+    service.reload_slots()?;
+    assert!(!closed.load(Ordering::SeqCst));
+    assert_eq!(service.slots["work"].bearer.as_deref(), Some("old"));
+    assert!(Arc::ptr_eq(
+        &inventory,
+        &service.channel_inventories["work"]
+    ));
+    assert_eq!(service.slots["work"].cached_directory().len(), rows.len());
+    let token = format!(
+        "header.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"exp":now_ms()/1000+300}).to_string())
+    );
+    tx.send(Ok((token.clone(), identity)))
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !service.oidc_recoveries["work"].worker.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    service.reload_slots()?;
+    assert_eq!(
+        service.slots["work"].bearer.as_deref(),
+        Some(token.as_str())
+    );
+    assert!(!closed.load(Ordering::SeqCst));
+    assert!(Arc::ptr_eq(&closed, &service.slots["work"].closed));
+    assert!(Arc::ptr_eq(
+        &inventory,
+        &service.channel_inventories["work"]
+    ));
+    assert_eq!(service.slots["work"].cached_directory().len(), rows.len());
+    let expired = service
+        .slots
+        .get_mut("work")
+        .ok_or("Missing renewed slot")?;
+    expired.expires_at = now_ms() / 1000 - 1;
+    expired.auth_retry_at = now_ms() + 5000;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = cancelled.clone();
+    service.oidc_recoveries.insert(
+        "work".into(),
+        OidcRecovery {
+            config: hub,
+            rejected: None,
+            cancelled,
+            worker: thread::spawn(move || {
+                while !cancel.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err("Recovery cancelled".into())
+            }),
+        },
+    );
+    service.reload_slots()?;
+    assert!(
+        closed.load(Ordering::SeqCst),
+        "Expiry must retire the stream even while renewal is pending"
+    );
+    assert!(service.slots["work"].cached_directory().is_empty());
+    assert!(!service.channel_inventories.contains_key("work"));
+    service.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
     let slot = HubClient::new(
         "work".into(),
@@ -63,7 +538,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         user: "alice".into(),
         default_hub: "local".into(),
     };
-    fs::write(&config.config_path, json!({"user":"alice","hubs":{"local":{"url":"local://"},"archive":{"url":"https://hub.example.com","enabled":false}}}).to_string()).map_err(|e| e.to_string())?;
+    fs::write(&config.config_path, json!({"user":"alice","hubs":{"local":{"url":"local://"},"archive":{"url":"https://hub.example.com","enabled":false,"autoListen":true}}}).to_string()).map_err(|e| e.to_string())?;
     let plugins = LoadedPlugins {
         plugins: vec![],
         rejected_ids: HashSet::new(),
@@ -81,7 +556,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             "human",
             "default",
         );
-        service.pause_listener("local", &human_id)?;
+        service.unlisten_id("local", &human_id)?;
         assert_eq!(
             service
                 .state
@@ -178,6 +653,10 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             .find(|hub| hub["name"] == "archive")
             .ok_or("Missing disabled Hub")?;
         assert_eq!(disabled["user"], service.config.effective_user("archive")?);
+        assert_eq!(
+            disabled["auto_listen"], false,
+            "Bulk stop disables even an empty disabled Hub"
+        );
         let personal = remaining[0].clone();
         let personal_signal = service.send(
             "local",
@@ -745,6 +1224,7 @@ print(json.dumps(result), flush=True)
                     tint: String::new(),
                     cli_flag: false,
                     pid_bound: true,
+                    auto_listen: Default::default(),
                     plugin_dir: dir.clone(),
                     is_builtin: false,
                     command: vec![
@@ -944,7 +1424,11 @@ print(json.dumps(result), flush=True)
                             Ok(())
                         })?;
                         fs::write(dir.join("candidate.json"), "[]").map_err(|e| e.to_string())?;
-                        service.set_auto_listen("work", false)?;
+                        assert!(
+                            service.set_auto_listen("work", false).is_err(),
+                            "Unavailable detach must remain visible"
+                        );
+                        assert_eq!(service.slot("work")?.config["autoListen"], false);
                         service.set_auto_listen("work", true)?;
                         service.refresh_available()?;
                         if state.db.query("SELECT 1 FROM pending_hub_detaches WHERE hub='work' AND listener_id=?",&[json!(id)])?.len()!=1 {
@@ -1085,10 +1569,13 @@ print(json.dumps(result), flush=True)
                     })
                     .ok_or("Missing fresh recovery candidate")?;
                 assert!(fresh["discovered_at"].as_u64() > revoked["updated_at"].as_u64());
-                for slot in service.slots.values_mut() {
-                    slot.config["autoListen"] = json!(true);
+                // Re-enabling explicitly clears per-session Stop intent; a fresh
+                // discovery alone no longer has that authority.
+                let hubs: Vec<_> = service.slots.keys().cloned().collect();
+                for hub in hubs {
+                    service.set_auto_listen(&hub, true)?;
                 }
-                service.auto_listen()?;
+                service.refresh_available()?;
                 if rebind {
                     assert_eq!(
                         state
@@ -1575,7 +2062,9 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         service
             .channel_inventories
             .insert("local".into(), inventory);
-        service.slots.insert("local".into(), remote);
+        if let Some(old) = service.slots.insert("local".into(), remote) {
+            old.close();
+        }
         assert_eq!(
             service.human_projection("local")["human_state_status"],
             "unknown"
@@ -1818,6 +2307,199 @@ fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
     result
 }
 #[test]
+fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let dir = std::env::temp_dir().join(format!("cito-boundary-{}", random_uuid_v4()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let target = dir.join("managed.json");
+    fs::write(&target, "{}").map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    std::os::unix::fs::symlink(&target, &config.config_path).map_err(|e| e.to_string())?;
+    let plugins = LoadedPlugins {
+        plugins: vec![],
+        rejected_ids: Default::default(),
+    };
+    let mut service = DaemonService::open(&config, &plugins)?;
+    let result = (|| -> Result<(), String> {
+        // Publication must follow a dangling symlink instead of replacing it.
+        fs::remove_file(&target).map_err(|e| e.to_string())?;
+        service.mutate_config(|value| {
+            value["user"] = json!("bob");
+            Ok(())
+        })?;
+        assert!(fs::symlink_metadata(&config.config_path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink());
+        let stored: Value =
+            serde_json::from_str(&fs::read_to_string(&target).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        assert_eq!(stored["user"], "bob");
+        // Resolve directory symlinks before interpreting a relative parent.
+        fs::remove_file(&config.config_path).map_err(|e| e.to_string())?;
+        fs::create_dir_all(dir.join("real/sub")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink("real/sub", dir.join("linkdir")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink("linkdir/../settings.json", &config.config_path)
+            .map_err(|e| e.to_string())?;
+        assert!(!dir.join("real/settings.json").exists());
+        service.mutate_config(|value| {
+            value["user"] = json!("charlie");
+            Ok(())
+        })?;
+        let stored: Value = serde_json::from_str(
+            &fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(stored["user"], "charlie");
+        assert!(dir.join("real/settings.json").is_file());
+        assert!(!dir.join("settings.json").exists());
+        assert!(fs::symlink_metadata(&config.config_path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink());
+        // Local state contains ownership secrets; every exported session/activity
+        // row must cross the DTO projection even in lightweight status updates.
+        let active = service.state.active()?;
+        assert!(!active.is_empty());
+        let snapshot = service.snapshot()?;
+        for key in ["listeners", "sessions"] {
+            assert!(!snapshot[key].as_array().unwrap().is_empty());
+            for row in snapshot[key].as_array().unwrap() {
+                assert!(row.get("owner_token").is_none());
+                assert!(row.get("dispatcher_token").is_none());
+                assert!(row.get("hub_url").is_none());
+                assert_eq!(row["is_self_principal"], true);
+                assert_eq!(row["can_set_scope"], false);
+                for control in ["can_pin", "can_rename", "can_stop"] {
+                    assert_eq!(row[control], row["harness"] != "human", "{row}");
+                }
+            }
+        }
+        for hubs in [&snapshot["hubs"], &snapshot["settings"]["hubs"]] {
+            let hub = hubs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hub| hub["name"] == "local")
+                .unwrap();
+            assert_eq!(hub["is_builtin"], true);
+            assert_eq!(hub["supports_workspace_scope"], false);
+            assert_eq!(hub["can_login"], false);
+        }
+        let row = &active[0];
+        let signal = json!({"signal_id":"dto-signal","target_generation":row["binding_generation"],"from":{"principal_id":row["principal_id"],"user":"alice","host_name":"desktop"},"message":"hello"});
+        service.state.admit(
+            "local",
+            row,
+            &signal,
+            1,
+            "2026-01-01T00:00:00Z",
+            now_ms() + 60_000,
+            &Value::Null,
+        )?;
+        service.state.db.execute(
+            "UPDATE local_signals SET dispatcher_token='secret-dispatcher'",
+            &[],
+        )?;
+        let activity = service.snapshot()?["activity"].clone();
+        assert!(!activity.as_array().unwrap().is_empty());
+        assert!(!activity.to_string().contains("secret-dispatcher"));
+        assert!(activity[0].get("dispatcher_token").is_none());
+        assert_eq!(activity[0]["message"], "hello");
+        assert!(
+            activity[0]["can_reply"].is_boolean(),
+            "Activity DTOs retain reply authority"
+        );
+        service.state.db.execute("DROP TABLE wake_retries", &[])?;
+        let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;
+        assert_eq!(sent["ok"], true);
+        assert!(sent["signal_id"].as_str().unwrap().contains("sig_"));
+        assert!(sent["maintenance_warning"].is_string(), "{sent}");
+        let reservation = service
+            .state
+            .db
+            .query("SELECT * FROM local_sent_idempotency", &[])?;
+        assert_eq!(reservation.len(), 1);
+        assert_eq!(reservation[0]["status"], "wake_accepted");
+        Ok(())
+    })();
+    let shared = Arc::new(Mutex::new(service));
+    let http_result = (|| -> Result<(), String> {
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        for (method, headers, status) in [
+            ("GET /health", format!("Host: {address}\r\n"), 200),
+            (
+                "GET /health",
+                format!("Host: {address}\r\nOrigin: http://{address}\r\n"),
+                200,
+            ),
+            (
+                "GET /health",
+                format!(
+                    "Host: {address}\r\nOrigin: http://127.0.0.1:{}\r\n",
+                    address.port() + 1
+                ),
+                403,
+            ),
+            (
+                "GET /health",
+                format!("Host: attacker.example:{}\r\n", address.port()),
+                403,
+            ),
+            (
+                "POST /mcp",
+                format!("Host: {address}\r\nContent-Type: text/plain\r\n"),
+                415,
+            ),
+            ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\n"), 200),
+            ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\nOrigin: http://127.0.0.1:{}\r\n", address.port() + 1), 403),
+            ("POST /mcp", format!("Host: attacker.example:{}\r\nContent-Type: application/json\r\n", address.port()), 403),
+        ] {
+            let service = shared.clone();
+            let mut client = TcpStream::connect(address).map_err(|e| e.to_string())?;
+            let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
+            let worker = thread::spawn(move || {
+                super::http_actions::handle_http(stream, service, Arc::new(json!({})))
+            });
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}).to_string();
+            write!(
+                client,
+                "{method} HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()
+            )
+            .map_err(|e| e.to_string())?;
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .map_err(|e| e.to_string())?;
+            worker.join().map_err(|_| "HTTP worker panicked")?;
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+        }
+        let mut committed =
+            json!({"ok":true,"signal_id":"missing:sig_committed","seq":1,"status":"wake_accepted"});
+        super::mcp::wait_send_receipt(&shared, &mut committed);
+        assert_eq!(committed["signal_id"], "missing:sig_committed");
+        assert_eq!(committed["ok"], true);
+        assert_eq!(committed["receipt_status"], "unknown");
+        Ok(())
+    })();
+    shared.lock().map_err(|e| e.to_string())?.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result.and(http_result)
+}
+
+#[test]
 fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
     let mailbox = UiMailbox::default();
     for i in 0..40 {
@@ -1826,7 +2508,6 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
     let results = [
         json!({"op":"settings","hub":"local","request_id":"gateway-save"}),
         json!({"op":"settings","hub":"local","request_id":"personal-save"}),
-        json!({"op":"settings","hub":"local","confirm_hub_save":true}),
         json!({"op":"settings","hub":"local","ok":true,"source_op":"setup_save_hub"}),
         json!({"op":"state","ok":true,"source_op":"clear_activity_history","request_id":"delete-a"}),
         json!({"op":"state","ok":true,"source_op":"ack_signals","request_id":"read-b"}),
@@ -1842,7 +2523,7 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
         mailbox.pending.lock().map_err(|e| e.to_string())?.len(),
         1 + results.len()
     );
-    for expected in std::iter::once(snapshot).chain(results) {
+    for expected in results.into_iter().chain(std::iter::once(snapshot)) {
         let bytes = mailbox.next().ok_or("Missing UI frame")?;
         let actual: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         assert_eq!(actual, expected);
@@ -1904,7 +2585,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         respond(
             &mut stream,
             200,
-            &json!({"ok":true,"result":{"server_now_ms":1000,"record":{"listener_id":"c_fixture","public_id":"alice-fixture","principal_id":"none#alice","owner_user":"alice","harness":"human","session_id":"default","state":"UNLISTENED","scope":"workspace","about":"Keep","human_control_revision":3,"channels":{"remote:human":{"host_id":"remote","host_name":"Laptop","state":"ACTIVE","updated_at_ms":1000}}}}}),
+            &json!({"ok":true,"result":{"server_now_ms":1000,"record":{"listener_id":"c_fixture","public_id":"alice-fixture","principal_id":"none#alice","owner_user":"alice","harness":"human","session_id":"default","state":"UNLISTENED","scope":"workspace","about":"Keep","human_control_revision":3,"updated_at_ms":1000,"channels":{"remote:human":{"host_id":"remote","host_name":"Laptop","state":"ACTIVE","updated_at_ms":1000}}}}}),
         );
     });
     let client = HubClient::new(
@@ -1933,9 +2614,35 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         .ok_or("Missing remote Human")?;
     assert_eq!(hub["human_availability"], "ACTIVE");
     assert_eq!(hub["human_state_status"], "current");
+    assert_eq!(hub["human_can_set_scope"], true);
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["hub"] != "work"));
     assert_eq!(peer["human_availability"], hub["human_availability"]);
     assert_eq!(peer["human_state_status"], hub["human_state_status"]);
+    assert_eq!(peer["human_can_set_scope"], hub["human_can_set_scope"]);
     assert_eq!(peer["attachments"], hub["attachments"]);
+    assert_eq!(peer["last_seen_at"], crate::core::identity::iso(1000));
+    let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&client)));
+    inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"status":"error","detail":"Temporary inventory failure","channels":[{"id":"messenger","status":"ready"}]});
+    service
+        .channel_inventories
+        .insert("work".into(), inventory.clone());
+    let settings = service.settings_for_hub("work");
+    assert_eq!(
+        settings["channel_inventory_error"],
+        "Temporary inventory failure"
+    );
+    assert_eq!(settings["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(settings["channels"][0]["id"], "messenger");
+    inventory.cached.lock().map_err(|e| e.to_string())?.value =
+        json!({"status":"error","detail":"Initial failure"});
+    let settings = service.settings_for_hub("work");
+    assert_eq!(settings["channels"], json!([]));
+    assert_eq!(settings["channel_inventory_error"], "Initial failure");
+    assert!(service.settings_for_hub("local")["channel_inventory_error"].is_null());
     *client.status.lock().map_err(|e| e.to_string())? = "connected".into();
     *client.rejected_bearer.lock().map_err(|e| e.to_string())? = Some("rejected".into());
     let snapshot = service.snapshot()?;
@@ -1952,6 +2659,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         .find(|r| r["hub"] == "work")
         .unwrap();
     assert_eq!(hub["human_state_status"], "stale");
+    assert_eq!(hub["human_can_set_scope"], false);
     assert_eq!(hub["human_state_status"], peer["human_state_status"]);
     client.closed.store(true, Ordering::SeqCst);
     service.shutdown();
@@ -1990,6 +2698,149 @@ fn root_hub_shedding_retains_correlated_receipt_and_terminates() -> Result<(), S
     Ok(())
 }
 #[test]
+fn channel_inventory_diagnostic_survives_collection_shedding() -> Result<(), String> {
+    let frame = json!({"op":"state","settings":{"channel_inventory_error":"Inventory unavailable","channels":(0..16).map(|i| json!({"id":format!("channel-{i}"),"fields":(0..12).map(|_|json!({"detail":"x".repeat(4096)})).collect::<Vec<_>>()})).collect::<Vec<_>>()}});
+    let bytes = bounded_frame(frame)?;
+    assert!(bytes.len() < FRAME_LIMIT);
+    let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    assert_eq!(frame["truncated"], true);
+    assert_eq!(
+        frame["settings"]["channel_inventory_error"],
+        "Inventory unavailable"
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_nested_pids_preserve_endpoint_errors_and_provider_fallback() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-explicit-{}", random_uuid_v4()));
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    let mut plugins = vec![];
+    for id in ["a-bound", "z-fallback"] {
+        let path = config.state_dir.join("plugins").join(id);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("plugin.json"),json!({"id":id,"kind":"agent","displayName":id,"pidBound":id=="a-bound","command":["python3","./driver.py"]}).to_string()).unwrap();
+        fs::write(path.join("driver.py"),r#"import json,sys,pathlib,os
+req=json.loads(sys.stdin.readline());root=pathlib.Path(__file__).parent
+op=req['op'];result={'ok':True}
+if op=='resolve_caller':
+ if root.name=='a-bound':
+  code='BINDING_REQUIRED' if (root/'unmatched').exists() else 'ENDPOINT_UNAVAILABLE'
+  result={'ok':False,'error_code':code,'message':'Matching endpoint is unavailable'}
+ else: result={'ok':True,'caller':{'harness':root.name,'session_id':'live','cwd':'/workspace','title':'Fallback','endpoint_pid':os.getppid()}}
+elif op=='discover_sessions': result['sessions']=[]
+elif op=='setup_inspect': result.update(installed=True,configured=True,paths=[])
+print(json.dumps(result))
+"#).unwrap();
+        plugins.push(crate::plugins::parse_manifest_dir(&path, false)?);
+    }
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins,
+            rejected_ids: Default::default(),
+        },
+    )?;
+    let pid = std::process::id();
+    for meta in [
+        json!({"endpoint_pid":pid}),
+        json!({"_stdio":{"endpoint_pid":pid}}),
+        json!({"_meta":{"endpoint_pid":pid}}),
+    ] {
+        let error = service
+            .tool(
+                "cito_send",
+                &json!({"to":"@self","message":"Must not downgrade"}),
+                &meta,
+            )
+            .unwrap_err();
+        assert!(error.starts_with("ENDPOINT_UNAVAILABLE:"), "{error}");
+    }
+    assert!(service
+        .state
+        .db
+        .query("SELECT * FROM local_sent_idempotency", &[])?
+        .is_empty());
+    fs::write(config.state_dir.join("plugins/a-bound/unmatched"), "").unwrap();
+    let status = service.tool(
+        "cito_status",
+        &json!({}),
+        &json!({"_stdio":{"endpoint_pid":pid}}),
+    )?;
+    assert_eq!(status["registered"], false, "{status}");
+    let caller = service
+        .caller(&json!({"_stdio":{"endpoint_pid":pid}}), true)?
+        .unwrap();
+    assert_eq!(caller["harness"], "z-fallback");
+    service.shutdown();
+    drop(service);
+    fs::remove_dir_all(dir).unwrap();
+    Ok(())
+}
+
+#[test]
+fn canonical_editable_values_survive_ui_projection() -> Result<(), String> {
+    let title = "\u{4e2d}".repeat(64);
+    let long = "x".repeat(6000);
+    let frame = json!({"op":"state","listeners":[{"title":title}],
+        "settings":{"hubs":[{"url":format!("https://id.example.com/{long}"),"issuer":long,"client_id":long}],
+        "channels":[{"fields":[{"value":long}]}]}});
+    let projected: Value = serde_json::from_slice(&bounded_frame(frame.clone())?).unwrap();
+    assert_eq!(projected, frame);
+    let invite = json!({"op":"hub_invite","url":long,"token":long,"issuer":long,"client_id":long});
+    let projected: Value = serde_json::from_slice(&bounded_frame(invite.clone())?).unwrap();
+    assert_eq!(projected, invite);
+    Ok(())
+}
+
+#[test]
+fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-authority-{}", random_uuid_v4()));
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    for tool in [
+        "cito_listen",
+        "cito_unlisten",
+        "cito_send",
+        "cito_inbox",
+        "cito_status",
+    ] {
+        assert!(service
+            .tool(tool, &json!({}), &json!({"expected_harness":"human"}))
+            .unwrap_err()
+            .starts_with("FORBIDDEN:"));
+        assert!(service
+            .tool(tool, &json!({"harness":"human"}), &json!({}))
+            .unwrap_err()
+            .starts_with("FORBIDDEN:"));
+    }
+    service.shutdown();
+    drop(service);
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn bounded_empty_activity_with_multibyte_listeners() -> Result<(), String> {
     let f = json!({"op":"state","activity":[],"listeners":(0..150).map(|_|json!({"title":"🦀".repeat(10000),"about":"🦀".repeat(10000)})).collect::<Vec<_>>(),"unread_count":200});
     let bytes = bounded_frame(f)?;
@@ -2000,9 +2851,9 @@ fn bounded_empty_activity_with_multibyte_listeners() -> Result<(), String> {
     let title = "é".repeat(128);
     let frame: Value = serde_json::from_slice(&bounded_frame(json!({"title":title}))?)
         .map_err(|e| e.to_string())?;
-    // The IPC budget caps UTF-8 bytes, rather than Unicode scalar count.
+    // Valid editable titles preserve their canonical UTF-8 bytes.
     let projected = frame["title"].as_str().ok_or("Missing title")?;
-    assert_eq!(projected, format!("{}…", "é".repeat(62)));
-    assert!(projected.len() <= 128);
+    assert_eq!(projected, title);
+    assert!(projected.len() <= 512);
     Ok(())
 }

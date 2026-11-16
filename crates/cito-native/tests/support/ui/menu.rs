@@ -1,6 +1,169 @@
 use super::*;
 
 #[test]
+fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let id = "personal:repo-abcdefghijkl";
+    let title_text = "A deliberately long conversation title";
+    for appearance in ["light", "dark"] {
+        for hub_auto in [false, true] {
+            for mode in ["auto", "manual"] {
+                for timed in [false, true] {
+                    let mut frame = state();
+                    frame["hubs"][0]["auto_listen"] = json!(hub_auto);
+                    frame["listeners"][0]["listen_mode"] = json!(mode);
+                    frame["listeners"][0]["title"] = json!(title_text);
+                    // Deliberately disagree with pid_bound to prove capability is independent.
+                    frame["harnesses"][0]["pid_bound"] = json!(timed);
+                    frame["harnesses"][0]["idle_timeout_ms"] =
+                        if timed { json!(3_600_000) } else { Value::Null };
+                    f.send(p, frame);
+                    let s = inspect_as(&f, p, Some(appearance));
+                    let pin = node(&s, "items", &format!("pin:{id}"));
+                    if !hub_auto && mode == "manual" {
+                        assert!(pin.is_null());
+                        continue;
+                    }
+                    assert_eq!(pin["width"], 22);
+                    assert_eq!(pin["height"], 22);
+                    assert_eq!(
+                        pin["symbol"],
+                        if mode == "auto" { "pin" } else { "pin.fill" }
+                    );
+                    assert_eq!(pin["border_width"], if mode == "auto" { 0 } else { 1 });
+                    assert_eq!(
+                        pin["accessibility_label"],
+                        if mode == "auto" {
+                            "Pin session"
+                        } else {
+                            "Unpin session"
+                        }
+                    );
+                    let tooltip = pin["tooltip"].as_str().unwrap();
+                    assert!(tooltip.contains(
+                        "Pinned sessions stay listening when Auto-Listen is turned off."
+                    ));
+                    assert!(tooltip.contains(if timed {
+                        "auto-retire after the idle timeout"
+                    } else {
+                        "endpoint is available; no idle timeout applies"
+                    }));
+                    let card = node(&s, "items", &format!("session:{id}"));
+                    let title = nodes(&card["children"])
+                        .into_iter()
+                        .find(|n| n["text"] == title_text)
+                        .unwrap();
+                    let rename = node(&s, "items", &format!("rename:{id}"));
+                    assert!(title["width"].as_f64().unwrap() >= 122.0);
+                    assert!(
+                        rename["x"].as_f64().unwrap() + rename["width"].as_f64().unwrap()
+                            - title["x"].as_f64().unwrap()
+                            >= 146.0,
+                        "title={title}; rename={rename}; pin={pin}; mode={mode}, auto={hub_auto}"
+                    );
+                    let scope = node(&s, "items", &format!("scope:{id}"));
+                    assert_eq!(scope["width"], 68);
+                    assert!(
+                        node(&s, "items", &format!("stop:{id}"))["width"]
+                            .as_f64()
+                            .unwrap()
+                            >= 44.0
+                    );
+                    if mode == "manual" {
+                        let tint = pin["children"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find_map(|n| n["tint"].as_array())
+                            .unwrap();
+                        assert!(
+                            tint[2].as_f64().unwrap() > tint[0].as_f64().unwrap(),
+                            "Pinned icon uses the blue info tint"
+                        );
+                    }
+                    control(&f, p, &format!("pin:{id}"));
+                    inspect(&f, p);
+                    let action = f
+                        .frames(p)
+                        .into_iter()
+                        .rev()
+                        .find(|a| a["op"] == "set_listen_mode")
+                        .unwrap();
+                    assert_eq!(action["hub"], "personal");
+                    assert_eq!(action["listener_id"], "c_abcdefghijkl");
+                    assert_eq!(
+                        action["listen_mode"],
+                        if mode == "auto" { "manual" } else { "auto" }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discovery() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    for (raw, expected) in [
+        ("ACTIVE / UNLISTENED / DISCONNECTED_RETAINED / EXPIRED; INACTIVE / EXPIRED_UNSENT", "Active / Not listening / Temporarily offline / Offline; INACTIVE / EXPIRED_UNSENT"),
+        ("personal: fixture_plugin: Discovery rejected: 10071: Cannot scan; BADGE_ERROR: Retry (os error 13)", "Cannot scan; Retry"),
+        ("Badge rejected: 10037: Missing endpoint", "Missing endpoint"),
+        ("Refresh failed: 10059: Not available; PLUGIN_EXEC_FAILED: Retry", "Refresh failed: Not available; Retry"),
+        (r#"Discovery rejected: {"error_code":"PLUGIN_EXEC_FAILED","message":"10071: Cannot scan"}"#, "Cannot scan"),
+        (r#"{"error":{"code":"FAILED","message":"Badge rejected: Cannot scan"}}"#, "Cannot scan"),
+        (r#"{"error_code":"FAILED"}"#, "The request failed. Try again."),
+        (r#"{"error_code": broken"#, "The request failed. Try again."),
+        ("fixture: SQLITE_CANTOPEN: cannot open", "App database is unavailable. Check the app and its data location."),
+        ("Discovery rejected: unable to open database file (SQLite 14)", "App database is unavailable. Check the app and its data location."),
+        ("fixture: sqlite3 failed", "App database is unavailable. Check the app and its data location."),
+        ("fixture: database is locked", "App database is unavailable. Check the app and its data location."),
+    ] {
+        let mut frame = state();
+        frame["hubs"][0]["error"] = json!(raw);
+        f.send(p, frame);
+        let s = inspect(&f, p);
+        assert_eq!(node(&s, "items", "hub_error:personal")["text"], expected, "{raw}");
+    }
+    let vectors: Vec<[String; 2]> =
+        serde_json::from_str(include_str!("../diagnostics.json")).unwrap();
+    for [raw, expected] in vectors {
+        let mut frame = state();
+        frame["hubs"][0]["error"] = json!(raw);
+        f.send(p, frame);
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "items", "hub_error:personal")["text"],
+            expected,
+            "{raw}"
+        );
+    }
+    let clean = "Cannot scan the session directory. Check the app data location and permissions, then refresh discovery to try again. ".repeat(4);
+    for appearance in ["light", "dark"] {
+        let mut frame = state();
+        frame["discovery"] = json!([{"harness":"fixture","status":"error","error":format!("fixture: Discovery rejected: 10071: {clean}")}]);
+        f.send(p, frame);
+        let s = inspect_as(&f, p, Some(appearance));
+        let row = node(&s, "items", "discovery:fixture");
+        let label = nodes(&row["children"])
+            .into_iter()
+            .find(|n| {
+                n["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Fixture · Cannot scan"))
+            })
+            .unwrap();
+        assert_eq!(label["width"], 322);
+        assert_eq!(label["tooltip"], format!("Fixture · {}", clean.trim()));
+        assert!(label["height"].as_f64().unwrap() > 26.0);
+        assert!(row["height"].as_f64().unwrap() >= label["height"].as_f64().unwrap() + 8.0);
+    }
+}
+
+#[test]
 fn hub_drawer_renders_the_presented_error_as_visible_text() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -75,7 +238,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "items", "toggle_group:fixture")["text"],
-        "Fixture · 1 recent"
+        "Fixture · 1 open"
     );
     assert!(!node(&s, "items", "candidate:fixture:recent").is_null());
     control(&f, p, "toggle_group:fixture");
@@ -160,7 +323,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("settings_tab:channels");
     let s = inspect(&f, l.ui);
     let row_id = "inbox_control_bar";
-    assert_eq!(node(&s, "settings_items", row_id)["height"], 44);
+    assert_eq!(node(&s, "settings_items", row_id)["height"], 48);
     let ready = l.until(|s| node(s, "settings_items", "toggle_inbox")["enabled"] == true);
     let pause = node(&ready, "settings_items", "toggle_inbox");
     assert_eq!(pause["text"], "Pause Inbox");
@@ -173,7 +336,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.until(|s| node(s, "settings_items", "toggle_inbox")["enabled"] == true);
     l.control("toggle_inbox");
     let s = l.until(|s| node(s, "settings_items", "toggle_inbox")["text"] == "Pause Inbox");
-    assert_eq!(node(&s, "settings_items", row_id)["height"], 44);
+    assert_eq!(node(&s, "settings_items", row_id)["height"], 48);
     assert!(nodes(&s["settings_items"])
         .iter()
         .any(|n| n["text"] == "You (@alice)"));
@@ -267,7 +430,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let paused_settings = l.until(|s| !node(s, "settings_items", "inbox_control_bar").is_null());
     assert_eq!(paused_settings["low_contrast_labels"], json!([]));
     l.control("toggle_inbox");
-    l.until(|s| node(s, "settings_items", row_id)["height"] == 44);
+    l.until(|s| node(s, "settings_items", row_id)["height"] == 48);
     l.control("close_settings");
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_about"],
@@ -316,7 +479,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         control(&f, p, "settings_tab:channels");
         let s = inspect(&f, p);
         let row = node(&s, "settings_items", "inbox_control_bar");
-        assert_eq!(row["height"], 44);
+        assert_eq!(row["height"], 48);
         let title = nodes(&row["children"])
             .into_iter()
             .find(|n| n["text"] == format!("You (@{user})"))
@@ -897,6 +1060,8 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     .is_null());
     control(&f, p, "copy:personal:repo-abcdefghijkl");
     assert_eq!(inspect(&f, p)["clipboard"], "alice/fixture#abcd");
+    next["hubs"][1]["supports_workspace_scope"] = json!(false);
+    f.send(p, next.clone());
     control(&f, p, "hub:work");
     assert!(!node(&inspect(&f, p), "items", "session:work:repo-workabcdefgh").is_null());
     assert!(
@@ -907,7 +1072,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(pause["text"], "Stop");
     assert_eq!(
         pause["tooltip"],
-        "Stop listening to this session and disable Auto-Listen on work"
+        "Stop only this session and keep it stopped. Auto-Listen on work stays unchanged."
     );
     assert_eq!(pause["border_width"], 1);
     assert!(pause["symbol"].is_null());
@@ -921,11 +1086,12 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     next["listeners"].as_array_mut().unwrap().push(other);
     f.send(p, next.clone());
     assert!(
-        !node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
-        "Another user makes visibility meaningful even on token Hubs"
+        node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
+        "Other users cannot grant a Hub capability"
     );
     next["listeners"].as_array_mut().unwrap().pop();
     next["hubs"][1]["auth_mode"] = json!("oidc");
+    next["hubs"][1]["supports_workspace_scope"] = json!(true);
     f.send(p, next.clone());
     let scope_before = node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh");
     assert_eq!(scope_before["width"], 68);

@@ -9,7 +9,6 @@ use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 pub(super) fn replace_host_hub_server(
@@ -125,7 +124,10 @@ pub(super) fn tailscale_host_from_status(status: &Value) -> Option<String> {
         .map(|ip| ip.to_string())
 }
 
-fn probe_tailscale_status() -> Option<Value> {
+#[derive(Debug)]
+struct ProbeError;
+
+fn probe_tailscale_status() -> Result<Value, ProbeError> {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let executable = [
         "/opt/homebrew/bin/tailscale",
@@ -135,23 +137,35 @@ fn probe_tailscale_status() -> Option<Value> {
     .into_iter()
     .find(|path| std::path::Path::new(path).is_file())
     .unwrap_or("tailscale");
-    let (mut output, writer) = UnixStream::pair().ok()?;
-    output.set_nonblocking(true).ok()?;
+    let (mut output, writer) = UnixStream::pair().map_err(|_| ProbeError)?;
+    output.set_nonblocking(true).map_err(|_| ProbeError)?;
     let mut child = Command::new(executable)
         .args(["status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::from(OwnedFd::from(writer)))
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+        .map_err(|_| ProbeError)?;
+    let exited = match crate::support::child_exit_fd(child.id()) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ProbeError);
+        }
+    };
     let deadline = Instant::now() + Duration::from_millis(500);
+    let mut eof = false;
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
     loop {
         let mut failed = false;
         loop {
             match output.read(&mut buffer) {
-                Ok(0) => break,
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
                 Ok(n) => {
                     bytes.extend_from_slice(&buffer[..n]);
                     if bytes.len() > 4 * 1024 * 1024 {
@@ -169,24 +183,65 @@ fn probe_tailscale_status() -> Option<Value> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() || failed {
-                    return None;
+                    return Err(ProbeError);
                 }
                 output
                     .take((4 * 1024 * 1024 - bytes.len()) as u64)
                     .read_to_end(&mut bytes)
-                    .ok()?;
-                return serde_json::from_slice(&bytes).ok();
+                    .map_err(|_| ProbeError)?;
+                return serde_json::from_slice(&bytes).map_err(|_| ProbeError);
             }
             Ok(None) if !failed && Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(5))
+                use std::os::fd::AsRawFd;
+                let mut fds = [
+                    libc::pollfd {
+                        fd: if eof { -1 } else { output.as_raw_fd() },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: exited.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                if crate::support::poll_until(&mut fds, Some(deadline)).is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProbeError);
+                }
             }
             _ => {
                 // Every timeout/read/wait failure reaps the owned CLI process.
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(ProbeError);
             }
         }
+    }
+}
+
+fn retain_confirmed_host(
+    previous: Option<String>,
+    probe: Result<Value, ProbeError>,
+) -> Option<String> {
+    match probe {
+        Ok(status) if status["Self"]["Online"] == false => None,
+        Ok(status) if status["BackendState"] == "Running" => {
+            tailscale_host_from_status(&status).or(previous)
+        }
+        Ok(status)
+            if status["BackendState"].as_str().is_some_and(|state| {
+                matches!(
+                    state,
+                    "Stopped" | "NeedsLogin" | "NeedsMachineAuth" | "NoState"
+                )
+            }) =>
+        {
+            None
+        }
+        // An incomplete response carries no confirmed online/offline observation.
+        _ => previous,
     }
 }
 
@@ -212,9 +267,10 @@ pub(super) fn tailscale_advertised_host() -> Option<String> {
     {
         return host.clone();
     }
-    let host = probe_tailscale_status()
-        .as_ref()
-        .and_then(tailscale_host_from_status);
+    let host = retain_confirmed_host(
+        cached.as_ref().and_then(|(_, host)| host.clone()),
+        probe_tailscale_status(),
+    );
     *cached = Some((Instant::now(), host.clone()));
     host
 }
@@ -389,5 +445,48 @@ impl DaemonService {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn probe_errors_retain_last_confirmed_host_until_confirmed_offline() {
+        let host = Some("device.tailnet.ts.net".to_owned());
+        assert_eq!(retain_confirmed_host(host.clone(), Err(ProbeError)), host);
+        for status in [
+            json!({}),
+            json!({"BackendState":"Running"}),
+            json!({"BackendState":"Running","Self":null}),
+            json!({"BackendState":"Running","Self":{}}),
+            json!({"BackendState":"Running","Self":{"Online":true,"DNSName":"","TailscaleIPs":[]}}),
+            json!({"BackendState":"Starting"}),
+        ] {
+            assert_eq!(
+                retain_confirmed_host(host.clone(), Ok(status.clone())),
+                host,
+                "{status}"
+            );
+            assert_eq!(retain_confirmed_host(None, Ok(status)), None);
+        }
+        assert_eq!(
+            retain_confirmed_host(host.clone(), Ok(json!({"BackendState":"Stopped"}))),
+            None
+        );
+        assert_eq!(
+            retain_confirmed_host(
+                host.clone(),
+                Ok(json!({"BackendState":"Running","Self":{"Online":false}}))
+            ),
+            None
+        );
+        assert_eq!(
+            retain_confirmed_host(
+                None,
+                Ok(json!({"BackendState":"Running","Self":{"DNSName":"device.tailnet.ts.net."}}))
+            ),
+            host
+        );
     }
 }

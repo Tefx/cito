@@ -203,7 +203,7 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
         control(&f, p, "settings_hub_auth:token");
         for (id, value) in [
             ("settings_hub_name", "submitted"),
-            ("settings_hub_url", "local://"),
+            ("settings_hub_url", "https://submitted.example.com"),
             ("settings_hub_token", "submitted-token"),
         ] {
             f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
@@ -219,9 +219,9 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             .find(|a| a["op"] == "setup_save_hub")
             .unwrap();
         assert_eq!(submitted["name"], "submitted");
-        assert_eq!(submitted["url"], "local://");
+        assert_eq!(submitted["url"], "https://submitted.example.com");
         assert!(!submitted["request_id"].as_str().unwrap().is_empty());
-        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"https://submitted.example.com","auth_mode":"token","is_builtin":false,"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
         f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":null,"settings":cfg}));
         let s = inspect(&f, p);
         assert!(
@@ -286,7 +286,7 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             control(&f, p, "settings_hub_auth:token");
             for (id, value) in [
                 ("settings_hub_name", "submitted"),
-                ("settings_hub_url", "local://"),
+                ("settings_hub_url", "https://submitted.example.com"),
                 ("settings_hub_token", token),
             ] {
                 f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
@@ -309,7 +309,7 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
         let cancelled = &submissions[0];
         let mut current = submissions[1].clone();
         assert_ne!(cancelled["request_id"], current["request_id"]);
-        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"https://submitted.example.com","auth_mode":"token","is_builtin":false,"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
         f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":cancelled["request_id"],"settings":cfg}));
         let s = inspect(&f, p);
         assert!(!node(&s, "settings_items", "add_hub_form").is_null());
@@ -332,7 +332,7 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             json!({"op":"error","source_op":"setup_save_hub","error":"Invite failed"}),
             json!({"op":"error","source_op":"paste_hub_invite","error":"Invalid invite"}),
             json!({"op":"error","error":"INVALID_INPUT: Message is too large to send"}),
-            json!({"op":"error","source_op":"","request_id":current["request_id"],"error":"Source-less correlated transport failure"}),
+            json!({"op":"error","source_op":"","request_id":"unrelated-request","error":"Source-less uncorrelated transport failure"}),
         ] {
             let error = frame["error"].clone();
             let source_less = frame.get("source_op").is_none();
@@ -507,7 +507,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
         ("Office Mac", "https://office.example.com", "office-mac"),
         ("Work", "http://127.0.0.1:4291", "work"),
         ("", "https://work.example.com", "work-2"),
-        ("", "https://local.example.com", "local-2"),
+        ("", "https://personal.example.com", "personal-2"),
         ("", "http://192.0.2.10:4291", "remote"),
         ("", "http://192.168.1.10:4291", "lan"),
         ("", "http://10.1.2.3:4291", "lan-2"),
@@ -716,7 +716,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     }
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "setup_app:pi")["text"],
-        "Setting Up…",
+        "Checking…",
         "A click remains pending until its correlated receipt"
     );
     let checked = f

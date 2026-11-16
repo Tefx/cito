@@ -1,6 +1,872 @@
 use super::*;
 
 #[test]
+fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_claims() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[]).unwrap();
+    let plugin = f.state.join("plugins/codex");
+    fs::create_dir_all(&plugin).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/codex/plugin.json")).unwrap())
+            .unwrap();
+    manifest["command"] = json!([CODEX]);
+    fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    // Pin all real providers. Fixture::new sets the builtin directory but does
+    // not substitute a provider; do not rely on staged binaries for this seam.
+    let pi = f.state.join("plugins/pi");
+    fs::create_dir_all(&pi).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/pi/plugin.json")).unwrap()).unwrap();
+    manifest["command"] = json!([PI]);
+    fs::write(pi.join("plugin.json"), manifest.to_string()).unwrap();
+    let claude = f.state.join("plugins/claude");
+    fs::create_dir_all(&claude).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/claude/plugin.json")).unwrap())
+            .unwrap();
+    manifest["command"] = json!([CLAUDE]);
+    fs::write(claude.join("plugin.json"), manifest.to_string()).unwrap();
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let claude_pid = f.pid(endpoint);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    let mut env = f.env.clone();
+    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":claude_pid,"cwd":"/repo"}));
+    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    let foreign = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","cwd":"/repo",
+        "meta":{"_stdio":{"endpoint_pid":claude_pid}}}),
+    );
+    assert_eq!(foreign["ok"], false, "{foreign}");
+    assert_eq!(foreign["error_code"], "BINDING_REQUIRED", "{foreign}");
+    let request = json!({"op":"resolve_caller","meta":{"endpoint_pid":std::process::id(),"threadId":"thread-a"}});
+    let pi_rejection = f.plugin(PI, request.clone());
+    assert_eq!(
+        pi_rejection["error_code"], "BINDING_REQUIRED",
+        "{pi_rejection}"
+    );
+    let codex_rejection = f.plugin(CODEX, request);
+    assert_eq!(
+        codex_rejection["error_code"], "INVALID_INPUT",
+        "{codex_rejection}"
+    );
+    for (meta, code) in [
+        (json!({"threadId":"thread-a"}), "INVALID_INPUT"),
+        (
+            json!({"expected_harness":"codex","expected_session_id":"thread-a"}),
+            "BINDING_REQUIRED",
+        ),
+    ] {
+        let reply = f.plugin(
+            CODEX,
+            json!({"op":"resolve_caller","endpoint_pid":std::process::id(),"meta":meta}),
+        );
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["error_code"], code, "{reply}");
+    }
+    let expected = json!({"expected_harness":"codex","endpoint_pid":std::process::id(),"expected_session_id":"thread-a"});
+    let direct = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","explicit_session_id":"thread-a","meta":expected}),
+    );
+    assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    let claude_meta =
+        json!({"endpoint_pid":claude_pid,"expected_session_id":"claude-session","cwd":"/repo"});
+    let direct = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":claude_meta}),
+    );
+    assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    let direct = f.plugin(
+        CLAUDE,
+        json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":claude_meta}),
+    );
+    assert_eq!(direct["caller"]["harness"], "claude", "{direct}");
+    // Incompatible harness metadata cannot seed the thread provider directly.
+    let direct = f.plugin(CODEX, json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":{"expected_harness":"claude"}}));
+    assert_eq!(direct["ok"], false, "{direct}");
+    assert_eq!(direct["error_code"], "INVALID_INPUT", "{direct}");
+    for meta in [json!({}), json!({"expected_session_id":"thread-a"})] {
+        let direct = f.plugin(CLAUDE, json!({"op":"resolve_caller","endpoint_pid":std::process::id(),"explicit_session_id":"thread-a","meta":meta}));
+        assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    }
+    f.daemon(&[]);
+    let routed = f.tool(
+        "cito_listen",
+        json!({"about":"Unfenced transport routing"}),
+        json!({"_stdio":{"endpoint_pid":claude_pid},"cwd":"/repo"}),
+    );
+    assert_eq!(routed["ok"], true, "{routed}");
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='codex'")
+            .len(),
+        0
+    );
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='claude'")[0]["session_id"],
+        "claude-session"
+    );
+    // Explicit thread metadata seeds a Codex cache entry for this same transport.
+    let seeded = f.tool("cito_status", json!({}),
+        json!({"expected_harness":"codex","threadId":"thread-a","_stdio":{"endpoint_pid":claude_pid},"cwd":"/repo"}));
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    source.execute("DELETE FROM threads", &[]).unwrap();
+    let routed = f.tool("cito_status", json!({}),
+        json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    // A stale command must reject the cache before checking conflicting metadata.
+    for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
+        let cached =
+            json!({"harness":harness,"session_id":"thread-a","endpoint_pid":std::process::id()});
+        let direct = f.plugin(bin, json!({"op":"resolve_caller","require_open":false,
+            "cached_caller":cached,"meta":{"_stdio":{"endpoint_pid":std::process::id()},"expected_session_id":"other-session"}}));
+        assert_eq!(
+            direct["error_code"], "BINDING_REQUIRED",
+            "{harness}: {direct}"
+        );
+    }
+    source
+        .execute("INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[])
+        .unwrap();
+    let uncached = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","require_open":false,
+        "cached_caller":null,"cwd":"/repo","meta":{"expected_session_id":"thread-a"}}),
+    );
+    assert_eq!(uncached["ok"], true, "{uncached}");
+    assert_eq!(uncached["caller"]["session_id"], "thread-a", "{uncached}");
+    let rejected = f.tool_result("cito_status", json!({}), expected);
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("BINDING_REQUIRED"),
+        "{rejected}"
+    );
+    let routed = f.tool_result(
+        "cito_listen",
+        json!({"about":"Cross-provider expected session routing"}),
+        claude_meta,
+    );
+    assert_ne!(routed["isError"], true, "{routed}");
+    let routed: Value =
+        serde_json::from_str(routed["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(routed["ok"], true, "{routed}");
+    let routed = f.tool("cito_listen", json!({"about":"Unharnessed transport session routing"}),
+        json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    let rejected = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"endpoint_pid":std::process::id(),"expected_session_id":"thread-a"}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("BINDING_REQUIRED"),
+        "{rejected}"
+    );
+    let rows = f.rows("SELECT * FROM local_listeners WHERE harness='claude'");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["session_id"], "claude-session");
+    for thread in [false, true] {
+        let mut meta = json!({"_stdio":{"endpoint_pid":std::process::id()},"cwd":"/repo"});
+        if thread {
+            meta["threadId"] = json!("thread-a");
+        }
+        let result = f.tool(
+            "cito_listen",
+            json!({"about":"Transport identity regression"}),
+            meta,
+        );
+        assert_eq!(result["ok"], true, "{result}");
+        let rows = f.rows("SELECT * FROM local_listeners WHERE harness='codex'");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["session_id"], "thread-a");
+    }
+    let explicit = f.tool("cito_listen", json!({"about":"New thread before database projection"}),
+        json!({"_stdio":{"endpoint_pid":std::process::id()},"threadId":"not-yet-indexed","cwd":"/repo"}));
+    assert_eq!(explicit["ok"], true);
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE session_id='not-yet-indexed'")
+            .len(),
+        1
+    );
+    let rejected = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"endpoint_pid":std::process::id(),"threadId":"thread-a"}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("INVALID_INPUT"),
+        "{rejected}"
+    );
+    let rejected = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"codex","endpoint_pid":std::process::id(),"threadId":"thread-a"}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("INVALID_INPUT"),
+        "{rejected}"
+    );
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
+}
+
+#[test]
+fn cached_generic_session_fences_allow_all_providers_to_continue() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
+        let app = f.dir.join(format!("{harness}.mjs"));
+        fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+        let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+        wait(|| f.output(endpoint, false).contains("ready"));
+        let pid = f.pid(endpoint);
+        let cached = cito_native::support::remember_process(
+            json!({"harness":harness,"session_id":"cached-session","endpoint_pid":pid}),
+        );
+        assert!(cached["process_identity"].is_object());
+        let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+        if harness == "claude" {
+            fs::create_dir_all(binding.parent().unwrap()).unwrap();
+            fs::write(
+                &binding,
+                json!({"session_id":"cached-session","cwd":"/repo",
+                    "start":cito_native::support::process_start(pid),
+                    "process_identity":cached["process_identity"]})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        for key in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo",
+                "http_client_pid":pid,"http_transport":true,"cached_caller":cached});
+            req[key] = json!({"expected_session_id":"other-session"});
+            let direct = f.plugin(bin, req.clone());
+            assert_eq!(
+                direct["error_code"], "BINDING_REQUIRED",
+                "{harness}/{key}: {direct}"
+            );
+            // A harness fence turns the same live-process mismatch into a conflict.
+            for harness_key in ["meta", "_meta"] {
+                let mut fenced = req.clone();
+                if !fenced[harness_key].is_object() {
+                    fenced[harness_key] = json!({});
+                }
+                fenced[harness_key]["expected_harness"] = json!(harness);
+                let direct = f.plugin(bin, fenced.clone());
+                assert_eq!(
+                    direct["error_code"], "INVALID_INPUT",
+                    "{harness}/{key}/{harness_key}: {direct}"
+                );
+                fenced["cached_caller"]["process_identity"]["started_at"] = json!("old-invocation");
+                let stale = f.plugin(bin, fenced);
+                assert_eq!(
+                    stale["error_code"], "BINDING_REQUIRED",
+                    "{harness}: {stale}"
+                );
+            }
+        }
+        if harness == "claude" {
+            let req = json!({"op":"resolve_caller","require_open":false,
+                "http_client_pid":pid,"http_transport":true,"cached_caller":cached,"cwd":"/repo"});
+            let unchanged = f.plugin(bin, req.clone());
+            assert_eq!(
+                unchanged["caller"]["session_id"], "cached-session",
+                "{unchanged}"
+            );
+            for key in ["meta", "_meta"] {
+                for metadata in [
+                    json!({"claudeSessionId":"resumed-session"}),
+                    json!({"expected_harness":"claude","expected_session_id":"resumed-session"}),
+                ] {
+                    let mut fenced = req.clone();
+                    fenced[key] = metadata;
+                    let conflict = f.plugin(bin, fenced);
+                    assert_eq!(conflict["error_code"], "INVALID_INPUT", "{conflict}");
+                }
+            }
+            let mut changed: Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+            changed["session_id"] = json!("resumed-session");
+            fs::write(&binding, changed.to_string()).unwrap();
+            let switched = f.plugin(bin, req.clone());
+            assert_eq!(switched["error_code"], "BINDING_REQUIRED", "{switched}");
+            for key in ["meta", "_meta"] {
+                for metadata in [
+                    json!({"claudeSessionId":"resumed-session"}),
+                    json!({"expected_harness":"claude","expected_session_id":"resumed-session"}),
+                ] {
+                    let mut fenced = req.clone();
+                    fenced[key] = metadata;
+                    let switched = f.plugin(bin, fenced.clone());
+                    assert_eq!(switched["error_code"], "BINDING_REQUIRED", "{switched}");
+                    assert_eq!(
+                        switched["message"], "Endpoint session binding changed",
+                        "{switched}"
+                    );
+                    let mut malformed = fenced.clone();
+                    malformed["cached_caller"]["session_id"] = json!("");
+                    let rejected = f.plugin(bin, malformed);
+                    assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+                    let mut stale = fenced.clone();
+                    stale["cached_caller"]["process_identity"]["started_at"] =
+                        json!("old-invocation");
+                    let rejected = f.plugin(bin, stale);
+                    assert_eq!(rejected["error_code"], "BINDING_REQUIRED", "{rejected}");
+                    assert_ne!(
+                        rejected["message"], "Endpoint session binding changed",
+                        "{rejected}"
+                    );
+                    fenced["cached_caller"] = Value::Null;
+                    let resolved = f.plugin(bin, fenced);
+                    assert_eq!(
+                        resolved["caller"]["session_id"], "resumed-session",
+                        "{resolved}"
+                    );
+                }
+            }
+            changed["start"] = json!("old-invocation");
+            fs::write(&binding, changed.to_string()).unwrap();
+            let obsolete = f.plugin(bin, req);
+            assert_eq!(
+                obsolete["caller"]["session_id"], "cached-session",
+                "{obsolete}"
+            );
+        }
+        f.stop(endpoint);
+    }
+}
+
+#[test]
+fn provider_session_metadata_has_envelope_parity() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    for (bin, harness, keys) in [
+        (
+            CLAUDE,
+            "claude",
+            &["claudeSessionId", "sessionId", "claude_session_id"][..],
+        ),
+        (
+            CODEX,
+            "codex",
+            &["openai/threadId", "threadId", "codexThreadId"][..],
+        ),
+    ] {
+        let mut metadata: Vec<Value> = keys
+            .iter()
+            .map(|key| json!({*key:"selected-session"}))
+            .collect();
+        metadata.push(json!({"expected_harness":harness,"expected_session_id":"selected-session"}));
+        metadata.push(json!({"expected_harness":format!(" {harness} "),"expected_session_id":"selected-session"}));
+        if harness == "codex" {
+            metadata.push(json!({"x-codex-turn-metadata":"{\"thread_id\":\"selected-session\"}"}));
+        }
+        for envelope in ["meta", "_meta"] {
+            for fields in &metadata {
+                let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
+                req[envelope] = fields.clone();
+                let resolved = f.plugin(bin, req.clone());
+                assert_eq!(
+                    resolved["caller"]["session_id"], "selected-session",
+                    "{harness}/{envelope}/{fields}: {resolved}"
+                );
+                let other = if envelope == "meta" { "_meta" } else { "meta" };
+                req[other] = json!({keys[0]:"conflicting-session"});
+                let rejected = f.plugin(bin, req);
+                assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+            }
+        }
+    }
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,git_branch TEXT); INSERT INTO threads VALUES('indexed-session','/repo',0,'main')", &[]).unwrap();
+    let req =
+        json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
+    let unfenced = f.plugin(CODEX, req.clone());
+    assert_eq!(unfenced["error_code"], "BINDING_REQUIRED", "{unfenced}");
+    for envelope in ["meta", "_meta"] {
+        let mut fenced = req.clone();
+        fenced[envelope] = json!({"expected_harness":" codex "});
+        let resolved = f.plugin(CODEX, fenced);
+        assert_eq!(
+            resolved["caller"]["session_id"], "indexed-session",
+            "{resolved}"
+        );
+    }
+    for sql in [
+        "UPDATE threads SET id=' selected-session '",
+        "ALTER TABLE threads DROP COLUMN git_branch",
+    ] {
+        source.execute(sql, &[]).unwrap();
+        for envelope in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo"});
+            req[envelope] = json!({"expected_session_id":"selected-session"});
+            let rejected = f.plugin(CODEX, req);
+            assert_eq!(
+                rejected["error_code"], "BINDING_REQUIRED",
+                "{sql}: {rejected}"
+            );
+        }
+    }
+    source
+        .execute("UPDATE threads SET id='selected-session'", &[])
+        .unwrap();
+    for (bin, harness) in [(PI, "pi"), (CODEX, "codex"), (CLAUDE, "claude")] {
+        // Execute real providers below a recognizable harness. HTTP transport
+        // metadata must suppress that ancestry, while a client PID selects it.
+        let app = f.dir.join(format!("{harness}.mjs"));
+        fs::write(&app, r#"import fs from 'node:fs';import net from 'node:net';import readline from 'node:readline';import {spawn} from 'node:child_process';
+const dir=process.env.CITO_STATE_DIR+'/sockets';fs.mkdirSync(dir,{recursive:true});
+net.createServer(c=>c.once('data',()=>c.end(JSON.stringify({ok:true,session_id:'selected-session',cwd:'/repo',pi_pid:process.pid})+'\n')))
+.listen(dir+'/pi-pid-'+process.pid+'.sock',()=>console.log('ready'));
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const req=JSON.parse(line);
+ const child=spawn(process.argv[2],{stdio:['pipe','inherit','inherit']});
+ child.stdin.end(JSON.stringify(req)+'\n');
+});
+"#).unwrap();
+        let endpoint = f.spawn("node", &[app.to_str().unwrap(), bin], &[]);
+        wait(|| f.output(endpoint, false).contains("ready"));
+        let pid = f.pid(endpoint);
+        if harness == "claude" {
+            let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+            fs::create_dir_all(binding.parent().unwrap()).unwrap();
+            fs::write(
+                binding,
+                json!({"session_id":"selected-session","cwd":"/repo",
+                    "start":cito_native::support::process_start(pid)})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        for envelope in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo",
+                "http_transport":true});
+            req[envelope] = json!({"http_client_pid":pid,"expected_session_id":"selected-session"});
+            if harness == "codex" {
+                req[envelope]["threadId"] = json!("selected-session");
+            }
+            let resolved = f.plugin(bin, req.clone());
+            assert_eq!(
+                resolved["caller"]["session_id"], "selected-session",
+                "{harness}/{envelope}/http_client_pid: {resolved}"
+            );
+            assert_eq!(
+                resolved["caller"]["endpoint_pid"], pid,
+                "{harness}/{envelope}/http_client_pid: {resolved}"
+            );
+            if harness == "pi" {
+                req[envelope]["expected_session_id"] = json!("other-session");
+                let rejected = f.plugin(bin, req);
+                assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+            }
+        }
+        for envelope in [None, Some("meta"), Some("_meta")] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo",
+                "state_dir":f.state,"env":f.env});
+            if let Some(key) = envelope {
+                req[key] = json!({"http_transport":true});
+            }
+            let before = f.frames(endpoint).len();
+            f.send(endpoint, req);
+            wait(|| f.frames(endpoint).len() > before);
+            let reply = f.frames(endpoint).last().unwrap().clone();
+            // Claude never infers a caller PID from its parent process, even
+            // without HTTP metadata; Pi and Codex provide positive controls.
+            if envelope.is_some() || harness == "claude" {
+                assert_eq!(
+                    reply["error_code"], "BINDING_REQUIRED",
+                    "{harness}/{envelope:?}/http_transport: {reply}"
+                );
+            } else {
+                assert_eq!(
+                    reply["caller"]["session_id"], "selected-session",
+                    "{harness}/ancestor control: {reply}"
+                );
+            }
+        }
+        f.stop(endpoint);
+    }
+}
+
+#[test]
+fn codex_padded_metadata_and_raw_cached_session_have_consistent_fences() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    for thread_id in [" selected-session ", "   "] {
+        f.env.insert("CODEX_THREAD_ID".into(), thread_id.into());
+        for envelope in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
+            req[envelope] = json!({"threadId":"selected-session","expected_harness":" codex ","expected_session_id":"selected-session"});
+            let resolved = f.plugin(CODEX, req);
+            assert_eq!(
+                resolved["caller"]["session_id"], "selected-session",
+                "{resolved}"
+            );
+        }
+    }
+    f.env.remove("CODEX_THREAD_ID");
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let cached = cito_native::support::remember_process(
+        json!({"harness":"codex","session_id":" selected-session ","endpoint_pid":f.pid(endpoint)}),
+    );
+    assert!(cached["process_identity"].is_object());
+    for op in ["resolve_caller", "verify"] {
+        let req = json!({"op":op,"require_open":false,"http_transport":true,
+            "http_client_pid":f.pid(endpoint),"cached_caller":cached});
+        let resolved = f.plugin(CODEX, req.clone());
+        assert_eq!(
+            resolved["caller"]["session_id"], " selected-session ",
+            "{resolved}"
+        );
+        for envelope in ["meta", "_meta"] {
+            let mut fenced = req.clone();
+            fenced[envelope] = json!({"expected_session_id":"selected-session"});
+            let rejected = f.plugin(CODEX, fenced.clone());
+            assert_eq!(rejected["error_code"], "BINDING_REQUIRED", "{rejected}");
+            fenced[envelope]["expected_harness"] = json!(" codex ");
+            let rejected = f.plugin(CODEX, fenced);
+            assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+        }
+    }
+    f.stop(endpoint);
+}
+
+#[test]
+fn pi_padded_bridge_identity_survives_live_and_cached_resolution() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("pi.mjs");
+    fs::write(&app, r#"import fs from 'node:fs';import net from 'node:net';import readline from 'node:readline';
+const dir=process.env.CITO_STATE_DIR+'/sockets';fs.mkdirSync(dir,{recursive:true});
+let failures=0, calls=0;
+net.createServer(c=>c.once('data',()=>{
+ calls++;
+ if(failures>0){failures--;c.end('unavailable\n');}
+ else c.end(JSON.stringify({ok:true,session_id:' selected-session ',cwd:'/repo',pi_pid:process.pid})+'\n');
+ console.log(JSON.stringify({op:'identify',calls}));
+})).listen(dir+'/pi-pid-'+process.pid+'.sock',()=>console.log(JSON.stringify({op:'ready'})));
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const req=JSON.parse(line);failures=req.failures;calls=0;console.log(JSON.stringify({op:'reset',token:req.token}));
+});
+"#).unwrap();
+    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.frames(endpoint).iter().any(|v| v["op"] == "ready"));
+    let pid = f.pid(endpoint);
+    let mut cached = Value::Null;
+    let mut token = 0;
+    for use_cache in [false, true] {
+        for envelope in [None, Some("meta"), Some("_meta")] {
+            token += 1;
+            // Fail the ancestor lookup and socket scan only. The third exchange
+            // must validate the cached caller against the live padded identity.
+            f.send(
+                endpoint,
+                json!({"failures":if use_cache {2} else {0},"token":token}),
+            );
+            wait(|| {
+                f.frames(endpoint)
+                    .iter()
+                    .any(|v| v["op"] == "reset" && v["token"] == token)
+            });
+            let mut req = json!({"op":"resolve_caller","require_open":false,
+                "endpoint_pid":pid,"cached_caller":if use_cache {cached.clone()} else {Value::Null}});
+            if let Some(key) = envelope {
+                req[key] = json!({"expected_session_id":"selected-session"});
+            }
+            let resolved = f.plugin(PI, req);
+            assert_eq!(
+                resolved["caller"]["session_id"], "selected-session",
+                "{use_cache}/{envelope:?}: {resolved}"
+            );
+            assert_eq!(resolved["caller"]["endpoint_pid"], pid, "{resolved}");
+            cached = resolved["caller"].clone();
+            assert!(cached["process_identity"].is_object());
+            let calls = if use_cache { 3 } else { 1 };
+            wait(|| {
+                f.frames(endpoint)
+                    .last()
+                    .is_some_and(|v| v["op"] == "identify" && v["calls"] == calls)
+            });
+        }
+    }
+    f.stop(endpoint);
+}
+
+#[test]
+fn uncached_generic_session_fences_allow_disk_providers_to_continue() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0)", &[]).unwrap();
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let pid = f.pid(endpoint);
+    let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+    fs::create_dir_all(binding.parent().unwrap()).unwrap();
+    fs::write(
+        &binding,
+        json!({"session_id":"claude-session","cwd":"/repo",
+        "start":cito_native::support::process_start(pid)})
+        .to_string(),
+    )
+    .unwrap();
+    for (bin, harness, session) in [
+        (CODEX, "codex", "thread-a"),
+        (CLAUDE, "claude", "claude-session"),
+    ] {
+        for key in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo",
+                "http_client_pid":pid,"http_transport":true});
+            // Codex can infer a DB thread without borrowing Claude's transport.
+            if harness == "codex" {
+                req.as_object_mut().unwrap().remove("http_client_pid");
+                req["http_transport"] = json!(false);
+            }
+            req[key] = json!({"expected_session_id":session});
+            let matching = f.plugin(bin, req.clone());
+            assert_eq!(
+                matching["caller"]["session_id"], session,
+                "{harness}/{key}: {matching}"
+            );
+            req[key]["expected_session_id"] = json!("other-session");
+            let generic = f.plugin(bin, req.clone());
+            assert_eq!(
+                generic["error_code"], "BINDING_REQUIRED",
+                "{harness}/{key}: {generic}"
+            );
+            for harness_key in ["meta", "_meta"] {
+                let mut fenced = req.clone();
+                if !fenced[harness_key].is_object() {
+                    fenced[harness_key] = json!({});
+                }
+                // Fence the inferred provider without turning the generic ID into
+                // provider-specific metadata in the same envelope.
+                fenced[harness_key]["expected_harness"] = json!("another-provider");
+                let conflict = f.plugin(bin, fenced);
+                assert_eq!(
+                    conflict["error_code"], "INVALID_INPUT",
+                    "{harness}/{key}/{harness_key}: {conflict}"
+                );
+            }
+        }
+    }
+    f.stop(endpoint);
+}
+
+#[test]
+fn daemon_attaches_rejected_caches_and_routes_to_the_next_real_provider() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[]).unwrap();
+    // Record requests and replies while forwarding unchanged to the actual providers.
+    let forwarder = f.dir.join("provider-trace.py");
+    fs::write(
+        &forwarder,
+        r#"import json,subprocess,sys
+request=sys.stdin.read()
+result=subprocess.run([sys.argv[1]],input=request,text=True,capture_output=True)
+with open(sys.argv[2],'a') as trace:
+ trace.write(json.dumps({'request':json.loads(request),'reply':json.loads(result.stdout)})+'\n')
+sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.returncode)
+"#,
+    )
+    .unwrap();
+    let trace = f.dir.join("provider-trace.jsonl");
+    for (harness, bin) in [("codex", CODEX), ("claude", CLAUDE), ("pi", PI)] {
+        let plugin = f.state.join("plugins").join(harness);
+        fs::create_dir_all(&plugin).unwrap();
+        let mut manifest: Value = serde_json::from_slice(
+            &fs::read(root().join(format!("plugins/{harness}/plugin.json"))).unwrap(),
+        )
+        .unwrap();
+        manifest["command"] = json!(["python3", forwarder, bin, trace]);
+        fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    }
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let pid = f.pid(endpoint);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    let mut env = f.env.clone();
+    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
+    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    f.daemon(&[]);
+    let seeded = f.tool(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"claude","_stdio":{"endpoint_pid":pid},"cwd":"/repo"}),
+    );
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
+    assert!(f
+        .state
+        .join(format!("claude/endpoints/{pid}.json"))
+        .exists());
+    fs::write(&trace, "").unwrap();
+    let routed = f.tool("cito_status", json!({}),
+        json!({"_stdio":{"endpoint_pid":pid},"threadId":"thread-a","expected_session_id":"thread-a","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    let calls: Vec<Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejected = calls
+        .iter()
+        .position(|call| call["request"]["cached_caller"]["harness"] == "claude")
+        .unwrap();
+    assert_eq!(
+        calls[rejected]["request"]["cached_caller"]["session_id"],
+        "claude-session"
+    );
+    assert_eq!(calls[rejected]["reply"]["error_code"], "BINDING_REQUIRED");
+    assert!(calls[rejected + 1..]
+        .iter()
+        .any(|call| call["reply"]["caller"]["harness"] == "codex"
+            && call["reply"]["caller"]["session_id"] == "thread-a"));
+
+    // An HTTP forwarder has no explicit/stdio PID priority. Seed its Codex cache,
+    // remove the DB projection, then require cache rejection before Claude wins.
+    let seeded = f.tool(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"codex","threadId":"thread-a","cwd":"/repo"}),
+    );
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    source.execute("DELETE FROM threads", &[]).unwrap();
+    fs::write(&trace, "").unwrap();
+    let routed = f.tool("cito_status", json!({}),
+        json!({"claudeSessionId":"claude-session","expected_session_id":"claude-session","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    let calls: Vec<Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejected = calls
+        .iter()
+        .position(|call| call["request"]["cached_caller"]["harness"] == "codex")
+        .unwrap();
+    assert_eq!(
+        calls[rejected]["request"]["cached_caller"]["session_id"],
+        "thread-a"
+    );
+    assert!(calls[rejected]["request"]["meta"]["_stdio"].is_null());
+    assert_eq!(calls[rejected]["reply"]["error_code"], "BINDING_REQUIRED");
+    assert!(calls[rejected + 1..]
+        .iter()
+        .any(|call| call["reply"]["caller"]["harness"] == "claude"
+            && call["reply"]["caller"]["session_id"] == "claude-session"));
+}
+
+#[test]
+fn nested_harness_stdio_never_claims_an_outer_bridge_but_shells_can() {
+    let _lock = serial();
+    for (outer, inner) in [("pi", "claude"), ("claude", "pi")] {
+        for shell in [false, true] {
+            let f = Fixture::new(json!({}));
+            for (id, bin) in [("pi", PI), ("claude", CLAUDE), ("codex", CODEX)] {
+                let plugin = f.state.join("plugins").join(id);
+                fs::create_dir_all(&plugin).unwrap();
+                let mut manifest: Value = serde_json::from_slice(
+                    &fs::read(root().join(format!("plugins/{id}/plugin.json"))).unwrap(),
+                )
+                .unwrap();
+                manifest["command"] = json!([bin]);
+                fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+            }
+            let inner_app = f.dir.join(format!("{inner}.mjs"));
+            fs::write(
+                &inner_app,
+                r#"import {spawn} from 'node:child_process';
+const mcp=spawn(process.argv[2],['mcp-stdio'],{stdio:['pipe','inherit','inherit']});
+process.stdin.pipe(mcp.stdin);
+process.on('SIGTERM',()=>{mcp.kill();process.exit()});
+"#,
+            )
+            .unwrap();
+            let outer_app = f.dir.join(format!("{outer}.mjs"));
+            fs::write(&outer_app, r#"import fs from 'node:fs';import net from 'node:net';import {spawn} from 'node:child_process';
+const path=process.env.CITO_STATE_DIR+'/sockets/'+process.argv[2]+'-pid-'+process.pid+'.sock';
+fs.mkdirSync(process.env.CITO_STATE_DIR+'/sockets',{recursive:true});
+const server=net.createServer(c=>{c.once('data',()=>c.end(JSON.stringify({ok:true,session_id:'outer-session',cwd:'/repo',pi_pid:process.pid})+'\n'))});
+server.listen(path,()=>{
+ const child=process.argv[4]==='shell'
+  ? spawn('/bin/sh',['-c','"$TEST_CITO" mcp-stdio; status=$?; exit "$status"'],{stdio:['pipe','inherit','inherit'],env:{...process.env,TEST_CITO:process.argv[3]}})
+  : spawn(process.execPath,[process.argv[4],process.argv[3]],{stdio:['pipe','inherit','inherit']});
+ process.stdin.pipe(child.stdin);
+ console.log(JSON.stringify({child:child.pid}));
+ process.on('SIGTERM',()=>{child.kill();server.close();process.exit()});
+});
+"#).unwrap();
+            f.daemon(&[]);
+            let owner = f.spawn(
+                "node",
+                &[
+                    outer_app.to_str().unwrap(),
+                    outer,
+                    NATIVE,
+                    if shell {
+                        "shell"
+                    } else {
+                        inner_app.to_str().unwrap()
+                    },
+                ],
+                &[],
+            );
+            wait(|| f.frames(owner).iter().any(|r| r["child"].is_u64()));
+            f.send(owner, json!({"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"cito_listen","arguments":{"about":"Nested transport boundary"}}}));
+            wait(|| f.frames(owner).iter().any(|r| r["id"] == 77));
+            let reply = f.frames(owner).into_iter().find(|r| r["id"] == 77).unwrap();
+            if shell {
+                assert_ne!(reply["result"]["isError"], true, "{outer}: {reply}");
+                let rows = f.rows("SELECT * FROM local_listeners WHERE session_id='outer-session'");
+                assert_eq!(rows.len(), 1, "{outer}: {reply}");
+                assert_eq!(rows[0]["harness"], outer);
+            } else {
+                assert_eq!(reply["result"]["isError"], true, "{outer}: {reply}");
+                assert!(f
+                    .rows("SELECT * FROM local_listeners WHERE session_id='outer-session'")
+                    .is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn long_lived_stdio_recovers_after_daemon_restart_and_configured_port_change() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -232,16 +1098,13 @@ fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let db = f.db("hub.sqlite");
     db.execute("CREATE TRIGGER reject_publish BEFORE INSERT ON hub_signals BEGIN SELECT RAISE(ABORT,'injected failure'); END",&[]).unwrap();
     let args = json!({"to":target["listener_id"],"message":"Recovery","idempotency_key":"same"});
-    assert_eq!(
-        f.tool_result("cito_send", args.clone(), human())["isError"],
-        true
-    );
+    assert_eq!(send_human_result(&f, args.clone())["http_status"], 400);
     let row = f.rows("SELECT * FROM local_sent_idempotency")[0].clone();
     assert_eq!(row["status"], "PENDING_PUBLISH");
     db.execute("DROP TRIGGER reject_publish", &[]).unwrap();
-    let recovered = f.tool("cito_send", args.clone(), human());
+    let recovered = send_human(&f, args.clone());
     assert_eq!(recovered["signal_id"], row["signal_id"]);
-    assert_eq!(f.tool("cito_send", args, human())["seq"], recovered["seq"]);
+    assert_eq!(send_human(&f, args)["seq"], recovered["seq"]);
     assert_eq!(
         db.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
             .unwrap()[0]["n"],
@@ -268,25 +1131,20 @@ fn shared_hub_private_scope_is_invisible_and_workspace_scope_is_deliverable() {
     b.env.insert("CITO_USER".into(), "bob".into());
     b.daemon(&[]);
     assert_eq!(
-        b.tool("cito_find", json!({"harness":"fixture"}), human())["listeners"],
+        b.tool("cito_find", json!({"harness":"fixture"}), json!({}))["listeners"],
         json!([])
     );
-    let denied = b.tool_result(
-        "cito_send",
-        json!({"to":target["listener_id"],"message":"Private"}),
-        human(),
-    );
-    assert_eq!(denied["isError"], true);
+    let denied = send_human_result(&b, json!({"to":target["listener_id"],"message":"Private"}));
+    assert_eq!(denied["http_status"], 400);
     assert!(denied.to_string().contains("FORBIDDEN_TARGET_SCOPE"));
     let public = a.tool(
         "cito_listen",
         json!({"about":"Workspace target","scope":"workspace"}),
         meta,
     );
-    b.tool(
-        "cito_send",
+    send_human(
+        &b,
         json!({"to":public["listener_id"],"message":"Workspace"}),
-        human(),
     );
     wait(|| {
         a.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
@@ -391,11 +1249,7 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
         a.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"]
             == "FENCED_INACTIVE"
     });
-    let sent = b.tool(
-        "cito_send",
-        json!({"to":winner["listener_id"],"message":"Winner"}),
-        human(),
-    );
+    let sent = send_human(&b, json!({"to":winner["listener_id"],"message":"Winner"}));
     wait(|| {
         b.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
             .len()
@@ -480,10 +1334,9 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
             assert_eq!(snapshot["settings"]["hubs"][0]["url"], url);
         }
         assert_channels_active();
-        sent_signals.push(b.tool(
-            "cito_send",
+        sent_signals.push(send_human(
+            &b,
             json!({"to":winner["listener_id"],"message":format!("Winner after {operation}")}),
-            human(),
         ));
         wait(|| {
             b.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
@@ -541,6 +1394,34 @@ fn http_origin_guard_strict_tool_schemas_and_singleton_port_ownership() {
     f.daemon(&[]);
 }
 #[test]
+fn cli_formats_real_mcp_error_envelopes_without_json_or_internal_codes() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.provider("delivered_unconfirmed");
+    let _daemon = f.daemon(&[]);
+    let (ok, _, error) = f.command(
+        NATIVE,
+        &[
+            "send",
+            "--harness",
+            "fixture",
+            "--to",
+            "c_0000000000000000",
+            "--message",
+            "hello",
+        ],
+        "",
+    );
+    assert!(!ok, "Unknown targets must fail");
+    assert!(error.contains("Target listener does not exist"), "{error}");
+    assert!(
+        !error.contains("error_code")
+            && !error.contains("{")
+            && !error.contains("LISTENER_NOT_FOUND"),
+        "{error}"
+    );
+}
+#[test]
 fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -549,7 +1430,7 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
     let daemon = f.daemon(&[]);
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        6
+        7
     );
     assert!(db
         .query(
@@ -665,7 +1546,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .all(|v| v["message"].as_str().unwrap().chars().count() <= 512));
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        6
+        7
     );
     assert_eq!(
         db.query("SELECT COUNT(*) AS n FROM local_signals", &[])
@@ -719,7 +1600,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         "^[a-z0-9][a-z0-9_-]{0,31}$"
     );
     assert_eq!(
-        f.tool("cito_find", json!({"harness":"1agent"}), human())["listeners"],
+        f.tool("cito_find", json!({"harness":"1agent"}), json!({}))["listeners"],
         json!([])
     );
     for v in [
@@ -748,7 +1629,7 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
     let prefix = &canonical[2..6];
     for length in [8, 12, 16] {
         let query = format!("alice/fixture#{}", &canonical[2..2 + length]);
-        let found = f.tool("cito_find", json!({"query":query}), human());
+        let found = f.tool("cito_find", json!({"query":query}), json!({}));
         assert_eq!(found["matched_count"], 1, "{found}");
         assert_eq!(found["listeners"][0]["listener_id"], canonical);
     }
@@ -759,11 +1640,7 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
         format!("local:alice/fixture#{prefix}"),
     ] {
         assert_eq!(
-            f.tool(
-                "cito_send",
-                json!({"to":to,"message":"Alias routing"}),
-                human()
-            )["to"],
+            send_human(&f, json!({"to":to,"message":"Alias routing"}))["to"],
             target["listener_id"]
         );
     }
@@ -771,7 +1648,7 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
     let row = json!({"listener_id":duplicate,"public_id":format!("alice-{}",&duplicate[2..]),"owner_user":"alice","principal_id":"none#alice","harness":"fixture","state":"ACTIVE","scope":"workspace","updated_at_ms":cito_native::core::plugins::now_ms(),"binding_generation":1});
     f.db("hub.sqlite").execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,?,CAST(? AS BLOB),'none#alice','workspace')",&[json!(duplicate),json!(cito_native::core::plugins::now_ms()),json!(row.to_string())]).unwrap();
     wait(|| {
-        f.tool("cito_find", json!({"harness":"fixture"}), human())["listeners"]
+        f.tool("cito_find", json!({"harness":"fixture"}), json!({}))["listeners"]
             .as_array()
             .unwrap()
             .len()
@@ -782,18 +1659,11 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
         format!("fixture#{prefix}"),
         format!("alice#{prefix}"),
     ] {
-        let result = f.tool_result(
-            "cito_send",
-            json!({"to":to,"message":"Must disambiguate"}),
-            human(),
-        );
-        assert_eq!(result["isError"], true, "{result}");
-        let error: Value =
-            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(error["error"]["code"], "INVALID_INPUT");
+        let result = send_human_result(&f, json!({"to":to,"message":"Must disambiguate"}));
+        assert_eq!(result["http_status"], 400, "{result}");
         assert_eq!(
-            error["error"]["message"],
-            "Ambiguous target; use full listener_id"
+            result["error"],
+            "INVALID_INPUT: Ambiguous target; use full listener_id"
         );
     }
 }
@@ -864,10 +1734,9 @@ fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations(
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
     let agent = f.tool("cito_listen", json!({"about":"Pending work"}), meta.clone());
-    f.tool(
-        "cito_send",
+    send_human(
+        &f,
         json!({"to":agent["listener_id"],"message":"Pending agent work"}),
-        human(),
     );
     f.tool(
         "cito_send",
@@ -959,7 +1828,10 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
         .as_str()
         .unwrap()
         .contains("/fixture#"));
-    let reply = f.tool("cito_send",json!({"to":activity["from_display_address"],"message":"Human reply","in_reply_to":activity["signal_id"]}),human());
+    let reply = send_human(
+        &f,
+        json!({"to":activity["from_display_address"],"message":"Human reply","in_reply_to":activity["signal_id"]}),
+    );
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["to"], sender["public_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
@@ -1102,7 +1974,7 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .command(NATIVE, &["status"], "")
         .1
         .contains("AVAILABLE SESSIONS"));
-    let find = f.tool("cito_find", json!({"query":"Native receiver"}), human());
+    let find = f.tool("cito_find", json!({"query":"Native receiver"}), json!({}));
     assert!(find["listeners"]
         .as_array()
         .unwrap()
@@ -1111,9 +1983,9 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
             && v["listener_id"] == target["canonical_listener_id"]));
     let long = "Context payload segment ".repeat(100).trim().to_string();
     let args = json!({"to":target["listener_id"],"message":long,"idempotency_key":"stable"});
-    let sent = f.tool("cito_send", args.clone(), human());
+    let sent = send_human(&f, args.clone());
     assert_eq!(sent["status"], "wake_accepted");
-    let again = f.tool("cito_send", args, human());
+    let again = send_human(&f, args);
     assert_eq!(sent["signal_id"], again["signal_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 1);
     assert!(
@@ -1201,10 +2073,9 @@ fn confirmed_delivery_business_ack_and_pending_hub_ack_reconciliation() {
     let meta = f.provider("delivered");
     f.daemon(&[]);
     let target = enroll(&f, meta);
-    f.tool(
-        "cito_send",
+    send_human(
+        &f,
         json!({"to":target["listener_id"],"message":"confirmed"}),
-        human(),
     );
     wait(|| {
         f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NOT NULL")
@@ -1313,11 +2184,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             json!({"hub":hub,"about":"Multi hub","scope":"workspace"}),
             meta.clone(),
         );
-        let sent = f.tool(
-            "cito_send",
-            json!({"to":target["listener_id"],"message":hub}),
-            human(),
-        );
+        let sent = send_human(&f, json!({"to":target["listener_id"],"message":hub}));
         assert!(sent["signal_id"]
             .as_str()
             .unwrap()
@@ -1375,7 +2242,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             &[binding["endpoint_pid"].clone()],
         )
         .unwrap();
-    let all = f.tool("cito_find", json!({"harness":"fixture"}), human());
+    let all = f.tool("cito_find", json!({"harness":"fixture"}), json!({}));
     assert_eq!(all["listeners"].as_array().unwrap().len(), 3);
     assert_eq!(all["matched_count"], all["online_count"]);
     assert_eq!(all["matched_count"], 3);
@@ -1394,7 +2261,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     let local = f.tool(
         "cito_find",
         json!({"hub":"local","harness":"fixture"}),
-        human(),
+        json!({}),
     );
     assert_eq!(local["listeners"].as_array().unwrap().len(), 1);
     assert_eq!(local["listeners"][0]["title"], "alice");

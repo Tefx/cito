@@ -176,17 +176,8 @@ impl Fixture {
         }
     }
     pub fn spawn(&self, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
-        let mut command = Command::new(bin);
-        command
-            .args(args)
-            .env_clear()
-            .envs(&self.env)
-            .envs(extra.iter().copied())
-            .current_dir(&self.dir)
-            .process_group(0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut command = self.command_builder(bin, args);
+        command.envs(extra.iter().copied()).stdin(Stdio::piped());
         let mut child = command.spawn().unwrap_or_else(|e| panic!("{bin}: {e}"));
         let stdout = Arc::new(Mutex::new(String::new()));
         let stderr = Arc::new(Mutex::new(String::new()));
@@ -218,6 +209,19 @@ impl Fixture {
             readers,
         });
         index
+    }
+    pub fn command_builder(&self, bin: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(bin);
+        command
+            .args(args)
+            .env_clear()
+            .envs(&self.env)
+            .current_dir(&self.dir)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
     }
     pub fn send_raw(&self, index: usize, bytes: &[u8]) {
         let mut children = self.children.borrow_mut();

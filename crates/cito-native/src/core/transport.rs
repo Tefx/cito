@@ -3,7 +3,7 @@ use super::identity::{principal, string};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -102,7 +102,14 @@ pub struct HubClient {
     directory_updates: Arc<Mutex<()>>,
     server_clock: Arc<Mutex<Option<(u64, Instant)>>>,
     pub local: Option<Arc<HubEngine>>,
+    // RPC reachability is independent of the optional event-stream hint.
     pub status: Arc<Mutex<String>>,
+    stream_live: Arc<AtomicBool>,
+    event_revision: Arc<AtomicU64>,
+    event_wait: Arc<(Mutex<()>, std::sync::Condvar)>,
+    local_event_wake: Arc<Mutex<Option<Arc<crate::support::WakePipe>>>>,
+    observed_at: Arc<Mutex<Option<Instant>>>,
+    event_credentials: Arc<Mutex<Option<String>>>,
     pub closed: Arc<AtomicBool>,
     pub registration: Arc<Mutex<()>>,
     agent: ureq::Agent,
@@ -119,6 +126,7 @@ impl HubClient {
             name,
             config,
             identity: principal(user),
+            event_credentials: Arc::new(Mutex::new(bearer.clone())),
             bearer,
             expires_at: u64::MAX,
             auth_retry_at: 0,
@@ -129,6 +137,11 @@ impl HubClient {
             server_clock: Arc::new(Mutex::new(None)),
             local,
             status: Arc::new(Mutex::new(status.into())),
+            stream_live: Arc::new(AtomicBool::new(false)),
+            event_revision: Arc::new(AtomicU64::new(1)),
+            event_wait: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
+            local_event_wake: Arc::new(Mutex::new(None)),
+            observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             registration: Arc::new(Mutex::new(())),
             agent: ureq::AgentBuilder::new()
@@ -155,38 +168,17 @@ impl HubClient {
             ))
             .timeout(Duration::from_secs(5))
             .set("X-Cito-User", string(&self.identity, "owner_user"));
-        if let Some(token) = self.bearer.as_deref().filter(|s| !s.is_empty()) {
+        let bearer = self
+            .event_credentials
+            .lock()
+            .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
+            .clone();
+        if let Some(token) = bearer.as_deref().filter(|s| !s.is_empty()) {
             request = request.set("Authorization", &format!("Bearer {token}"));
         }
         let result = match request.send_json(json!({"op":op,"params":params})) {
             Ok(response) => response,
-            Err(ureq::Error::Status(status, response)) => {
-                if status == 401 {
-                    self.reject_bearer();
-                }
-                if let Ok(mut state) = self.status.lock() {
-                    *state = if status == 401 {
-                        "auth_required".into()
-                    } else {
-                        "connected".into()
-                    };
-                }
-                let body: Value = serde_json::from_reader(response.into_reader().take(65_536))
-                    .unwrap_or(Value::Null);
-                let code = body["error"]["code"].as_str().unwrap_or(if status == 401 {
-                    "UNAUTHORIZED"
-                } else if status == 403 {
-                    "FORBIDDEN"
-                } else {
-                    "INVALID_INPUT"
-                });
-                return Err(hub_error(
-                    code,
-                    body["error"]["message"]
-                        .as_str()
-                        .unwrap_or("Hub rejected request"),
-                ));
-            }
+            Err(ureq::Error::Status(_, response)) => response,
             Err(error) => {
                 if let Ok(mut status) = self.status.lock() {
                     *status = "reconnecting".into();
@@ -194,6 +186,7 @@ impl HubClient {
                 return Err(format!("NATS_UNAVAILABLE: {error}"));
             }
         };
+        let status = result.status();
         let mut bytes = Vec::new();
         result
             .into_reader()
@@ -203,12 +196,39 @@ impl HubClient {
         if bytes.len() > 8 * 1024 * 1024 {
             return Err("Hub response exceeds frame limit".into());
         }
-        let response: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if response["ok"] == false || response.get("error").is_some() {
-            return Err(response.to_string());
+        self.parse_rpc_response(status, &bytes, &bearer)
+    }
+    fn parse_rpc_response(
+        &self,
+        status: u16,
+        bytes: &[u8],
+        bearer: &Option<String>,
+    ) -> Result<Value, String> {
+        if status == 401 {
+            self.reject_token(bearer);
         }
-        if let Ok(mut status) = self.status.lock() {
-            *status = "connected".into();
+        if let Ok(mut state) = self.status.lock() {
+            *state = "connected".into();
+        }
+        let response: Value = match serde_json::from_slice(bytes) {
+            Ok(value) => value,
+            Err(_) if status != 200 => Value::Null,
+            Err(error) => return Err(error.to_string()),
+        };
+        if status != 200 || response["ok"] == false || !response["error"].is_null() {
+            let fallback = match status {
+                401 => "UNAUTHORIZED",
+                403 => "FORBIDDEN",
+                200 | 500..=599 => "NATS_UNAVAILABLE",
+                _ => "INVALID_INPUT",
+            };
+            return Err(hub_error(
+                response["error"]["code"].as_str().unwrap_or(fallback),
+                response["error"]["message"]
+                    .as_str()
+                    .or_else(|| response["message"].as_str())
+                    .unwrap_or("Hub rejected request"),
+            ));
         }
         Ok(response.get("result").cloned().unwrap_or(response))
     }
@@ -222,7 +242,12 @@ impl HubClient {
         let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
         let deadline = Instant::now() + Duration::from_secs(10);
         let addresses = url.socket_addrs(|| None).map_err(|e| e.to_string())?;
-        let result = (|| -> Result<Value, String> {
+        let credential = self
+            .event_credentials
+            .lock()
+            .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
+            .clone();
+        let result = (|| {
             let mut connected = None;
             let mut last_error = "Hub address unavailable".to_owned();
             for address in addresses {
@@ -254,38 +279,14 @@ impl HubClient {
                 deadline,
             };
             let body = json!({"op":op,"params":params}).to_string();
-            let bearer = self
-                .bearer
+            let bearer = credential
                 .as_deref()
                 .filter(|v| !v.is_empty())
                 .map(|v| format!("Authorization: Bearer {v}\r\n"))
                 .unwrap_or_default();
             write!(stream,"POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nX-Cito-User: {}\r\n{bearer}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",url.path(),string(&self.identity,"owner_user"),body.len()).map_err(|e|format!("NATS_UNAVAILABLE: {e}"))?;
-            let reply = crate::plugins::read_http_response(&mut stream)
-                .map_err(|e| format!("NATS_UNAVAILABLE: {e}"))?;
-            let response: Value =
-                serde_json::from_str(&reply.body).map_err(|e| format!("NATS_UNAVAILABLE: {e}"))?;
-            if reply.status != 200 || response["ok"] == false {
-                if reply.status == 401 {
-                    self.reject_bearer();
-                }
-                let code = response["error"]["code"]
-                    .as_str()
-                    .unwrap_or("NATS_UNAVAILABLE");
-                if let Ok(mut status) = self.status.lock() {
-                    *status = if reply.status == 401 {
-                        "auth_required"
-                    } else {
-                        "connected"
-                    }
-                    .into();
-                }
-                return Err(hub_error(code, string(&response["error"], "message")));
-            }
-            if let Ok(mut status) = self.status.lock() {
-                *status = "connected".into();
-            }
-            Ok(response.get("result").cloned().unwrap_or(response))
+            crate::plugins::read_http_response(&mut stream)
+                .map_err(|e| format!("NATS_UNAVAILABLE: {e}"))
         })();
         if result
             .as_ref()
@@ -295,25 +296,84 @@ impl HubClient {
                 *status = "disconnected".into();
             }
         }
-        result
+        let reply = result?;
+        self.parse_rpc_response(reply.status, reply.body.as_bytes(), &credential)
     }
-    fn reject_bearer(&self) {
-        if let Ok(mut rejected) = self.rejected_bearer.lock() {
-            *rejected = Some(super::identity::hash(self.bearer.as_deref().unwrap_or("")));
+    fn reject_token(&self, bearer: &Option<String>) {
+        // An old in-flight request must not reject a newly verified credential.
+        let current = self.event_credentials.lock();
+        if current.as_ref().is_ok_and(|token| **token == *bearer) {
+            if let Ok(mut rejected) = self.rejected_bearer.lock() {
+                *rejected = Some(super::identity::hash(bearer.as_deref().unwrap_or("")));
+            }
         }
     }
-    pub fn connection_status(&self) -> String {
-        if self
-            .rejected_bearer
-            .lock()
-            .is_ok_and(|rejected| rejected.is_some())
-        {
-            return "auth_required".into();
+    /// Preserve the authority-owned observations and running stream on renewal.
+    pub fn inherit_authority(&mut self, old: &Self) {
+        self.directory_cache = old.directory_cache.clone();
+        self.directory_updates = old.directory_updates.clone();
+        self.server_clock = old.server_clock.clone();
+        self.status = old.status.clone();
+        self.stream_live = old.stream_live.clone();
+        self.event_revision = old.event_revision.clone();
+        self.event_wait = old.event_wait.clone();
+        self.local_event_wake = old.local_event_wake.clone();
+        self.rejected_bearer = old.rejected_bearer.clone();
+        self.observed_at = old.observed_at.clone();
+        self.closed = old.closed.clone();
+        self.event_credentials = old.event_credentials.clone();
+        if let Ok(mut token) = self.event_credentials.lock() {
+            *token = self.bearer.clone();
+            // Verification of the replacement supersedes any old-token rejection
+            // that raced recovery. reject_token uses this same lock.
+            if let Ok(mut rejected) = self.rejected_bearer.lock() {
+                *rejected = None;
+            }
         }
-        self.status
+        let _guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.event_wait.1.notify_all();
+    }
+    fn observation_recent(&self) -> bool {
+        self.local.is_some()
+            || self
+                .observed_at
+                .lock()
+                .is_ok_and(|at| at.is_some_and(|at| at.elapsed() < Duration::from_secs(60)))
+    }
+    pub fn observation_current(&self) -> bool {
+        self.auth_valid() && self.observation_recent()
+    }
+    fn auth_valid(&self) -> bool {
+        (self.config["authMode"] != "oidc"
+            || (self.bearer.is_some() && self.expires_at > crate::plugins::now_ms() / 1000))
+            && self
+                .rejected_bearer
+                .lock()
+                .is_ok_and(|rejected| rejected.is_none())
+    }
+    pub fn capabilities(&self) -> Value {
+        let authenticated = self.auth_valid();
+        let rpc = self
+            .status
             .lock()
             .map(|status| status.clone())
-            .unwrap_or_else(|_| "disconnected".into())
+            .unwrap_or_else(|_| "disconnected".into());
+        let stream = self.stream_live.load(Ordering::SeqCst);
+        let current = authenticated && self.observation_recent();
+        let status = if !authenticated {
+            "auth_required"
+        } else if self.local.is_some() || rpc == "connected" || stream {
+            "connected"
+        } else {
+            &rpc
+        };
+        json!({"status":status,"auth_valid":authenticated,"rpc_status":rpc,"sse_live":stream,"observation_current":current})
+    }
+    pub fn connection_status(&self) -> String {
+        self.capabilities()["status"]
+            .as_str()
+            .unwrap_or("disconnected")
+            .into()
     }
     pub fn cached_directory(&self) -> Vec<Value> {
         self.directory_cache
@@ -357,18 +417,96 @@ impl HubClient {
             }
         }
     }
+    pub fn event_revision(&self) -> u64 {
+        self.event_revision.load(Ordering::Acquire)
+    }
+    fn mutation(&self) {
+        {
+            let _guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.event_revision.fetch_add(1, Ordering::Release);
+            self.event_wait.1.notify_all();
+        }
+        super::daemon::wake_daemon();
+    }
+    pub fn wait_for_event(&self, revision: u64, deadline: Instant) {
+        let guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .event_wait
+            .1
+            .wait_timeout_while(
+                guard,
+                deadline.saturating_duration_since(Instant::now()),
+                |_| self.event_revision() == revision && !self.closed.load(Ordering::SeqCst),
+            )
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    pub fn close(&self) {
+        if let Ok(_guard) = self.event_wait.0.lock() {
+            self.closed.store(true, Ordering::SeqCst);
+            self.event_wait.1.notify_all();
+            if let Ok(wake) = self.local_event_wake.lock() {
+                if let Some(wake) = &*wake {
+                    wake.notify();
+                }
+            }
+        }
+    }
     pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
-        if self.local.is_some() {
-            return None;
+        if let Some(local) = &self.local {
+            let mut subscription = local.subscribe(Some(self.identity.clone())).ok()?;
+            if let Ok(mut wake) = self.local_event_wake.lock() {
+                *wake = Some(subscription.wake.clone());
+            }
+            let client = self.clone();
+            client.stream_live.store(true, Ordering::SeqCst);
+            return Some(thread::spawn(move || {
+                while !client.closed.load(Ordering::SeqCst) {
+                    let mut fds = [libc::pollfd {
+                        fd: subscription.wake.read_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }];
+                    let _ = crate::support::poll_until(&mut fds, None);
+                    subscription.wake.drain();
+                    let mut changed = false;
+                    let disconnected = loop {
+                        match subscription.try_recv() {
+                            Ok(_) => changed = true,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break false,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
+                        }
+                    };
+                    if changed || disconnected {
+                        client.mutation();
+                    }
+                    if disconnected && !client.closed.load(Ordering::SeqCst) {
+                        let Some(local) = &client.local else { break };
+                        let Ok(next) = local.subscribe(Some(client.identity.clone())) else {
+                            break;
+                        };
+                        subscription = next;
+                        if let Ok(mut wake) = client.local_event_wake.lock() {
+                            *wake = Some(subscription.wake.clone());
+                            if client.closed.load(Ordering::SeqCst) {
+                                subscription.wake.notify();
+                            }
+                        }
+                    }
+                }
+                client.stream_live.store(false, Ordering::SeqCst);
+            }));
+        }
+        if let Ok(mut token) = self.event_credentials.lock() {
+            *token = self.bearer.clone();
         }
         let mut client = self.clone();
         client.agent = ureq::AgentBuilder::new()
             .redirects(0)
             .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_millis(2500))
+            .timeout_read(Duration::from_secs(1))
             .build();
         Some(thread::spawn(move || {
-            let mut delay = 250;
+            let mut backoff = crate::support::RetryBackoff::default();
             while !client.closed.load(Ordering::SeqCst) {
                 let url = format!(
                     "{}/v1/events",
@@ -378,41 +516,81 @@ impl HubClient {
                     .agent
                     .get(&url)
                     .set("X-Cito-User", string(&client.identity, "owner_user"));
-                if let Some(token) = client.bearer.as_deref().filter(|s| !s.is_empty()) {
+                let bearer = client
+                    .event_credentials
+                    .lock()
+                    .ok()
+                    .and_then(|token| token.clone());
+                if let Some(token) = bearer.as_deref().filter(|s| !s.is_empty()) {
                     request = request.set("Authorization", &format!("Bearer {token}"));
                 }
-                if let Ok(response) = request.call() {
-                    if let Ok(mut s) = client.status.lock() {
-                        *s = "connected".into();
-                    }
-                    delay = 250;
+                let response = request.call();
+                if matches!(&response, Err(ureq::Error::Status(401 | 403, _))) {
+                    client.reject_token(&bearer);
+                }
+                if matches!(&response, Err(ureq::Error::Status(401 | 403 | 409, _))) {
+                    let guard = client
+                        .event_wait
+                        .0
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let _guard = client
+                        .event_wait
+                        .1
+                        .wait_while(guard, |_| {
+                            !client.closed.load(Ordering::SeqCst)
+                                && client
+                                    .event_credentials
+                                    .lock()
+                                    .is_ok_and(|token| *token == bearer)
+                        })
+                        .unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
+                if let Ok(response) = response {
+                    client.stream_live.store(true, Ordering::SeqCst);
                     let mut reader = BufReader::new(response.into_reader());
+                    let connected = Instant::now();
+                    let mut line = String::new();
                     loop {
-                        let mut line = String::new();
-                        let result = reader.by_ref().take(65_536).read_line(&mut line);
+                        let remaining = 65_536usize.saturating_sub(line.len());
+                        if remaining == 0 {
+                            break;
+                        }
+                        let result = reader.by_ref().take(remaining as u64).read_line(&mut line);
                         if client.closed.load(Ordering::SeqCst) {
                             break;
+                        }
+                        if matches!(&result, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
+                        {
+                            continue;
                         }
                         if !matches!(result, Ok(n) if n > 0 && line.ends_with('\n')) {
                             break;
                         }
-                        // The durable consumer backlog is authoritative; events only reduce
-                        // reconnection latency and never advance the persisted cursor.
+                        if connected.elapsed() >= Duration::from_secs(30) {
+                            backoff.reset();
+                        }
+                        if line.starts_with("data:") {
+                            backoff.reset();
+                            // Hints invalidate observations; only the durable consumer advances cursors.
+                            client.mutation();
+                        }
+                        line.clear();
                     }
                 }
+                client.stream_live.store(false, Ordering::SeqCst);
                 if client.closed.load(Ordering::SeqCst) {
                     break;
                 }
-                if let Ok(mut s) = client.status.lock() {
-                    *s = "reconnecting".into();
+                if let Ok(guard) = client.event_wait.0.lock() {
+                    let _ = client
+                        .event_wait
+                        .1
+                        .wait_timeout_while(guard, backoff.failed(), |_| {
+                            !client.closed.load(Ordering::SeqCst)
+                        });
                 }
-                for _ in 0..delay / 25 {
-                    if client.closed.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(25));
-                }
-                delay = (delay * 2).min(2000);
             }
         }))
     }
@@ -438,6 +616,9 @@ impl HubClient {
     }
     fn cache_human(&self, result: &Value) {
         self.observe_server_clock(result);
+        if let Ok(mut observed) = self.observed_at.lock() {
+            *observed = Some(Instant::now());
+        }
         if result["record"].is_object() {
             let mut record = result["record"].clone();
             record["server_now_ms"] = result["server_now_ms"].clone();
@@ -482,28 +663,42 @@ impl HubClient {
             .directory_updates
             .lock()
             .map_err(|_| "STATE_ERROR: Directory update lock poisoned")?;
-        let raw = self.rpc("kv_snapshot", &json!({}))?;
-        self.observe_server_clock(&raw);
-        let items = raw
-            .as_array()
-            .or_else(|| raw["entries"].as_array())
-            .cloned()
-            .unwrap_or_default();
+        let mut cursor: Option<String> = None;
         let mut rows = Vec::new();
-        for item in items {
-            if item.get("listener_id").is_some() {
-                rows.push(item);
-                continue;
-            }
-            if let Ok(data) = STANDARD.decode(string(&item, "value_b64")) {
-                if let Ok(mut row) = serde_json::from_slice::<Value>(&data) {
-                    row["server_now_ms"] = raw["server_now_ms"].clone();
-                    rows.push(row);
+        loop {
+            let raw = self.rpc("kv_snapshot", &json!({"after_key":cursor}))?;
+            self.observe_server_clock(&raw);
+            let items = raw
+                .as_array()
+                .or_else(|| raw["entries"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            for item in items {
+                if item.get("listener_id").is_some() {
+                    rows.push(item);
+                    continue;
                 }
+                let data = STANDARD
+                    .decode(string(&item, "value_b64"))
+                    .map_err(|e| e.to_string())?;
+                let mut row: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                row["server_now_ms"] = raw["server_now_ms"].clone();
+                rows.push(row);
+            }
+            let next = raw["next_cursor"].as_str().map(str::to_owned);
+            if next.is_some() && next <= cursor {
+                return Err("NATS_UNAVAILABLE: Snapshot cursor did not advance".into());
+            }
+            cursor = next;
+            if cursor.is_none() {
+                break;
             }
         }
         if let Ok(mut cache) = self.directory_cache.lock() {
             *cache = rows.clone();
+        }
+        if let Ok(mut observed) = self.observed_at.lock() {
+            *observed = Some(Instant::now());
         }
         Ok(rows)
     }

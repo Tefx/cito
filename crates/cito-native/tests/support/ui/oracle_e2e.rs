@@ -1,12 +1,147 @@
 use super::*;
 
 #[test]
+fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    let mut cycle = ClosedLoop::new(&f);
+    f.tool(
+        "cito_listen",
+        json!({"about":"Lifecycle check"}),
+        meta.clone(),
+    );
+    let s = cycle.until(|s| !node(s, "items", "stop_all").is_null());
+    let stop_id = nodes(&s["items"])
+        .into_iter()
+        .find_map(|n| {
+            n["id"]
+                .as_str()
+                .filter(|id| id.starts_with("stop:"))
+                .map(str::to_owned)
+        })
+        .unwrap();
+    let pin_id = stop_id.replacen("stop:", "pin:", 1);
+    let session_id = stop_id.replacen("stop:", "session:", 1);
+    assert!(
+        node(&s, "items", &pin_id).is_null(),
+        "Manual listening without Auto-Listen needs no pin control"
+    );
+
+    cycle.control("toggle_auto_listen");
+    let s = cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    assert!(node(&s, "items", "toggle_auto_listen")["tooltip"]
+        .as_str()
+        .unwrap()
+        .contains("keeps pinned sessions listening"));
+    cycle.control("toggle_auto_listen");
+    let s = cycle.until(|s| node(s, "items", "toggle_auto_listen")["text"] == "Auto-Listen");
+    assert!(
+        !node(&s, "items", &session_id).is_null(),
+        "Turning Auto-Listen off preserves pinned listeners"
+    );
+    assert!(node(&s, "items", &pin_id).is_null());
+
+    cycle.control("toggle_auto_listen");
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    cycle.control(&pin_id);
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin");
+    assert!(cycle
+        .results
+        .iter()
+        .any(|(a, status, _)| a["op"] == "set_listen_mode"
+            && a["listen_mode"] == "auto"
+            && *status == 200));
+    cycle.control(&pin_id);
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    cycle.control(&pin_id);
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin");
+    cycle.control("toggle_auto_listen");
+    cycle.until(|s| {
+        node(s, "items", &session_id).is_null()
+            && node(s, "items", "toggle_auto_listen")["text"] == "Auto-Listen"
+    });
+
+    f.tool("cito_listen", json!({"about":"Stop only me"}), meta.clone());
+    cycle.until(|s| !node(s, "items", &session_id).is_null());
+    cycle.control("toggle_auto_listen");
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    cycle.control(&stop_id);
+    let s = cycle.until(|s| node(s, "items", &session_id).is_null());
+    assert_eq!(
+        node(&s, "items", "toggle_auto_listen")["text"],
+        "Auto-Listen: On"
+    );
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        true
+    );
+
+    f.tool("cito_listen", json!({"about":"Stop all agents"}), meta);
+    cycle.until(|s| !node(s, "items", "stop_all").is_null());
+    cycle.control("stop_all");
+    cycle.until(|s| {
+        node(s, "items", &session_id).is_null()
+            && node(s, "items", "toggle_auto_listen")["text"] == "Auto-Listen"
+    });
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        false
+    );
+    let (status, _) = f.action(json!({"op":"unlisten_all","hub":"local"}));
+    assert_eq!(
+        status, 200,
+        "Bulk stop remains idempotent with no active agents"
+    );
+}
+
+#[test]
+fn add_hub_errors_wrap_below_fields_and_above_actions() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    f.send(p, json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
+    control(&f, p, "submit_add_hub");
+    inspect(&f, p);
+    let submitted = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "setup_save_hub")
+        .unwrap();
+    let clean =
+        "The Hub is unavailable. Check its address and network connection before trying again. "
+            .repeat(3);
+    f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":submitted["request_id"],"error":format!("10071: {clean}")}));
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, p, Some(appearance));
+        let error = node(&s, "settings_items", "add_hub_error");
+        assert_eq!(error["text"], clean.trim());
+        assert_eq!(error["tooltip"], clean.trim());
+        assert_eq!(error["width"], 452);
+        assert!(error["height"].as_f64().unwrap() > 15.0);
+        let submit = node(&s, "settings_items", "submit_add_hub");
+        assert!(
+            submit["y"].as_f64().unwrap() + submit["height"].as_f64().unwrap()
+                <= error["y"].as_f64().unwrap()
+        );
+    }
+}
+
+#[test]
 fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut frame = state();
     let mut cfg = settings();
+    cfg["apps"][0]["display_name"] = json!("Pi Coding Agent");
     cfg["apps"][2]["id"] = json!("claude");
     cfg["apps"][2]["display_name"] = json!("Claude Code");
     cfg["channels"][0]["id"] = json!("telegram");
@@ -21,6 +156,8 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     frame["listeners"][0]["harness"] = json!("pi");
     frame["listeners"][0]["display_address"] = json!("alice/pi#abcd");
     frame["listeners"][0]["title"] = json!("Release review");
+    frame["listeners"][0]["listen_mode"] = json!("manual");
+    frame["hubs"][0]["auto_listen"] = json!(true);
     frame["listeners"][0]["cwd"] = json!("~/work/service");
     frame["directory_online_count"] = json!(3);
     frame["hubs"][0]["human_listener_id"] = json!("human-node");
@@ -29,7 +166,7 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     frame["hubs"][0]["human_paused"] = json!(false);
     frame["hubs"][0]["attachments"] = json!([{"channel_id":"hub:telegram","location":"hub","plugin_id":"telegram","display_name":"Telegram","availability":"ACTIVE","is_local":false},{"channel_id":"here:human","location":"device","host_id":"here","display_name":"laptop","availability":"ACTIVE","is_local":true}]);
     frame["unread_count"] = json!(2);
-    frame["activity"]=json!([("review","The review is ready. Can you check the final changes?",true,true),("build","Build passed. All checks are green.",false,false),("reply","Approved. Please continue with the next step.",true,true)].into_iter().map(|(id,message,unread,for_me)|json!({"hub":"personal","signal_id":id,"listener_id":"human-node","from_user":"bob","from_host_name":"desktop","from_harness":"pi","from_title":"Release review","from_scoped_id":"personal:sender","from_display_address":"bob/pi#abcd","target_harness":if for_me{"human"}else{"pi"},"target_title":"Build session","target_scoped_id":"personal:receiver","message":message,"created_at":"2030-01-01T00:00:00Z","unread":unread,"for_me":for_me})).collect::<Vec<_>>());
+    frame["activity"]=json!([("review","The review is ready. Can you check the final changes?",true,true),("build","Build passed. All checks are green.",false,false),("reply","Approved. Please continue with the next step.",true,true)].into_iter().map(|(id,message,unread,for_me)|json!({"hub":"personal","signal_id":id,"listener_id":"human-node","from_user":"bob","from_host_name":"desktop","from_harness":"pi","from_title":"Release review","from_scoped_id":"personal:sender","from_display_address":"bob/pi#abcd","target_harness":if for_me{"human"}else{"pi"},"target_title":"Build session","target_scoped_id":"personal:receiver","message":message,"created_at":"2030-01-01T00:00:00Z","unread":unread,"for_me":for_me,"can_reply":for_me})).collect::<Vec<_>>());
     f.send(p, frame);
     let s = inspect(&f, p);
     assert!(s["button_tooltip"].as_str().unwrap().contains("unread"));
@@ -184,9 +321,9 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     assert_eq!(
         s["key_panels"],
         json!([{
-            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true,"automatic_key_view_loop":true
         }, {
-            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true,"automatic_key_view_loop":true
         }])
     );
     assert_eq!(
@@ -565,7 +702,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     }
     l.control("open_add_hub");
     l.input("settings_hub_name", "scratch");
-    l.input("settings_hub_url", "local://");
+    l.input("settings_hub_url", &format!("http://127.0.0.1:{}", port()));
     l.control("submit_add_hub");
     l.until(|s| {
         node(s, "settings_items", "add_hub_form").is_null()
@@ -762,6 +899,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     cfg["hubs"][1]["url"] = json!("https://cito.example.com");
     cfg["hubs"][1]["auth_mode"] = json!("oidc");
     cfg["channels"][0]["status"] = json!("not_configured");
+    cfg["channels"][0]["hub_ready"] = json!(false);
     cfg["channels"][0]["fields"][0]["configured"] = json!(false);
     cfg["channels"][0]["fields"][0]["value"] = json!("");
     cfg["channels"][0]["setup_guide"] = json!([
@@ -786,7 +924,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "inbox_control_bar")["height"],
-        44
+        48
     );
     assert_eq!(
         node(&s, "settings_items", "toggle_inbox")["text"],
@@ -866,7 +1004,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         f.send(p, paused);
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "inbox_control_bar")["height"],
-            44
+            48
         );
     }
     f.send(p, frame.clone());
@@ -932,6 +1070,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     control(&f, p, "settings_tab:apps");
     assert!(node(&inspect(&f, p), "settings_items", "apps_next_step_callout").is_null());
     cfg["channels"][0]["status"] = json!("pairing_pending");
+    cfg["channels"][0]["hub_ready"] = json!(true);
     cfg["channels"][0]["fields"][0]["configured"] = json!(true);
     cfg["channels"][0]["pairing_instruction"] =
         json!("Send /start cito-abc123def4 to your account provider.");
@@ -969,7 +1108,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let paired = inspect(&f, p);
     assert_eq!(
         node(&paired, "settings_items", "stratum_user:channel")["height"],
-        36
+        38
     );
     assert!(node(&paired, "settings_items", "channel_field:channel:account").is_null());
     assert_eq!(
@@ -1057,23 +1196,17 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         "pairing_instruction:channel"
     )
     .is_null());
-    // Non-admin schemas keep ownership explanation but never reveal gateway fields.
+    // Non-admins see their personal account without a shared-service wizard.
     cfg["channels"][0]["hub_provided"] = json!(true);
+    cfg["channels"][0]["can_configure_hub"] = json!(false);
+    cfg["channels"][0]["can_clear_hub"] = json!(false);
     cfg["channels"][0]["fields"][0]["hidden"] = json!(true);
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
     assert!(node(&s, "settings_items", "clear_channel_service:channel").is_null());
-    assert_eq!(
-        node(&s, "settings_items", "stratum_hub:channel")["height"],
-        36
-    );
+    assert!(node(&s, "settings_items", "stratum_hub:channel").is_null());
     render_png(&f, p, "settings", "r1_gateway_non_admin.png");
-    assert!(
-        node(&s, "settings_items", "stratum_hub_title:channel")["tooltip"]
-            .as_str()
-            .is_some_and(|s| s.contains("administrator"))
-    );
     let channel = cfg["channels"][0].clone();
     cfg["channels"][0]["status"] = json!("error");
     cfg["channels"][0]["configured"] = json!(false);
@@ -1105,6 +1238,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         json!("cito setup --hub mac-studio --url http://192.168.1.10:4291");
     cfg["hubs"][1]["auth_mode"] = json!("oidc");
     cfg["hubs"][1]["status"] = json!("auth_required");
+    cfg["hubs"][1]["can_login"] = json!(true);
     f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "settings_tab:hubs");
     let sharing_toggle = node(&inspect(&f, p), "settings_items", "toggle_host_hub");
@@ -1153,19 +1287,23 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         if error == Some("Address already in use") {
             render_png(&f, p, "settings", "r3_host_hub_failed.png");
         }
-        if !running || failure.is_some() {
+        if let Some(failure) = failure {
+            assert_eq!(warning["text"], failure);
+        } else {
+            assert!(warning.is_null());
+            let title = node(&status, "settings_items", "host_hub_title");
             assert_eq!(
-                warning["text"],
-                failure.unwrap_or("Hub server is not running")
+                title["text"].as_str().unwrap().contains("Starting…"),
+                !running
             );
+        }
+        if !running || failure.is_some() {
             assert!(
                 node(&status, "settings_items", "copy_hub_invite")["tooltip"]
                     .as_str()
                     .unwrap()
                     .contains("unavailable")
             );
-        } else {
-            assert!(warning.is_null());
         }
     }
     f.send(
@@ -1629,6 +1767,15 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             "UI action exceeds",
             "Passive",
             "[Passive]",
+            "Refresh failed: PLUGIN_EXEC_FAILED: retry",
+            "Discovery failed; 10071: retry",
+            "An embedded 10037: failure",
+            "Prefix EXPIRED: retry",
+            r#"Response {"error_code":"FAILED"}"#,
+            "Storage SQLITE_CANTOPEN",
+            "Call sqlite3 failed",
+            "Storage (SQLite 14)",
+            "unable to open database file",
         ] {
             f.send(
                 p,
@@ -2002,7 +2149,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     remote_human["repo"] = Value::Null;
     remote_human["branch"] = Value::Null;
     let peers = json!([remote_agent, remote_human]);
-    let short = json!({"hub":"local","signal_id":"local:short","listener_id":"c_76e846d115ce642f","from_user":"bob","from_host_name":"laptop","from_harness":"pi","from_title":"Review","from_scoped_id":"local:review","from_display_address":"bob/pi#8a4f","target_harness":"human","target_title":"Human","target_scoped_id":"local:alice-76e846d115ce642f","target_display_address":"@alice","message":"All checks passed on release branch. Ship v2.4 now or hold for docs?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true});
+    let short = json!({"hub":"local","signal_id":"local:short","listener_id":"c_76e846d115ce642f","from_user":"bob","from_host_name":"laptop","from_harness":"pi","from_title":"Review","from_scoped_id":"local:review","from_display_address":"bob/pi#8a4f","target_harness":"human","target_title":"Human","target_scoped_id":"local:alice-76e846d115ce642f","target_display_address":"@alice","message":"All checks passed on release branch. Ship v2.4 now or hold for docs?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true});
     let mut expanded = short.clone();
     expanded["signal_id"] = json!("local:expanded");
     expanded["message"] =
@@ -2214,12 +2361,14 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let error = node(&local_error, "settings_items", "add_hub_error");
     let user = node(&local_error, "settings_items", "settings_hub_user");
     assert_eq!(
-        node(&local_error, "settings_items", "add_hub_form")["height"],
-        144
+        node(&local_error, "settings_items", "add_hub_form")["height"]
+            .as_f64()
+            .unwrap(),
+        124.0 + error["height"].as_f64().unwrap() + 6.0
     );
     assert!(
-        error["y"].as_f64().unwrap()
-            >= user["y"].as_f64().unwrap() + user["height"].as_f64().unwrap() + 6.0
+        user["y"].as_f64().unwrap()
+            >= error["y"].as_f64().unwrap() + error["height"].as_f64().unwrap() + 6.0
     );
     assert_eq!(local_error["overlapping_siblings"], json!([]));
     assert_eq!(local_error["clipped_views"], json!([]));
@@ -2468,7 +2617,7 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
 #[test]
 fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://","autoListen":false}}}));
     let fake = f.recording_ui();
     let daemon = f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -2485,6 +2634,39 @@ fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
+    f.action(json!({"op":"open_menu"}));
+    f.action(json!({"op":"open_directory"}));
+    // A crash closes the connection and replacement starts with every surface
+    // closed. An external mutation then emits status, never a full inventory.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let mut replacement = pid;
+    wait(|| {
+        replacement = fs::read_to_string(f.home.join("ui-pid"))
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(pid);
+        replacement != pid
+    });
+    wait(|| {
+        !fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .is_empty()
+    });
+    f.db("state.sqlite").execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','crash-state','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED')", &[json!(cito_native::plugins::now_ms()+60_000)]).unwrap();
+    let mut frame = Value::Null;
+    wait(|| {
+        frame = fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .rfind(|v| v["op"] == "state" && v["unread_count"] == 1)
+            .unwrap_or(Value::Null);
+        !frame.is_null()
+    });
+    assert!(frame.get("settings").is_none(), "{frame}");
+    assert!(frame.get("activity").is_none(), "{frame}");
     f.stop(daemon);
-    wait(|| unsafe { libc::kill(pid, 0) } != 0);
+    wait(|| unsafe { libc::kill(replacement, 0) } != 0);
 }

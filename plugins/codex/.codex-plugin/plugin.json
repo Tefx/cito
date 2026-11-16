@@ -2,5 +2,5 @@
   "name": "cito",
   "version": "0.21.3",
   "description": "Cross-harness notification and wake bridge for Codex",
-  "mcpServers": "../.mcp.json"
+  "mcpServers": "./.mcp.json"
 }

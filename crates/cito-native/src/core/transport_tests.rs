@@ -3,6 +3,226 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
 #[test]
+fn embedded_and_http_events_invalidate_after_commits_and_shutdown_cleanly() {
+    for http in [false, true] {
+        let dir =
+            std::env::temp_dir().join(format!("cito-events-{}", crate::plugins::random_uuid_v4()));
+        let engine = Arc::new(HubEngine::open(&dir).unwrap());
+        engine.set_plugin_roots(&[]).unwrap();
+        let server = http.then(|| {
+            engine
+                .start_server(
+                    "127.0.0.1",
+                    0,
+                    super::super::auth::HubAuth::new("none", None, None, None).unwrap(),
+                )
+                .unwrap()
+        });
+        let client = HubClient::new(
+            "local".into(),
+            json!({"url":server.as_ref().map(|s|format!("http://{}",s.address)).unwrap_or_else(||"local://".into()),"authMode":"none"}),
+            "alice",
+            (!http).then(|| engine.clone()),
+        );
+        let worker = client.start_events().unwrap();
+        let wait = |condition: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !condition() {
+                assert!(Instant::now() < deadline, "Event notification timed out");
+                thread::sleep(Duration::from_millis(1));
+            }
+        };
+        wait(&|| client.stream_live.load(Ordering::SeqCst));
+        // Outlast the network cancellation deadline; it must not tear down a quiet SSE stream.
+        if http {
+            thread::sleep(Duration::from_millis(1100));
+        }
+        let observed = client.event_revision();
+        let value = STANDARD.encode(json!({"listener_id":"node","harness":"agent","scope":"workspace","principal_id":"none#alice"}).to_string());
+        engine
+            .rpc(
+                "kv_put",
+                &json!({"key":"node","data_b64":value}),
+                Some(&client.identity),
+            )
+            .unwrap();
+        wait(&|| client.event_revision() > observed);
+        assert_eq!(client.directory().unwrap()[0]["listener_id"], "node");
+        let start = Instant::now();
+        client.close();
+        worker.join().unwrap();
+        if let Some(server) = server {
+            server.shutdown();
+        }
+        engine.shutdown();
+        assert!(start.elapsed() < Duration::from_millis(1500));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
+    use std::os::fd::AsRawFd;
+    for status in [503, 401] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(crate::support::WakePipe::new().unwrap());
+        let stopped = stop.clone();
+        let (sent, calls) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: stopped.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            crate::support::poll_until(&mut fds, None).unwrap();
+            if fds[1].revents != 0 {
+                break;
+            }
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let _ = write!(
+                socket,
+                "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            sent.send(Instant::now()).unwrap();
+        });
+        let config = json!({"url":format!("http://{address}"),"token":"first"});
+        let client = HubClient::new("work".into(), config.clone(), "alice", None);
+        let worker = client.start_events().unwrap();
+        let first = calls.recv_timeout(Duration::from_secs(2)).unwrap();
+        if status == 503 {
+            let second = calls.recv_timeout(Duration::from_secs(2)).unwrap();
+            let third = calls.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(second.duration_since(first) >= Duration::from_millis(200));
+            assert!(third.duration_since(second) >= Duration::from_millis(450));
+        } else {
+            assert!(
+                calls.recv_timeout(Duration::from_millis(600)).is_err(),
+                "Permanent rejection must suspend the stream"
+            );
+            let mut replacement = HubClient::new("work".into(), config, "alice", None);
+            replacement.bearer = Some("replacement".into());
+            replacement.inherit_authority(&client);
+            calls.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let start = Instant::now();
+        client.close();
+        worker.join().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        stop.notify();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = json!({"url":format!("http://{}",listener.local_addr().unwrap()),"authMode":"oidc","token":"old"});
+    let mut old = HubClient::new("work".into(), config.clone(), "alice", None);
+    old.expires_at = crate::plugins::now_ms() / 1000 + 20;
+    old.cache_human(
+        &json!({"server_now_ms":1000,"record":{"listener_id":"human","human_paused":true}}),
+    );
+    old.stream_live.store(true, Ordering::SeqCst);
+    let mut renewed = HubClient::new("work".into(), config, "alice", None);
+    renewed.bearer = Some("verified-new".into());
+    renewed.expires_at = old.expires_at + 300;
+    renewed.inherit_authority(&old);
+    assert!(Arc::ptr_eq(&old.closed, &renewed.closed));
+    assert!(Arc::ptr_eq(&old.event_revision, &renewed.event_revision));
+    assert!(Arc::ptr_eq(&old.event_wait, &renewed.event_wait));
+    assert!(Arc::ptr_eq(&old.directory_cache, &renewed.directory_cache));
+    assert_eq!(renewed.cached_directory()[0]["human_paused"], true);
+    assert!(renewed.stream_live.load(Ordering::SeqCst));
+    old.reject_token(&Some("old".into()));
+    assert!(
+        renewed.auth_valid(),
+        "A delayed rejection cannot reject new credentials"
+    );
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            headers.push_str(&line);
+        }
+        assert!(
+            headers.contains("Authorization: Bearer verified-new"),
+            "{headers}"
+        );
+        let body = r#"{"ok":true,"result":{}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    old.rpc("fixture", &json!({})).unwrap();
+    server.join().unwrap();
+    renewed.reject_token(&Some("verified-new".into()));
+    assert_eq!(renewed.connection_status(), "auth_required");
+}
+
+#[test]
+fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":"http://127.0.0.1:1"}),
+        "alice",
+        None,
+    );
+    client.cache_human(&json!({"record":{"listener_id":"human"}}));
+    client
+        .parse_rpc_response(200, br#"{"ok":true}"#, &None)
+        .unwrap();
+    // A disconnected SSE stream cannot downgrade a successful RPC or observation.
+    client.stream_live.store(false, Ordering::SeqCst);
+    assert_eq!(client.connection_status(), "connected");
+    assert!(client.observation_current());
+    client.stream_live.store(true, Ordering::SeqCst);
+    assert!(client.rpc("fixture", &json!({})).is_err());
+    let state = client.capabilities();
+    assert_eq!(state["status"], "connected");
+    assert_eq!(state["rpc_status"], "disconnected");
+    assert_eq!(state["sse_live"], true);
+    assert_eq!(state["observation_current"], true);
+    client.stream_live.store(false, Ordering::SeqCst);
+    assert!(client.observation_current());
+    assert_eq!(client.capabilities()["rpc_status"], "disconnected");
+    assert_ne!(client.connection_status(), "connected");
+    client.stream_live.store(true, Ordering::SeqCst);
+    *client.observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+    assert!(!client.observation_current());
+    assert_eq!(client.connection_status(), "connected");
+}
+
+#[test]
 fn human_cache_projection_uses_monotonic_hub_time_without_waiting_for_network_writers() {
     let client = HubClient::new(
         "work".into(),
@@ -131,7 +351,12 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
                     if line.to_ascii_lowercase().starts_with("content-length:") {
                         length = line.split(':').nth(1).unwrap().trim().parse().unwrap();
                     }
-                    headers.push_str(&line);
+                    // The TLS terminator forwards to a different destination authority.
+                    if line.to_ascii_lowercase().starts_with("host:") {
+                        headers.push_str(&format!("Host: {target}\r\n"));
+                    } else {
+                        headers.push_str(&line);
+                    }
                     if line == "\r\n" {
                         break;
                     }
@@ -139,6 +364,25 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 drop(reader);
+                let input: Value = serde_json::from_slice(&body).unwrap();
+                if matches!(input["op"].as_str(), Some("fixture_error" | "fixture_null")) {
+                    let response = if input["op"] == "fixture_error" {
+                        json!({"ok":false,"error":{"code":"FORBIDDEN","message":"Request denied"}})
+                    } else {
+                        json!({"ok":true,"error":null,"result":{"value":"accepted"}})
+                    };
+                    let body = response.to_string();
+                    write!(
+                        tls,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                    tls.conn.send_close_notify();
+                    tls.flush().unwrap();
+                    continue;
+                }
                 let mut upstream = TcpStream::connect(target).unwrap();
                 upstream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -157,6 +401,119 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
     let mut client = HubClient::new("work".into(), json!({"url":url}), "alice", None);
     client.agent = agent;
     (f, client)
+}
+
+#[test]
+fn https_rpc_extracts_error_envelopes_and_accepts_null_error() {
+    let (_fixture, client) = fixture("127.0.0.1", true);
+    assert_eq!(
+        client.rpc("fixture_error", &json!({})).unwrap_err(),
+        "FORBIDDEN: Request denied"
+    );
+    assert_eq!(
+        client.rpc("fixture_null", &json!({})).unwrap()["value"],
+        "accepted"
+    );
+}
+#[test]
+fn http_rpc_response_status_and_error_envelopes() {
+    for (status, body, expected, state) in [
+        (
+            200,
+            json!({"ok":true,"error":null,"result":{"value":"accepted"}}),
+            Ok(json!({"value":"accepted"})),
+            "connected",
+        ),
+        (
+            200,
+            json!({"error":{"code":"FORBIDDEN","message":"Denied"}}),
+            Err("FORBIDDEN: Denied"),
+            "connected",
+        ),
+        (
+            200,
+            json!({"ok":false,"message":"Retry"}),
+            Err("NATS_UNAVAILABLE: Retry"),
+            "connected",
+        ),
+        (
+            401,
+            json!({}),
+            Err("UNAUTHORIZED: Hub rejected request"),
+            "auth_required",
+        ),
+        (
+            403,
+            json!({}),
+            Err("FORBIDDEN: Hub rejected request"),
+            "connected",
+        ),
+        (
+            500,
+            json!({"message":"Retry"}),
+            Err("NATS_UNAVAILABLE: Retry"),
+            "connected",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let raw = body.to_string();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.to_ascii_lowercase().starts_with("content-length:") {
+                    length = line.split(':').nth(1).unwrap().trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            write!(
+                socket,
+                "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}",
+                raw.len()
+            )
+            .unwrap();
+        });
+        let client = HubClient::new(
+            "work".into(),
+            json!({"url":format!("http://{address}")}),
+            "alice",
+            None,
+        );
+        *client.status.lock().unwrap() = "reconnecting".into();
+        let actual = client.rpc("fixture", &json!({}));
+        server.join().unwrap();
+        assert_eq!(actual, expected.map_err(str::to_owned));
+        assert_eq!(client.connection_status(), state);
+    }
+}
+#[test]
+fn directory_snapshot_pages_exceed_transport_total_budget() {
+    for https in [false, true] {
+        let (fixture, client) = fixture("127.0.0.1", https);
+        for index in 0..90 {
+            let value = json!({"listener_id":format!("node-{index:03}"),"harness":"agent","scope":"workspace","about":"x".repeat(100_000)});
+            fixture.engine.rpc("kv_put",&json!({"key":value["listener_id"],"data_b64":STANDARD.encode(value.to_string())}),Some(&client.identity)).unwrap();
+        }
+        let page = client.rpc("kv_snapshot", &json!({})).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 2 * 1024 * 1024);
+        assert!(page["next_cursor"].is_string());
+        let rows = client.directory().unwrap();
+        assert_eq!(rows.len(), 90);
+        assert!(serde_json::to_vec(&rows).unwrap().len() > 8 * 1024 * 1024);
+        assert_eq!(client.cached_directory().len(), 90);
+    }
 }
 
 #[test]

@@ -1,0 +1,356 @@
+use super::*;
+
+struct Fixture {
+    root: std::path::PathBuf,
+    service: DaemonService,
+}
+impl Fixture {
+    fn new() -> Result<Self, String> {
+        let root = std::env::temp_dir().join(format!("cito-demand-{}", random_uuid_v4()));
+        fs::create_dir_all(root.join("home")).map_err(|e| e.to_string())?;
+        let script = root.join("provider.py");
+        fs::write(&script, r#"import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+request = json.loads(sys.stdin.readline())
+harness = sys.argv[1]
+with (root / 'calls.jsonl').open('a') as output:
+    output.write(json.dumps(dict(harness=harness, request=request)) + '\n')
+if request['op'] in ('discover_sessions', 'resolve_caller') and (root/'delay').exists():
+    import time
+    time.sleep(float((root/'delay').read_text()))
+result = dict(ok=True)
+if request['op'] == 'setup_inspect': result.update(installed=True, configured=harness=='agent', paths=[])
+elif request['op'] == 'discover_sessions':
+    result['sessions'] = [dict(harness=harness, session_id=(root/'session').read_text(), cwd='/workspace', title='Work')]
+elif request['op'] == 'resolve_caller': result['caller'] = dict(harness=harness, session_id='initial', cwd='/workspace')
+elif request['op'] == 'probe': result['status'] = 'closed_definitive' if request['session_id']=='closed' else 'alive'
+print(json.dumps(result))
+"#).map_err(|e| e.to_string())?;
+        fs::write(root.join("session"), "initial").map_err(|e| e.to_string())?;
+        let mut plugins = LoadedPlugins {
+            plugins: Vec::new(),
+            rejected_ids: HashSet::new(),
+        };
+        for id in ["agent", "disabled"] {
+            let dir = root.join("plugins").join(id);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            fs::write(dir.join("plugin.json"), json!({"id":id,"kind":"agent-harness","displayName":id,"command":["python3",script,id]}).to_string()).map_err(|e|e.to_string())?;
+            plugins.plugins.push(crate::plugins::PluginDescriptor {
+                id: id.into(),
+                kind: "agent-harness".into(),
+                display_name: id.into(),
+                tier: "test".into(),
+                order: 0,
+                sf_symbol: "terminal".into(),
+                tint: "blue".into(),
+                cli_flag: false,
+                pid_bound: true,
+                auto_listen: Default::default(),
+                plugin_dir: dir,
+                is_builtin: false,
+                command: vec![
+                    "python3".into(),
+                    script.to_string_lossy().into_owned(),
+                    id.into(),
+                ],
+                channel_env: None,
+                fields: Vec::new(),
+                post_setup_hint: None,
+                post_disconnect_hint: None,
+            });
+        }
+        let config = NativeConfig {
+            state_dir: root.join("state"),
+            config_path: root.join("config.json"),
+            home_dir: root.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        fs::write(&config.config_path,json!({"hubs":{"local":{"url":"local://","autoListen":false},"work":{"url":"local://","autoListen":false}}}).to_string()).map_err(|e|e.to_string())?;
+        let service = DaemonService::open(&config, &plugins)?;
+        service.local.set_plugin_roots(&[])?;
+        Ok(Self { root, service })
+    }
+    fn calls(&self, op: &str) -> Vec<Value> {
+        fs::read_to_string(self.root.join("calls.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|row| row["request"]["op"] == op)
+            .collect()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.service.shutdown();
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn paused_discovery_skips_unconfigured_providers_and_refreshes_on_snapshot_and_menu_open(
+) -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.poll()?;
+    assert!(f.calls("discover_sessions").is_empty());
+    for (op, session) in [
+        ("get_snapshot", "first"),
+        ("open_menu", "second"),
+        ("refresh_available", "third"),
+    ] {
+        fs::write(f.root.join("session"), session).map_err(|e| e.to_string())?;
+        let start = Instant::now();
+        let reply = f.service.action(&json!({"op":op}))?;
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "On-demand discovery exceeded its caller budget"
+        );
+        let snapshot = if op == "get_snapshot" {
+            reply
+        } else {
+            f.service.snapshot()?
+        };
+        assert_eq!(snapshot["available"][0]["session_id"], session);
+        assert!(f
+            .calls("discover_sessions")
+            .iter()
+            .all(|row| row["harness"] == "agent"));
+        f.service.action(&json!({"op":"close_menu"}))?;
+        let count = f.calls("discover_sessions").len();
+        f.service.poll()?;
+        assert_eq!(
+            f.calls("discover_sessions").len(),
+            count,
+            "Closed surfaces with Auto-Listen off must not restart discovery"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    for hub in ["local", "work"] {
+        for sid in ["shared", "closed"] {
+            super::super::registration::register_listener(
+                &f.service.state,
+                f.service.slot(hub)?,
+                &f.service.host_id,
+                &json!({"about":"Work"}),
+                &json!({"harness":"agent","session_id":sid,"endpoint_pid":std::process::id(),"cwd":"/workspace","title":"Work"}),
+            )?;
+        }
+    }
+    f.service.schedule_probes()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while f.service.probes.values().any(|probe| {
+        probe
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+    }) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    f.service.schedule_probes()?;
+    let calls = f.calls("probe");
+    assert_eq!(
+        calls.len(),
+        2,
+        "Two Hub bindings share a probe, while different sessions keep separate observations"
+    );
+    let rows = f.service.state.db.query(
+        "SELECT session_id,status FROM local_listeners WHERE harness='agent'",
+        &[],
+    )?;
+    assert_eq!(rows.len(), 4);
+    for row in rows {
+        assert_eq!(
+            row["status"],
+            if row["session_id"] == "closed" {
+                "UNLISTENED"
+            } else {
+                "ACTIVE"
+            }
+        );
+    }
+    assert!(f
+        .service
+        .probes
+        .values()
+        .any(|probe| probe.calm > 0 && probe.due > Instant::now() + Duration::from_secs(1)));
+    Ok(())
+}
+
+#[test]
+fn contention_iterations_back_off_after_the_poll_deadline_expires() -> Result<(), String> {
+    let service = Mutex::new(());
+    let _held = service.lock().unwrap();
+    let last_poll = Instant::now() - Duration::from_secs(2);
+    let start = Instant::now();
+    let mut iterations = 0;
+    while start.elapsed() < Duration::from_millis(140) {
+        assert!(service.try_lock().is_err());
+        crate::support::poll_until(&mut [], Some(poll_deadline(last_poll)))?;
+        iterations += 1;
+    }
+    assert!(
+        iterations <= 3,
+        "Expired periodic deadline caused {iterations} contention iterations"
+    );
+    Ok(())
+}
+
+#[test]
+fn status_refresh_and_caller_share_one_deadline() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    // Either operation alone fits; their sum exceeds the request budget.
+    fs::write(f.root.join("delay"), "1.2").map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    assert!(f
+        .service
+        .tool(
+            "cito_status",
+            &json!({}),
+            &json!({"expected_harness":"agent"})
+        )
+        .is_err());
+    assert!(
+        started.elapsed() < Duration::from_millis(1900),
+        "Provider deadlines stacked: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(f.calls("discover_sessions").len(), 1);
+    assert_eq!(f.calls("resolve_caller").len(), 1);
+    Ok(())
+}
+
+#[test]
+fn disconnected_ui_revokes_all_visibility_demand_before_replacement() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.action(&json!({"op":"open_menu"}))?;
+    f.service.directory_open = true;
+    f.service.active_settings_hub = Some("local".into());
+    let count = f.calls("discover_sessions").len();
+    f.service.disconnect_ui();
+    assert!(!f.service.menu_open);
+    assert!(!f.service.directory_open);
+    assert!(f.service.active_settings_hub.is_none());
+    f.service
+        .session_activity
+        .as_mut()
+        .unwrap()
+        .mark_stale("agent");
+    f.service.poll()?;
+    assert_eq!(f.calls("discover_sessions").len(), count);
+    f.service.action(&json!({"op":"open_menu"}))?;
+    assert_eq!(f.calls("discover_sessions").len(), count + 1);
+    Ok(())
+}
+
+#[test]
+fn replaced_ui_reader_cannot_restore_visibility_demand() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.shutdown();
+    let service = Arc::new(Mutex::new(DaemonService::open(
+        &f.service.config,
+        &f.service.plugins,
+    )?));
+    let result = (|| {
+        let (old_generation, current_generation) = {
+            let mut s = service.lock().unwrap();
+            s.set_ui(Arc::new(UiMailbox::default()));
+            let old_generation = s.ui_generation;
+            s.set_ui(Arc::new(UiMailbox::default()));
+            assert!(s.ui_generation > old_generation);
+            (old_generation, s.ui_generation)
+        };
+        // The old reader resumes only after the replacement mailbox is installed.
+        for action in [
+            json!({"op":"open_menu"}),
+            json!({"op":"open_directory"}),
+            json!({"op":"open_settings"}),
+        ] {
+            assert!(
+                http_actions::dispatch_action(&service, &action, Some(old_generation)).is_err()
+            );
+            let s = service.lock().unwrap();
+            assert!(!s.menu_open);
+            assert!(!s.directory_open);
+            assert!(s.active_settings_hub.is_none());
+        }
+        http_actions::dispatch_action(
+            &service,
+            &json!({"op":"open_menu"}),
+            Some(current_generation),
+        )?;
+        assert!(service.lock().unwrap().menu_open);
+        service.lock().unwrap().disconnect_ui();
+        assert!(http_actions::dispatch_action(
+            &service,
+            &json!({"op":"open_menu"}),
+            Some(current_generation),
+        )
+        .is_err());
+        assert!(!service.lock().unwrap().menu_open);
+        // HTTP control remains independent of the companion connection.
+        http_actions::dispatch_action(&service, &json!({"op":"open_menu"}), None)?;
+        assert!(service.lock().unwrap().menu_open);
+        Ok(())
+    })();
+    service.lock().unwrap().shutdown();
+    result
+}
+
+#[test]
+fn visibility_close_actions_emit_no_full_snapshot() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.ui = Some(Arc::new(UiMailbox::default()));
+    for close in ["close_menu", "close_settings", "close_directory"] {
+        match close {
+            "close_menu" => f.service.menu_open = true,
+            "close_settings" => f.service.active_settings_hub = Some("local".into()),
+            _ => f.service.directory_open = true,
+        }
+        f.service.push_ui();
+        f.service.ui.take().unwrap().close();
+        let mailbox = Arc::new(UiMailbox::default());
+        f.service.ui = Some(mailbox.clone());
+        f.service.action(&json!({"op":close}))?;
+        // A close emits a cheap status projection without a correlated snapshot.
+        let frame: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing close frame")?)
+            .map_err(|e| e.to_string())?;
+        assert!(frame.get("activity").is_none(), "{close}: {frame}");
+        assert!(frame.get("settings").is_none(), "{close}: {frame}");
+        assert!(frame.get("source_op").is_none(), "{close}: {frame}");
+    }
+    Ok(())
+}
+
+#[test]
+fn closed_ui_emits_light_status_without_activity_history_or_inventory() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    let mailbox = Arc::new(UiMailbox::default());
+    f.service.ui = Some(mailbox.clone());
+    f.service.push_ui();
+    let initial: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing initial state")?)
+        .map_err(|e| e.to_string())?;
+    assert!(initial.get("settings").is_some());
+    f.service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','new','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED')", &[json!(now_ms()+60_000)])?;
+    f.service.push_ui();
+    let status: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing status state")?)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(status["op"], "state");
+    assert_eq!(status["unread_count"], 1);
+    assert_eq!(status["activity_has_any"], true);
+    assert!(status.get("activity").is_none());
+    assert!(status.get("settings").is_none());
+    f.service.menu_open = true;
+    f.service.push_ui();
+    let full: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing open-surface state")?)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(full["activity"].as_array().map(Vec::len), Some(1));
+    assert!(full.get("settings").is_some());
+    Ok(())
+}

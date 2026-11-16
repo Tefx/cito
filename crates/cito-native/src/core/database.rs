@@ -57,6 +57,7 @@ extern "C" {
     fn sqlite3_column_text(statement: *mut libc::c_void, column: i32) -> *const u8;
     fn sqlite3_column_bytes(statement: *mut libc::c_void, column: i32) -> i32;
     fn sqlite3_changes(db: *mut libc::c_void) -> i32;
+    fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
 }
 
 pub struct Connection {
@@ -251,9 +252,12 @@ impl Connection {
         Ok(())
     }
 }
+type CommitNotifier = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    committed: Arc<Mutex<Option<CommitNotifier>>>,
 }
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -281,6 +285,7 @@ impl Database {
         }
         let db = Self {
             connection: Arc::new(Mutex::new(conn)),
+            committed: Arc::new(Mutex::new(None)),
         };
         db.execute(
             "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
@@ -290,11 +295,39 @@ impl Database {
             .map_err(|e| e.to_string())?;
         Ok(db)
     }
-    pub fn execute(&self, sql: &str, values: &[Value]) -> Result<usize, String> {
-        self.connection
+    pub fn set_commit_notifier(
+        &self,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        *self
+            .committed
             .lock()
-            .map_err(|_| "SQLite lock poisoned")?
-            .execute(sql, values)
+            .map_err(|_| "Commit notifier lock poisoned")? = Some(Arc::new(notify));
+        Ok(())
+    }
+    fn notify_committed(&self) {
+        let notify = self.committed.lock().ok().and_then(|notify| notify.clone());
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+    pub fn execute(&self, sql: &str, values: &[Value]) -> Result<usize, String> {
+        let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        // SAFETY: the connection lock owns SQLite throughout both counter reads.
+        let before = unsafe { sqlite3_total_changes(conn.raw) };
+        let result = conn.execute(sql, values);
+        let changed = unsafe { sqlite3_total_changes(conn.raw) } != before;
+        drop(conn);
+        if changed {
+            self.notify_committed();
+        }
+        result
+    }
+    /// Connection-local write counter; reading it does not execute SQL.
+    pub fn mutation_revision(&self) -> Result<i32, String> {
+        let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        // SAFETY: the lock owns the live SQLite handle throughout the counter read.
+        Ok(unsafe { sqlite3_total_changes(conn.raw) })
     }
     pub fn query(&self, sql: &str, values: &[Value]) -> Result<Vec<Value>, String> {
         self.connection
@@ -307,6 +340,8 @@ impl Database {
         action: impl FnOnce(&Connection) -> Result<T, String>,
     ) -> Result<T, String> {
         let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        // SAFETY: the connection lock keeps the SQLite handle exclusively owned.
+        let before = unsafe { sqlite3_total_changes(conn.raw) };
         conn.execute("BEGIN IMMEDIATE", &[])?;
         struct Rollback<'a>(&'a Connection, bool);
         impl Drop for Rollback<'_> {
@@ -320,6 +355,12 @@ impl Database {
         let result = action(&conn)?;
         conn.execute("COMMIT", &[])?;
         rollback.1 = true;
+        let changed = unsafe { sqlite3_total_changes(conn.raw) } != before;
+        drop(rollback);
+        drop(conn);
+        if changed {
+            self.notify_committed();
+        }
         Ok(result)
     }
 }
@@ -327,7 +368,88 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::ReadOnlySqlite;
     use serde_json::json;
+    use std::time::Duration;
+    #[test]
+    fn read_only_sqlite_persistent_cantopen_returns_the_cause_not_deadline() -> Result<(), String> {
+        let root =
+            std::env::temp_dir().join(format!("cito-reader-{}", crate::plugins::random_uuid_v4()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let path = root.join("source.sqlite");
+            drop(crate::database::Database::open(&path)?);
+            let reader = ReadOnlySqlite::open(&path, Duration::from_millis(1200))?;
+            let missing = root.join("missing/attached.sqlite");
+            let error = reader
+                .rows(&format!(
+                    "ATTACH DATABASE '{}' AS missing",
+                    missing.display()
+                ))
+                .unwrap_err();
+            assert_eq!(
+                error,
+                "Session database is unavailable; check its location and permissions"
+            );
+            assert_eq!(reader.rows("SELECT 7 AS value")?[0]["value"], "7");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        result
+    }
+    #[test]
+    fn read_only_sqlite_initializes_wal_without_shm_and_preserves_committed_frames(
+    ) -> Result<(), String> {
+        let root =
+            std::env::temp_dir().join(format!("cito-reader-{}", crate::plugins::random_uuid_v4()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let source = root.join("writer.sqlite");
+            let writer = crate::database::Database::open(&source)?;
+            writer.execute("PRAGMA journal_mode=WAL; CREATE TABLE items(value TEXT); INSERT INTO items VALUES('checkpointed'); PRAGMA wal_checkpoint(TRUNCATE)",&[])?;
+            for nonempty in [false, true] {
+                if nonempty {
+                    writer.execute("INSERT INTO items VALUES('committed frame')", &[])?;
+                }
+                let path = root.join(format!("copy #?%{nonempty}.sqlite"));
+                std::fs::copy(&source, &path).map_err(|e| e.to_string())?;
+                if nonempty {
+                    std::fs::copy(
+                        source.with_extension("sqlite-wal"),
+                        path.with_extension("sqlite-wal"),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                assert!(!path.with_extension("sqlite-shm").exists());
+                let reader = ReadOnlySqlite::open(&path, Duration::from_secs(1))?;
+                let rows = reader.rows("SELECT value FROM items ORDER BY rowid")?;
+                assert_eq!(rows.len(), if nonempty { 2 } else { 1 });
+                assert_eq!(rows[0]["value"], "checkpointed");
+                if nonempty {
+                    assert_eq!(rows[1]["value"], "committed frame");
+                }
+                assert!(reader.rows("PRAGMA table_info(absent)")?.is_empty());
+            }
+            let limited = ReadOnlySqlite::open(&source, Duration::from_millis(30))?;
+            assert_eq!(limited.rows("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n").unwrap_err(),"Session database deadline exceeded");
+            assert_eq!(
+                ReadOnlySqlite::open(&root.join("absent.sqlite"), Duration::from_millis(30))
+                    .err()
+                    .ok_or("Expected missing DB")?,
+                "Session database was not found"
+            );
+            let invalid = root.join("invalid.sqlite");
+            std::fs::write(&invalid, "not a database").map_err(|e| e.to_string())?;
+            let failure = ReadOnlySqlite::open(&invalid, Duration::from_millis(30))
+                .err()
+                .ok_or("Expected invalid DB error")?;
+            assert_eq!(failure, "Session database is invalid");
+            assert!(!failure.contains("SQLite") && !failure.contains("not a database"));
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        result
+    }
     #[test]
     fn rollback_and_utf8_bindings() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("cito-sqlite-{}", std::process::id()));

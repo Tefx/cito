@@ -176,9 +176,17 @@ pub fn poll_listener(
     let hub = &client.name;
     let name = format!("{}_{}", string(row, "host_id"), id);
     let added=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
-    let backlog = client
-        .rpc("consumer_backlog", &json!({"name":name}))
-        .unwrap_or(added);
+    // A fallback response keeps its own clock observation, including time spent
+    // waiting for a failing backlog request.
+    let added_observed = std::time::Instant::now();
+    let (backlog, observed) = match client.rpc("consumer_backlog", &json!({"name":name})) {
+        Ok(backlog) => (backlog, std::time::Instant::now()),
+        Err(_) => (added, added_observed),
+    };
+    let (hub_now, observed) = match backlog["server_now_ms"].as_u64() {
+        Some(now) => (now, observed),
+        None => (client.server_now(), std::time::Instant::now()),
+    };
     let registration = local.registration_lock(hub)?;
     let registration_guard = if row["harness"] == "human" {
         let guard = registration
@@ -218,7 +226,9 @@ pub fn poll_listener(
             continue;
         }
         signal["to"] = json!(id);
-        let created = item["created_ms"].as_u64().unwrap_or_else(now_ms);
+        let admission_hub_now =
+            hub_now.saturating_add(observed.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        let created = item["created_ms"].as_u64().unwrap_or(admission_hub_now);
         let acked = item
             .get("acked_at_ms")
             .filter(|v| v.is_number())
@@ -230,7 +240,7 @@ pub fn poll_listener(
             &signal,
             item["seq"].as_u64().unwrap_or(0),
             &iso(created),
-            created + 1_800_000,
+            LocalState::signal_deadline(created, admission_hub_now, now_ms()),
             acked,
         )?;
         if admitted && !acked.is_number() {
@@ -309,7 +319,22 @@ pub fn probe_listener(
         None,
         Some((local, row)),
     )?;
-    let status = string(&result, "status");
+    apply_probe(local, client, row, &result)
+}
+
+pub(super) fn apply_probe(
+    local: &LocalState,
+    client: &HubClient,
+    row: &Value,
+    result: &Value,
+) -> Result<(), String> {
+    if result["ok"] != true {
+        return Err(crate::support::response_diagnostic(
+            result,
+            "Session probe failed",
+        ));
+    }
+    let status = string(result, "status");
     let failures = if status == "alive" {
         0
     } else {
@@ -333,7 +358,7 @@ pub fn probe_listener(
     let revoked = local.db.transaction(|c| {
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
-            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
             if changed > 0 {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
                 c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[row["hub"].clone(),row["listener_id"].clone(),client.config["url"].clone()])?;
@@ -508,7 +533,7 @@ fn dispatch_listener(
                         false,
                     )?;
                     let changed=local.db.transaction(|c| {
-                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
+                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
                         if changed>0 {
                             c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
                         }
@@ -603,9 +628,13 @@ fn dispatch_listener(
             )?;
             return Err(e.message);
         }
-        _ => {
+        Ok(result) => {
             local.finish_wake_batch(row, first, "DISPATCHING", None, false, false, false, false)?;
             local.schedule_wake_retry_for(row, 1500)?;
+            return Err(crate::support::response_diagnostic(
+                &result,
+                "Session delivery failed",
+            ));
         }
     }
     Ok(())

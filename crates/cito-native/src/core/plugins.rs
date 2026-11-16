@@ -10,6 +10,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +27,7 @@ pub struct PluginDescriptor {
     pub tint: String,
     pub cli_flag: bool,
     pub pid_bound: bool,
+    pub auto_listen: AutoListen,
     pub plugin_dir: PathBuf,
     pub is_builtin: bool,
     pub command: Vec<String>,
@@ -33,6 +35,19 @@ pub struct PluginDescriptor {
     pub fields: Vec<Value>,
     pub post_setup_hint: Option<String>,
     pub post_disconnect_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AutoListen {
+    pub mode: AutoListenMode,
+    pub recent_window_ms: Option<u64>,
+    pub idle_timeout_ms: Option<u64>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoListenMode {
+    #[default]
+    Endpoint,
+    Activity,
 }
 
 #[derive(Clone, Debug)]
@@ -233,34 +248,36 @@ pub fn validate_nats_url(raw: &str) -> Result<String, String> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
-pub fn validate_https_issuer(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("CITO_OIDC_ISSUER is required in oidc mode".to_string());
-    }
-    let is_https = trimmed.starts_with("https://");
-    let is_loopback_http = trimmed.starts_with("http://127.0.0.1:")
-        || trimmed == "http://127.0.0.1"
-        || trimmed.starts_with("http://127.0.0.1/");
-    if (!is_https && !is_loopback_http)
-        || trimmed.contains('?')
-        || trimmed.contains('#')
-        || trimmed.contains('@')
+/// Validate OIDC issuer or resource URLs without changing their canonical bytes.
+pub fn validate_oidc_url(raw: &str, issuer: bool) -> Result<url::Url, String> {
+    let url = url::Url::parse(raw).map_err(|_| "Invalid OIDC URL")?;
+    let loopback = url.host_str() == Some("127.0.0.1");
+    if raw != raw.trim()
+        || url.host().is_none()
+        || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || issuer && url.query().is_some()
     {
-        return Err(
-            "CITO_OIDC_ISSUER must use HTTPS (http://127.0.0.1 is allowed for tests), without credentials, query or fragment"
-                .to_string(),
-        );
+        return Err("OIDC URL must use HTTPS (HTTP 127.0.0.1 is allowed for tests), without credentials or fragment; issuers cannot contain a query".into());
     }
-    let after_scheme = trimmed.split_once("://").map(|(_, r)| r).unwrap_or("");
-    let host_part = after_scheme.split('/').next().unwrap_or("");
-    if host_part.is_empty() || (!is_loopback_http && !host_part.contains('.')) {
-        return Err(
-            "CITO_OIDC_ISSUER must use HTTPS (http://127.0.0.1 is allowed for tests), without credentials, query or fragment"
-                .to_string(),
-        );
+    Ok(url)
+}
+
+pub fn validate_https_issuer(raw: &str) -> Result<String, String> {
+    validate_oidc_url(raw, true)?;
+    Ok(raw.to_owned())
+}
+
+/// Apply a process-local endpoint override only to the selected Hub.
+pub fn apply_hub_url_override(name: &str, selected: &str, hub: &mut Value) -> Result<(), String> {
+    if name == selected {
+        if let Ok(raw) = env::var("CITO_HUB_URL").or_else(|_| env::var("CITO_NATS_URL")) {
+            hub["url"] = json!(validate_nats_url(&raw)?);
+        }
     }
-    Ok(trimmed.to_string())
+    Ok(())
 }
 
 fn is_checked_cito_env_key(key: &str) -> bool {
@@ -453,6 +470,31 @@ pub(super) fn parse_manifest(
         tint,
         cli_flag,
         pid_bound: map.get("pidBound").and_then(Value::as_bool).unwrap_or(true),
+        auto_listen: {
+            let value = map.get("autoListen");
+            if value.is_some_and(|v| !v.is_object()) {
+                return Err("PLUGIN_LOAD_ERROR: autoListen must be an object".into());
+            }
+            let mode = match value.and_then(|v| v.get("mode")) {
+                None => AutoListenMode::Endpoint,
+                Some(Value::String(mode)) if mode == "endpoint" => AutoListenMode::Endpoint,
+                Some(Value::String(mode)) if mode == "activity" => AutoListenMode::Activity,
+                _ => return Err("PLUGIN_LOAD_ERROR: Invalid autoListen mode".into()),
+            };
+            for key in ["recentWindowMs", "idleTimeoutMs"] {
+                if value
+                    .and_then(|v| v.get(key))
+                    .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+                {
+                    return Err(format!("PLUGIN_LOAD_ERROR: Invalid autoListen {key}"));
+                }
+            }
+            AutoListen {
+                mode,
+                recent_window_ms: value.and_then(|v| v["recentWindowMs"].as_u64()),
+                idle_timeout_ms: value.and_then(|v| v["idleTimeoutMs"].as_u64()),
+            }
+        },
         plugin_dir: dir.to_path_buf(),
         is_builtin,
         command,
@@ -642,7 +684,7 @@ fn load_plugins_with_cleanup(state_dir: &Path, cleanup_legacy: bool) -> LoadedPl
     )
 }
 
-fn load_plugins_from_roots(
+pub(super) fn load_plugins_from_roots(
     external_roots: &[PathBuf],
     builtin_roots: &[PathBuf],
     user_root: Option<&Path>,
@@ -986,6 +1028,7 @@ pub fn plugin_request_with_progress(
                     }
                 }
             }
+            let exited = crate::support::child_exit_fd(child.id())?;
             let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
             input.push(b'\n');
             let mut written = 0;
@@ -993,6 +1036,7 @@ pub fn plugin_request_with_progress(
             let mut errors = Vec::new();
             let mut out_eof = false;
             let mut err_eof = false;
+            let mut child_exited = None;
             let started = Instant::now();
             let deadline = started + timeout;
             loop {
@@ -1050,12 +1094,18 @@ pub fn plugin_request_with_progress(
                         }
                     }
                 }
-                if let Some((success, code)) = peek_plugin_exit(child.id())? {
+                if child_exited.is_none() {
+                    child_exited = peek_plugin_exit(child.id())?;
+                }
+                if let Some((success, code)) = child_exited {
                     if out_eof && err_eof {
                         if !success {
                             return Err(format!(
                                 "Plugin exited {code}: {}",
-                                String::from_utf8_lossy(&errors)
+                                crate::support::bounded_diagnostic(
+                                    &String::from_utf8_lossy(&errors),
+                                    "Plugin process failed"
+                                )
                             ));
                         }
                         let output = std::str::from_utf8(&output).map_err(|e| e.to_string())?;
@@ -1072,7 +1122,37 @@ pub fn plugin_request_with_progress(
                         return Ok(response);
                     }
                 }
-                thread::sleep(Duration::from_millis(5));
+                let mut fds = [
+                    libc::pollfd {
+                        fd: stdin.as_ref().map(|p| p.as_raw_fd()).unwrap_or(-1),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: if out_eof { -1 } else { stdout.as_raw_fd() },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: if err_eof { -1 } else { stderr.as_raw_fd() },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: if child_exited.is_some() {
+                            -1
+                        } else {
+                            exited.as_raw_fd()
+                        },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // Progress checks enforce generation fencing and dispatch lease renewal.
+                crate::support::poll_until(
+                    &mut fds,
+                    Some(deadline.min(Instant::now() + Duration::from_millis(250))),
+                )?;
             }
         })();
         if result.is_err() {
@@ -1082,16 +1162,7 @@ pub fn plugin_request_with_progress(
             unsafe {
                 libc::kill(group, libc::SIGTERM);
             }
-            let grace = Instant::now() + Duration::from_millis(50);
-            while Instant::now() < grace {
-                // SAFETY: signal zero observes our still-reserved process group.
-                if unsafe { libc::kill(group, 0) } != 0
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
+            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(50));
             // SAFETY: the child remains unreaped, preserving group ownership on escalation.
             unsafe {
                 libc::kill(group, libc::SIGKILL);
@@ -1322,6 +1393,14 @@ fn daemon_health_from_json(config: &NativeConfig, val: &Value) -> Option<DaemonH
     })
 }
 
+#[cfg(test)]
+#[test]
+fn pid_alive_rejects_non_process_ids() {
+    assert!(!pid_alive(0));
+    assert!(!pid_alive(u32::MAX as i32));
+    assert!(pid_alive(std::process::id() as i32));
+}
+
 pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -1338,6 +1417,7 @@ pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), S
     if current.pid != health.pid || current.version != health.version {
         return Err("Daemon identity changed before shutdown".to_string());
     }
+    let exited = crate::support::child_exit_fd(health.pid as u32)?;
     // SAFETY: PID was obtained twice from the matching state directory's health endpoint.
     if unsafe { libc::kill(health.pid, libc::SIGTERM) } != 0 {
         let e = std::io::Error::last_os_error();
@@ -1345,17 +1425,20 @@ pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), S
             return Err(format!("Cannot stop daemon: {e}"));
         }
     }
-    let deadline = Instant::now() + Duration::from_millis(5000);
-    while pid_alive(health.pid) && Instant::now() < deadline {
-        // A daemon launched by this process may have exited as an unreaped child.
-        // SAFETY: waitpid targets only the verified daemon and never blocks.
-        if unsafe { libc::waitpid(health.pid, std::ptr::null_mut(), libc::WNOHANG) } == health.pid {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(20));
+    let ready = crate::support::poll_until(
+        &mut [libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }],
+        Some(Instant::now() + Duration::from_secs(5)),
+    )?;
+    if !ready {
+        return Err("Daemon did not stop within 5000ms".into());
     }
-    if pid_alive(health.pid) {
-        return Err("Daemon did not stop within 5000ms".to_string());
+    // SAFETY: reap only if this process is the daemon's parent; otherwise ECHILD is harmless.
+    unsafe {
+        libc::waitpid(health.pid, std::ptr::null_mut(), libc::WNOHANG);
     }
     Ok(())
 }
@@ -1392,9 +1475,11 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
             Ok(())
         });
     }
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
-
+    let exited = crate::support::child_exit_fd(child.id())?;
+    let mut retry = crate::support::RetryBackoff::default();
     let deadline = Instant::now() + Duration::from_millis(5000);
     while Instant::now() < deadline {
         if let Some(h) = probe_daemon_health(config) {
@@ -1402,7 +1487,17 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
                 return Ok(());
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        if crate::support::poll_until(
+            &mut [libc::pollfd {
+                fd: exited.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }],
+            Some(deadline.min(Instant::now() + retry.failed())),
+        )? {
+            let _ = child.wait();
+            return Err("Daemon exited before becoming healthy".into());
+        }
     }
     Err(format!(
         "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
@@ -1415,6 +1510,35 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn oidc_urls_preserve_queries_and_issuer_identity() {
+        for issuer in [
+            "https://identity",
+            "https://[::1]/tenant",
+            "https://id.example.com/tenant@team/",
+            "http://127.0.0.1:8400",
+        ] {
+            assert_eq!(validate_https_issuer(issuer).unwrap(), issuer);
+        }
+        for endpoint in [
+            "https://id.example.com/authorize?tenant=work&prompt=login",
+            "https://identity/keys?version=2",
+        ] {
+            assert!(validate_oidc_url(endpoint, false).is_ok());
+            assert!(validate_oidc_url(endpoint, true).is_err());
+        }
+        for bad in [
+            "https://alice@id.example.com",
+            "https://id.example.com/#keys",
+            "http://id.example.com",
+            "http://localhost:9000",
+            "http://127.0.0.2:9000",
+        ] {
+            assert!(validate_oidc_url(bad, false).is_err());
+            assert!(validate_oidc_url(bad, true).is_err());
+        }
+    }
 
     fn fixture(script: &str) -> (PathBuf, PluginDescriptor) {
         let root = PathBuf::from(env::var("HOME").expect("isolated HOME"))
@@ -1592,6 +1716,22 @@ mod tests {
             assert_eq!(result["error_code"], "PLUGIN_EXEC_FAILED");
             fs::remove_dir_all(root).unwrap();
         }
+        let (root, plugin) = fixture("printf '%06000d\\n' 1 >&2; exit 4");
+        let error = plugin_request(&plugin, &json!({"op":"probe"})).unwrap_err();
+        assert!(
+            error.chars().count() < 600,
+            "Subprocess stderr must stay bounded"
+        );
+        fs::remove_dir_all(root).unwrap();
+        let (root, plugin) =
+            fixture("printf '{\"ok\":false,\"error_code\":\"OFFLINE\",\"message\":\"Retry\"}\\n'");
+        let envelope = plugin_request(&plugin, &json!({"op":"probe"})).unwrap();
+        assert_eq!(
+            envelope["ok"], false,
+            "MCP still owns negative envelope routing"
+        );
+        assert_eq!(envelope["error_code"], "OFFLINE");
+        fs::remove_dir_all(root).unwrap();
         let (root, plugin) = fixture("echo $$ > child.pid; exec /bin/sleep 10");
         let started = Instant::now();
         let result = plugin_request_with_timeout(
@@ -1640,6 +1780,37 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn manifest_auto_listen_is_optional_typed_and_independent_of_pid_binding() {
+        let (root, plugin) = fixture("/bin/cat");
+        assert_eq!(plugin.auto_listen.mode, AutoListenMode::Endpoint);
+        assert_eq!(plugin.auto_listen.idle_timeout_ms, None);
+        let path = plugin.plugin_dir.join("plugin.json");
+        let mut value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["pidBound"] = json!(false);
+        value["autoListen"] =
+            json!({"mode":"activity","recentWindowMs":900000,"idleTimeoutMs":3600000});
+        fs::write(&path, value.to_string()).unwrap();
+        let parsed = parse_manifest_dir(&plugin.plugin_dir, false).unwrap();
+        assert!(!parsed.pid_bound);
+        assert_eq!(parsed.auto_listen.mode, AutoListenMode::Activity);
+        assert_eq!(parsed.auto_listen.idle_timeout_ms, Some(3_600_000));
+        for invalid in [
+            json!({"mode":"invalid"}),
+            json!({"mode":false}),
+            json!({"mode":null}),
+            json!({"mode":1}),
+            json!({"mode":[]}),
+            json!({"mode":{}}),
+            json!({"mode":"endpoint","idleTimeoutMs":-1}),
+            json!("activity"),
+        ] {
+            value["autoListen"] = invalid;
+            fs::write(&path, value.to_string()).unwrap();
+            assert!(parse_manifest_dir(&plugin.plugin_dir, false).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn manifest_kind_aliases_and_script_fallback() {
         let (root, plugin) = fixture("/bin/cat");

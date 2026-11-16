@@ -4,11 +4,11 @@
   <meta charset="utf-8" />
   <meta name="application-version" content="0.21.3" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Architecture &amp; Protocol — Cito Documentation</title>
+  <title>Architecture &amp; Reference — Cito Documentation</title>
   <meta name="description" content="Symmetric Node (Human | Agent) ↔ Hub ↔ Channels (1..K) ontology, @self / @username addressing, multi-channel read sync, and public MCP &amp; CLI interfaces." />
   <link rel="canonical" href="https://tefx.github.io/cito/docs/architecture.html" />
   <meta property="og:type" content="article" />
-  <meta property="og:title" content="Architecture &amp; Protocol — Cito Documentation" />
+  <meta property="og:title" content="Architecture &amp; Reference — Cito Documentation" />
   <meta property="og:description" content="Node (Human | Agent) ↔ Hub ↔ Channels (1..K) ontology, @self / @username addressing, multi-channel read sync, and public MCP &amp; CLI interfaces." />
   <meta property="og:url" content="https://tefx.github.io/cito/docs/architecture.html" />
   <meta property="og:image" content="https://tefx.github.io/cito/assets/og-card.png" />
@@ -18,15 +18,17 @@
   <link rel="stylesheet" href="../styles/main.css" />
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="site-header">
     <div class="nav-inner">
       <a class="brand-link" href="../index.html" aria-label="Cito Home">
         <img class="brand-logo" src="../assets/brand/cito-logo-dark.svg" alt="Cito" />
       </a>
       <nav class="nav-links" aria-label="Primary Navigation">
-        <a href="./guide.html">Guide</a>
+        <a href="./guide.html">User Guide</a>
+        <a href="./hosting.html">Host a Hub</a>
         <a href="./plugins.html">Plugins</a>
-        <a href="./architecture.html" aria-current="page">Architecture</a>
+        <a href="./architecture.html" aria-current="page">Reference</a>
         <a class="nav-cta" href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
     </div>
@@ -35,10 +37,17 @@
   <div class="docs-shell">
     <aside class="docs-sidebar" aria-label="Documentation Navigation">
       <div class="docs-nav-group">
-        <div class="docs-nav-title">Documentation</div>
-        <a class="docs-nav-link" href="./guide.html">Getting Started Guide</a>
-        <a class="docs-nav-link" href="./plugins.html">Subprocess Plugin Authoring</a>
-        <a class="docs-nav-link" href="./architecture.html" aria-current="page">Architecture &amp; Protocol</a>
+        <div class="docs-nav-title">For Users</div>
+        <a class="docs-nav-link" href="./guide.html">User Guide</a>
+      </div>
+      <div class="docs-nav-group">
+        <div class="docs-nav-title">For Hub Operators</div>
+        <a class="docs-nav-link" href="./hosting.html">Host a Hub</a>
+      </div>
+      <div class="docs-nav-group">
+        <div class="docs-nav-title">For Developers</div>
+        <a class="docs-nav-link" href="./plugins.html">Plugin Authoring</a>
+        <a class="docs-nav-link" href="./architecture.html" aria-current="page">Architecture &amp; Reference</a>
       </div>
       <div class="docs-nav-group">
         <div class="docs-nav-title">On This Page</div>
@@ -50,17 +59,17 @@
       </div>
     </aside>
 
-    <main class="docs-content">
+    <main id="main-content" class="docs-content">
       <div>
         <span class="eyebrow">Protocol &amp; System Design</span>
-        <h1>Architecture &amp; Protocol</h1>
+        <h1>Architecture &amp; Reference</h1>
       </div>
       <p>
         Cito models every human user and every coding agent session as a symmetric participant on the same signaling network: <code>Node (1) ↔ Hub ↔ Channels (1..K)</code>.
       </p>
 
       <figure class="docs-figure">
-        <img src="../assets/art/architecture-topology.svg" width="960" height="420" alt="Hand-drawn diagram: Pi, Codex, and Claude Code session nodes connect through Cito Hub to a Human Node with Mac menu bar and Telegram channels, plus remote team Hubs" />
+        <img src="../assets/art/architecture-topology.svg" width="960" height="420" alt="Hand-drawn diagram: Pi, Codex, and Claude Code session nodes connect through Cito Hub to a Human Node with Mac menu bar and Telegram channels, with shared Hub read synchronization" />
         <figcaption class="docs-figcaption">
           Symmetric topology: coding agent sessions (left) and human endpoints—your Mac menu bar and mobile channels (right)—connect as peers through a shared Hub.
         </figcaption>
@@ -93,7 +102,7 @@
       <ul>
         <li><code>to: "@self"</code> (or <code>"&lt;hub&gt;:@self"</code>): Resolves directly to the caller's own enrolled <code>Human Node</code> on that Hub.</li>
         <li><code>to: "@&lt;username&gt;"</code> (or <code>"&lt;hub&gt;:@&lt;username&gt;"</code>): Resolves to that user's visible <code>Human Node</code> on the Hub (respecting <code>self</code> vs. <code>workspace</code> visibility scope).</li>
-        <li><code>to: "&lt;user&gt;/&lt;app&gt;#&lt;prefix&gt;"</code>: Targets a session using its readable address, such as <code>alice/pi#8a4f</code> or <code>alice/codex#4219</code>. Non-default Hubs add a prefix, such as <code>work:alice/pi#8f1a</code>. <strong>Display == Clipboard == Search == Send Target</strong>: every address chip shows the exact value it copies, search accepts it, and <code>cito_send</code> resolves it. Prefixes widen automatically on collision. Full canonical <code>c_&lt;16hex&gt;</code> and public <code>&lt;slug&gt;-&lt;16hex&gt;</code> IDs remain compatible.</li>
+        <li><code>to: "&lt;user&gt;/&lt;app&gt;#&lt;prefix&gt;"</code>: Targets a session using its readable address, such as <code>alice/pi#8a4f</code> or <code>alice/codex#4219</code>. Non-default Hubs add a prefix, such as <code>work:alice/pi#8f1a</code>. Each address chip copies the full sendable and searchable <code>display_address</code>, shown in full on hover and in its accessibility label. Long visible labels may be middle-truncated to fit the card. Prefixes widen automatically on collision. Full canonical <code>c_&lt;16hex&gt;</code> and public <code>&lt;slug&gt;-&lt;16hex&gt;</code> IDs remain compatible.</li>
       </ul>
 
       <p><strong>Sender auto-enrollment on <code>cito_send</code>:</strong> Sending from a not-yet-enrolled agent session registers its return address automatically so human replies can reach it. Explicitly stopped sessions remain stopped; call <code>cito_listen</code> to resume them.</p>
@@ -104,11 +113,11 @@
       </p>
       <ul>
         <li><strong>Stream Transport Cursor</strong>: Advances when a local daemon receives a signal over the Hub event stream so passively observed notifications are stored locally as unread without prematurely marking them read on other devices.</li>
-        <li><strong>Business Read Acknowledgment</strong>: Emitted only when an agent drains its inbox (<code>cito_inbox</code>) or a human reads or replies from the menu bar directory or Telegram. The Hub broadcasts a node read-acknowledgment event (<code>node_ack</code> / <code>on_acked</code>) so all other attached channels clear their unread badges immediately.</li>
-        <li><strong>Exclusive Single-Execution Wake</strong>: For wake-capable agent channels, the Hub atomically claims each signal batch before wake execution so a session is woken at most once even when multiple devices observe the stream.</li>
+        <li><strong>Business Read Acknowledgment</strong>: <code>signal_ack</code> is emitted on <code>cito_inbox</code> drain, confirmed agent wake delivery (<code>dispatch_listener</code>), or Menu Bar Activity / Telegram replies. Passive Telegram reading does not acknowledge a signal. The Hub broadcasts <code>node_ack</code> / <code>on_acked</code> for read synchronization; Telegram's <code>on_acked</code> is a no-op and does not immediately clear Telegram unread badges.</li>
+        <li><strong>Exclusive Single-Execution Wake</strong>: For wake-capable agent channels, the Hub atomically claims each batch with a 30-second lease to deduplicate concurrent wakes. A 30.5-second fallback retries after a crash or unacknowledged loss; this does not guarantee at-most-once delivery across crashes.</li>
       </ul>
 
-      <p><strong>7-day reply retention:</strong> Telegram delivery mappings remain available for 7 days. Explicit replies to an alert, or plain messages within 7 days of the latest alert, route through the Hub to the sending node. You can also reply from the Mac menu bar <strong>Activity</strong> stream while that session remains reachable. Pairing codes still expire after ten minutes; their lifetime is independent of reply retention.</p>
+      <p><strong>7-day reply retention:</strong> Telegram delivery mappings remain available for 7 days. Explicit replies route to the alert's sender. A plain unthreaded message auto-routes only if exactly one distinct sender delivered alerts in the preceding 7 days; otherwise Telegram returns <code>AMBIGUOUS_REPLY</code> and the user must reply to a specific notification. You can also reply from the Mac menu bar <strong>Activity</strong> stream while that session remains reachable. Pairing codes still expire after ten minutes; their lifetime is independent of reply retention.</p>
 
       <h2 id="three-layers">4. Three-Layer System Architecture</h2>
       <ol>
@@ -123,8 +132,9 @@
 
       <h2 id="mcp-tools">5. Public MCP &amp; CLI Interfaces</h2>
       <h3>Native surfaces</h3>
-      <p>The menu starts with Listening Sessions, followed by other hosts, Available Sessions, Directory, Activity, and Stop All. Stop detaches one session and disables Auto-Listen on that Hub. Human inbox controls live in the compact Inbox Control Bar at the top of Settings → Human Channels: identity, active delivery paths, Pause/Resume Inbox, and Self/Team visibility. A paused inbox adds only an “Inbox paused · Resume in Settings…” menu notice. External channels deliver alerts even when this Mac is offline.</p>
+      <p>The menu starts with Listening Sessions, followed by other hosts, Available Sessions, Directory, Activity, and Stop All. Stop detaches only that session and keeps it stopped without changing Hub Auto-Listen. Stop All stops all agent sessions on the selected Hub and disables Auto-Listen. Turning Auto-Listen off retires unpinned auto-listened sessions and preserves pinned sessions. The conditional Pin control switches between auto (outline) and manual (filled blue); + Listen attaches as manual/pinned. <code>pidBound</code> controls whether an OS PID is required, independently of <code>idleTimeoutMs</code>. Bundled Pi and Claude set <code>idleTimeoutMs: null</code>; Codex sets <code>3600000</code> ms for unpinned idle retirement. Closed or disconnected apps retire regardless of pin state. Human inbox controls live in the compact Inbox Control Bar at the top of Settings → Human Channels: identity, active delivery paths, Pause/Resume Inbox, and Self/Team visibility. A paused inbox adds only an “Inbox paused · Resume in Settings…” menu notice. External channels can deliver alerts when this Mac is offline, provided the selected Hub and its channel service remain online elsewhere.</p>
       <h3>MCP Tools</h3>
+      <div class="docs-table-wrap" role="region" aria-label="Reference table" tabindex="0">
       <table class="docs-table">
         <thead>
           <tr>
@@ -166,22 +176,42 @@
           </tr>
         </tbody>
       </table>
+      </div>
 
       <h3>CLI Commands</h3>
+      <div class="docs-table-wrap" role="region" aria-label="CLI subcommands" tabindex="0">
+        <table class="docs-table">
+          <thead><tr><th>Subcommand</th><th>Target</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>status</code></td><td>Local daemon</td><td>Inspect Hub health, listening sessions, and available sessions; use <code>--json</code> for structured output.</td></tr>
+            <tr><td><code>listen</code> / <code>unlisten</code></td><td>Calling session, or this Mac with <code>--harness human</code></td><td>Attach/detach an endpoint. <code>cito unlisten --all</code> stops agents and disables Auto-Listen across all configured Hubs unless <code>--hub &lt;name&gt;</code> selects one Hub.</td></tr>
+            <tr><td><code>rename &lt;title&gt;</code></td><td>Calling agent session</td><td>Set its display title. Select another known session with <code>--harness &lt;id&gt; --session &lt;sid&gt;</code> or a plugin flag such as <code>--pi=&lt;sid&gt;</code>; <code>--json</code> returns the receipt.</td></tr>
+            <tr><td><code>find</code> / <code>send</code></td><td>Visible Hub Nodes</td><td>Search by user, host, repository, or harness; send to a readable address or Human Node.</td></tr>
+            <tr><td><code>inbox</code></td><td>Calling Node</td><td>Read or acknowledge signals; <code>pause</code> / <code>resume</code> administer the shared Human inbox.</td></tr>
+            <tr><td><code>setup</code></td><td>Local installation and Hub configuration</td><td>Connect/disconnect apps, join Hubs, share this Mac, or configure login startup.</td></tr>
+            <tr><td><code>daemon</code> / <code>mcp-stdio</code></td><td>Local host</td><td>Run the background daemon or MCP stdio bridge.</td></tr>
+            <tr><td><code>hub</code></td><td>Shared server</td><td>Run a standalone Hub; see <a class="text-link" href="./hosting.html">Host a Hub</a> for deployment.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Agent plugins expose short selectors such as <code>--pi[=&lt;sid&gt;]</code>, <code>--codex[=&lt;sid&gt;]</code>, and <code>--claude[=&lt;sid&gt;]</code>. Use <code>--harness &lt;id&gt; --session &lt;sid&gt;</code> for an explicit harness/session pair; <code>--session</code> requires <code>--harness</code>.</p>
       <p><code>cito listen/unlisten --harness human</code> controls only this Mac's attachment. <code>cito inbox pause/resume</code> controls the shared Human inbox across all attached channels; Resume omits the description unless <code>--about</code> is supplied. <code>cito unlisten --all [--hub &lt;name&gt;]</code> stops agents only. Human inbox and device administration remain CLI/GUI-only.</p>
-      <pre><code>cito status [--hub &lt;hub&gt;] [--json]
-cito rename &lt;title&gt; [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--json]
-cito listen [--title|-t &lt;title&gt;] [--scope &lt;self|workspace&gt;] [--team] [--hub &lt;hub&gt;] [--tag &lt;tag&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json] [about...]
-cito unlisten [--all] [--hub &lt;hub&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
-cito find [--hub &lt;hub&gt;] [--user|-u &lt;user&gt;] [--host &lt;host&gt;] [--repo &lt;repo&gt;] [--query|-q &lt;query&gt;] [--harness &lt;id&gt;|--codex|--claude] [--limit &lt;1..50&gt;] [--json] [query...]
-cito send --to &lt;target&gt; --message|-m &lt;text&gt; [--hub &lt;hub&gt;] [--reply-to|--in-reply-to &lt;signal_id&gt;] [--idempotency-key &lt;key&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
+      <div class="code-block">
+        <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
+        <pre><code>cito status [--json]
+cito rename &lt;title&gt; [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
+cito listen [--title|-t &lt;title&gt;] [--scope &lt;self|workspace&gt;] [--team] [--hub &lt;hub&gt;] [--tag &lt;tag&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json] [about...]
+cito unlisten [--all] [--hub &lt;hub&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
+cito find [--hub &lt;hub&gt;] [--user|-u &lt;user&gt;] [--host &lt;host&gt;] [--repo &lt;repo&gt;] [--query|-q &lt;query&gt;] [--harness &lt;id&gt;|--pi|--codex|--claude] [--limit &lt;1..50&gt;] [--json] [query...]
+cito send --to &lt;target&gt; --message|-m &lt;text&gt; [--hub &lt;hub&gt;] [--reply-to|--in-reply-to &lt;signal_id&gt;] [--idempotency-key &lt;key&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito inbox pause|resume [--hub &lt;hub&gt;] [--scope &lt;self|workspace&gt;] [--team] [--about &lt;text&gt;]
-cito inbox [--hub &lt;hub&gt;] [--unread|--peek|--no-ack] [--ack-all] [--ack &lt;id&gt;...] [--limit &lt;1..1000&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
+cito inbox [--hub &lt;hub&gt;] [--unread|--peek|--no-ack] [--ack-all] [--ack &lt;id&gt;]... [--limit &lt;1..1000&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito daemon
 cito mcp-stdio
 cito --version | -v
 cito setup [--invite &lt;code-or-url&gt;] [--print-invite] [--disconnect-all [--purge-data]] [--build-app[=&lt;path&gt;]] [--enable-hub &lt;name&gt;] [--disable-hub &lt;name&gt;] [--remove-hub &lt;name&gt;] [--status] [--dry-run] [--force] [--enable &lt;harness&gt;] [--disable &lt;harness&gt;] [--uninstall [--purge-data]] [--hub &lt;name&gt; --url &lt;url&gt; [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--default]] [--share-hub|--no-share-hub] [--share-port &lt;port&gt;] [--login-item|--no-login-item] [--json]
 cito hub [--port &lt;port&gt;] [--bind &lt;addr&gt;] [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--data-dir &lt;dir&gt;]</code></pre>
+      </div>
     </main>
   </div>
 
@@ -190,9 +220,10 @@ cito hub [--port &lt;port&gt;] [--bind &lt;addr&gt;] [--auth &lt;none|token|oidc
       <strong>Cito Documentation</strong> · <a class="text-link" href="../index.html">Back to Product Overview</a>
     </div>
     <div class="footer-links">
-      <a href="./guide.html">Getting Started</a>
-      <a href="./plugins.html">Subprocess Plugins</a>
-      <a href="./architecture.html">Architecture</a>
+      <a href="./guide.html">User Guide</a>
+      <a href="./hosting.html">Host a Hub</a>
+      <a href="./plugins.html">Plugins</a>
+      <a href="./architecture.html">Reference</a>
       <a href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
     </div>
   </footer>

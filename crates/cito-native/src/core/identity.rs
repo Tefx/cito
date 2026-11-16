@@ -143,7 +143,10 @@ pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value
                     .filter(|p| {
                         normalize_slug(string(p, "owner_user")) == user
                             && string(p, "harness") == harness
-                            && is_live_peer(p, crate::plugins::now_ms())
+                            && is_live_peer(
+                                p,
+                                super::lease::registration_now(p, crate::plugins::now_ms()),
+                            )
                             && string(p, "listener_id")
                                 .strip_prefix("c_")
                                 .is_some_and(|s| s.starts_with(prefix))
@@ -327,6 +330,29 @@ mod tests {
         assert!(readable_alias("agent#abcd").is_some());
         assert!(readable_alias("alice/agent#").is_none());
         assert!(!super::super::config::validate_user("SELF"));
+    }
+    #[test]
+    fn display_address_collision_liveness_matches_the_hub_clock() {
+        let row =
+            json!({"listener_id":"c_abcd123456789012","owner_user":"alice","harness":"agent"});
+        let mut peer = json!({"listener_id":"c_abcd987654321098","owner_user":"alice","harness":"agent","state":"ACTIVE","updated_at_ms":1000,"server_now_ms":1001});
+        assert!(is_live_peer(
+            &peer,
+            super::super::lease::registration_now(&peer, crate::plugins::now_ms())
+        ));
+        assert_eq!(
+            display_address("work", "work", &row, &[peer.clone()]),
+            "alice/agent#abcd1234"
+        );
+        peer["server_now_ms"] = json!(1_801_001);
+        assert_eq!(
+            super::super::lease::evaluate_node_lease(&peer, crate::plugins::now_ms()),
+            "EXPIRED"
+        );
+        assert_eq!(
+            display_address("work", "work", &row, &[peer]),
+            "alice/agent#abcd"
+        );
     }
     #[test]
     fn message_validation() {

@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn oversized_committed_channel_values_get_payload_free_success_receipts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"string","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let ui = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    let large = "canonical-value".repeat(21_000);
+    assert!(large.len() > 260 * 1024);
+    for (op, request) in [
+        ("channel_save", "large-save"),
+        ("save_hub_service", "large-service"),
+        ("channel_toggle", "large-toggle"),
+    ] {
+        let action = json!({"op":op,"hub":"local","channel_id":"channel","enabled":true,
+            "request_id":request,"values":{"credential":large,"address":"room"}});
+        let (status, response) = f.action(action);
+        assert_eq!(status, 200, "{response}");
+        wait(|| {
+            fs::read_to_string(f.home.join("ui-frames"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|frame| frame["request_id"] == request && frame["op"] == "settings")
+        });
+        let frames = fs::read_to_string(f.home.join("ui-frames")).unwrap();
+        let receipt: Value = frames
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|frame| frame["request_id"] == request && frame["op"] == "settings")
+            .unwrap();
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        assert_eq!(receipt["committed"], true);
+        assert_eq!(receipt["hub"], "local");
+        assert_eq!(receipt["channel"], "channel");
+        assert_eq!(receipt["action"], op);
+        assert_eq!(receipt["authority_changed"], false);
+        assert!(receipt["warning"].is_string());
+        assert!(receipt.get("settings").is_none());
+        let rows = f
+            .db("hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        let saved: Value = serde_json::from_str(rows[0]["config_json"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["credential"], large);
+    }
+}
+
+#[test]
 fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -108,7 +166,7 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     let found = f.tool(
         "cito_find",
         json!({"hub":"shared","harness":"human"}),
-        human(),
+        json!({}),
     );
     let peer = &found["listeners"][0];
     assert_eq!(found["matched_count"], 1);
@@ -441,9 +499,8 @@ server.serve_forever()
         .unwrap();
     assert_eq!(snapshot["settings"]["settings_hub"], "shared");
     assert_eq!(
-        snapshot["settings"]["channels"],
-        json!([]),
-        "Invalidated inventory must be loading"
+        snapshot["settings"]["channels"][0]["configured"], true,
+        "Same-principal credential renewal retains the confirmed personal inventory"
     );
     // Replace the slot again while Alice's response is in flight. Bob must never
     // receive Alice's configured personal binding, including after its late reply.
@@ -538,10 +595,10 @@ server.serve_forever()
     assert_eq!(snapshot["settings"]["channels"][0]["status"], "ready");
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], true);
 
-    // A replaced slot cannot acknowledge an in-flight mutation against the new
-    // identity, even when its remote mutation already committed before replacement.
+    // Preserve a committed receipt under its original authority without applying
+    // its personal inventory or UI completion to the replacement identity.
     gate("unpair-post", "bob", "next-credential", false);
-    gate("replacement", "bob", "replacement-credential", false);
+    gate("replacement", "charlie", "replacement-credential", false);
     std::thread::scope(|scope| {
         let changed = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -553,16 +610,18 @@ server.serve_forever()
         });
         wait(|| seen("unpair-post"));
         config["hubs"]["shared"]["token"] = json!("replacement-credential");
+        config["hubs"]["shared"]["user"] = json!("charlie");
         fs::write(&f.config, config.to_string()).unwrap();
         wait(|| seen("replacement"));
-        let failure = changed.join().unwrap().unwrap_err();
-        match *failure {
-            ureq::Error::Status(400, response) => assert!(response
-                .into_string()
-                .unwrap()
-                .contains("Hub changed during channel request")),
-            other => panic!("Unexpected mutation failure: {other}"),
-        }
+        let receipt: Value = changed.join().unwrap().unwrap().into_json().unwrap();
+        assert_eq!(receipt["committed"], true);
+        assert_eq!(receipt["authority_changed"], true);
+        assert_eq!(receipt["receipt_authority"]["hub"], "shared");
+        assert_eq!(receipt["receipt_authority"]["principal_id"], "none#bob");
+        assert!(receipt["maintenance_warning"]
+            .as_str()
+            .unwrap()
+            .contains("authority changed"));
     });
     assert_eq!(local("/health")["ok"], true);
     release("replacement");
@@ -656,12 +715,10 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             .is_null());
     };
     let untouched = source();
-    for op in ["send_signal", "send_reply_from_human", "cito_send"] {
+    for op in ["send_signal", "send_reply_from_human"] {
         let id = source();
         let results_before = ui_results().len();
-        let result = if op == "cito_send" {
-            f.tool("cito_send", json!({"hub":"work","to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")}), human())
-        } else {
+        let result = {
             let action = if op == "send_signal" {
                 json!({"op":op,"request_id":format!("{op}-{id}"),"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
             } else {
@@ -746,13 +803,9 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let before = hub
         .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
         .unwrap();
-    for op in ["send_signal", "send_reply_from_human", "cito_send"] {
+    for op in ["send_signal", "send_reply_from_human"] {
         let args = json!({"to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":format!("retry-{op}")});
-        if op == "cito_send" {
-            let result = f.tool_result(op, args, human());
-            assert_eq!(result["isError"], true);
-            assert!(result.to_string().contains("injected ack failure"));
-        } else {
+        {
             let mut action = args;
             action["op"] = json!(op);
             let count = ui_results().len();
@@ -812,8 +865,8 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let local = f.db("state.sqlite");
     local.execute("CREATE TRIGGER reject_sent_commit BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'injected local commit failure'); END", &[]).unwrap();
     let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
-    let result = f.tool_result("cito_send", args.clone(), human());
-    assert_eq!(result["isError"], true);
+    let result = send_human_result(&f, args.clone());
+    assert_eq!(result["http_status"], 400);
     assert!(result.to_string().contains("injected local commit failure"));
     let committed = hub.query("SELECT seq,signal_id FROM hub_signals WHERE json_extract(CAST(data AS TEXT),'$.in_reply_to')=?", &[json!(recovered)]).unwrap();
     assert_eq!(committed.len(), 1);
@@ -827,7 +880,7 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     local
         .execute("DROP TRIGGER reject_sent_commit", &[])
         .unwrap();
-    let reply = f.tool("cito_send", args, human());
+    let reply = send_human(&f, args);
     assert_eq!(
         reply["signal_id"],
         format!("work:{}", committed[0]["signal_id"].as_str().unwrap())
@@ -1463,7 +1516,7 @@ fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
         let args = [vec!["listen", "--harness", "human"], extra].concat();
         let (ok, _, error) = f.command(NATIVE, &args, "");
         assert!(
-            !ok && error.contains("INVALID_INPUT") && error.contains("cito inbox"),
+            !ok && !error.contains("INVALID_INPUT") && error.contains("cito inbox"),
             "{error}"
         );
         assert!(!f
@@ -1545,12 +1598,7 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
             )
             .unwrap()
     };
-    for op in [
-        "save_hub_service",
-        "channel_save",
-        "channel_pair",
-        "channel_test",
-    ] {
+    for op in ["save_hub_service", "channel_save"] {
         let (status,v)=f.action(json!({"op":op,"scope":"hub","hub":"remote","channel_id":"channel","enabled":true,"user_config":{"address":"injected"},"display_label":"injected","values":{"credential":op,"address":"must-not-save"}}));
         assert_eq!(status, 200, "{v}");
         assert!(rows().is_empty());
@@ -1567,6 +1615,25 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
             json!({"credential":op}),
             "Selected remote schema must override conflicting local field scopes"
         );
+    }
+    for op in ["channel_pair", "channel_test"] {
+        let (status, value) = f.action(json!({"op":op,"scope":"hub","hub":"remote","channel_id":"channel","values":{"credential":"must-not-save"}}));
+        assert_eq!(status, 400, "{value}");
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("INVALID_INPUT:"));
+        assert!(rows().is_empty());
+        let config = owner
+            .db("hub/hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        let config: Value =
+            serde_json::from_str(config[0]["config_json"].as_str().unwrap()).unwrap();
+        assert_eq!(config, json!({"credential":"channel_save"}));
     }
     assert_eq!(f.action(json!({"op":"channel_save","hub":"remote","channel_id":"channel","enabled":true,"values":{"address":"personal"}})).0,200);
     assert_eq!(rows()[0]["enabled"], 1);

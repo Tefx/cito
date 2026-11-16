@@ -96,6 +96,7 @@ impl Fixture {
             tint: String::new(),
             cli_flag: false,
             pid_bound: true,
+            auto_listen: Default::default(),
             plugin_dir: self.dir.clone(),
             is_builtin: false,
             command: vec!["/usr/bin/python3".into(), "-c".into(), script],
@@ -161,6 +162,80 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+#[test]
+fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    let f = Fixture::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let id = f.row["listener_id"].clone();
+    let generation = f.row["binding_generation"].clone();
+    let server = thread::spawn(move || {
+        for expected in [
+            "consumer_add",
+            "consumer_backlog",
+            "consumer_ack",
+            "stream_get_message",
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["op"], expected);
+            let now = 10_000_000u64; // Deliberately unrelated to the local wall clock.
+            let body = if expected == "consumer_add" {
+                let signal = json!({"signal_id":"expiring","to":id,"target_generation":generation,"from":{"principal_id":"none#alice","user":"alice","host_name":"desktop"},"message":"near expiry"});
+                json!({"ok":true,"result":{"server_now_ms":now,"backlog":[{"seq":1,"created_ms":now-1_800_000+50,"data_b64":STANDARD.encode(signal.to_string())}]}})
+            } else if expected == "consumer_backlog" {
+                thread::sleep(Duration::from_millis(150));
+                json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Backlog failed"}})
+            } else { json!({"ok":true,"result":{}}) }.to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    let client = HubClient::new(
+        "local".into(),
+        json!({"url":format!("http://{address}")}),
+        "alice",
+        None,
+    );
+    let mut admitted_at = 0;
+    poll_listener(&f.state, &client, &f.row, None, &f.dir, |_| {
+        admitted_at = now_ms()
+    })?;
+    server.join().map_err(|_| "Clock server panicked")?;
+    let rows = f.rows()?;
+    assert_eq!(rows.len(), 1);
+    // Admission clamps already elapsed lifetimes to zero. Re-anchoring the add
+    // response after the failed RPC incorrectly leaves another 50ms of lifetime.
+    let created = rows[0]["created_at"].as_str().unwrap();
+    assert!(created.contains("1970"), "{rows:?}");
+    assert!(
+        rows[0]["expires_at_ms"].as_u64().unwrap() <= admitted_at,
+        "{rows:?}"
+    );
+    Ok(())
+}
+
 fn wait_until(mut predicate: impl FnMut() -> bool, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     while !predicate() {

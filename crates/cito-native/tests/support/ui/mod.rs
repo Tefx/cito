@@ -134,10 +134,10 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
 }
 
 fn hubs() -> Value {
-    json!([{"name":"personal","status":"connected","user":"alice","auth_mode":"oidc","error":null},{"name":"work","status":"connected","user":"alice","auth_mode":"none","error":null}])
+    json!([{"name":"personal","status":"connected","user":"alice","auth_mode":"oidc","error":null,"is_builtin":false,"supports_workspace_scope":true,"human_can_set_scope":true,"can_login":false},{"name":"work","status":"connected","user":"alice","auth_mode":"none","error":null,"is_builtin":false,"supports_workspace_scope":true,"human_can_set_scope":true,"can_login":false}])
 }
 fn listener() -> Value {
-    json!({"hub":"personal","listener_id":"c_abcdefghijkl","public_id":"repo-abcdefghijkl","scoped_id":"personal:repo-abcdefghijkl","display_address":"alice/fixture#abcd","harness":"fixture","session_id":"s1","title":"café conversation","cwd":"/tmp","repo":null,"scope":"self"})
+    json!({"hub":"personal","listener_id":"c_abcdefghijkl","public_id":"repo-abcdefghijkl","scoped_id":"personal:repo-abcdefghijkl","display_address":"alice/fixture#abcd","harness":"fixture","session_id":"s1","title":"café conversation","cwd":"/tmp","repo":null,"scope":"self","is_self_principal":true,"can_set_scope":true,"can_pin":true,"can_rename":true,"can_stop":true})
 }
 fn state() -> Value {
     json!({"op":"state","hubs":hubs(),"listeners":[listener()],"harnesses":[{"id":"fixture","display_name":"Fixture","sf_symbol":"terminal","tint":"purple","tier":"stable","order":0}],"unread_count":0,"directory_online_count":2})
@@ -190,7 +190,14 @@ fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
     );
     assert_eq!(snapshot["overlapping_siblings"], json!([]));
     assert_eq!(snapshot["clipped_views"], json!([]));
-    for key in ["low_contrast_labels", "jargon_leaks", "address_mismatches"] {
+    for key in [
+        "tight_padding",
+        "non_anchored_action_bars",
+        "overlapping_views",
+        "low_contrast_labels",
+        "jargon_leaks",
+        "address_mismatches",
+    ] {
         assert_eq!(snapshot[key], json!([]), "{key}");
     }
     snapshot
@@ -214,6 +221,16 @@ fn node(snapshot: &Value, surface: &str, id: &str) -> Value {
 fn control(f: &Fixture, p: usize, id: &str) {
     f.send(p, json!({"op":"test_control","id":id}));
 }
+fn confirm_channel_action(f: &Fixture, p: usize, op: &str) {
+    inspect(f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == op)
+        .unwrap();
+    f.send(p, json!({"op":"settings","ok":true,"committed":true,"hub":action["hub"],"channel_id":action["channel_id"],"source_op":op,"request_id":action["request_id"]}));
+}
 /// Synthetic directory frames echo the real UI request, just as the daemon does.
 fn send_fixture(f: &Fixture, p: usize, mut frame: Value) {
     if frame["op"] == "directory" && frame["request_id"].is_null() {
@@ -235,11 +252,15 @@ fn peer(id: &str) -> Value {
     json!({"hub":"personal","listener_id":format!("c_{id}"),"display_address":format!("bob/fixture#{}", &cito_native::core::identity::hash(id)[..4]),"public_id":id,"scoped_id":format!("personal:{id}"),"user":"bob","host_id":"remote","host_name":"laptop","harness":"fixture","title":id,"about":"Schema work","repo":"acme/service","branch":"main","scope":"workspace","last_seen_at":"2030-01-01T00:00:00Z","is_self_principal":false,"channels":["laptop"]})
 }
 fn settings() -> Value {
-    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"http://127.0.0.1:4291","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
+    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"has_hub_service":true,"hub_ready":true,"can_configure_hub":true,"can_clear_hub":true,"can_edit_personal":true,"can_pair":true,"can_test":true,"can_unpair":true,"error_origin":null,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"hubs":[{"name":"personal","url":"local://","auth_mode":"none","is_builtin":true,"supports_workspace_scope":false,"can_login":false,"enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"http://127.0.0.1:4291","auth_mode":"none","is_builtin":false,"supports_workspace_scope":true,"can_login":false,"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
 }
 
+mod capabilities;
 mod directory;
+mod lazy_rendering;
 mod menu;
 mod oracle_e2e;
+mod render_stability;
 mod settings_channels;
 mod settings_hubs;
+mod settlement;

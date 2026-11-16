@@ -9,6 +9,13 @@ enum CitoMetrics {
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
     static let headerInset: CGFloat = 14
+    static let cardRadius: CGFloat = 10
+    static let sessionTextX: CGFloat = 48
+    static let sessionPathWidth = menuRailWidth - sessionTextX - cardInset - 52
+    static let directoryWidth: CGFloat = 560
+    static let directoryTextX: CGFloat = 52
+    static let directoryInset: CGFloat = 16
+    static let activityTextWidth = directoryWidth - directoryTextX - directoryInset
 }
 
 func normalizedHubURL(_ raw: String) -> String {
@@ -41,7 +48,7 @@ func proposedHubName(_ raw: String, url: String, existing: [HubConfigItem], crea
         if slug.isEmpty { slug = "remote" }
         let base = slug
         var suffix = 2
-        while slug == "local" || existing.contains(where:{(creating || $0.name != original) && $0.name == slug && normalizedHubURL($0.url) != url}) {
+        while existing.contains(where:{(creating || $0.name != original) && $0.name == slug && ($0.is_builtin == true || normalizedHubURL($0.url) != url)}) {
             let ending = "-\(suffix)"
             slug = String(base.prefix(32-ending.count)).trimmingCharacters(in:CharacterSet(charactersIn:"-")) + ending
             suffix += 1
@@ -136,7 +143,7 @@ func compactAddressLabel(_ address: String, maxWidth: CGFloat, font: NSFont, pad
     return "…"
 }
 
-func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = 244,
+func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = CitoMetrics.sessionPathWidth,
                         font: NSFont = .systemFont(ofSize: 10.5)) -> String {
     let full = shortCwd + branchSuffix
     guard measureTextWidth(full, font: font) > maxWidth else { return full }
@@ -150,8 +157,8 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
 
 func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
     let font = NSFont.systemFont(ofSize: 12)
-    guard selected && (measureTextWidth(text, font: font) > 492 || text.contains("\n")) else { return 60 }
-    let wrappedRect = (text as NSString).boundingRect(with: NSSize(width: 492, height: CGFloat.greatestFiniteMagnitude),
+    guard selected && (measureTextWidth(text, font: font) > CitoMetrics.activityTextWidth || text.contains("\n")) else { return 60 }
+    let wrappedRect = (text as NSString).boundingRect(with: NSSize(width: CitoMetrics.activityTextWidth, height: CGFloat.greatestFiniteMagnitude),
         options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font])
     return min(108, max(60, 44 + ceil(wrappedRect.height)))
 }
@@ -181,8 +188,25 @@ func nodeDisplayTitle(_ title: String, harness: String, user: String, about: Str
     return title
 }
 func presentationError(_ raw: String) -> String {
-    if raw.hasPrefix("CONTROL_REVISION_CONFLICT:") { return "Inbox changed on another device. Review the current state and try again." }
-    var message = raw.replacingOccurrences(of: "^(?:[a-z][a-z0-9-]*: )?(?:[A-Z][A-Z0-9_]+:\\s*)+", with: "", options: .regularExpression)
+    var message = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Unwrap transport/plugin diagnostics before rendering their human message.
+    while !message.isEmpty {
+        if message.hasPrefix("CONTROL_REVISION_CONFLICT:") { return "Inbox changed on another device. Review the current state and try again." }
+        if message.range(of:"(?i:SQLITE_|sqlite3|\\(SQLite\\b|unable to open database|database is locked|database disk image is malformed|no such table:)",options:.regularExpression) != nil {
+            return "App database is unavailable. Check the app and its data location."
+        }
+        if message.hasPrefix("{") || message.hasPrefix("[") {
+            guard let data = message.data(using:.utf8), let object = try? JSONSerialization.jsonObject(with:data) as? [String:Any] else { return "The request failed. Try again." }
+            let error = object["error"] as? [String:Any]
+            let detail = object["message"] as? String ?? error?["message"] as? String ?? object["error"] as? String
+            guard let detail = detail, !detail.isEmpty, detail != message else { return "The request failed. Try again." }
+            message = detail; continue
+        }
+        let stripped = message.replacingOccurrences(of:"^(?:[a-z][a-z0-9_-]*|[A-Z][A-Z0-9_]{2,}|[0-9]{3,}|(?i:Discovery rejected|Badge rejected|Error)):(?:\\s+|$)",with:"",options:.regularExpression)
+        if stripped == message { break }
+        message = stripped
+    }
+    message = message.replacingOccurrences(of:"\\b(?:[A-Z][A-Z0-9_]{2,}|[0-9]{3,}):(?:\\s+|$)",with:"",options:.regularExpression)
         .replacingOccurrences(of: "\\s*\\(os error [0-9]+\\)$", with: "", options: .regularExpression)
     if message.hasPrefix("Hub URL must use") { return "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment." }
     if message.hasPrefix("CITO_NATS_URL") { return "Enter a valid Hub URL (http://ip:4291 or https://host)." }
@@ -191,7 +215,12 @@ func presentationError(_ raw: String) -> String {
         let reason = String(message.dropFirst(bindPrefix.count))
         return "Cannot start sharing: " + reason
     }
-    for (token, copy) in [("DISCONNECTED_RETAINED", "Temporarily offline"), ("UNLISTENED", "Not listening"), ("EXPIRED", "Offline"), ("ACTIVE", "Active"), ("local://", "Built-in on this Mac"), ("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode"), (" (http://127.0.0.1 is allowed for tests)", "")] { message = message.replacingOccurrences(of: token, with: copy) }
+    for (token, copy) in [("DISCONNECTED_RETAINED", "Temporarily offline"), ("UNLISTENED", "Not listening"), ("EXPIRED", "Offline"), ("ACTIVE", "Active"), ("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode")] {
+        message = message.replacingOccurrences(of:"\\b" + token + "\\b",with:copy,options:.regularExpression)
+    }
+    message = message.replacingOccurrences(of:"(?i:\\bchannel inventory\\b)",with:"Channel list",options:.regularExpression)
+        .replacingOccurrences(of:"local://",with:"Built-in on this Mac")
+        .replacingOccurrences(of:" (http://127.0.0.1 is allowed for tests)",with:"")
     return message
 }
 func distinctAbout(_ raw: String?, title: String, user: String, otherTitle: String? = nil) -> String? {
@@ -215,13 +244,25 @@ func displayAttachments(_ attachments: [ChannelAttachment]) -> [ChannelAttachmen
     return unique.values.sorted { ($0.location, $0.display_name) < ($1.location, $1.display_name) }
 }
 
-func relativeTime(_ timestamp: String) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let date = formatter.date(from: timestamp) ?? {
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: timestamp)
+private enum ActivityDateFormatters {
+    static let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
     }()
+    static let whole: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+}
+
+func activityDate(_ timestamp: String) -> Date? {
+    ActivityDateFormatters.fractional.date(from: timestamp) ?? ActivityDateFormatters.whole.date(from: timestamp)
+}
+
+func relativeTime(_ timestamp: String) -> String {
+    let date = activityDate(timestamp)
     guard let date = date else { return "Just now" }
     let seconds = max(0, Date().timeIntervalSince(date))
     if seconds < 60 { return "Just now" }

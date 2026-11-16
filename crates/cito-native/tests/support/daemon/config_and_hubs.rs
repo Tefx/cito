@@ -76,9 +76,12 @@ fn gui_purge_removes_credentials_idempotency_hub_history_and_personal_profile_da
         "delete this credential",
     )
     .unwrap();
+    fs::create_dir_all(f.state.join("activity/fixture")).unwrap();
+    fs::write(f.state.join("activity/fixture/source.json"), "{}").unwrap();
     let result = f.action(json!({"op":"setup_disconnect_all","purge_data":true}));
     assert_eq!(result.0, 200, "{}", result.1);
     assert!(!f.state.join("oidc-token-work.json").exists());
+    assert!(!f.state.join("activity").exists());
     for table in [
         "local_signals",
         "local_sent_idempotency",
@@ -418,7 +421,8 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         );
         assert!(!ok, "{host}: {out}");
         assert!(
-            err.contains("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub"),
+            err.contains("This invite code belongs to this Mac's own shared Hub")
+                && !err.contains("INVALID_INPUT:"),
             "{host}: {err}"
         );
         assert_eq!(fs::read(&f.config).unwrap(), committed);
@@ -719,7 +723,7 @@ fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
             .unwrap()
             .iter()
             .any(|h| h["name"] == "work" && h["enabled"] == false));
-        let found = f.tool("cito_find", json!({"user":"absent"}), human());
+        let found = f.tool("cito_find", json!({"user":"absent"}), json!({}));
         assert_eq!(found["ok"], true, "{found}");
         assert_eq!(found["listeners"], json!([]));
         assert_eq!(fs::read_to_string(&f.config).unwrap(), config.to_string());
@@ -757,8 +761,11 @@ fn disabled_hub_alias_reenable_paths_activate_slots_across_restart() {
                 .is_empty(),
             "disabled local still exposes channel inventory"
         );
-        let unavailable =
-            f.tool_result("cito_find", json!({"hub":"work","user":"absent"}), human());
+        let unavailable = f.tool_result(
+            "cito_find",
+            json!({"hub":"work","user":"absent"}),
+            json!({}),
+        );
         assert_eq!(unavailable["isError"], true, "{unavailable}");
         if op == "cli" {
             let (ok, out, err) = f.command(
@@ -792,7 +799,11 @@ fn disabled_hub_alias_reenable_paths_activate_slots_across_restart() {
                 .find(|hub| hub["name"] == "work")
                 .unwrap();
             assert_eq!(work["enabled"], true, "{op}: {work}");
-            let found = f.tool("cito_find", json!({"hub":"work","user":"absent"}), human());
+            let found = f.tool(
+                "cito_find",
+                json!({"hub":"work","user":"absent"}),
+                json!({}),
+            );
             assert_eq!(found["ok"], true, "{op}: {found}");
             assert_eq!(found["listeners"], json!([]));
             f.stop(running);
@@ -840,7 +851,11 @@ fn disabled_hub_alias_saves_preserve_effective_enablement() {
                 .find(|hub| hub["name"] == "work")
                 .unwrap();
             assert_eq!(work["enabled"], enabled, "{action}: {work}");
-            let result = f.tool_result("cito_find", json!({"hub":"work","user":"absent"}), human());
+            let result = f.tool_result(
+                "cito_find",
+                json!({"hub":"work","user":"absent"}),
+                json!({}),
+            );
             assert_eq!(result["isError"] == true, !enabled, "{action}: {result}");
         }
     }
@@ -901,9 +916,8 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
             let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
             assert_eq!(status, 200, "{snapshot}");
             assert_eq!(snapshot["hub"], "local");
-            let inbox = f.tool("cito_inbox", json!({}), human());
-            assert_eq!(inbox["signals"], json!([]));
-            assert_eq!(inbox["acknowledged_count"], 0);
+            assert_eq!(snapshot["activity"], json!([]));
+            assert_eq!(snapshot["unread_count"], 0);
         }
     }
     for user in [

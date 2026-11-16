@@ -7,7 +7,7 @@ use super::{
     mcp::{tools_list, validate_tool_input, wait_send_receipt},
     request_shutdown, shutdown_requested,
     ui_ipc::{bounded_frame, REQUEST_LIMIT},
-    DaemonService, SHUTDOWN_REQUESTED,
+    wake_daemon, DaemonService, SHUTDOWN_REQUESTED,
 };
 use crate::core::{
     config::repair_default_hub,
@@ -25,8 +25,7 @@ use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(super) struct InteractiveLogin {
@@ -64,15 +63,19 @@ pub(super) fn respond(stream: &mut TcpStream, status: u16, value: &Value) {
 fn http_client_pid(stream: &TcpStream) -> Option<u32> {
     let remote = stream.peer_addr().ok()?.port();
     let local = stream.local_addr().ok()?.port();
-    let output = Command::new("/usr/sbin/lsof")
+    let mut command = Command::new("/usr/sbin/lsof");
+    command
         .args([
             "-nP",
             &format!("-iTCP:{remote}"),
             "-sTCP:ESTABLISHED",
             "-Fpn",
         ])
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output =
+        crate::support::run_command_with_timeout(command, Duration::from_millis(250)).ok()??;
     let expected = format!("n127.0.0.1:{remote}->127.0.0.1:{local}");
     let mut pid = None;
     let mut matches = std::collections::HashSet::new();
@@ -103,16 +106,25 @@ pub(super) fn interactive_login(action: &Value) -> bool {
 pub(super) fn dispatch_action(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
+    ui_generation: Option<u64>,
 ) -> Result<Value, String> {
-    let mut result = dispatch_action_inner(service, action);
+    let mut result = dispatch_action_inner(service, action, ui_generation);
     let refresh_setup = matches!(
         string(action, "op"),
         "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
     );
     // Await invalidated inspections without holding service. Retain the final
     // guard so another mutation cannot invalidate them before receipt publication.
+    let completion = service
+        .lock()
+        .map_err(|_| "Daemon lock poisoned")?
+        .setup_completion
+        .clone();
+    let deadline = Instant::now() + Duration::from_secs(12);
     let mut s = loop {
+        let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
         if !refresh_setup {
             break s;
         }
@@ -127,8 +139,20 @@ pub(super) fn dispatch_action(
         {
             break s;
         }
+        if Instant::now() >= deadline {
+            result = Err("Setup inspection timed out".into());
+            break s;
+        }
         drop(s);
-        thread::sleep(Duration::from_millis(5));
+        let revision = completion.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = completion
+            .1
+            .wait_timeout_while(
+                revision,
+                deadline.saturating_duration_since(Instant::now()),
+                |revision| *revision == before,
+            )
+            .unwrap_or_else(|e| e.into_inner());
     };
     if interactive_login(action) {
         s.record_hub_result(action, &result, None);
@@ -144,18 +168,22 @@ pub(super) fn dispatch_action(
     } else {
         s.push_ui();
     }
+    drop(s);
+    wake_daemon();
     result
 }
 
 fn dispatch_action_inner(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
+    ui_generation: Option<u64>,
 ) -> Result<Value, String> {
     if let Some(kind) = channel_action_kind(action) {
-        return dispatch_channel_action(service, action, kind);
+        return dispatch_channel_action(service, action, kind, ui_generation);
     }
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
             return Err("Shutting down".into());
         }
@@ -226,7 +254,7 @@ fn dispatch_action_inner(
     }
     let (token, identity) = result?;
     if let Some(old) = s.slots.remove(&hub) {
-        old.closed.store(true, Ordering::SeqCst);
+        old.close();
     }
     for row in s.state.active()?.into_iter().filter(|row| {
         row["hub"] == hub
@@ -292,25 +320,23 @@ pub(super) fn handle_http(
                 };
                 length = n;
             }
-            headers.insert(k, json!(v.trim()));
+            if headers.insert(k, json!(v.trim())).is_some() {
+                respond(&mut stream, 400, &json!({"error":"Duplicate header"}));
+                return;
+            }
         }
     }
-    if headers
-        .get("origin")
-        .and_then(Value::as_str)
-        .is_some_and(|origin| {
-            !url::Url::parse(origin).ok().is_some_and(|url| {
-                matches!(url.scheme(), "http" | "https")
-                    && match url.host() {
-                        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-                        Some(url::Host::Ipv4(host)) => host == std::net::Ipv4Addr::LOCALHOST,
-                        Some(url::Host::Ipv6(host)) => host == std::net::Ipv6Addr::LOCALHOST,
-                        None => false,
-                    }
-            })
-        })
-    {
-        respond(&mut stream, 403, &json!({"error":"Forbidden Origin"}));
+    let Ok(bound) = stream.local_addr() else {
+        return;
+    };
+    if let Err((status, error)) = crate::core::http_boundary::validate(
+        bound,
+        method,
+        headers.get("host").and_then(Value::as_str),
+        headers.get("origin").and_then(Value::as_str),
+        headers.get("content-type").and_then(Value::as_str),
+    ) {
+        respond(&mut stream, status, &json!({"error":error}));
         return;
     }
     if length > REQUEST_LIMIT {
@@ -346,7 +372,7 @@ pub(super) fn handle_http(
         return;
     };
     if matches!(path, "/ui" | "/action" | "/control") {
-        match dispatch_action(&service, &parsed) {
+        match dispatch_action(&service, &parsed, None) {
             Ok(v) => match bounded_frame(v) {
                 Ok(bytes) => respond_bytes(&mut stream, 200, &bytes),
                 Err(error) => respond(&mut stream, 500, &json!({"ok":false,"error":error})),
@@ -404,14 +430,7 @@ pub(super) fn handle_http(
             match tool {
                 Ok(mut payload) => {
                     if name == "cito_send" {
-                        if let Err(error) = wait_send_receipt(&service, &mut payload) {
-                            payload = json!({"ok":false,"error":{"code":"NATS_UNAVAILABLE","message":error,"retryable":true}});
-                            return respond(
-                                &mut stream,
-                                200,
-                                &json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":payload.to_string()}]}}),
-                            );
-                        }
+                        wait_send_receipt(&service, &mut payload);
                     }
                     json!({"isError":false,"content":[{"type":"text","text":payload.to_string()}]})
                 }
@@ -549,7 +568,20 @@ impl DaemonService {
         }
         self.reload_slots()?;
         match op {
-            "get_snapshot" => return self.snapshot(),
+            "get_snapshot" => {
+                self.refresh_available()?;
+                self.observations
+                    .retain(|key, _| !key.starts_with("directory:"));
+                wake_daemon();
+                return self.snapshot();
+            }
+            "open_menu" => {
+                self.menu_open = true;
+                self.refresh_available()?;
+            }
+            "close_menu" => {
+                self.menu_open = false;
+            }
             "cli_human_device" => {
                 if action["attach"] == true {
                     let slot = self.slot(&hub)?;
@@ -631,13 +663,32 @@ impl DaemonService {
             }
             "unlisten_session" => {
                 let mut detach_errors = Vec::new();
-                for row in self.state.db.query(
-                    "SELECT * FROM local_listeners WHERE harness=? AND session_id=? AND status!='FENCED_INACTIVE'",
-                    &[action["harness"].clone(), action["session_id"].clone()],
-                )? {
-                    if (action["hub"].is_null() || row["hub"] == hub) && self.slots.get(string(&row,"hub")).is_some_and(|slot| crate::core::auth::principal_ids_equal(string(&row,"principal_id"),string(&slot.identity,"principal_id"))) {
-                        let name = string(&row, "hub");
-                        if let Err(error) = self.pause_listener(name, string(&row, "listener_id")) { detach_errors.push(format!("{name}: {error}")); }
+                if action["harness"] != "human" {
+                    let targets: Vec<String> = self
+                        .slots
+                        .keys()
+                        .filter(|name| action["hub"].is_null() || name.as_str() == hub)
+                        .cloned()
+                        .collect();
+                    for name in targets {
+                        self.ensure_agent_stop_row(
+                            &name,
+                            string(action, "harness"),
+                            string(action, "session_id"),
+                        )?;
+                        let slot = self.slot(&name)?;
+                        let rows=self.state.db.query("SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE'",&[json!(name),action["harness"].clone(),action["session_id"].clone()])?;
+                        for row in rows.into_iter().filter(|row| {
+                            crate::core::auth::principal_ids_equal(
+                                string(row, "principal_id"),
+                                string(&slot.identity, "principal_id"),
+                            )
+                        }) {
+                            if let Err(error) = self.unlisten_id(&name, string(&row, "listener_id"))
+                            {
+                                detach_errors.push(format!("{name}: {error}"));
+                            }
+                        }
                     }
                 }
                 if action["harness"] == "human" && action["session_id"] == "default" {
@@ -710,9 +761,11 @@ impl DaemonService {
                     .into_iter()
                     .filter(|r| r["harness"] == id)
                 {
-                    if let Err(error) =
-                        self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))
-                    {
+                    if let Err(error) = self.retire_id(
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    ) {
                         detach_errors.push(error);
                     }
                 }
@@ -790,6 +843,9 @@ impl DaemonService {
                         string(&cfg, "url").trim()
                     )
                     .map_err(|error| format!("INVALID_INPUT: {error}"))?);
+                    if cfg["authMode"] == "oidc" {
+                        super::super::login::Settings::new(&cfg)?;
+                    }
                     let base_name = if requested_name.is_empty() {
                         hub_name_from_url(string(&cfg, "url"))
                     } else {
@@ -953,7 +1009,7 @@ impl DaemonService {
                         drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
                     }
                     if let Some(old) = self.slots.remove(&original) {
-                        old.closed.store(true, Ordering::SeqCst);
+                        old.close();
                     }
                     let keys: Vec<_> = self
                         .receivers
@@ -1027,7 +1083,7 @@ impl DaemonService {
                 };
                 if op == "hub_action" && action["action"] == "reconnect" {
                     if let Some(old) = self.slots.remove(&hub) {
-                        old.closed.store(true, Ordering::SeqCst);
+                        old.close();
                     }
                 }
                 self.mutate_config(|v| {
@@ -1139,7 +1195,8 @@ impl DaemonService {
                 return Ok(json!({"ok":true,"invite":invite}));
             }
             "send_signal" | "send_reply_from_human" => {
-                let meta = json!({"expected_harness":"human","expected_session_id":"default"});
+                let caller =
+                    json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
                 let mut send_args = action.clone();
                 if let Some(args) = send_args.as_object_mut() {
                     args.remove("op");
@@ -1173,7 +1230,7 @@ impl DaemonService {
                     }
                 }
                 let result = validate_tool_input("cito_send", &send_args)
-                    .and_then(|()| self.send(&hub, &send_args, &meta));
+                    .and_then(|()| self.send_from(&hub, &send_args, Some(caller)));
                 self.emit(match &result {
                     Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
                     Err(e) => json!({"op":"composer_result","ok":false,"error":e,"request_id":action["request_id"]}),
@@ -1315,16 +1372,28 @@ impl DaemonService {
             }
             "unlisten" => {
                 let id = string(action, "listener_id");
-                self.pause_listener(&hub, id)?;
+                self.unlisten_id(&hub, id)?;
             }
             "unlisten_all" => {
+                // Bulk stop owns Hub policy even when no listener is active.
+                let raw = self.raw_config()?;
+                let (_, configured, _) =
+                    crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+                let selected_hub = action.get("hub").filter(|hub| !hub.is_null());
+                let targets: Vec<String> = configured
+                    .keys()
+                    .filter(|name| selected_hub.is_none_or(|hub| *hub == name.as_str()))
+                    .cloned()
+                    .collect();
+                if targets.is_empty() && action["hub"].is_string() {
+                    return Err("INVALID_INPUT: Unknown hub".into());
+                }
                 let mut removed = 0;
                 let mut detach_errors = Vec::new();
                 for row in self.state.active()?.into_iter().filter(|row| {
-                    row["harness"] != "human"
-                        && action.get("hub").is_none_or(|hub| row["hub"] == *hub)
+                    row["harness"] != "human" && selected_hub.is_none_or(|hub| row["hub"] == *hub)
                 }) {
-                    match self.pause_listener(string(&row, "hub"), string(&row, "listener_id")) {
+                    match self.unlisten_id(string(&row, "hub"), string(&row, "listener_id")) {
                         Ok(true) => removed += 1,
                         Ok(false) => {}
                         Err(error) => {
@@ -1332,10 +1401,47 @@ impl DaemonService {
                         }
                     }
                 }
+                for name in targets {
+                    if let Err(error) = self.set_auto_listen(&name, false) {
+                        detach_errors.push(format!("{name}: {error}"));
+                    }
+                }
                 if !detach_errors.is_empty() {
                     return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
                 }
                 return Ok(json!({"ok":true,"removed":removed}));
+            }
+            "set_listen_mode" => {
+                let mode = string(action, "listen_mode");
+                if !matches!(mode, "auto" | "manual") {
+                    return Err("INVALID_INPUT: listen_mode must be auto or manual".into());
+                }
+                let slot = self.slot(&hub)?;
+                if mode == "auto" && slot.config["autoListen"] != true {
+                    return Err(
+                        "INVALID_INPUT: Enable Auto-Listen before unpinning a session".into(),
+                    );
+                }
+                let lock = self.state.registration_lock(&hub)?;
+                let _guard = lock
+                    .lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                let row = self
+                    .state
+                    .listener(&hub, string(action, "listener_id"))?
+                    .filter(|r| r["harness"] != "human" && r["status"] == "ACTIVE")
+                    .ok_or("LISTENER_NOT_FOUND: Session is not active")?;
+                let activity = self
+                    .session_activity
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|a| a.candidates())
+                    .find(|c| {
+                        c["harness"] == row["harness"] && c["session_id"] == row["session_id"]
+                    })
+                    .and_then(|c| super::super::state::qualifying_activity(&c));
+                let at = activity.map(|(_, at)| at).unwrap_or_else(now_ms);
+                self.state.db.execute("UPDATE local_listeners SET listen_mode=?,user_stopped=0,retirement_reason=NULL,retired_activity_revision=NULL,last_activity_at_ms=CASE WHEN listen_mode='manual' AND ?='auto' THEN MAX(COALESCE(last_activity_at_ms,0),?) ELSE last_activity_at_ms END WHERE hub=? AND listener_id=?", &[json!(mode),json!(mode),json!(at),json!(hub),row["listener_id"].clone()])?;
             }
             "set_scope" => {
                 let id = string(action, "listener_id");
@@ -1378,6 +1484,10 @@ impl DaemonService {
                 )?;
             }
             "open_directory" | "query_directory" => {
+                self.directory_open = true;
+                if op == "open_directory" {
+                    self.refresh_available()?;
+                }
                 self.activity_filter = action["filter"].as_str().unwrap_or("all").into();
                 self.activity_query = if action["mode"] == "activity" {
                     string(action, "query").into()
@@ -1539,7 +1649,11 @@ impl DaemonService {
                     .into_iter()
                     .filter(|row| action["purge_data"] == true || row["harness"] != "human")
                 {
-                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                    self.retire_id(
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    )?;
                 }
                 for p in self
                     .plugins
@@ -1600,7 +1714,7 @@ impl DaemonService {
                         drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
                     }
                     for slot in self.slots.values() {
-                        slot.closed.store(true, Ordering::SeqCst);
+                        slot.close();
                     }
                     for (_, worker) in self.receivers.drain() {
                         let _ = worker.join();
@@ -1643,6 +1757,15 @@ impl DaemonService {
                         }
                     }
                     self.local.reset_data()?;
+                    match fs::remove_dir_all(self.config.state_dir.join("activity")) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => {
+                            return Err(
+                                "STATE_ERROR: Cannot remove session activity metadata".into()
+                            )
+                        }
+                    }
                     self.state.db.transaction(|db| {
                         db.execute("DELETE FROM local_sent_idempotency; DELETE FROM pending_hub_acks; DELETE FROM pending_hub_detaches; DELETE FROM wake_retries;", &[])?;
                         db.execute("DELETE FROM local_signals", &[])?;
@@ -1664,7 +1787,11 @@ impl DaemonService {
             }
             "setup_uninstall_all" => {
                 for row in self.state.active()? {
-                    let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"));
+                    let _ = self.retire_id(
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    );
                 }
                 self.uninstall = Some(action["purge_data"].as_bool().unwrap_or(false));
                 request_shutdown();
@@ -1689,7 +1816,9 @@ impl DaemonService {
             "close_settings" => {
                 self.active_settings_hub = None;
             }
-            "close_directory" => {}
+            "close_directory" => {
+                self.directory_open = false;
+            }
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;
@@ -1697,7 +1826,12 @@ impl DaemonService {
         // awaits without holding service. Passive cached projections remain usable.
         if !matches!(
             op,
-            "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
+            "setup_apply"
+                | "setup_remove_app"
+                | "setup_disconnect_all"
+                | "close_menu"
+                | "close_settings"
+                | "close_directory"
         ) {
             self.push_ui_result(Some(action));
         }

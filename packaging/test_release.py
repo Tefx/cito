@@ -20,6 +20,49 @@ release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
 
+class BundleVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.app = Path(self.directory.name) / "Cito.app"
+        for name in ("Contents/Helpers/cito-native", "Contents/Helpers/cito-ui", "Contents/Resources/AppIcon.icns"):
+            path = self.app / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+        with (self.app / "Contents/Info.plist").open("wb") as stream:
+            plistlib.dump({"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3"}, stream)
+        self.plugin = self.app / "Contents/Resources/plugins/sample"
+        self.plugin.mkdir(parents=True)
+        (self.plugin / "plugin.json").write_text(json.dumps({"command": ["./driver"]}))
+        self.driver = self.plugin / "driver"
+
+    def command(self, argv, **kwargs):
+        output = "arm64" if str(argv[0]).endswith("lipo") else "cito v1.2.3"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    def test_missing_and_nonexecutable_manifest_commands_are_rejected(self):
+        with patch.object(release, "run", side_effect=self.command):
+            for exists in (False, True):
+                if exists:
+                    self.driver.write_text("fixture")
+                    self.driver.chmod(0o600)
+                with self.subTest(exists=exists), self.assertRaisesRegex(release.ReleaseError, "missing or not executable"):
+                    release.verify_bundle(self.app, "1.2.3")
+
+    def test_manifest_command_outside_bin_is_architecture_verified(self):
+        self.driver.write_text("fixture")
+        self.driver.chmod(0o755)
+        with patch.object(release, "run", side_effect=self.command) as run:
+            release.verify_bundle(self.app, "1.2.3")
+            self.assertTrue(any(call.args[0] == ["/usr/bin/lipo", "-archs", self.driver] for call in run.call_args_list))
+        def wrong_arch(argv, **kwargs):
+            if argv[-1] == self.driver:
+                return subprocess.CompletedProcess(argv, 0, "x86_64", "")
+            return self.command(argv, **kwargs)
+        with patch.object(release, "run", side_effect=wrong_arch), self.assertRaisesRegex(release.ReleaseError, "arm64"):
+            release.verify_bundle(self.app, "1.2.3")
+
+
 class MetadataTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

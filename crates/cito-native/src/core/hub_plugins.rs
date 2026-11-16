@@ -1,7 +1,8 @@
 //! Persistent, generic HumanChannel NDJSON subprocess transport.
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -25,64 +26,43 @@ pub fn discover(
     user_root: Option<&Path>,
 ) -> Result<Vec<ChannelPlugin>, String> {
     let mut plugins = Vec::new();
-    let mut seen_ids = HashSet::new();
     if let Some(state) = user_root.and_then(Path::parent) {
         super::plugins::cleanup_retired_companion(state)?;
     }
-    for (root, is_builtin) in roots {
-        if !root.exists() {
+    let external: Vec<_> = roots
+        .iter()
+        .filter(|(_, builtin)| !builtin)
+        .map(|(path, _)| path.clone())
+        .collect();
+    let builtin: Vec<_> = roots
+        .iter()
+        .filter(|(_, builtin)| *builtin)
+        .map(|(path, _)| path.clone())
+        .collect();
+    let loaded = super::plugins::load_plugins_from_roots(&external, &builtin, user_root, true);
+    for descriptor in loaded.plugins {
+        let dir = descriptor.plugin_dir;
+        // Discovery owns validation and fallback selection. A concurrently removed
+        // manifest affects only this entry, never the other channel services.
+        let Some(m) = std::fs::read(dir.join("plugin.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        else {
+            continue;
+        };
+        if descriptor.kind != "human-channel" || m["scope"] == "user" {
             continue;
         }
-        // A bundled fallback may share the user root's target without being a user copy.
-        let is_user_root = !*is_builtin
-            && user_root.is_some_and(|user| super::plugins::same_plugin_root(root, user));
-        let mut subdirs = std::fs::read_dir(root)
-            .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", root.display()))?
-            .map(|entry| entry.map(|entry| entry.path()).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        subdirs.retain(|dir| dir.is_dir());
-        subdirs.sort();
-        for dir in subdirs {
-            let path = dir.join("plugin.json");
-            if !path.exists() {
-                continue;
-            }
-            let dir_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            if is_user_root && super::plugins::remove_legacy_staged_plugin(&dir, true) {
-                continue;
-            }
-            if dir_name == "human" {
-                continue;
-            }
-            if seen_ids.contains(dir_name) {
-                continue;
-            }
-            let m: Value =
-                serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
-                    .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", path.display()))?;
-            if m["id"].as_str() == Some("human") {
-                continue;
-            }
-            let descriptor = super::plugins::parse_manifest(&dir, *is_builtin, &m)
-                .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", path.display()))?;
-            // A higher-priority manifest owns its ID even if it changes kind.
-            if !seen_ids.insert(descriptor.id.clone()) {
-                continue;
-            }
-            if descriptor.kind != "human-channel" || m["scope"] == "user" {
-                continue;
-            }
-            let mut command = descriptor.command;
-            if command[0].starts_with("./") || command[0].starts_with("../") {
-                command[0] = dir.join(&command[0]).to_string_lossy().into();
-            }
-            plugins.push(ChannelPlugin {
-                id: descriptor.id,
-                dir,
-                command,
-                manifest: m,
-            });
+        let mut command = descriptor.command;
+        if command[0].starts_with("./") || command[0].starts_with("../") {
+            command[0] = dir.join(&command[0]).to_string_lossy().into();
         }
+        plugins.push(ChannelPlugin {
+            id: descriptor.id,
+            dir,
+            command,
+            manifest: m,
+        });
     }
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(plugins)
@@ -99,12 +79,14 @@ pub struct ChannelProcess {
     alive: Arc<AtomicBool>,
     pending: Pending,
     reader: Mutex<Option<thread::JoinHandle<()>>>,
+    shutdown_wake: Arc<crate::support::WakePipe>,
 }
 impl ChannelProcess {
     pub fn spawn(
         plugin: &ChannelPlugin,
         callback: Arc<dyn Fn(Value) -> Option<Value> + Send + Sync>,
     ) -> Result<Self, String> {
+        let shutdown_wake = Arc::new(crate::support::WakePipe::new()?);
         let mut child = Command::new(&plugin.command[0])
             .args(&plugin.command[1..])
             .current_dir(&plugin.dir)
@@ -134,13 +116,26 @@ impl ChannelProcess {
             .stdout
             .take()
             .ok_or("PLUGIN_EXEC_FAILED: missing stdout")?;
+        // SAFETY: stdout owns the pipe; nonblocking reads preserve partial lines
+        // while the wake pipe can interrupt an inherited-but-idle stdout.
+        unsafe {
+            let flags = libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL);
+            if flags < 0
+                || libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        }
+        let reader_wake = shutdown_wake.clone();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let (si, p, a) = (stdin.clone(), pending.clone(), alive.clone());
         let reader = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            loop {
-                let mut line = Vec::new();
+            let mut line = Vec::new();
+            while a.load(Ordering::SeqCst) {
                 // A broken plugin cannot grow a line indefinitely.
                 use std::io::Read;
                 match reader
@@ -148,11 +143,36 @@ impl ChannelProcess {
                     .take(8 * 1024 * 1024 + 1)
                     .read_until(b'\n', &mut line)
                 {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if line.len() > 8 * 1024 * 1024 {
+                            break;
+                        }
+                        let mut fds = [
+                            libc::pollfd {
+                                fd: reader.get_ref().as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                            libc::pollfd {
+                                fd: reader_wake.read_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                        ];
+                        if crate::support::poll_until(&mut fds, None).is_err()
+                            || fds[1].revents != 0
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     Ok(0) | Err(_) => break,
                     _ if line.len() > 8 * 1024 * 1024 => break,
                     _ => {}
                 }
-                let Ok(frame) = serde_json::from_slice::<Value>(&line) else {
+                let parsed = serde_json::from_slice::<Value>(&line);
+                line.clear();
+                let Ok(frame) = parsed else {
                     continue;
                 };
                 if frame["op"] == "rpc_result" {
@@ -187,6 +207,7 @@ impl ChannelProcess {
             alive,
             pending,
             reader: Mutex::new(Some(reader)),
+            shutdown_wake,
         })
     }
     pub fn alive(&self) -> bool {
@@ -242,31 +263,27 @@ impl ChannelProcess {
             stdin.take();
         }
         self.alive.store(false, Ordering::SeqCst);
+        self.shutdown_wake.notify();
         if let Ok(mut pending) = self.pending.lock() {
             for (_, tx) in pending.drain() {
                 let _ = tx.send(json!({"ok":false,"error":"Plugin subprocess exited"}));
             }
         }
         if let Ok(mut child) = self.child.lock() {
-            let until = Instant::now() + Duration::from_millis(200);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Err(_) => break,
-                    _ => {}
-                }
-                if Instant::now() >= until {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
+            let mut reaped = child.try_wait().ok().flatten().is_some();
+            if !reaped {
+                let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
+                reaped = child.try_wait().ok().flatten().is_some();
             }
-            // SAFETY: spawn gave this child its own process group. Kill descendants
-            // too: inherited stdout pipes must close before joining the reader.
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            if !reaped {
+                // SAFETY: the owned, unreaped child still reserves its PID and
+                // process group, created by spawn. Never signal after reaping.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
             }
-            let _ = child.kill();
-            let _ = child.wait();
         }
         // No cursor, pairing, or delivery callback may outlive a stopped process.
         // Callers release the process registry and database locks before shutdown.
@@ -296,7 +313,17 @@ fn send_line(stdin: &Mutex<Option<ChildStdin>>, value: &Value) -> Result<(), Str
             Ok(0) => return Err("PLUGIN_EXEC_FAILED: closed stdin".into()),
             Ok(n) => offset += n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
-                thread::sleep(Duration::from_millis(2))
+                crate::support::poll_until(
+                    &mut [libc::pollfd {
+                        fd: stdin.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    }],
+                    Some(until),
+                )?;
+                if Instant::now() >= until {
+                    return Err("PLUGIN_EXEC_FAILED: channel input timed out".into());
+                }
             }
             Err(e) => return Err(format!("PLUGIN_EXEC_FAILED: {e}")),
         }

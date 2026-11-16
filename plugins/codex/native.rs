@@ -1,6 +1,6 @@
 use crate::support::*;
 use serde_json::{json, Value};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -32,31 +32,38 @@ fn desktop_command(command: &str) -> bool {
         }
     })
 }
+fn interactive_process(p: u32, command: &str) -> bool {
+    if has_harness_ancestor(p, |_, command| is_agent_harness(command)) {
+        return false;
+    }
+    if desktop_command(command) {
+        return true;
+    }
+    matches_process(command)
+        && process_has_tty(p)
+        && !command.split_whitespace().any(|arg| {
+            matches!(
+                arg,
+                "exec"
+                    | "exec-server"
+                    | "app-server"
+                    | "mcp-server"
+                    | "cloud"
+                    | "--help"
+                    | "--version"
+            )
+        })
+}
 fn desktop_running(req: &Value) -> Result<bool> {
     if let Some(p) = pid(req) {
         let identity = process_identity(p)?;
         let command =
             str_at(&identity, "command").ok_or("Desktop process command is unavailable")?;
-        return Ok(desktop_command(command) || matches_process(command));
+        return Ok(interactive_process(p, command));
     }
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "uid=,command="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err("Desktop process inspection failed".into());
-    }
-    // SAFETY: geteuid only reads this process's effective user ID.
-    let uid = unsafe { libc::geteuid() }.to_string();
-    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-        line.trim_start()
-            .split_once(char::is_whitespace)
-            .is_some_and(|(owner, command)| {
-                owner == uid
-                    && (desktop_command(command.trim_start())
-                        || matches_process(command.trim_start()))
-            })
-    }))
+    Ok(user_processes()?
+        .into_iter()
+        .any(|pid| process_command(pid).is_ok_and(|command| interactive_process(pid, &command))))
 }
 fn db(req: &Value) -> PathBuf {
     config_home(req, "CITO_CODEX_HOME", "~/.codex").join("state_5.sqlite")
@@ -158,23 +165,234 @@ fn setup(req: &Value) -> Result<Value> {
     })?;
     Ok(json!({"ok":true,"actions":[action]}))
 }
+fn activity_at(row: &Value) -> Option<(u64, u64)> {
+    let revision = str_at(row, "recency_at_ms")
+        .or_else(|| str_at(row, "updated_at"))?
+        .parse::<u64>()
+        .ok()?;
+    Some((
+        revision,
+        if revision < 100_000_000_000 {
+            revision.saturating_mul(1000)
+        } else {
+            revision
+        },
+    ))
+}
+fn effect_path(req: &Value, sid: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    state(req)
+        .join("activity/codex")
+        .join(format!("{:x}.json", Sha256::digest(sid.as_bytes())))
+}
+fn record_effect(req: &Value, sid: &str, text: &str, activity: Option<(u64, u64)>) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let path = effect_path(req, sid);
+    std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
+        .map_err(|_| "Cannot save activity attribution")?;
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    let mut ledger = read_json(&path)?;
+    let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+    let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
+    if !effects.contains(&hash) {
+        effects.push(hash);
+    }
+    ledger["effects"] = json!(effects);
+    if let Some((revision, at)) = activity {
+        ledger["fallback"] = json!({"revision":revision,"at_ms":at});
+    }
+    atomic_write(&path, ledger.to_string().as_bytes())
+}
+fn idle_wake_guard(path: &Path) -> Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| "Cannot inspect in-flight wake")?;
+    // SAFETY: the descriptor stays owned by file. Closing it releases this shared
+    // lock, including on process exit. Wake uses an exclusive lock on the same path.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err("Cannot inspect in-flight wake".into())
+    }
+}
+fn source_activity(req: &Value, row: &Value) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    let path = effect_path(req, str_at(row, "id").unwrap_or(""));
+    std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
+        .map_err(|_| "Cannot save session activity")?;
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    let ledger = read_json(&path)?;
+    let Some((source_revision, recency)) = activity_at(row) else {
+        return Ok(Value::Null);
+    };
+    let cursor_path = path.with_extension("source.json");
+    let mut cached = read_json(&cursor_path)?;
+    let previous = cached.clone();
+    // Retain the maximum observed source integer, never a refresh counter. This
+    // also prevents a source timestamp rollback from decreasing the revision.
+    let revision = source_revision.max(cached["revision"].as_u64().unwrap_or(0));
+    // Do not consume a user-shaped queue record before its attribution commits.
+    // Hold the shared guard through checkpointing so a wake cannot start mid-scan.
+    // The nonblocking acquisition avoids waiting on a wake that needs our ledger lock.
+    let Some(_idle) = idle_wake_guard(&path.with_extension("wake.lock"))? else {
+        return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+    };
+    if let Some(rollout) = str_at(row, "rollout_path") {
+        match std::fs::File::open(rollout) {
+            Ok(mut file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| "Cannot inspect session activity")?;
+                let same_source = cached["device"] == metadata.dev()
+                    && cached["inode"] == metadata.ino()
+                    && cached["offset"]
+                        .as_u64()
+                        .is_some_and(|offset| offset <= metadata.len());
+                let mut offset = if same_source {
+                    cached["offset"].as_u64().unwrap_or(0)
+                } else {
+                    0
+                };
+                let mut latest = if same_source {
+                    cached["user_at_ms"].as_u64()
+                } else {
+                    None
+                };
+                let mut saw_effect = same_source && cached["saw_effect"] == true;
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|_| "Cannot read session activity")?;
+                let mut reader = BufReader::new(file);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    let n = reader
+                        .read_until(b'\n', &mut line)
+                        .map_err(|_| "Cannot read session activity")?;
+                    // Never checkpoint a partially appended JSONL record.
+                    if n == 0 || !line.ends_with(b"\n") {
+                        break;
+                    }
+                    offset += n as u64;
+                    let Ok(event) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line))
+                    else {
+                        continue;
+                    };
+                    let payload = &event["payload"];
+                    let text = if payload["type"] == "user_message" {
+                        payload["message"].as_str().map(str::to_owned)
+                    } else if payload["type"] == "message" && payload["role"] == "user" {
+                        payload["content"].as_array().map(|a| {
+                            a.iter()
+                                .filter_map(|v| v["text"].as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                    } else {
+                        None
+                    };
+                    let Some(text) = text else {
+                        continue;
+                    };
+                    let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+                    let effect = ledger["effects"]
+                        .as_array()
+                        .is_some_and(|effects| effects.contains(&hash));
+                    if effect {
+                        saw_effect = true;
+                    } else if let Some(at) =
+                        event["timestamp"].as_str().and_then(activity_timestamp)
+                    {
+                        latest = Some(latest.unwrap_or(0).max(at));
+                    }
+                }
+                // The cursor bounds repeat work, not the activity revision. Revision
+                // remains the durable DB source integer across scans and restarts.
+                let observed = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision});
+                if observed != previous {
+                    atomic_write(&cursor_path, observed.to_string().as_bytes())?;
+                }
+                if let Some(at) = latest {
+                    return Ok(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
+                }
+                if saw_effect {
+                    return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Cannot read session activity".into()),
+        }
+    }
+    cached["revision"] = json!(revision);
+    if cached != previous {
+        atomic_write(&cursor_path, cached.to_string().as_bytes())?;
+    }
+    if let (Some(effect_revision), Some(effect_at)) = (
+        ledger["fallback"]["revision"].as_u64(),
+        ledger["fallback"]["at_ms"].as_u64(),
+    ) {
+        let kind = if source_revision <= effect_revision || recency <= effect_at {
+            "cito_effect"
+        } else {
+            "user_turn"
+        };
+        return Ok(json!({"revision":revision,"at_ms":recency,"kind":kind}));
+    }
+    Ok(json!({"revision":revision,"at_ms":recency,"kind":"unknown"}))
+}
+fn activity_timestamp(raw: &str) -> Option<u64> {
+    // SAFETY: libc::tm has valid zero-initialized fields before strptime fills them.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let input = std::ffi::CString::new(raw).ok()?;
+    // SAFETY: both C strings and tm remain live through strptime/timegm.
+    let rest = unsafe { libc::strptime(input.as_ptr(), c"%Y-%m-%dT%H:%M:%S".as_ptr(), &mut tm) };
+    if rest.is_null() {
+        return None;
+    }
+    let seconds = unsafe { libc::timegm(&mut tm) };
+    let fraction = raw
+        .get(19..)?
+        .strip_prefix('.')
+        .map(|s| {
+            s.chars()
+                .take_while(char::is_ascii_digit)
+                .take(3)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let ms = format!("{fraction:0<3}").parse::<u64>().ok()?;
+    u64::try_from(seconds)
+        .ok()?
+        .checked_mul(1000)?
+        .checked_add(ms)
+}
 fn row_for_id(req: &Value, id: &str) -> Result<Option<Value>> {
     let path = db(req);
     if !path.try_exists().map_err(|e| e.to_string())? {
         return Ok(None);
     }
-    if sqlite_rows(&path, "PRAGMA table_info(threads)")?.is_empty() {
+    let connection = ReadOnlySqlite::open(&path, Duration::from_millis(1200))?;
+    if connection.rows("PRAGMA table_info(threads)")?.is_empty() {
         return Ok(None);
     }
-    Ok(sqlite_rows(
-        &path,
-        &format!(
+    Ok(connection
+        .rows(&format!(
             "SELECT * FROM threads WHERE id = '{}'",
             id.replace('\'', "''")
-        ),
-    )?
-    .into_iter()
-    .next())
+        ))?
+        .into_iter()
+        .next())
 }
 fn try_rows(req: &Value) -> Result<Vec<Value>> {
     let path = db(req);
@@ -199,12 +417,18 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         "archived",
         "thread_source",
         "source",
+        "rollout_path",
     ]
     .into_iter()
     .filter(|column| has(column))
     .collect::<Vec<_>>()
     .join(", ");
-    let mut predicates = vec!["id IS NOT NULL", "id != ''", "cwd IS NOT NULL", "cwd != ''"];
+    let mut predicates = vec![
+        "id IS NOT NULL",
+        "trim(id,char(9)||char(10)||char(13)||' ') != ''",
+        "cwd IS NOT NULL",
+        "trim(cwd,char(9)||char(10)||char(13)||' ') != ''",
+    ];
     if has("archived") && req["cli_cmd"] != "unlisten" {
         predicates.push("archived = 0");
     }
@@ -212,7 +436,7 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         predicates.push("(thread_source IS NULL OR thread_source = '' OR thread_source = 'user')");
     }
     if has("source") {
-        predicates.push("(source IS NULL OR source NOT LIKE '{\"subagent\"%')");
+        predicates.push("(source IS NULL OR (source NOT IN ('exec','subagent') AND source NOT LIKE '%\"subagent\"%'))");
     }
     let mut order = vec![];
     if has("archived") && req["cli_cmd"] == "unlisten" {
@@ -225,16 +449,32 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
+    let predicate = predicates.join(" AND ");
+    let order = order.join(", ");
+    let window = if req["op"] == "discover_sessions" {
+        let recency = match (has("recency_at_ms"), has("updated_at")) {
+            (true, true) => "COALESCE(recency_at_ms,updated_at,0)",
+            (true, false) => "COALESCE(recency_at_ms,0)",
+            (false, true) => "COALESCE(updated_at,0)",
+            (false, false) => "0",
+        };
+        let cutoff = now_ms().saturating_sub(req["recent_window_ms"].as_u64().unwrap_or(900_000));
+        let retained = req["retained_session_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // One coherent snapshot covers display, recent enrollment and restoration.
+        format!(" AND (id IN ({retained}) OR rowid IN (SELECT rowid FROM threads WHERE {predicate} ORDER BY {order} LIMIT 8) OR CASE WHEN {recency}<100000000000 THEN {recency}*1000 ELSE {recency} END >= {cutoff})")
+    } else {
+        String::new()
+    };
     Ok(connection
         .rows(&format!(
-            "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
-            predicates.join(" AND "),
-            order.join(", "),
-            if req["op"] == "discover_sessions" {
-                " LIMIT 32"
-            } else {
-                ""
-            }
+            "SELECT {projection} FROM threads WHERE {predicate}{window} ORDER BY {order}"
         ))?
         .into_iter()
         // Preserve caller validation for whitespace-only IDs and working directories.
@@ -250,7 +490,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
     }
-    for source in [&req["meta"], &req["headers"]] {
+    for source in [&req["meta"], &req["_meta"], &req["headers"]] {
         let turn = &source["x-codex-turn-metadata"];
         let fragments = turn
             .as_array()
@@ -269,18 +509,26 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
     }
-    if let Some(s) = str_at(req, "explicit_session_id") {
-        ids.push(s.into())
-    }
-    let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
-    if explicit_pid(&public)?.is_none() && req["meta"]["expected_harness"] == "codex" {
-        if let Some(s) = str_at(&req["meta"], "expected_session_id") {
-            ids.push(s.into())
+    if caller_supplied_pid(req)?.is_none() {
+        if [&req["meta"], &req["_meta"]]
+            .iter()
+            .all(|source| str_at(source, "expected_harness").is_none_or(|id| id == "codex"))
+        {
+            if let Some(s) = str_at(req, "explicit_session_id") {
+                ids.push(s.into())
+            }
+        }
+        for source in [&req["meta"], &req["_meta"]] {
+            if str_at(source, "expected_harness") == Some("codex") {
+                if let Some(s) = str_at(source, "expected_session_id") {
+                    ids.push(s.into())
+                }
+            }
         }
     }
     if let Some(s) = env_value(req, "CODEX_THREAD_ID") {
         if !s.trim().is_empty() {
-            ids.push(s)
+            ids.push(s.trim().to_owned())
         }
     }
     ids.sort();
@@ -303,7 +551,17 @@ fn row_caller(req: &Value, r: &Value) -> Value {
             "repo":str_at(r,"git_origin_url").and_then(normalize_repo),
             "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
     }
-    caller("codex", str_at(r, "id").unwrap_or(""), cwd, pid(req), title)
+    caller(
+        req,
+        "codex",
+        r["id"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(""),
+        cwd,
+        pid(req),
+        title,
+    )
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
@@ -321,16 +579,18 @@ pub fn handle(req: &Value) -> Result<Value> {
             let sessions = if running {
                 try_rows(req)?
                     .iter()
-                    .take(8)
                     .map(|r| {
                         let mut c = row_caller(req, r);
+                        // One unreadable rollout must not discard unrelated threads.
+                        // Unknown activity cannot enroll an idle activity-mode session.
+                        c["activity"] = source_activity(req, r).unwrap_or(Value::Null);
                         c["updated_at_ms"] = json!(str_at(r, "recency_at_ms")
                             .or_else(|| str_at(r, "updated_at"))
                             .and_then(|s| s.parse::<u64>().ok())
                             .map(|t| if t < 100_000_000_000 { t * 1000 } else { t }));
-                        c
+                        Ok(c)
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>>>()?
             } else {
                 vec![]
             };
@@ -341,8 +601,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 Ok(v) => v,
                 Err(e) => return Ok(error("INVALID_INPUT", e)),
             };
-            let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
-            if explicit_pid(&public)?.is_some() {
+            if caller_supplied_pid(req)?.is_some() {
                 return Ok(error(
                     if explicit.is_some() {
                         "INVALID_INPUT"
@@ -352,6 +611,19 @@ pub fn handle(req: &Value) -> Result<Value> {
                     "Conflicting caller metadata: explicit bridge PID cannot claim a Codex thread",
                 ));
             }
+            let transport_pid = explicit_pid(req)?.is_some();
+            if explicit.is_none()
+                && transport_pid
+                && pid(req).is_some_and(|p| {
+                    process_command(p)
+                        .is_ok_and(|cmd| is_agent_harness(&cmd) && !matches_process(&cmd))
+                })
+            {
+                return Ok(error(
+                    "BINDING_REQUIRED",
+                    "Transport belongs to another harness",
+                ));
+            }
             let all = try_rows(req)?;
             let known_row = explicit
                 .as_deref()
@@ -359,9 +631,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .transpose()?
                 .flatten();
             let needs_cached_pid = (explicit.is_some() && known_row.is_none())
-                || (explicit.is_none() && (str_at(req, "cli_cmd").is_none() || all.is_empty()));
-            if needs_cached_pid {
-                match cached_caller(req, "codex", explicit.as_deref(), matches_process) {
+                || (explicit.is_none()
+                    && ((!transport_pid && str_at(req, "cli_cmd").is_none()) || all.is_empty()));
+            if needs_cached_pid && (!transport_pid || req["cached_caller"].is_object()) {
+                match cached_caller(req, "codex", explicit.as_deref(), matches_process, |_| {
+                    Ok(())
+                }) {
                     Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),
                     Ok(None) => {}
@@ -380,10 +655,15 @@ pub fn handle(req: &Value) -> Result<Value> {
                 }
                 row.unwrap_or_else(|| json!({"id":id,"cwd":req["cwd"]}))
             } else if str_at(req, "cli_cmd").is_some()
+                || transport_pid
                 || (pid(req).is_none()
-                    && (req["meta"]["expected_harness"] == "codex"
+                    && ([&req["meta"], &req["_meta"]]
+                        .iter()
+                        .any(|source| str_at(source, "expected_harness") == Some("codex"))
                         || (req["http_transport"] != true
-                            && req["meta"]["http_transport"] != true)))
+                            && [&req["meta"], &req["_meta"]]
+                                .iter()
+                                .all(|source| source["http_transport"] != true))))
             {
                 match all
                     .iter()
@@ -405,6 +685,13 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ));
             };
             let c = row_caller(req, &row);
+            // A generic session fence cannot turn an inferred thread into an
+            // authoritative cross-provider conflict. Let other providers resolve it.
+            if explicit.is_none()
+                && has_generic_session_mismatch(req, c["session_id"].as_str().unwrap_or(""))
+            {
+                return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
+            }
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }
@@ -420,16 +707,18 @@ pub fn handle(req: &Value) -> Result<Value> {
                 );
             }
             let id = str_at(req, "session_id").unwrap_or("");
-            let archived = sqlite_rows(
-                &db(req),
-                &format!(
-                    "SELECT archived FROM threads WHERE id = '{}'",
-                    id.replace('\'', "''")
-                ),
-            )
-            .ok()
-            .and_then(|r| r.first().cloned())
-            .and_then(|r| r["archived"].as_str().map(|s| s != "0"));
+            let archived = match row_for_id(req, id) {
+                Ok(row) => row.and_then(|r| r["archived"].as_str().map(|s| s != "0")),
+                Err(error)
+                    if matches!(
+                        error.as_str(),
+                        "Session database is busy" | "Session database deadline exceeded"
+                    ) =>
+                {
+                    return Ok(json!({"ok":true,"status":"transient_error","reason":error}));
+                }
+                Err(error) => return Err(error),
+            };
             let status = if archived == Some(true) {
                 "closed_definitive"
             } else {
@@ -467,6 +756,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     .map(|output| output.map(|o| o.status.success()))
             };
             let already_queued = req["queue_written"] == true;
+            let mut wake_guard = None;
             let queue_confirmed = if already_queued {
                 req["queue_confirmed"] == true
             } else {
@@ -474,6 +764,18 @@ pub fn handle(req: &Value) -> Result<Value> {
                     return Ok(
                         json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":"Codex binary was not found"}),
                     );
+                };
+                // Serialize deliveries and exclude source qualification until the
+                // confirmed effect is durable. OS locks need no stale-PID recovery.
+                wake_guard = match FileLock::acquire(
+                    &effect_path(req, sid).with_extension("wake.lock"),
+                ) {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        return Ok(
+                            json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":"Cannot guard wake attribution"}),
+                        )
+                    }
                 };
                 let mut attempt = 0;
                 loop {
@@ -500,11 +802,23 @@ pub fn handle(req: &Value) -> Result<Value> {
                     thread::sleep(Duration::from_secs(attempt));
                 }
             };
+            // Attribution failure must not erase a confirmed insertion checkpoint:
+            // the host would otherwise retry a queue command that already committed.
+            let attribution_error = if !already_queued && queue_confirmed {
+                row_for_id(req, sid)
+                    .and_then(|row| {
+                        record_effect(req, sid, text, row.as_ref().and_then(activity_at))
+                    })
+                    .err()
+            } else {
+                None
+            };
+            drop(wake_guard);
             if !already_queued && req["checkpoint_only"] == true {
                 // Return the insertion checkpoint before requesting a separately
                 // fenced open. The host rechecks unreadness and binding ownership.
                 return Ok(
-                    json!({"ok":true,"outcome":"delivered_unconfirmed","queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":false,"continue_wake":true}),
+                    json!({"ok":true,"outcome":"delivered_unconfirmed","queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":false,"continue_wake":true,"reason":attribution_error}),
                 );
             }
             let mut opened = false;
@@ -522,7 +836,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 }
             }
             Ok(
-                json!({"ok":true,"outcome":if !already_queued && queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{None}else{Some("Codex open effect was not confirmed")}}),
+                json!({"ok":true,"outcome":if queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{attribution_error}else{Some("Codex open effect was not confirmed".into())}}),
             )
         }
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
