@@ -15276,7 +15276,7 @@ phases:
     Restorable Manual Discovery Demand, Post-Commit Ack Isolation, Metadata-Only Signal
     Queries, Shared Symlink-Safe Atomic Write, UI Request Correlation & Docs Parity
     (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All binding v50 requirements across Contract §§1–7 and the 17-item Admitted
     Finding Ledger (#1–#17) pass; 3-way incremental [REQUIRES_SKILL: contract-and-simplicity]
     audit convergence (uiux-auditor, pathway-auditor, structural-auditor) reaches
@@ -15614,7 +15614,7 @@ phases:
   - id: v50.review
     name: 'V50 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v50` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v50.core`, `v50.ui`,\
@@ -15666,6 +15666,45 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-17T19:57:20.230286Z'
+    done_at: '2026-11-17T20:24:12.072202+00:00'
+    evidence: 'Artifact:
+
+      - Integrated commits on main: df953b5 (v50.core), 567ebe0 (v50.docs), 375ecad
+      (v50.ui), 38ac998 (v50.fix_ui), a0e8436 (v50.fix_core)
+
+      - Gate report: /tmp/v50-review/report-gate-delta.json (DELTA PASS, POSITIVE_GATE_EVIDENCE,
+      17/17 PROVEN)
+
+
+      Verification:
+
+      - 3-way audit convergence (structural-auditor, pathway-auditor, uiux-auditor):
+      ZERO_NEW_ISSUES on a0e8436
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings (both pinned 1.93.1/clippy
+      0.1.93 and 1.95.0/clippy 0.1.95) -> exit 0, 0 warnings/errors
+
+      - Run: cargo test --workspace -- --test-threads=2 -> 569 passed, 0 failed, 4
+      ignored (includes 104 UI tests, 0 warnings)
+
+      - Run: cargo build --release -> exit 0, 0 warnings; 7/7 strict codesign checks
+      passed
+
+      - Run: cargo fmt --all -- --check && git diff --check -> passed
+
+      - Run: python3.12 packaging/release.py check -> passed (version 0.21.3, no release
+      tag)
+
+      - Run: python3.12 -m unittest discover -s packaging -> 17 passed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> passed
+
+      - Run: §1.2 hardcoding & private-name scans -> 0 violations / 0 matches
+
+
+      Spec link:
+
+      - Binding Contract §§1–7, Admitted Finding Ledger #1–#17, Phase v50 Gate'
   - id: v50.fix_core
     name: 'V50 Rust Core Repair: Explicit 0o600 Final-Mode Policy for Credential/Config
       Atomic Writes (v50.PATH-2)'
