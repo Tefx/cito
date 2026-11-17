@@ -15618,30 +15618,33 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v50` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v50.core`, `v50.ui`,\
-      \ and `v50.docs`:\n  1. Execute and verify 3-way incremental `[REQUIRES_SKILL:\
-      \ contract-and-simplicity]` audit convergence (`uiux-auditor`, `pathway-auditor`,\
-      \ `structural-auditor` all reaching `ZERO_NEW_ISSUES`) plus the independent\
-      \ `FULL` gate across Binding Contract §§1–7 and all 17 Admitted Finding Ledger\
-      \ items (`#1`–`#17`).\n  2. Run and verify full workspace regression and packaging\
-      \ checks at version `0.21.3` (with NO release tag) before `PASS`:\n     - `cargo\
-      \ fmt --all -- --check` and `git diff --check`\n     - `cargo clippy --workspace\
-      \ --all-targets -- -D warnings`\n     - `cargo test --workspace`\n     - `cargo\
-      \ build --release` (0 warnings + staged binary rebuild/codesign verification)\n\
-      \     - `python3 packaging/release.py check` (version `0.21.3`, NO release tag)\
-      \ and `python3 -m unittest discover -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \ `v50.docs`, `v50.fix_core`, and `v50.fix_ui`:\n  1. Execute and verify 3-way\
+      \ incremental `[REQUIRES_SKILL: contract-and-simplicity]` audit convergence\
+      \ (`uiux-auditor`, `pathway-auditor`, `structural-auditor` all reaching `ZERO_NEW_ISSUES`)\
+      \ plus the independent `FULL` gate across Binding Contract §§1–7, all 17 Admitted\
+      \ Finding Ledger items (`#1`–`#17`), and Round 1 repair closures (`v50.PATH-1`,\
+      \ `v50.PATH-2`, `uiux-auditor #1/#2` & Tier 2 cleanups).\n  2. Run and verify\
+      \ full workspace regression and packaging checks at version `0.21.3` (with NO\
+      \ release tag) before `PASS`:\n     - `cargo fmt --all -- --check` and `git\
+      \ diff --check`\n     - `cargo clippy --workspace --all-targets -- -D warnings`\n\
+      \     - `cargo test --workspace`\n     - `cargo build --release` (0 warnings\
+      \ + staged binary rebuild/codesign verification)\n     - `python3 packaging/release.py\
+      \ check` (version `0.21.3`, NO release tag) and `python3 -m unittest discover\
+      \ -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
       \     - Zero `§1.2` hardcoding violations across `crates/cito-native/src/core/`\
       \ and `src/macos/`, and zero private/internal name matches (`rda\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`)\
       \ across product and documentation paths.\n\nBoundary:\n- Owner: `gate-reviewer`\
       \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
       \ no_repo_change`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
-      \nAdmit:\n- Depends on `v50.core`, `v50.ui`, and `v50.docs`.\n- Consumed evidence:\
-      \ integrated commits from `v50.core`, `v50.ui`, and `v50.docs`, 3-way incremental\
-      \ audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`\
-      \ to `ZERO_NEW_ISSUES`), independent `FULL` gate report, and full workspace\
-      \ regression outputs.\n\nRecovery:\n- If any audit finding, test failure, clippy/compiler\
-      \ warning, packaging mismatch, or `§1.2`/private-name violation remains open,\
-      \ fail the gate with concrete `file:line` evidence so a scoped repair can close\
-      \ it before Delta re-verification.\n"
+      \nAdmit:\n- Depends on `v50.core`, `v50.ui`, `v50.docs`, `v50.fix_core`, and\
+      \ `v50.fix_ui`.\n- Consumed evidence: integrated commits from `v50.core`, `v50.ui`,\
+      \ `v50.docs`, `v50.fix_core`, and `v50.fix_ui`, 3-way incremental audit convergence\
+      \ (`uiux-auditor`, `pathway-auditor`, `structural-auditor` to `ZERO_NEW_ISSUES`),\
+      \ independent `FULL` gate report, and full workspace regression outputs.\n\n\
+      Recovery:\n- If any audit finding, test failure, clippy/compiler warning, packaging\
+      \ mismatch, or `§1.2`/private-name violation remains open, fail the gate with\
+      \ concrete `file:line` evidence so a scoped repair can close it before Delta\
+      \ re-verification."
     verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace && cargo build --release
       && python3 packaging/release.py check && python3 -m unittest discover -s packaging
@@ -15658,4 +15661,116 @@ phases:
     - v50.core
     - v50.ui
     - v50.docs
+    - v50.fix_core
+    - v50.fix_ui
     agent: gate-reviewer
+  - id: v50.fix_core
+    name: 'V50 Rust Core Repair: Explicit 0o600 Final-Mode Policy for Credential/Config
+      Atomic Writes (v50.PATH-2)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
+      \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
+      \  - docs/**\n    - deploy/**\n    - site/**\n\nDeliver:\n- Resolve `v50.PATH-2`\
+      \ (Rust Core atomic write mode policy):\n  1. Let `plugin_support::atomic_write`\
+      \ (or a sibling `atomic_write_with_mode(..., mode: Option<u32>)`) honor an explicit\
+      \ final-mode policy:\n     - Default `None` preserves existing file mode for\
+      \ plugin-owned files (or `0o600` when creating a new file).\n     - Explicit\
+      \ `Some(0o600)` enforces `0o600` on the published file for Cito credential/config\
+      \ writers in `core/setup.rs:mutate_file`, `core/daemon/mod.rs:mutate_config`,\
+      \ `core/config.rs`, and `core/login.rs:publish` (where applicable), even when\
+      \ overwriting an existing world-readable (`0o644`) file.\n  2. Add regression\
+      \ tests exercising both `setup` and `daemon` credential saves against an existing\
+      \ `0o644` external config path asserting final mode `0o600`, while retaining\
+      \ the `0o640` plugin mode-preservation test.\n\nBoundary:\n- Owner: `rust-engineer`.\
+      \ Isolated worktree transaction modifying `crates/cito-native/src/**` and `crates/cito-native/tests/**`\
+      \ (excluding `tests/support/ui/**`).\n\nAdmit:\n- Depends on `v50.core`.\n-\
+      \ Verification: `cargo test -p cito-native --lib && cargo test -p cito-native\
+      \ --test native daemon:: && cargo test -p cito-native --test native plugins::`\
+      \ pass with 0 warnings. Consumed by `v50.review`.\n\nRecovery:\n- Repair any\
+      \ Rust build or test failure in place within the worktree before completion."
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native daemon:: && cargo test -p cito-native --test native plugins::'
+    evidence_template: 'Artifact:
+
+      - Commit: <sha>
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --lib -> <summary>
+
+      - Run: cargo test -p cito-native --test native daemon:: -> <summary>
+
+      - Run: cargo test -p cito-native --test native plugins:: -> <summary>
+
+
+      Spec link:
+
+      - v50.PATH-2 (atomic_write explicit mode policy 0o600 for credential/config
+      writers vs existing-mode preservation for plugin files)'
+    refs:
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    depends_on:
+    - v50.core
+    agent: rust-engineer
+  - id: v50.fix_ui
+    name: 'V50 macOS Swift UI Repair: Tagged paste_hub_invite Correlation Guard, source_op
+      directory Error Routing & Pill Track Reuse (v50.PATH-1, uiux-auditor #1/#2)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
+      \    - plugins/**\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
+      \nDeliver:\n- Resolve `v50.PATH-1` / `uiux-auditor #1`, `uiux-auditor #2`, and\
+      \ `uiux-auditor` Tier 2 cleanups across `src/macos/**` and `crates/cito-native/tests/support/ui/**`:\n\
+      \  1. **`v50.PATH-1` / `uiux-auditor #1` — Tagged `paste_hub_invite` Error Correlation\
+      \ Guard (`src/macos/Companion.swift:466-471`, `crates/cito-native/tests/support/ui/settings_hubs.rs`)**:\n\
+      \     - Reject tagged `paste_hub_invite` errors unless `request_id` matches\
+      \ `inviteParseRequest`, `hubInviteRequest` (with `!hubInviteRequest.isEmpty`),\
+      \ or `pendingHubSave`, while preserving uncorrelated (`request_id == nil`) fallback.\n\
+      \     - Add a Gate 1 regression in `crates/cito-native/tests/support/ui/settings_hubs.rs`\
+      \ verifying superseded `parse_only` errors do not set `settings_error_banner`.\n\
+      \  2. **`uiux-auditor #2` — `source_op: \"directory\"` Error Routing (`src/macos/Companion.swift:506-508`,\
+      \ `crates/cito-native/tests/support/ui/oracle_e2e.rs`)**:\n     - Route `source_op\
+      \ == \"directory\"` (and `frame.op == \"directory\"` with `sourceOp.isEmpty`)\
+      \ to `directoryQueryError`, and cover `source_op: \"directory\"` in `crates/cito-native/tests/support/ui/oracle_e2e.rs`.\n\
+      \  3. **`uiux-auditor` Tier 2 Cleanups (`src/macos/DirectorySurface.swift`,\
+      \ `src/macos/Companion.swift`)**:\n     - Reuse shared `makePillTrack` in `src/macos/DirectorySurface.swift`\
+      \ and enforce the `!hubInviteRequest.isEmpty` guard in `src/macos/Companion.swift`.\n\
+      \nBoundary:\n- Owner: `frontend-engineer`. Isolated worktree transaction modifying\
+      \ `src/macos/**`, `crates/cito-native/tests/support/ui/**`, and `bin/**`.\n\n\
+      Admit:\n- Depends on `v50.ui`.\n- Verification: `cargo test -p cito-native --test\
+      \ native ui::` passes with 0 warnings and 0 `HeadlessOracle` violations. Consumed\
+      \ by `v50.review`.\n\nRecovery:\n- Repair any Swift build, layout, `HeadlessOracle`,\
+      \ or UI test failure in place within the worktree before completion."
+    verification: 'cargo test -p cito-native --test native ui::'
+    evidence_template: 'Artifact:
+
+      - Commit: <sha>
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --test native ui:: -> <summary>
+
+
+      Spec link:
+
+      - v50.PATH-1 / uiux-auditor #1, uiux-auditor #2, and uiux-auditor Tier 2 cleanups'
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/UIPrimitives.swift
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v50.ui
+    agent: frontend-engineer
