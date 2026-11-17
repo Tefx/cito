@@ -15667,7 +15667,7 @@ phases:
   - id: v50.fix_core
     name: 'V50 Rust Core Repair: Explicit 0o600 Final-Mode Policy for Credential/Config
       Atomic Writes (v50.PATH-2)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
@@ -15721,10 +15721,12 @@ phases:
     depends_on:
     - v50.core
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-17T19:42:51.109128Z'
   - id: v50.fix_ui
     name: 'V50 macOS Swift UI Repair: Tagged paste_hub_invite Correlation Guard, source_op
       directory Error Routing & Pill Track Reuse (v50.PATH-1, uiux-auditor #1/#2)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
@@ -15774,3 +15776,5 @@ phases:
     depends_on:
     - v50.ui
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-17T19:42:51.109239Z'
