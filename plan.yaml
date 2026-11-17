@@ -15276,7 +15276,7 @@ phases:
     Restorable Manual Discovery Demand, Post-Commit Ack Isolation, Metadata-Only Signal
     Queries, Shared Symlink-Safe Atomic Write, UI Request Correlation & Docs Parity
     (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: in_progress
   gate: 'All binding v50 requirements across Contract §§1–7 and the 17-item Admitted
     Finding Ledger (#1–#17) pass; 3-way incremental [REQUIRES_SKILL: contract-and-simplicity]
     audit convergence (uiux-auditor, pathway-auditor, structural-auditor) reaches
@@ -15340,7 +15340,7 @@ phases:
     name: 'V50 Rust Core & Plugins Root-Cause Closure: Restorable Manual Discovery
       Demand, Post-Commit Ack Isolation, Metadata-Only Signal Queries & Shared Atomic
       Write (Contract §§2–6, #1–#8, #11–#14, #16)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - src/macos/**\n    - README.md\n    - docs/**\n    -\
@@ -15439,6 +15439,8 @@ phases:
     - plugins/pi/native.rs
     - plugins/codex/native.rs
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-17T18:39:20.486660Z'
   - id: v50.ui
     name: 'V50 macOS Swift UI Correlation/Error Routing, Per-Tab Settings Builders
       & UI Oracle Calibration (Contract §7, #9, #15, #16)'
