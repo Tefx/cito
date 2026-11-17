@@ -15340,7 +15340,7 @@ phases:
     name: 'V50 Rust Core & Plugins Root-Cause Closure: Restorable Manual Discovery
       Demand, Post-Commit Ack Isolation, Metadata-Only Signal Queries & Shared Atomic
       Write (Contract §§2–6, #1–#8, #11–#14, #16)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - src/macos/**\n    - README.md\n    - docs/**\n    -\
@@ -15441,6 +15441,35 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-17T18:39:20.486660Z'
+    done_at: '2026-11-17T19:11:51.829021+00:00'
+    evidence: 'Artifact:
+
+      - Commit: df953b550c053bd3a5d7a8b7498964764181a7f2 (fast-forwarded to main)
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 294 passed, 0
+      failed, 4 ignored
+
+      - Run: cargo test -p cito-native --test native plugins:: -- --test-threads=2
+      -> 47 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      -> 74 passed, 0 failed
+
+      - Run: cargo check --bins -> passed
+
+      - Run: cargo fmt --all -- --check -> passed
+
+      - Run: git diff --check -> passed
+
+      - Note: cargo clippy unavailable on host (exit 101: no such command: clippy)
+
+
+      Spec link:
+
+      - Binding Contract §§2–6, Admitted Findings #1–#8, #11–#14, #16 (plugins.rs)'
   - id: v50.ui
     name: 'V50 macOS Swift UI Correlation/Error Routing, Per-Tab Settings Builders
       & UI Oracle Calibration (Contract §7, #9, #15, #16)'
