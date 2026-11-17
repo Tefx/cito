@@ -15726,7 +15726,7 @@ phases:
   - id: v50.fix_ui
     name: 'V50 macOS Swift UI Repair: Tagged paste_hub_invite Correlation Guard, source_op
       directory Error Routing & Pill Track Reuse (v50.PATH-1, uiux-auditor #1/#2)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
@@ -15778,3 +15778,22 @@ phases:
     agent: frontend-engineer
     claimed_by: frontend-engineer
     claimed_at: '2026-11-17T19:42:51.109239Z'
+    done_at: '2026-11-17T19:48:37.823193+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 38ac998de6154d1326c44579d482f7d3a719fac2 (fast-forwarded to main)
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --test native ui:: -- --test-threads=2 -> 104
+      passed, 0 failed (0 compiler warnings, 0 HeadlessOracle violations)
+
+      - Run: cargo fmt --all -- --check -> passed
+
+      - Run: git diff --check -> passed
+
+
+      Spec link:
+
+      - v50.PATH-1, uiux-auditor #1, uiux-auditor #2, Tier 2 UI cleanups'
