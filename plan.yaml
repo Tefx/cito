@@ -15614,7 +15614,7 @@ phases:
   - id: v50.review
     name: 'V50 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v50` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v50.core`, `v50.ui`,\
@@ -15664,6 +15664,8 @@ phases:
     - v50.fix_core
     - v50.fix_ui
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-17T19:57:20.230286Z'
   - id: v50.fix_core
     name: 'V50 Rust Core Repair: Explicit 0o600 Final-Mode Policy for Credential/Config
       Atomic Writes (v50.PATH-2)'
