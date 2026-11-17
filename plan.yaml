@@ -15532,7 +15532,7 @@ phases:
   - id: v50.docs
     name: 'V50 Documentation & Env-Table Parity, Version Hygiene & DESIGN.md §8.2
       Trim (Contract §7, #10, #17)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
       \    - crates/cito-native/tests/support/site-clipboard.mjs\n    - packaging/**\n\
@@ -15569,6 +15569,28 @@ phases:
     agent: docs-editor
     claimed_by: docs-editor
     claimed_at: '2026-11-17T19:11:56.229759Z'
+    done_at: '2026-11-17T19:14:09.703817+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 567ebe04d2bc5b49d130008d7b7eac5ed4d2acad (fast-forwarded to main;
+      actual executor: executor)
+
+
+      Verification:
+
+      - Run: git diff --check -> passed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> passed
+
+      - Run: python3.12 packaging/release.py check -> passed (version 0.21.3; system
+      python3 is 3.9 without tomllib)
+
+      - Run: python3.12 -m unittest discover -s packaging -> passed (17 tests)
+
+
+      Spec link:
+
+      - Binding Contract §7 Documentation & Env-Table Parity (#10, #17)'
   - id: v50.review
     name: 'V50 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
