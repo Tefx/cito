@@ -15667,7 +15667,7 @@ phases:
   - id: v50.fix_core
     name: 'V50 Rust Core Repair: Explicit 0o600 Final-Mode Policy for Credential/Config
       Atomic Writes (v50.PATH-2)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
@@ -15723,6 +15723,32 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-17T19:42:51.109128Z'
+    done_at: '2026-11-17T19:48:49.954826+00:00'
+    evidence: 'Artifact:
+
+      - Commit: b8803c1428ef68785bd3077beaa9469503b14576 (rebased onto main after
+      disjoint v50.fix_ui)
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 296 passed, 0
+      failed, 4 ignored
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      -> 75 passed, 0 failed
+
+      - Run: cargo check --bins -> passed (0 warnings)
+
+      - Run: cargo fmt --all -- --check -> passed
+
+      - Run: git diff --check -> passed
+
+
+      Spec link:
+
+      - v50.PATH-2 (explicit 0o600 final-mode policy for credential/config atomic
+      writes)'
   - id: v50.fix_ui
     name: 'V50 macOS Swift UI Repair: Tagged paste_hub_invite Correlation Guard, source_op
       directory Error Routing & Pill Track Reuse (v50.PATH-1, uiux-auditor #1/#2)'
