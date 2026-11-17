@@ -74,6 +74,35 @@ for (const required of ['index.html', 'docs/guide.html', 'docs/hosting.html', 'd
   assert.ok(pages.includes(required), `Missing required page: ${required}`);
 }
 const documents = new Map(pages.map(page => [new URL(page, site).href, readFileSync(new URL(page, site), 'utf8')]));
+// Compare only variable-name cells in the Hub Server tables, not mentions elsewhere.
+function hubServerVars(text, html = false) {
+  const table = html
+    ? text.match(/<h3>Hub Server<\/h3>\s*<div\b[^>]*><table\b[^>]*>([\s\S]*?)<\/table>/)
+    : text.match(/^### Hub Server\s*\n([\s\S]*?)(?=^### |^## |(?![\s\S]))/m);
+  assert.ok(table, 'Missing Hub Server table');
+  const rows = html
+    ? [...table[1].matchAll(/<tr>\s*<td><code>(CITO_[^<]+)<\/code><\/td>/g)]
+    : [...table[1].matchAll(/^\|\s*`(CITO_[^\x60]+)`\s*\|/gm)];
+  const vars = rows.map(row => row[1].replaceAll('&lt;', '<').replaceAll('&gt;', '>')).sort();
+  assert.ok(vars.length > 0, 'Empty Hub Server table');
+  assert.equal(new Set(vars).size, vars.length, 'Duplicate Hub Server variable');
+  return vars;
+}
+const hubTables = [
+  ['README.md', readFileSync(new URL('../README.md', site), 'utf8'), false],
+  ['deploy/hub/README.md', readFileSync(new URL('../deploy/hub/README.md', site), 'utf8'), false],
+  ['site/docs/hosting.html', documents.get(new URL('docs/hosting.html', site).href), true]
+];
+const hubVars = hubTables.map(([name, text, html]) => [name, hubServerVars(text, html)]);
+assert.ok(hubVars[0][1].includes('CITO_OIDC_REDIRECT_PORT'), 'Hub Server redirect port missing');
+for (const [name, vars] of hubVars.slice(1)) assert.deepEqual(vars, hubVars[0][1], `${name}: Hub Server variables differ from README.md`);
+for (const [name, text, html] of hubTables) {
+  const cell = html ? '<td><code>CITO_HUB_PORT</code></td>' : '| `CITO_HUB_PORT` |';
+  assert.ok(text.includes(cell), `${name}: missing test row`);
+  const missing = text.replace(cell, html ? '<td>removed</td>' : '| removed |');
+  assert.notDeepEqual(hubServerVars(missing, html), hubVars[0][1], `${name}: missing table row must be detected`);
+}
+
 const homepage = documents.get(new URL('index.html', site).href);
 const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
 for (const [page, html] of documents) {

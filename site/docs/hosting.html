@@ -221,6 +221,7 @@ sqlite3 /srv/backups/cito-hub.sqlite 'PRAGMA integrity_check;'</code></pre>
 <tr><td><code>CITO_HUB_TOKEN</code></td><td>Required shared bearer credential in token mode; standalone <code>--token</code>.</td></tr>
 <tr><td><code>CITO_OIDC_ISSUER</code></td><td>Required HTTPS issuer in OIDC mode; standalone <code>--issuer</code>.</td></tr>
 <tr><td><code>CITO_OIDC_CLIENT_ID</code></td><td>Required public client ID in OIDC mode; standalone <code>--client-id</code>.</td></tr>
+<tr><td><code>CITO_OIDC_REDIRECT_PORT</code></td><td>Optional advertised OIDC callback port, <code>1..=65535</code>; standalone <code>--redirect-port</code> takes precedence.</td></tr>
 <tr><td><code>CITO_OIDC_ADMIN_USERS</code></td><td>Empty by default; comma-separated verified owner usernames or OIDC subjects allowed to administer shared channel fields.</td></tr>
 <tr><td><code>CITO_JWKS_COOLDOWN_MS</code></td><td><code>60000</code>; minimum cooldown between forced JWKS refreshes for unknown signing keys.</td></tr>
 <tr><td><code>CITO_PLUGIN_&lt;ID&gt;_&lt;KEY&gt;</code></td><td>No default; seeds declared Hub-scoped channel fields at startup, including <code>CITO_PLUGIN_TELEGRAM_BOT_TOKEN</code>.</td></tr></tbody></table></div>
