@@ -466,8 +466,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
             if sourceOp == "paste_hub_invite", let request = frame.request_id {
-                if request == inviteParseRequest { inviteParseRequest=""; return }
-                if request == hubInviteRequest { hubInvitePending = false }
+                guard (!inviteParseRequest.isEmpty && request == inviteParseRequest) ||
+                      (!hubInviteRequest.isEmpty && request == hubInviteRequest) ||
+                      (pendingHubSave != nil && request == pendingHubSave?.requestId) else { return }
+                if !inviteParseRequest.isEmpty && request == inviteParseRequest { inviteParseRequest=""; return }
+                if !hubInviteRequest.isEmpty && request == hubInviteRequest { hubInvitePending = false }
             }
             // A command may emit both its result and a trailing generic error.
             // Neither can settle a retry or overwrite its feedback.
@@ -493,7 +496,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 hostHubPortPending = false
                 submittedHostHubRequestId = ""
             }
-            if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || (sourceOp.isEmpty && (frame.request_id == nil || frame.request_id == hubInviteRequest)) {
+            if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || (sourceOp.isEmpty && (frame.request_id == nil || (!hubInviteRequest.isEmpty && frame.request_id == hubInviteRequest))) {
                 hubInvitePending=false; hubInvitePastedUntil = .distantPast
             }
             if isAddHubError { pendingHubSave = nil }
@@ -503,7 +506,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 setComposerStatus(error)
                 pendingComposer = nil
             } else if isAddHubError { addHubError = error }
-            else if ["query_directory", "open_directory"].contains(sourceOp) {
+            else if ["query_directory", "open_directory", "directory"].contains(sourceOp) || (frame.op == "directory" && sourceOp.isEmpty) {
                 if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
             }
             else if directoryVisible && directoryActionOps.contains(sourceOp) {
@@ -536,7 +539,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 appCheckedUntil[app] = Date().addingTimeInterval(1.5)
                 rebuildFeedbackAfter(1.5)
             }
-            if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? "") {
+            if hubInvitePending && !hubInviteRequest.isEmpty && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? "") {
                 hubInvitePending=false; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
             let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil

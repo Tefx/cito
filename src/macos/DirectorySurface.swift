@@ -105,7 +105,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         // Top Search Bar (560 × 46 pt, y: 394)
         let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
         searchBar.identifier = NSUserInterfaceItemIdentifier("directory_search_bar")
-        let modeTrack = roundedView(NSRect(x:14,y:9,width:174,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
+        let modeTrack = makePillTrack(NSRect(x:14,y:9,width:174,height:28),radius:8)
         modeTrack.identifier = NSUserInterfaceItemIdentifier("directory_mode_track")
         searchBar.addSubview(modeTrack)
 
@@ -155,7 +155,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let facetSeparator = roundedView(NSRect(x: 151, y: 9, width: 1, height: 14), radius: 0, color: .separatorColor)
         facetSeparator.identifier = NSUserInterfaceItemIdentifier("directory_facet_separator")
         facetBar.addSubview(facetSeparator)
-        let scopeTrack = roundedView(NSRect(x:16,y:3,width:129,height:26),radius:13,color:.labelColor.withAppearanceAlpha(0.06))
+        let scopeTrack = makePillTrack(NSRect(x:16,y:3,width:129,height:26),radius:13,bordered:false)
         scopeTrack.identifier = NSUserInterfaceItemIdentifier("directory_scope_track")
         facetBar.addSubview(scopeTrack)
         let scopePills: [(String, String, CGFloat, CGFloat)] = [
@@ -190,7 +190,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
         directoryFacetControls["dir_harness:all"] = allHarnessesPill
 
-        let activityTrack = roundedView(NSRect(x:16,y:3,width:226,height:26),radius:13,color:.labelColor.withAppearanceAlpha(0.06))
+        let activityTrack = makePillTrack(NSRect(x:16,y:3,width:226,height:26),radius:13,bordered:false)
         activityTrack.identifier = NSUserInterfaceItemIdentifier("activity_filter_track")
         activityTrack.isHidden = true
         facetBar.addSubview(activityTrack)

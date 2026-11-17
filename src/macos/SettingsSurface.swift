@@ -217,7 +217,7 @@ extension Companion {
             }
             settled = true
         }
-        if request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation)) {
+        if !hubInviteRequest.isEmpty && request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation)) {
             hubInvitePending = false; settled = true
         }
         if request == submittedHostHubRequestId && (operation.isEmpty || operation == "set_host_hub") {

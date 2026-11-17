@@ -39,11 +39,22 @@ fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
         .rev()
         .find(|a| a["op"] == "open_directory")
         .unwrap();
-    f.send(p, json!({"op":"directory","ok":false,"source_op":"open_directory","request_id":query["request_id"],"error":"Directory unavailable"}));
-    let s = inspect(&f, p);
-    assert!(s["directory_items"]
-        .to_string()
-        .contains("Directory unavailable"));
+    for (op, source) in [
+        ("directory", "open_directory"),
+        ("error", "directory"),
+        ("directory", "directory"),
+        ("directory", ""),
+    ] {
+        let error = format!("Directory unavailable: {op}/{source}");
+        f.send(p, json!({"op":op,"ok":false,"source_op":source,"request_id":query["request_id"],"error":error}));
+        let s = inspect(&f, p);
+        assert!(s["directory_items"].to_string().contains(&error));
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Mutation failed",
+            "Directory failures must not replace the Settings banner"
+        );
+    }
 }
 
 #[test]

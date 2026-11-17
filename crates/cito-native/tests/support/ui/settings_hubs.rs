@@ -81,6 +81,73 @@ fn clipboard_join_errors_stay_outside_an_idle_add_hub_form() {
 }
 
 #[test]
+fn superseded_invite_parse_errors_preserve_the_current_draft_and_pending_requests() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    for replacement in [
+        "https://corrected.example.com",
+        "cito setup --hub corrected --url https://corrected.example.com",
+    ] {
+        f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"cito setup --hub stale --url https://stale.example.com"}));
+        inspect(&f, p);
+        let stale = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "paste_hub_invite")
+            .unwrap();
+        assert_eq!(stale["parse_only"], true);
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"settings_hub_url","value":replacement}),
+        );
+        let before = inspect(&f, p);
+        let current = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "paste_hub_invite")
+            .unwrap();
+        for request in [stale["request_id"].clone(), json!("")] {
+            f.send(p,json!({"op":"error","source_op":"paste_hub_invite","request_id":request,"error":"Delayed invalid invite"}));
+            let after = inspect(&f, p);
+            for key in ["pending_hub_save", "pending_controls", "hub_invite_pending"] {
+                assert_eq!(after[key], before[key], "{key}");
+            }
+            for id in ["settings_hub_name", "settings_hub_url"] {
+                assert_eq!(
+                    node(&after, "settings_items", id)["text"],
+                    node(&before, "settings_items", id)["text"]
+                );
+            }
+            assert!(node(&after, "settings_items", "settings_error_banner").is_null());
+            assert!(node(&after, "settings_items", "add_hub_error").is_null());
+        }
+        if replacement.starts_with("cito setup ") {
+            assert_ne!(current["request_id"], stale["request_id"]);
+            // Acceptance of B proves A's error did not clear the newer parse.
+            f.send(p,json!({"op":"hub_invite","request_id":current["request_id"],"config":{"name":"corrected","url":"https://corrected.example.com"}}));
+            let parsed = inspect(&f, p);
+            assert_eq!(
+                node(&parsed, "settings_items", "settings_hub_name")["text"],
+                "corrected"
+            );
+            assert_eq!(
+                node(&parsed, "settings_items", "settings_hub_url")["text"],
+                "https://corrected.example.com"
+            );
+        }
+    }
+}
+
+#[test]
 fn v41_start_sharing_and_auth_validate_ports_without_blocking_stop() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
