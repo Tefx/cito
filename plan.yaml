@@ -15473,7 +15473,7 @@ phases:
   - id: v50.ui
     name: 'V50 macOS Swift UI Correlation/Error Routing, Per-Tab Settings Builders
       & UI Oracle Calibration (Contract §7, #9, #15, #16)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
@@ -15527,10 +15527,12 @@ phases:
     depends_on:
     - v50.core
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-17T19:11:56.229643Z'
   - id: v50.docs
     name: 'V50 Documentation & Env-Table Parity, Version Hygiene & DESIGN.md §8.2
       Trim (Contract §7, #10, #17)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
       \    - crates/cito-native/tests/support/site-clipboard.mjs\n    - packaging/**\n\
@@ -15565,6 +15567,8 @@ phases:
     depends_on:
     - v50.core
     agent: docs-editor
+    claimed_by: docs-editor
+    claimed_at: '2026-11-17T19:11:56.229759Z'
   - id: v50.review
     name: 'V50 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
