@@ -15473,7 +15473,7 @@ phases:
   - id: v50.ui
     name: 'V50 macOS Swift UI Correlation/Error Routing, Per-Tab Settings Builders
       & UI Oracle Calibration (Contract §7, #9, #15, #16)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
@@ -15529,6 +15529,26 @@ phases:
     agent: frontend-engineer
     claimed_by: frontend-engineer
     claimed_at: '2026-11-17T19:11:56.229643Z'
+    done_at: '2026-11-17T19:26:51.357500+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 8ff0a3e866d09d64f67ad93b3b82c00268b262f5 (rebased onto main after
+      disjoint v50.docs)
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --test native ui:: -- --test-threads=2 -> 103
+      passed, 0 failed (0 compiler warnings, 0 HeadlessOracle violations)
+
+      - Run: git diff --check -> passed
+
+      - Run: cargo fmt --all -- --check -> passed
+
+
+      Spec link:
+
+      - Binding Contract §7 UI & UI Test Calibration (#9, #15, #16 UI tests)'
   - id: v50.docs
     name: 'V50 Documentation & Env-Table Parity, Version Hygiene & DESIGN.md §8.2
       Trim (Contract §7, #10, #17)'
