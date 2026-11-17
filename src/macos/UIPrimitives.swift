@@ -74,6 +74,11 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     }
 }
 
+func makePillTrack(_ frame: NSRect, radius: CGFloat, bordered: Bool = true) -> SurfaceView {
+    roundedView(frame, radius: radius, color: .labelColor.withAppearanceAlpha(0.06),
+                border: bordered ? .labelColor.withAppearanceAlpha(0.08) : nil)
+}
+
 enum PillAlignment { case leading, trailing }
 @discardableResult
 func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,

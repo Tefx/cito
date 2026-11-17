@@ -324,7 +324,6 @@ extension Companion: NSMenuDelegate {
             }
         }
         var activeRows: [(id: String, view: NSView)] = []
-        let home = NSHomeDirectory()
         let map = harnessMap
         let targetHub = effectiveTargetHub
         let listeners = self.listeners.filter { targetHub.isEmpty || $0.hub == targetHub }
@@ -392,7 +391,7 @@ extension Companion: NSMenuDelegate {
                 self?.copyText(listener.display_address, control: copy)
             }
             card.addSubview(copy)
-            let cwd = listener.cwd == home ? "~" : listener.cwd.hasPrefix(home + "/") ? "~" + listener.cwd.dropFirst(home.count) : listener.cwd
+            let cwd = compactHomePath(listener.cwd)
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText: String
             pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
@@ -679,7 +678,7 @@ extension Companion: NSMenuDelegate {
                         let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
                         let rowId = "candidate:\(c.harness):\(c.session_id)"
                         row.identifier = NSUserInterfaceItemIdentifier(rowId)
-                        let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
+                        let shortCwd = compactHomePath(c.cwd)
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
                         let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, harnessName: visual.name, customTitle: c.custom_title == true)

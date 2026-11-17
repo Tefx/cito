@@ -18,6 +18,10 @@ enum CitoMetrics {
     static let activityTextWidth = directoryWidth - directoryTextX - directoryInset
 }
 
+func compactHomePath(_ path: String, home: String = NSHomeDirectory()) -> String {
+    path == home ? "~" : path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+}
+
 func normalizedHubURL(_ raw: String) -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.hasSuffix("://") ? trimmed : trimmed.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)

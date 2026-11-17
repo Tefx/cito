@@ -368,26 +368,26 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     }
     func receive(_ data: Data) {
         if handleHeadlessTestCommand(data) { return }
-        if let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any], object["op"] as? String == "hub_invite" {
-            guard !inviteParseRequest.isEmpty, object["request_id"] as? String == inviteParseRequest, let cfg=object["config"] as? [String:Any] else{return}
+        guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
+        if frame.op == "hub_invite" {
+            guard !inviteParseRequest.isEmpty, frame.request_id == inviteParseRequest, let cfg = frame.config else { return }
             inviteParseRequest=""; addHubError=nil
-            addHubUrl=cfg["url"] as? String ?? ""; addHubName=cfg["name"] as? String ?? ""
-            addHubAuth=cfg["authMode"] as? String ?? cfg["auth_mode"] as? String ?? "none"
-            addHubAuthExplicit = cfg["authMode"] != nil || cfg["auth_mode"] != nil
-            addHubToken=cfg["token"] as? String ?? ""; addHubUser=cfg["user"] as? String ?? ""
-            addHubIssuer=cfg["issuer"] as? String ?? cfg["oidcIssuer"] as? String ?? ""; addHubClientId=cfg["clientId"] as? String ?? cfg["client_id"] as? String ?? cfg["oidcClientId"] as? String ?? ""
-            let port = cfg["redirect_port"] ?? cfg["redirectPort"] ?? cfg["oidcRedirectPort"]
-            addHubRedirectPort = (port as? Int).map(String.init) ?? port as? String ?? ""
+            addHubUrl=cfg.url ?? ""; addHubName=cfg.name ?? ""
+            addHubAuth=cfg.authMode ?? cfg.auth_mode ?? "none"
+            addHubAuthExplicit = cfg.authMode != nil || cfg.auth_mode != nil
+            addHubToken=cfg.token ?? ""; addHubUser=cfg.user ?? ""
+            addHubIssuer=cfg.issuer ?? cfg.oidcIssuer ?? ""
+            addHubClientId=cfg.clientId ?? cfg.client_id ?? cfg.oidcClientId ?? ""
+            addHubRedirectPort=(cfg.redirect_port ?? cfg.redirectPort ?? cfg.oidcRedirectPort)?.text ?? ""
             rebuildSettingsPanel(syncFields: false); return
         }
-        guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         // Receipt-only settlements never project settings or results from an
         // obsolete authority. They still own the matching request's pending UI.
         if (frame.op == "settings" && frame.settings == nil) ||
            (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
             let settled = settleReceiptOnly(frame)
             if settled {
-                if let warning = frame.warning { menuBannerError = warning }
+                if let warning = frame.warning, !settingsVisible { menuBannerError = warning }
                 rebuild()
                 refreshDirectoryViews()
                 if settingsVisible { rebuildSettingsPanel() }
@@ -462,20 +462,19 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         let activityPresenceChanged = frame.activity_has_any.map { $0 != activityHasAny } ?? false
-        if frame.op == "error" || actionFailure || (frame.op == "settings" && frame.ok == false) {
+        if frame.op == "error" || (frame.ok == false && frame.op != "channel_test_result") {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
             if sourceOp == "paste_hub_invite", let request = frame.request_id {
                 if request == inviteParseRequest { inviteParseRequest=""; return }
-                guard request == hubInviteRequest else { return }
-                hubInvitePending = false
+                if request == hubInviteRequest { hubInvitePending = false }
             }
             // A command may emit both its result and a trailing generic error.
             // Neither can settle a retry or overwrite its feedback.
             if ["send_signal", "send_reply_from_human"].contains(sourceOp),
                (pendingComposer == nil || frame.request_id != pendingComposer?.requestId) { return }
             if sourceOp == "set_host_hub", let requestId = frame.request_id,
-               requestId != submittedHostHubRequestId { return }
+               requestId != submittedHostHubRequestId && !settledControl { return }
             let isAddHubOp = ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(sourceOp) || (pendingHubSave != nil && frame.request_id == pendingHubSave?.requestId)
             if ["setup_save_hub", "save_hub"].contains(sourceOp), let requestId = frame.request_id,
                requestId != pendingHubSave?.requestId { return }
@@ -485,7 +484,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if let pending = pendingHubSave {
                 isAddHubError = isAddHubOp && frame.request_id == pending.requestId
             } else {
-                isAddHubError = addHubFormOpen && isAddHubOp
+                isAddHubError = addHubFormOpen && isAddHubOp && sourceOp != "paste_hub_invite"
             }
             let error = frame.error ?? frame.warning ?? "Unknown daemon error"
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
@@ -494,7 +493,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 hostHubPortPending = false
                 submittedHostHubRequestId = ""
             }
-            if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || sourceOp.isEmpty {
+            if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || (sourceOp.isEmpty && (frame.request_id == nil || frame.request_id == hubInviteRequest)) {
                 hubInvitePending=false; hubInvitePastedUntil = .distantPast
             }
             if isAddHubError { pendingHubSave = nil }
@@ -510,7 +509,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             else if directoryVisible && directoryActionOps.contains(sourceOp) {
                 directoryActionError = error; directoryActionErrorSourceOp = sourceOp; updateDirectoryWarnings()
             }
-            else if settingsVisible || pendingHubSave != nil { settingsBannerError = error }
+            else if settingsVisible || pendingHubSave != nil || sourceOp == "paste_hub_invite" { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild()
@@ -522,7 +521,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if frame.op == "state", frame.ok == true, frame.committed == true,
            frame.request_id != nil, frame.hubs == nil || frame.listeners == nil {
             _ = settleReceiptOnly(frame)
-            if let warning = frame.warning { settingsBannerError = warning; menuBannerError = warning }
+            if let warning = frame.warning { settingsBannerError = warning; if !settingsVisible { menuBannerError = warning } }
             rebuild()
             refreshDirectoryViews()
             if settingsVisible { rebuildSettingsPanel() }

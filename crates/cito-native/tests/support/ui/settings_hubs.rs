@@ -1,6 +1,86 @@
 use super::*;
 
 #[test]
+fn host_toggle_failures_settle_and_redraw_the_settings_banner() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["host_hub"]["enabled"] = json!(true);
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    for id in ["toggle_host_hub", "toggle_host_hub_auth"] {
+        control(&f, p, id);
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "set_host_hub")
+            .unwrap();
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", id)["enabled"],
+            false
+        );
+        f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":request["request_id"],"error":"Sharing failed"}));
+        let s = inspect(&f, p);
+        assert_eq!(s["pending_controls"], json!([]));
+        assert_eq!(node(&s, "settings_items", id)["enabled"], true);
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Sharing failed"
+        );
+        control(&f, p, "dismiss_settings_error");
+    }
+}
+
+#[test]
+fn clipboard_join_errors_stay_outside_an_idle_add_hub_form() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"https://hub.example.com"}),
+    );
+    control(&f, p, "paste_hub_invite");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "paste_hub_invite")
+        .unwrap();
+    f.send(
+        p,
+        json!({"op":"error","request_id":"unrelated","error":"Other request failed"}),
+    );
+    assert_eq!(inspect(&f, p)["hub_invite_pending"], true);
+    for correlated in [true, false] {
+        let mut error = json!({"op":"error","source_op":"paste_hub_invite","error":"Join failed"});
+        if correlated {
+            error["request_id"] = request["request_id"].clone();
+        }
+        f.send(p, error);
+        let s = inspect(&f, p);
+        assert_eq!(s["hub_invite_pending"], false);
+        assert!(node(&s, "settings_items", "add_hub_error").is_null());
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Join failed"
+        );
+    }
+}
+
+#[test]
 fn v41_start_sharing_and_auth_validate_ports_without_blocking_stop() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

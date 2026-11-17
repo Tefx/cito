@@ -19,6 +19,26 @@ fn latest(f: &Fixture, p: usize, op: &str) -> Value {
         .find(|a| a["op"] == op)
         .unwrap()
 }
+#[test]
+fn payload_free_save_errors_have_only_the_form_as_their_owner() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    open(&f, p, &settings(), "hubs");
+    control(&f, p, "open_add_hub");
+    input(&f, p, "settings_hub_url", "https://hub.example.com");
+    control(&f, p, "submit_add_hub");
+    let request = latest(&f, p, "setup_save_hub");
+    f.send(p, json!({"op":"settings","source_op":"setup_save_hub","request_id":request["request_id"],"ok":false,"warning":"Save failed"}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "add_hub_error")["text"],
+        "Save failed"
+    );
+    assert!(node(&s, "settings_items", "settings_error_banner").is_null());
+    assert!(node(&s, "items", "menu_error_row").is_null());
+}
+
 fn focus(f: &Fixture, p: usize, id: &str) {
     f.send(p, json!({"op":"test_focus_field","id":id}));
     assert_eq!(inspect(f, p)["field_editors"][0]["id"], id);
@@ -139,11 +159,12 @@ fn real_host_and_nested_invite_receipts_settle_pending_controls_after_bounding()
 
 #[test]
 fn url_only_oidc_edit_discovers_destination_metadata_and_preserves_overrides() {
-    use cito_native::core::config::{discover_hub_config, merge_hub_config};
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let f = Fixture::new(
+        json!({"hubs":{"personal":{"url":"https://old.example.com","authMode":"oidc","issuer":"https://old-id.example.com","clientId":"old-client","redirectPort":8400}}}),
+    );
     let p = start(&f);
     let mut cfg = settings();
     cfg["hubs"][0] = json!({"name":"personal","url":"https://old.example.com","auth_mode":"oidc","enabled":true,"is_default":true,"status":"connected","issuer":"https://old-id.example.com","client_id":"old-client","redirect_port":8400,"is_builtin":false});
@@ -176,20 +197,25 @@ fn url_only_oidc_edit_discovers_destination_metadata_and_preserves_overrides() {
         .unwrap();
     });
     input(&f, p, "settings_hub_url", &url);
+    input(&f, p, "settings_hub_redirect_port", " 8400 ");
     control(&f, p, "submit_add_hub");
     let request = latest(&f, p, "setup_save_hub");
     for key in ["issuer", "client_id", "redirect_port"] {
         assert!(request.get(key).is_none(), "{request}");
     }
-    let adopted = discover_hub_config(merge_hub_config(&cfg["hubs"][0], &request)).unwrap();
+    f.daemon(&[]);
+    let (status, response) = f.action(request.clone());
+    assert_eq!(status, 200, "{response}");
     server.join().unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    let adopted = &saved["hubs"]["personal"];
     assert_eq!(adopted["issuer"], "https://new-id.example.com");
     assert_eq!(adopted["clientId"], "new-client");
     assert_eq!(adopted["redirectPort"], 8500);
     f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":request["request_id"],"error":"Retry"}));
     input(&f, p, "settings_hub_issuer", "https://override.example.com");
     input(&f, p, "settings_hub_client_id", "");
-    input(&f, p, "settings_hub_redirect_port", "0");
+    input(&f, p, "settings_hub_redirect_port", " 0 ");
     control(&f, p, "submit_add_hub");
     let explicit = latest(&f, p, "setup_save_hub");
     assert_eq!(explicit["issuer"], "https://override.example.com");
@@ -264,7 +290,10 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     assert!(discovered.get("client_id").is_none());
     control(&f, p, "cancel_add_hub");
     control(&f, p, "open_add_hub");
-    for alias in ["redirect_port", "redirectPort", "oidcRedirectPort"] {
+    for (alias, port_value) in ["redirect_port", "redirectPort", "oidcRedirectPort"]
+        .into_iter()
+        .flat_map(|alias| [(alias, json!(4319)), (alias, json!("4319"))])
+    {
         input(
             &f,
             p,
@@ -274,7 +303,7 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
         let request = latest(&f, p, "paste_hub_invite");
         let mut config =
             json!({"url":"https://hub.example.com","auth_mode":"oidc","clientId":"desktop"});
-        config[alias] = json!(4319);
+        config[alias] = port_value;
         f.send(
             p,
             json!({"op":"hub_invite","request_id":request["request_id"],"config":config}),

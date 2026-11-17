@@ -148,8 +148,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
         let cwd = peer.cwd ?? ""
-        let home = NSHomeDirectory()
-        let shortCwd = cwd == home ? "~" : cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd
+        let shortCwd = compactHomePath(cwd)
         let context = (peer.repo ?? "").isEmpty ? (peer.harness == "human" ? "" : shortCwd) : peer.repo ?? ""
         let repoText = (context.isEmpty ? "" : " · \(context)") + branchSuffix
         line1RepoLabel.font = .systemFont(ofSize:11)

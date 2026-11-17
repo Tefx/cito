@@ -281,7 +281,26 @@ struct SettingsPayload: Decodable, Equatable {
     let host_hub: HostHubSummary
     let launch_at_login: Bool
 }
+// Invite ports accept both daemon numeric values and clipboard string aliases.
+enum InvitePort: Decodable {
+    case number(Int), string(String)
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if let port = try? value.decode(Int.self) { self = .number(port) }
+        else { self = .string(try value.decode(String.self)) }
+    }
+    var text: String {
+        switch self { case .number(let port): return String(port); case .string(let port): return port }
+    }
+}
+struct HubInviteConfig: Decodable {
+    let url: String?, name: String?, authMode: String?, auth_mode: String?
+    let token: String?, user: String?, issuer: String?, oidcIssuer: String?
+    let clientId: String?, client_id: String?, oidcClientId: String?
+    let redirect_port: InvitePort?, redirectPort: InvitePort?, oidcRedirectPort: InvitePort?
+}
 struct Frame: Decodable {
+    let config: HubInviteConfig?
     let truncated: Bool?
     let op: String
     let hub: String?

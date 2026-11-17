@@ -203,6 +203,7 @@ extension Companion {
     @discardableResult
     func settleReceiptOnly(_ frame: Frame) -> Bool {
         var settled = settleChannelReceipt(frame)
+        var routedToForm = false
         guard let request = frame.request_id else { return settled }
         let operation = frame.source_op ?? frame.action ?? ""
         let failed = frame.ok == false || frame.op == "error"
@@ -210,7 +211,7 @@ extension Companion {
         if let pending = pendingHubSave, request == pending.requestId,
            operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation) {
             pendingHubSave = nil
-            if failed { addHubError = message ?? "Hub save failed." }
+            if failed { addHubError = message ?? "Hub save failed."; routedToForm = true }
             else if frame.authority_changed != true && (frame.committed == true || frame.ok == true) {
                 finishHubSave(pending)
             }
@@ -229,7 +230,7 @@ extension Companion {
            frame.channel == nil || frame.channel == pending.target {
             pendingControls.removeValue(forKey: request); settled = true
         }
-        if settled, let message = message { settingsBannerError = message }
+        if settled && !routedToForm, let message = message { settingsBannerError = message }
         return settled
     }
 
@@ -436,7 +437,7 @@ extension Companion {
             MenuControl.intrinsicWidth($0.0, leadingSymbol:$0.1, paddingX:12)
         }
         let tabsWidth = tabWidths.reduce(0,+) + 12
-        let tabsTrack = roundedView(NSRect(x:62+floor((400-tabsWidth)/2),y:10,width:tabsWidth,height:28),radius:9,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
+        let tabsTrack = makePillTrack(NSRect(x:62+floor((400-tabsWidth)/2),y:10,width:tabsWidth,height:28),radius:9)
         tabsTrack.identifier = NSUserInterfaceItemIdentifier("settings_tab_track")
         header.addSubview(tabsTrack)
         let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: tabWidths[0], height: 24), leadingSymbol: "square.grid.2x2", radius: 7)
@@ -496,6 +497,103 @@ extension Companion {
             banner.addSubview(dismiss); root.addSubview(banner)
         }
 
+        buildAppsTab(in: root)
+        buildChannelsTab(in: root)
+        buildHubsTab(in: root)
+
+        // Persistent Footer (520 × 44 pt, y: 0)
+        let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 44))
+        footerBar.identifier = NSUserInterfaceItemIdentifier("settings_footer")
+        footerBar.alphaValue = uninstallConfirmOpen ? 0.35 : 1
+        footerBar.addSubview(roundedView(NSRect(x: 0, y: 43, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
+        let launchAtLogin = settings?.launch_at_login ?? false
+        let loginBtn = MenuControl("Start Cito at Login", frame: NSRect(x: 20, y: 10, width: 164, height: 24),
+            leadingSymbol: launchAtLogin ? "checkmark.square.fill" : "square", radius: 6)
+        loginBtn.identifier = NSUserInterfaceItemIdentifier("settings_launch_at_login")
+        loginBtn.style = .subtleHeader
+        loginBtn.setAccessibilityRole(.checkBox)
+        loginBtn.setAccessibilityValue(launchAtLogin ? 1 : 0)
+        loginBtn.label.alignment = .left
+        loginBtn.layoutContents()
+        loginBtn.pressed = { [weak self] in
+            self?.emit(["op": "set_launch_at_login", "enabled": !launchAtLogin])
+        }
+        footerBar.addSubview(loginBtn)
+
+        let uninstallBtn = MenuControl("Disconnect Agent Apps…", frame: NSRect(x: 316, y: 10, width: MenuControl.intrinsicWidth("Disconnect Agent Apps…", paddingX: 12), height: 24), radius: 6)
+        uninstallBtn.identifier = NSUserInterfaceItemIdentifier("open_uninstall_confirm")
+        uninstallBtn.style = .destructiveHover
+        uninstallBtn.pressed = { [weak self] in
+            guard let self = self else { return }
+            self.uninstallConfirmOpen = true
+            self.uninstallPurgeData = false
+            self.rebuildSettingsPanel()
+        }
+        footerBar.addSubview(uninstallBtn)
+        layoutBar(in: footerBar, insetLeft: 20, insetRight: 20, y: 10, height: 24, leading: [loginBtn], trailing: [uninstallBtn])
+        root.addSubview(footerBar)
+
+        if uninstallConfirmOpen {
+            let overlay = ModalOverlay(frame:NSRect(x:0,y:0,width:520,height:460))
+            overlay.identifier = NSUserInterfaceItemIdentifier("uninstall_modal_overlay")
+            let confirmBox = roundedView(NSRect(x: 40, y: 150, width: 440, height: 112), radius: 10,
+                color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: CitoPalette.dangerText.withAppearanceAlpha(0.35))
+            confirmBox.identifier = NSUserInterfaceItemIdentifier("uninstall_confirm_box")
+
+            confirmBox.addSubview(textLabel("Disconnect Agent Apps",NSRect(x:12,y:82,width:416,height:18),size:12.5,weight:.semibold))
+            let purgeCheckbox = MenuControl("Also delete local data and Hub settings",
+                frame: NSRect(x: 12, y: 50, width: 416, height: 22),
+                leadingSymbol: uninstallPurgeData ? "checkmark.square.fill" : "square", radius: 6)
+            purgeCheckbox.identifier = NSUserInterfaceItemIdentifier("uninstall_purge_data")
+            purgeCheckbox.style = .subtleHeader
+            purgeCheckbox.setAccessibilityRole(.checkBox)
+            purgeCheckbox.setAccessibilityValue(uninstallPurgeData ? 1 : 0)
+            purgeCheckbox.label.alignment = .left
+            purgeCheckbox.layoutContents()
+            purgeCheckbox.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.uninstallPurgeData.toggle()
+                self.rebuildSettingsPanel()
+            }
+            confirmBox.addSubview(purgeCheckbox)
+
+            let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 32, y: 16, width: MenuControl.intrinsicWidth("Cancel"), height: 24), radius: 6)
+            cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_all")
+            cancelUninstallBtn.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.uninstallConfirmOpen = false
+                self.uninstallPurgeData = false
+                self.rebuildSettingsPanel()
+            }
+            confirmBox.addSubview(cancelUninstallBtn)
+
+            let disconnectTitle=uninstallPurgeData ? "Disconnect & Delete Data" : "Disconnect Apps"
+            let disconnect=MenuControl(disconnectTitle,frame:NSRect(x:112,y:16,width:MenuControl.intrinsicWidth(disconnectTitle),height:24),radius:6)
+            disconnect.identifier=NSUserInterfaceItemIdentifier("confirm_disconnect_all")
+            disconnect.style = .destructive
+            disconnect.toolTip = uninstallPurgeData ? "Disconnect all Agent Apps and delete local data and Hub settings" : "Disconnect all Agent Apps and keep Cito running"
+            disconnect.pressed = { [weak self] in
+                guard let self = self else { return }
+                let purge = self.uninstallPurgeData
+                self.uninstallConfirmOpen = false
+                self.uninstallPurgeData = false
+                self.emit(["op": "setup_disconnect_all", "purge_data": purge])
+                self.rebuildSettingsPanel()
+            }
+            confirmBox.addSubview(disconnect)
+            layoutBar(in: confirmBox, insetLeft: 12, insetRight: 12, y: 14, height: 24, leading: [cancelUninstallBtn], trailing: [disconnect])
+            overlay.addSubview(confirmBox); root.addSubview(overlay)
+        }
+
+        window.invalidateShadow()
+        if revealAddHub && addHubFormOpen, let form=root.subviews.compactMap({($0 as? NSScrollView)?.documentView}).flatMap({$0.subviews}).first(where:{$0.identifier?.rawValue=="add_hub_form"}) { form.scrollToVisible(form.bounds) }
+        if let id = focusedId, let field = settingsFieldControls[id] {
+            window.makeFirstResponder(field)
+            if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }
+        }
+    }
+
+    func buildAppsTab(in root: NSView) {
         // Tab 1: Agent Apps (520 × 368 pt, y: 44)
         let appsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
         appsView.identifier = NSUserInterfaceItemIdentifier("settings_apps_tab")
@@ -570,6 +668,9 @@ extension Companion {
         }
         mountSettingsCards(appsView, in: root)
 
+    }
+
+    func buildChannelsTab(in root: NSView) {
         // Tab 2: Human Channels (520 × 368 pt, y: 44)
         let channelsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
         channelsView.identifier = NSUserInterfaceItemIdentifier("settings_channels_tab")
@@ -1003,6 +1104,9 @@ extension Companion {
         }
         mountSettingsCards(channelsView, in: root)
 
+    }
+
+    func buildHubsTab(in root: NSView) {
         // Tab 3: Hubs & Network (520 × 368 pt, y: 44)
         let hubsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
         hubsView.identifier = NSUserInterfaceItemIdentifier("settings_hubs_tab")
@@ -1057,7 +1161,7 @@ extension Companion {
         let selectedEndpoint = (selectedLan ? hostHub.lan_url : hostHub.tailscale_url) ?? hostHub.endpoint_url
         let selectedInvite = (selectedLan ? hostHub.lan_invite_command : hostHub.tailscale_invite_command) ?? hostHub.invite_command
         if hasAddressChoice {
-            let addressTrack = roundedView(NSRect(x:14,y:82,width:0,height:26),radius:8,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
+            let addressTrack = makePillTrack(NSRect(x:14,y:82,width:0,height:26),radius:8)
             addressTrack.identifier = NSUserInterfaceItemIdentifier("host_hub_addr_track")
             var addressPills: [NSView] = []
             for (mode,title) in [("tailscale","Tailscale"),("lan","Local IP")] {
@@ -1187,8 +1291,7 @@ extension Companion {
                 form.addSubview(makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:addHubName,accessibilityLabel:"Hub name"))
                 fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14))
                 let authOptions = [("none","Trusted Network"),("token","Shared Token"),("oidc","Team Sign-In")]
-                let authTrack = roundedView(NSRect(x:68,y:118,width:398,height:26),radius:13,
-                    color:.labelColor.withAppearanceAlpha(0.06))
+                let authTrack = makePillTrack(NSRect(x:68,y:118,width:398,height:26),radius:13,bordered:false)
                 authTrack.identifier = NSUserInterfaceItemIdentifier("settings_hub_auth_track")
                 var authPills: [NSView] = []
                 for (mode,label) in authOptions {
@@ -1298,7 +1401,7 @@ extension Companion {
                     if committed != nil || (initialURL != nil && url != initialURL) {
                         if iss == (committed?.issuer ?? initial?.issuer ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"issuer") }
                         if cid == (committed?.clientId ?? initial?.client_id ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"client_id") }
-                        if self.addHubRedirectPort == (committed?.redirectPort ?? initial?.redirect_port.map(String.init) ?? "") { action.removeValue(forKey:"redirect_port") }
+                        if self.addHubRedirectPort.trimmingCharacters(in: .whitespacesAndNewlines) == (committed?.redirectPort ?? initial?.redirect_port.map(String.init) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"redirect_port") }
                     }
                 }
                 let pending = PendingHubSave(name:name, url:url, requestId:UUID().uuidString, generation:self.addHubDraftGeneration,
@@ -1400,96 +1503,6 @@ extension Companion {
         }
         mountSettingsCards(hubsView, in: root)
 
-        // Persistent Footer (520 × 44 pt, y: 0)
-        let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 44))
-        footerBar.identifier = NSUserInterfaceItemIdentifier("settings_footer")
-        footerBar.alphaValue = uninstallConfirmOpen ? 0.35 : 1
-        footerBar.addSubview(roundedView(NSRect(x: 0, y: 43, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-        let launchAtLogin = settings?.launch_at_login ?? false
-        let loginBtn = MenuControl("Start Cito at Login", frame: NSRect(x: 20, y: 10, width: 164, height: 24),
-            leadingSymbol: launchAtLogin ? "checkmark.square.fill" : "square", radius: 6)
-        loginBtn.identifier = NSUserInterfaceItemIdentifier("settings_launch_at_login")
-        loginBtn.style = .subtleHeader
-        loginBtn.setAccessibilityRole(.checkBox)
-        loginBtn.setAccessibilityValue(launchAtLogin ? 1 : 0)
-        loginBtn.label.alignment = .left
-        loginBtn.layoutContents()
-        loginBtn.pressed = { [weak self] in
-            self?.emit(["op": "set_launch_at_login", "enabled": !launchAtLogin])
-        }
-        footerBar.addSubview(loginBtn)
-
-        let uninstallBtn = MenuControl("Disconnect Agent Apps…", frame: NSRect(x: 316, y: 10, width: MenuControl.intrinsicWidth("Disconnect Agent Apps…", paddingX: 12), height: 24), radius: 6)
-        uninstallBtn.identifier = NSUserInterfaceItemIdentifier("open_uninstall_confirm")
-        uninstallBtn.style = .destructiveHover
-        uninstallBtn.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.uninstallConfirmOpen = true
-            self.uninstallPurgeData = false
-            self.rebuildSettingsPanel()
-        }
-        footerBar.addSubview(uninstallBtn)
-        layoutBar(in: footerBar, insetLeft: 20, insetRight: 20, y: 10, height: 24, leading: [loginBtn], trailing: [uninstallBtn])
-        root.addSubview(footerBar)
-
-        if uninstallConfirmOpen {
-            let overlay = ModalOverlay(frame:NSRect(x:0,y:0,width:520,height:460))
-            overlay.identifier = NSUserInterfaceItemIdentifier("uninstall_modal_overlay")
-            let confirmBox = roundedView(NSRect(x: 40, y: 150, width: 440, height: 112), radius: 10,
-                color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: CitoPalette.dangerText.withAppearanceAlpha(0.35))
-            confirmBox.identifier = NSUserInterfaceItemIdentifier("uninstall_confirm_box")
-
-            confirmBox.addSubview(textLabel("Disconnect Agent Apps",NSRect(x:12,y:82,width:416,height:18),size:12.5,weight:.semibold))
-            let purgeCheckbox = MenuControl("Also delete local data and Hub settings",
-                frame: NSRect(x: 12, y: 50, width: 416, height: 22),
-                leadingSymbol: uninstallPurgeData ? "checkmark.square.fill" : "square", radius: 6)
-            purgeCheckbox.identifier = NSUserInterfaceItemIdentifier("uninstall_purge_data")
-            purgeCheckbox.style = .subtleHeader
-            purgeCheckbox.setAccessibilityRole(.checkBox)
-            purgeCheckbox.setAccessibilityValue(uninstallPurgeData ? 1 : 0)
-            purgeCheckbox.label.alignment = .left
-            purgeCheckbox.layoutContents()
-            purgeCheckbox.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.uninstallPurgeData.toggle()
-                self.rebuildSettingsPanel()
-            }
-            confirmBox.addSubview(purgeCheckbox)
-
-            let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 32, y: 16, width: MenuControl.intrinsicWidth("Cancel"), height: 24), radius: 6)
-            cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_all")
-            cancelUninstallBtn.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.uninstallConfirmOpen = false
-                self.uninstallPurgeData = false
-                self.rebuildSettingsPanel()
-            }
-            confirmBox.addSubview(cancelUninstallBtn)
-
-            let disconnectTitle=uninstallPurgeData ? "Disconnect & Delete Data" : "Disconnect Apps"
-            let disconnect=MenuControl(disconnectTitle,frame:NSRect(x:112,y:16,width:MenuControl.intrinsicWidth(disconnectTitle),height:24),radius:6)
-            disconnect.identifier=NSUserInterfaceItemIdentifier("confirm_disconnect_all")
-            disconnect.style = .destructive
-            disconnect.toolTip = uninstallPurgeData ? "Disconnect all Agent Apps and delete local data and Hub settings" : "Disconnect all Agent Apps and keep Cito running"
-            disconnect.pressed = { [weak self] in
-                guard let self = self else { return }
-                let purge = self.uninstallPurgeData
-                self.uninstallConfirmOpen = false
-                self.uninstallPurgeData = false
-                self.emit(["op": "setup_disconnect_all", "purge_data": purge])
-                self.rebuildSettingsPanel()
-            }
-            confirmBox.addSubview(disconnect)
-            layoutBar(in: confirmBox, insetLeft: 12, insetRight: 12, y: 14, height: 24, leading: [cancelUninstallBtn], trailing: [disconnect])
-            overlay.addSubview(confirmBox); root.addSubview(overlay)
-        }
-
-        window.invalidateShadow()
-        if revealAddHub && addHubFormOpen, let form=root.subviews.compactMap({($0 as? NSScrollView)?.documentView}).flatMap({$0.subviews}).first(where:{$0.identifier?.rawValue=="add_hub_form"}) { form.scrollToVisible(form.bounds) }
-        if let id = focusedId, let field = settingsFieldControls[id] {
-            window.makeFirstResponder(field)
-            if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }
-        }
     }
 
     func openSettingsPanel() {

@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["hubs"][0]["human_state_status"] = json!("current");
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    for (operation, id) in [
+        ("human_inbox_update", "toggle_inbox"),
+        ("unlisten_all", "stop_all"),
+    ] {
+        control(&f, p, id);
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == operation)
+            .unwrap();
+        f.send(p, json!({"op":"state","ok":false,"source_op":operation,"request_id":request["request_id"],"error":"Mutation failed"}));
+        let s = inspect(&f, p);
+        assert_eq!(s["pending_controls"], json!([]));
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Mutation failed"
+        );
+    }
+    control(&f, p, "open_directory");
+    inspect(&f, p);
+    let query = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "open_directory")
+        .unwrap();
+    f.send(p, json!({"op":"directory","ok":false,"source_op":"open_directory","request_id":query["request_id"],"error":"Directory unavailable"}));
+    let s = inspect(&f, p);
+    assert!(s["directory_items"]
+        .to_string()
+        .contains("Directory unavailable"));
+}
+
+#[test]
 fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1690,16 +1736,24 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         control(&f, p, &format!("settings_hub_auth:{mode}"));
         let s = inspect(&f, p);
         let track = node(&s, "settings_items", "settings_hub_auth_track");
-        assert_eq!(track["radius"], 13);
-        assert_eq!(track["border_width"], 0);
-        assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
+        // Selection styling is checked by the contrast oracle. This assertion
+        // owns packing geometry rather than implementation-specific RGBA values.
+        let mut right = 0.0;
         for candidate in ["none", "token", "oidc"] {
             let pill = node(
                 &s,
                 "settings_items",
                 &format!("settings_hub_auth:{candidate}"),
             );
-            assert_eq!(pill["border_width"], if candidate == mode { 1 } else { 0 });
+            let x = pill["x"].as_f64().unwrap();
+            assert!(x >= right);
+            right = x + pill["width"].as_f64().unwrap();
+            assert!(right <= track["width"].as_f64().unwrap());
+            assert!(pill["y"].as_f64().unwrap() >= 0.0);
+            assert!(
+                pill["y"].as_f64().unwrap() + pill["height"].as_f64().unwrap()
+                    <= track["height"].as_f64().unwrap()
+            );
         }
         let labels: Vec<_> = nodes(&node(&s, "settings_items", "add_hub_form")["children"])
             .into_iter()
@@ -2301,22 +2355,23 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 assert_eq!(icon["width"], 28);
             }
         } else if tab == "channels" {
-            for (appearance, dark) in [("light", false), ("dark", true)] {
+            for appearance in ["light", "dark"] {
                 let snapshot = inspect_as(&f, p, Some(appearance));
                 let track = node(&snapshot, "settings_items", "channel_hub_strip");
-                assert_eq!(track["radius"], 13);
-                assert_eq!(track["draws_background"], true);
-                let red = track["background"][0].as_f64().unwrap();
-                assert!(if dark { red > 0.9 } else { red < 0.1 });
-                assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
-                assert_eq!(
-                    node(&snapshot, "settings_items", "channel_hub_selector:local")["border_width"],
-                    1
-                );
-                assert_eq!(
-                    node(&snapshot, "settings_items", "channel_hub_selector:work")["border_width"],
-                    0
-                );
+                assert!(track["width"].as_f64().unwrap() <= 398.0);
+                let mut right = 0.0;
+                for hub in ["local", "work"] {
+                    let pill = node(
+                        &snapshot,
+                        "settings_items",
+                        &format!("channel_hub_selector:{hub}"),
+                    );
+                    let x = pill["x"].as_f64().unwrap();
+                    assert!(x >= right);
+                    right = x + pill["width"].as_f64().unwrap();
+                    assert!(right <= track["width"].as_f64().unwrap());
+                    assert!(pill["height"].as_f64().unwrap() <= track["height"].as_f64().unwrap());
+                }
             }
             assert_eq!(
                 node(&s, "settings_items", "plugin_icon:telegram")["tint"],
