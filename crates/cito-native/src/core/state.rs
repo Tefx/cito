@@ -509,7 +509,7 @@ impl LocalState {
         self.db.transaction(|c| {
             let listener = current_listener(c, hub, node)?;
             for id in ids {
-            let rows = c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?", &[json!(hub),json!(node),id.clone()])?;
+            let rows = c.query("SELECT hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?", &[json!(hub),json!(node),id.clone()])?;
             if !rows.first().is_some_and(|signal| signal_matches_listener(signal, &listener)) { continue; }
             c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(now_ms()),json!(hub),json!(node),id.clone()])?;
             c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?,?,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(channel),json!(now_ms()),json!(hub),json!(node),id.clone()])?;
@@ -520,7 +520,7 @@ impl LocalState {
     pub fn isolate_stale_signals(&self, listener: &Value) -> Result<(), String> {
         self.db.transaction(|db| {
             let current = current_listener(db, string(listener,"hub"), string(listener,"listener_id"))?;
-            for signal in db.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING')", &[listener["hub"].clone(),listener["listener_id"].clone()])? {
+            for signal in db.query("SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING')", &[listener["hub"].clone(),listener["listener_id"].clone()])? {
                 if !signal_matches_listener(&signal, &current) {
                     db.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='authority_mismatch',dispatcher_token=NULL WHERE hub=? AND signal_id=?", &[signal["hub"].clone(),signal["signal_id"].clone()])?;
                 }
@@ -528,6 +528,43 @@ impl LocalState {
             Ok(())
         })
     }
+    /// Unread identity and dispatch metadata; payloads stay in paginated inbox reads.
+    pub fn current_signal_metadata(
+        &self,
+        hub: &str,
+        node: &str,
+        after_seq: u64,
+        limit: usize,
+        match_id: Option<&str>,
+    ) -> Result<Vec<Value>, String> {
+        let Some(listener) = self.listener(hub, node)? else {
+            return Ok(Vec::new());
+        };
+        let mut rows = Vec::new();
+        self.db.transaction(|db| db.query_while(
+            "SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (?=0 OR seq>?) AND (? IS NULL OR signal_id=? OR batch_id=?) ORDER BY seq,signal_id",
+            &[json!(hub),json!(node),json!(after_seq),json!(after_seq),json!(match_id),json!(match_id),json!(match_id)],
+            |row| {
+                if signal_matches_listener(&row, &listener) { rows.push(row); }
+                Ok(rows.len() < limit)
+            },
+        ))?;
+        Ok(rows)
+    }
+
+    pub fn unread_count(&self, hub: &str, node: &str, live_only: bool) -> Result<u64, String> {
+        let Some(listener) = self.listener(hub, node)? else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        self.db.transaction(|db| db.query_each(
+            "SELECT hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (?=0 OR (expires_at_ms>? AND state!='EXPIRED_UNSENT'))",
+            &[json!(hub),json!(node),json!(live_only),json!(now_ms())],
+            |row| { if signal_matches_listener(&row, &listener) { count += 1; } },
+        ))?;
+        Ok(count)
+    }
+
     pub fn current_signals(
         &self,
         hub: &str,
@@ -537,6 +574,7 @@ impl LocalState {
         let Some(listener) = self.listener(hub, node)? else {
             return Ok(Vec::new());
         };
+        let limit = limit.clamp(1, 1000);
         let mut rows = Vec::new();
         self.db.transaction(|db| db.query_while("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY created_at,seq", &[json!(hub),json!(node)], |row| {
             if signal_matches_listener(&row, &listener) { rows.push(row); }
@@ -590,7 +628,7 @@ pub(super) fn reconcile_wake_retry(c: &Connection, hub: &str, id: &str) -> Resul
     let retryable = if let Some(listener) =
         listener.filter(|row| row["status"] == "ACTIVE" && row["harness"] != "human")
     {
-        c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE') AND (held_reason IS NULL OR held_reason='driver_unavailable') AND expires_at_ms>? AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?)",
+        c.query("SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE') AND (held_reason IS NULL OR held_reason='driver_unavailable') AND expires_at_ms>? AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?)",
             &[json!(hub), json!(id), listener["binding_generation"].clone(), json!(now_ms()), json!(now_ms())])?
             .iter().any(|signal| signal_matches_listener(signal, &listener))
     } else {

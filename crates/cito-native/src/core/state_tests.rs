@@ -34,6 +34,63 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn unread_metadata_is_bounded_ordered_payload_free_and_authority_scoped() -> Result<(), String> {
+    let f = Fixture::new()?;
+    for index in 0..140 {
+        f.seed(&format!("signal-{index:03}"), index / 2)?;
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET message=?,batch_card=?,batch_id='batch'",
+        &[json!("x".repeat(100_000)), json!("y".repeat(100_000))],
+    )?;
+    f.state.db.execute(
+        "UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='signal-001'",
+        &[],
+    )?;
+    let rows = f
+        .state
+        .current_signal_metadata("local", "c_1", 0, 128, None)?;
+    assert_eq!(rows.len(), 128);
+    assert_eq!(rows[0]["signal_id"], "signal-000");
+    assert_eq!(rows[1]["signal_id"], "signal-002");
+    for row in &rows {
+        assert_eq!(row.as_object().unwrap().len(), 9);
+        assert!(row.get("message").is_none() && row.get("batch_card").is_none());
+    }
+    let remaining = f
+        .state
+        .current_signal_metadata("local", "c_1", 64, 128, None)?;
+    assert_eq!(remaining.len(), 10);
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 139);
+    f.state.db.execute(
+        "UPDATE local_signals SET expires_at_ms=0 WHERE signal_id='signal-002'",
+        &[],
+    )?;
+    assert_eq!(f.state.unread_count("local", "c_1", true)?, 138);
+    assert_eq!(
+        f.state
+            .current_signal_metadata("local", "c_1", 0, 128, Some("signal-139"))?
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .current_signal_metadata("local", "c_1", 0, usize::MAX, Some("batch"))?
+            .len(),
+        139
+    );
+    f.state
+        .db
+        .execute("UPDATE local_listeners SET status='FENCED_INACTIVE'", &[])?;
+    assert!(f
+        .state
+        .current_signal_metadata("local", "c_1", 0, 128, None)?
+        .is_empty());
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 0);
+    Ok(())
+}
+
+#[test]
 fn signal_reads_and_acknowledgments_isolate_origin_and_accept_principal_aliases(
 ) -> Result<(), String> {
     let f = Fixture::new()?;

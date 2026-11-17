@@ -14,7 +14,7 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(45);
-const POLL: Duration = Duration::from_millis(20);
+const CANCELLATION_CHECK: Duration = Duration::from_millis(20);
 const MAX_JSON: u64 = 1024 * 1024;
 type LoginResult = (String, Value);
 
@@ -33,7 +33,10 @@ impl Deadline<'_> {
             .ok_or_else(|| "OIDC_LOGIN_TIMEOUT: OIDC login deadline exceeded".into())
     }
     fn pause(&self) -> Result<(), String> {
-        std::thread::sleep(self.remaining()?.min(POLL));
+        crate::support::poll_until(
+            &mut [],
+            Some(Instant::now() + self.remaining()?.min(CANCELLATION_CHECK)),
+        )?;
         self.remaining().map(|_| ())
     }
     fn request(&self, request: ureq::Request) -> Result<ureq::Request, String> {
@@ -362,26 +365,9 @@ fn response_json(response: ureq::Response, deadline: &Deadline<'_>) -> Result<Va
 }
 fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), String> {
     deadline.remaining()?;
-    let temporary = path.with_extension(format!("json.{}.tmp", crate::plugins::random_uuid_v4()));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|e| e.to_string())?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-        file.write_all(cache.to_string().as_bytes())
-            .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        deadline.remaining()?;
-        fs::rename(&temporary, path).map_err(|e| e.to_string())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    crate::support::atomic_write_checked(path, cache.to_string().as_bytes(), || {
+        deadline.remaining().map(|_| ())
+    })
 }
 
 /// Recover a rejected bearer generation even if its JWT has not expired. Callers must pass
@@ -575,7 +561,17 @@ fn recover_inner(
                         break code;
                     }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => deadline.pause()?,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    crate::support::poll_until(
+                        &mut [libc::pollfd {
+                            fd: listener.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        }],
+                        Some(Instant::now() + deadline.remaining()?.min(CANCELLATION_CHECK)),
+                    )?;
+                    deadline.remaining()?;
+                }
                 Err(error) => return Err(format!("AUTH_UNAVAILABLE: OIDC callback: {error}")),
             }
         };

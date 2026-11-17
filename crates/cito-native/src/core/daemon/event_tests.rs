@@ -89,6 +89,135 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn save_hub_honors_outer_default_selection_before_nested_config() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    for (name, outer, nested, expected) in [
+        ("personal", Some(true), false, "personal"),
+        ("cloud", Some(false), true, "personal"),
+        ("shared", None, true, "shared"),
+    ] {
+        let mut action =
+            json!({"op":"save_hub","name":name,"config":{"url":"local://","set_default":nested}});
+        if let Some(outer) = outer {
+            action["set_default"] = json!(outer);
+        }
+        f.service.action(&action)?;
+        assert_eq!(f.service.raw_config()?["default_hub"], expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn discovery_demand_restores_only_configured_manual_hard_exits() -> Result<(), String> {
+    for (status, stopped, mode, reason, harness, disconnected, enabled, expected) in [
+        (
+            "UNLISTENED",
+            0,
+            "manual",
+            "hard_exit",
+            "agent",
+            false,
+            true,
+            true,
+        ),
+        (
+            "UNLISTENED",
+            0,
+            "manual",
+            "disconnected",
+            "agent",
+            false,
+            true,
+            false,
+        ),
+        (
+            "UNLISTENED",
+            1,
+            "manual",
+            "hard_exit",
+            "agent",
+            false,
+            true,
+            false,
+        ),
+        (
+            "FENCED_INACTIVE",
+            0,
+            "manual",
+            "hard_exit",
+            "agent",
+            false,
+            true,
+            false,
+        ),
+        (
+            "UNLISTENED",
+            0,
+            "auto",
+            "hard_exit",
+            "agent",
+            false,
+            true,
+            false,
+        ),
+        (
+            "UNLISTENED",
+            0,
+            "manual",
+            "hard_exit",
+            "disabled",
+            false,
+            true,
+            false,
+        ),
+        (
+            "UNLISTENED",
+            0,
+            "manual",
+            "hard_exit",
+            "agent",
+            true,
+            true,
+            false,
+        ),
+        (
+            "UNLISTENED",
+            0,
+            "manual",
+            "hard_exit",
+            "agent",
+            false,
+            false,
+            false,
+        ),
+    ] {
+        let mut f = Fixture::new()?;
+        f.service.state.db.execute(
+            "INSERT INTO local_listeners(hub,listener_id,harness,session_id,status,user_stopped,listen_mode,retirement_reason,principal_id,owner_user,host_id,host_name,cwd,title,about,scope) VALUES('work','target',?,'session',?,?,?,?,'none#alice','alice','host','host','','Target','','self')",
+            &[json!(harness),json!(status),json!(stopped),json!(mode),json!(reason)],
+        )?;
+        if disconnected {
+            f.service
+                .last_app_action
+                .insert(harness.into(), "disconnect".into());
+        }
+        if !enabled {
+            f.service.slots.remove("work").unwrap().close();
+        }
+        f.service.update_discovery_demand();
+        let activity = f.service.session_activity.as_mut().unwrap();
+        activity.tick(&f.service.state, &[])?;
+        assert_eq!(
+            activity.discovery_pending(),
+            expected,
+            "{status} {stopped} {mode} {reason} {harness} {disconnected} {enabled}"
+        );
+        activity.shutdown()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn paused_discovery_skips_unconfigured_providers_and_refreshes_on_snapshot_and_menu_open(
 ) -> Result<(), String> {
     let mut f = Fixture::new()?;

@@ -405,7 +405,7 @@ fn mutate_file<F>(
 where
     F: FnOnce(Option<&str>) -> Result<(String, Option<String>, String), String>,
 {
-    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let resolved = crate::support::publication_target(path)?;
     let path = resolved.as_path();
     // Reject malformed input before even creating a lockfile, then reread while locked.
     crate::plugins::read_config_text(path)?;
@@ -461,22 +461,7 @@ where
             backup_path = Some(bak);
         }
         if let Some(ref nx) = next_content {
-            let temporary = path.with_extension(format!("tmp.{}", random_hex(8)));
-            let result = (|| {
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(target_mode)
-                    .open(&temporary)
-                    .map_err(|e| e.to_string())?;
-                file.write_all(nx.as_bytes()).map_err(|e| e.to_string())?;
-                file.sync_all().map_err(|e| e.to_string())?;
-                fs::rename(&temporary, path).map_err(|e| e.to_string())
-            })();
-            if result.is_err() {
-                let _ = fs::remove_file(&temporary);
-            }
-            result?;
+            crate::support::atomic_write(path, nx.as_bytes())?;
         }
         Ok(SetupAction {
             target: target.to_string(),

@@ -5,7 +5,6 @@ use crate::core::{
     identity::{local_host_name, normalize_slug, string},
 };
 use serde_json::{json, Value};
-use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -128,7 +127,6 @@ pub(super) fn tailscale_host_from_status(status: &Value) -> Option<String> {
 struct ProbeError;
 
 fn probe_tailscale_status() -> Result<Value, ProbeError> {
-    use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let executable = [
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
@@ -137,88 +135,19 @@ fn probe_tailscale_status() -> Result<Value, ProbeError> {
     .into_iter()
     .find(|path| std::path::Path::new(path).is_file())
     .unwrap_or("tailscale");
-    let (mut output, writer) = UnixStream::pair().map_err(|_| ProbeError)?;
-    output.set_nonblocking(true).map_err(|_| ProbeError)?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["status", "--json"])
         .stdin(Stdio::null())
-        .stdout(Stdio::from(OwnedFd::from(writer)))
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ProbeError)?;
-    let exited = match crate::support::child_exit_fd(child.id()) {
-        Ok(fd) => fd,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ProbeError);
-        }
-    };
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let mut eof = false;
-    let mut bytes = Vec::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let mut failed = false;
-        loop {
-            match output.read(&mut buffer) {
-                Ok(0) => {
-                    eof = true;
-                    break;
-                }
-                Ok(n) => {
-                    bytes.extend_from_slice(&buffer[..n]);
-                    if bytes.len() > 4 * 1024 * 1024 {
-                        failed = true;
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => {
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() || failed {
-                    return Err(ProbeError);
-                }
-                output
-                    .take((4 * 1024 * 1024 - bytes.len()) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| ProbeError)?;
-                return serde_json::from_slice(&bytes).map_err(|_| ProbeError);
-            }
-            Ok(None) if !failed && Instant::now() < deadline => {
-                use std::os::fd::AsRawFd;
-                let mut fds = [
-                    libc::pollfd {
-                        fd: if eof { -1 } else { output.as_raw_fd() },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: exited.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                ];
-                if crate::support::poll_until(&mut fds, Some(deadline)).is_err() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ProbeError);
-                }
-            }
-            _ => {
-                // Every timeout/read/wait failure reaps the owned CLI process.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ProbeError);
-            }
-        }
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = crate::support::run_command_with_timeout(command, Duration::from_millis(500))
+        .map_err(|_| ProbeError)?
+        .ok_or(ProbeError)?;
+    if !output.status.success() || output.stdout.len() > 4 * 1024 * 1024 {
+        return Err(ProbeError);
     }
+    serde_json::from_slice(&output.stdout).map_err(|_| ProbeError)
 }
 
 fn retain_confirmed_host(

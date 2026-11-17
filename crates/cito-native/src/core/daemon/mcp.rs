@@ -833,8 +833,7 @@ impl DaemonService {
                 let unread = if let Some(row) = &row {
                     json!(self
                         .state
-                        .current_signals(&hub, string(row, "listener_id"), usize::MAX)?
-                        .len())
+                        .unread_count(&hub, string(row, "listener_id"), false)?)
                 } else {
                     json!(0)
                 };
@@ -1312,7 +1311,7 @@ impl DaemonService {
                 }
                 matches.extend(
                     self.state
-                        .current_signals(name, node, usize::MAX)?
+                        .current_signal_metadata(name, node, 0, usize::MAX, Some(id))?
                         .into_iter()
                         .filter(|row| row["signal_id"] == *id || row["batch_id"] == *id),
                 );

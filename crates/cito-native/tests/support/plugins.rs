@@ -1,5 +1,71 @@
 use super::support::*;
 use std::os::unix::net::UnixListener;
+use std::time::{Duration, Instant};
+
+#[test]
+fn claude_wake_distinguishes_session_switch_from_transient_socket_failure() {
+    let _lock = serial();
+    for mode in ["mismatch", "io", "rejected"] {
+        let f = Fixture::new(json!({}));
+        fs::create_dir_all(f.state.join("sockets")).unwrap();
+        let pid = std::process::id();
+        let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for op in ["identify", "deliver"] {
+                use std::os::fd::AsRawFd;
+                assert!(cito_native::support::poll_until(
+                    &mut [libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }],
+                    Some(Instant::now() + Duration::from_secs(3))
+                )
+                .unwrap());
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["op"], op);
+                let reply = if op == "identify" {
+                    json!({"ok":true,"session_id":"session-a"})
+                } else if mode == "io" {
+                    continue;
+                } else if mode == "mismatch" {
+                    json!({"ok":false,"error":"SESSION_MISMATCH"})
+                } else {
+                    json!({"ok":false,"error":"UNAVAILABLE","message":"Try later"})
+                };
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        let reply = f.plugin(CLAUDE, json!({"op":"wake","endpoint_pid":pid,"session_id":"session-a","batch_id":"batch-a","text":"Wake content"}));
+        server.join().unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(
+            reply["outcome"],
+            match mode {
+                "mismatch" => "session_switched",
+                "io" => "delivered_unconfirmed",
+                _ => "driver_unavailable",
+            },
+            "{reply}"
+        );
+        let queue = f.state.join("claude/wakes/session-a.jsonl");
+        if mode == "io" {
+            let queued: Value =
+                serde_json::from_str(fs::read_to_string(queue).unwrap().trim()).unwrap();
+            assert_eq!(queued["batch_id"], "batch-a");
+            assert_eq!(queued["content"], "Wake content");
+        } else {
+            assert!(!queue.exists());
+        }
+    }
+}
 
 // Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
 fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
@@ -17,9 +83,9 @@ if(process.argv[2]==='child') {
  const result=spawnSync(process.env.TEST_HOOK,[],{input:process.argv[3],env:process.env,encoding:'utf8'});
  process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exit(result.status);
 }
-console.log('ready');
-setInterval(()=>{
- const path=join(dir,`hook-request-${process.pid}`);if(!fs.existsSync(path))return;
+fs.watch(dir, (_event, name)=>{
+ if(name!==`hook-request-${process.pid}`)return;
+ const path=join(dir,name);if(!fs.existsSync(path))return;
  const req=JSON.parse(fs.readFileSync(path));fs.unlinkSync(path);
  const input=JSON.stringify(req.input);
  const env={...process.env,CITO_ENDPOINT_PID:String(process.pid)};
@@ -34,7 +100,8 @@ setInterval(()=>{
          ? spawnSync('/bin/sh',['-c','"$TEST_HOOK"; status=$?; exit "$status"'],options)
          : spawnSync(process.env.TEST_HOOK,[],options);
  fs.writeFileSync(join(dir,`hook-result-${process.pid}`),JSON.stringify({out:result.stdout,err:result.stderr}));
-},10);
+});
+console.log('ready');
 "#).unwrap();
     let mut env = vec![("TEST_HOOK", HOOK)];
     env.extend_from_slice(extra);
@@ -46,9 +113,9 @@ fn hook_from_parent(f: &Fixture, parent: usize, input: Value, mode: &str) -> Val
     let pid = f.pid(parent);
     let result = f.state.join(format!("hook-result-{pid}"));
     let _ = fs::remove_file(&result);
-    fs::write(
-        f.state.join(format!("hook-request-{pid}")),
-        json!({"input":input,"mode":mode}).to_string(),
+    cito_native::support::atomic_write(
+        &f.state.join(format!("hook-request-{pid}")),
+        json!({"input":input,"mode":mode}).to_string().as_bytes(),
     )
     .unwrap();
     wait(|| result.exists());
@@ -298,7 +365,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
 
     // A real parent hook must wait for the same lock as channel and discovery writers.
     let lock = FileLock::acquire(&lock_path).unwrap();
-    fs::write(&request, json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo-b"}}).to_string()).unwrap();
+    atomic_write(&request, json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo-b"}}).to_string().as_bytes()).unwrap();
     wait(|| !request.exists());
     std::thread::sleep(Duration::from_millis(100));
     assert!(!result.exists(), "Hook bypassed the endpoint lock");
@@ -498,7 +565,17 @@ fn claude_canonical_adoption_does_not_renew_activity_on_identify_or_discovery() 
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "startup-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {} / {}; endpoint: {} / {}",
+            f.output(sidecar, false),
+            f.output(sidecar, true),
+            f.output(parent, false),
+            f.output(parent, true)
+        );
+        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
+    });
     let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
     assert_eq!(
         socket(&path, json!({"op":"identify"}))["session_id"],
@@ -695,7 +772,7 @@ setInterval(()=>{},1000);
         .unwrap();
     let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
     let lock = FileLock::acquire(&binding.with_extension("lock")).unwrap();
-    fs::write(f.state.join(format!("hook-request-{pid}")), json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"descendant-session","cwd":"/repo"}}).to_string()).unwrap();
+    cito_native::support::atomic_write(&f.state.join(format!("hook-request-{pid}")), json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"descendant-session","cwd":"/repo"}}).to_string().as_bytes()).unwrap();
     let result = f.state.join(format!("hook-result-{pid}"));
     wait(|| result.exists());
     let result: Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();

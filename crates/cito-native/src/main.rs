@@ -319,6 +319,9 @@ fn run_mcp_stdio() {
                     return Err("MCP state directory changed; restart the client".into());
                 }
                 ensure_daemon(&current)?;
+                if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err("MCP transport stopped".into());
+                }
                 http_post_mcp(
                     current.daemon_port,
                     &req.to_string(),

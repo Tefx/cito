@@ -590,10 +590,14 @@ impl HubEngine {
             return Err(format!("CONTROL_REVISION_CONFLICT: {}", result));
         }
         if op == "signal_ack" {
-            self.notify_ack(params)?;
+            if let Err(error) = self.notify_ack(params) {
+                eprintln!("Post-commit acknowledgment notification failed: {error}");
+            }
         }
         if let Some(request) = ack_request {
-            self.notify_ack(&request)?;
+            if let Err(error) = self.notify_ack(&request) {
+                eprintln!("Post-commit acknowledgment notification failed: {error}");
+            }
         }
         Ok(result)
     }
@@ -1129,7 +1133,18 @@ impl HubEngine {
         let process = Arc::new(ChannelProcess::spawn(plugin, callback)?);
         processes.insert(plugin.id.clone(), process.clone());
         drop(processes);
-        self.configure_process(&plugin.id, &process)?;
+        if let Err(error) = self.configure_process(&plugin.id, &process) {
+            if let Ok(mut processes) = self.inner.processes.lock() {
+                if processes
+                    .get(&plugin.id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &process))
+                {
+                    processes.remove(&plugin.id);
+                }
+            }
+            process.shutdown();
+            return Err(error);
+        }
         Ok(process)
     }
     fn configure_process(&self, id: &str, process: &ChannelProcess) -> Result<(), String> {

@@ -560,6 +560,8 @@ mod remediation_tests {
                 committed_tx.send(()).unwrap();
                 release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                 json!({"channels":[{"id":"messenger","enabled":true}]})
+            } else if request["op"] == "kv_get" {
+                Value::Null
             } else if request["op"] == "kv_snapshot" || request["op"] == "human_device_attach" {
                 json!({"entries":[]})
             } else {

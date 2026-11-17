@@ -1640,13 +1640,15 @@ impl DaemonService {
     /// Give fast providers a bounded first-render opportunity. Workers retain
     /// ownership after the deadline and are reaped by the regular poll path.
     fn update_discovery_demand(&mut self) {
-        let configured = self
+        let configured: HashSet<String> = self
             .plugins
             .agent_plugins()
             .into_iter()
             .filter(|plugin| {
-                self.inspect_setup(plugin)
-                    .is_ok_and(|(_, configured, _)| configured)
+                self.last_app_action.get(&plugin.id).map(String::as_str) != Some("disconnect")
+                    && self
+                        .inspect_setup(plugin)
+                        .is_ok_and(|(_, configured, _)| configured)
             })
             .map(|plugin| plugin.id.clone())
             .collect();
@@ -1655,8 +1657,11 @@ impl DaemonService {
             || self.active_settings_hub.is_some()
             || self
                 .slots
-                .values()
-                .any(|slot| slot.config["autoListen"] == true);
+                .iter()
+                .any(|(hub, slot)| slot.config["autoListen"] == true || self.state.db.query(
+                    "SELECT harness FROM local_listeners WHERE hub=? AND status='UNLISTENED' AND user_stopped=0 AND listen_mode='manual' AND retirement_reason='hard_exit'",
+                    &[json!(hub)],
+                ).is_ok_and(|rows| rows.iter().any(|row| configured.contains(string(row, "harness")))));
         if let Some(activity) = self.session_activity.as_mut() {
             activity.discovery_demand(background, configured);
         }
@@ -1723,7 +1728,7 @@ impl DaemonService {
         if let Some(parent) = self.config.config_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let target = crate::core::config::publication_target(&self.config.config_path)?;
+        let target = crate::support::publication_target(&self.config.config_path)?;
         crate::plugins::with_config_lock(&target, || {
             let mut raw = match fs::read_to_string(&target) {
                 Ok(text) => serde_json::from_str(&text)
@@ -1753,11 +1758,7 @@ impl DaemonService {
                     }
                 }
             }
-            let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
-            fs::write(&tmp, rendered).map_err(|e| e.to_string())?;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-            fs::rename(tmp, &target).map_err(|e| e.to_string())?;
+            crate::support::atomic_write(&target, rendered.as_bytes())?;
             Ok(())
         })
     }

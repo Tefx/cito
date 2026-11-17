@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub fn repair_default_hub(v: &mut Value) {
@@ -38,55 +38,7 @@ pub fn repair_default_hub(v: &mut Value) {
 
 static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
-pub(super) fn publication_target(path: &Path) -> Result<PathBuf, String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(path)
-    };
-    // Follow even a dangling leaf symlink before choosing the atomic rename
-    // destination. Bound the walk so a cycle cannot recurse indefinitely.
-    let mut absolute = absolute;
-    for _ in 0..40 {
-        if let Ok(canonical) = absolute.canonicalize() {
-            return Ok(canonical);
-        }
-        let Ok(target) = fs::read_link(&absolute) else {
-            break;
-        };
-        absolute = if target.is_absolute() {
-            target
-        } else {
-            absolute
-                .parent()
-                .ok_or("Configuration path has no parent")?
-                .join(target)
-        };
-    }
-    if fs::read_link(&absolute).is_ok() {
-        return Err("Configuration symlink chain exceeds 40 links".into());
-    }
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => {
-                normalized.push(component.as_os_str());
-                // Resolve existing ancestors before a following `..`: walking
-                // through a directory symlink changes which parent it denotes.
-                if let Ok(canonical) = normalized.canonicalize() {
-                    normalized = canonical;
-                }
-            }
-        }
-    }
-    Ok(normalized)
-}
+use crate::support::publication_target;
 
 /// Serialize a complete read-modify-write operation, including the initial read.
 /// Readers that need a filesystem-pure dry run can use `with_config_lock_mode`.
@@ -281,19 +233,20 @@ pub fn merge_hub_config(base: &Value, patch: &Value) -> Value {
     let changed_url = patch
         .get("url")
         .is_some_and(|url| base.get("url") != Some(url));
-    let clearing = ["issuer", "clientId", "redirectPort"]
-        .iter()
-        .any(|key| patch.get(*key).is_some_and(Value::is_null));
     if changed_url {
         merged.remove("authMode");
+        merged.remove("natsUrl");
     }
-    if changed_url || clearing {
+    if changed_url {
         for key in ["issuer", "clientId", "redirectPort"] {
             merged.remove(key);
         }
     }
     if let Some(patch) = patch.as_object() {
         for (key, value) in patch {
+            if changed_url && key == "natsUrl" {
+                continue;
+            }
             if matches!(
                 key.as_str(),
                 "token" | "clientSecret" | "client_secret" | "oidcClientSecret"
@@ -485,13 +438,23 @@ mod tests {
         assert_eq!(same["redirectPort"], 4280);
         assert_eq!(same["scopes"], base["scopes"]);
         assert_eq!(same["autoListen"], true);
-        for patch in [
-            json!({"url":"https://new.example.com"}),
-            json!({"redirectPort":null}),
-        ] {
-            let changed = merge_hub_config(&base, &patch);
-            for key in ["issuer", "clientId", "redirectPort"] {
-                assert!(changed.get(key).is_none());
+        let mut with_legacy = base.clone();
+        with_legacy["natsUrl"] = base["url"].clone();
+        let changed = merge_hub_config(
+            &with_legacy,
+            &json!({"url":"https://new.example.com","natsUrl":base["url"]}),
+        );
+        for key in ["issuer", "clientId", "redirectPort", "natsUrl"] {
+            assert!(changed.get(key).is_none());
+        }
+        for key in ["issuer", "clientId", "redirectPort"] {
+            let cleared = merge_hub_config(&base, &json!({key:null}));
+            assert!(cleared.get(key).is_none());
+            for preserved in ["issuer", "clientId", "redirectPort"]
+                .into_iter()
+                .filter(|k| *k != key)
+            {
+                assert_eq!(cleared[preserved], base[preserved]);
             }
         }
     }

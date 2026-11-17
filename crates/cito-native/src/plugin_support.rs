@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -143,7 +143,64 @@ fn clean_sidecars(path: &Path) {
         }
     }
 }
+pub fn publication_target(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let mut pending: std::collections::VecDeque<_> = absolute
+        .components()
+        .map(|part| part.as_os_str().to_os_string())
+        .collect();
+    let mut target = PathBuf::new();
+    let mut hops = 0;
+    while let Some(part) = pending.pop_front() {
+        match Path::new(&part).components().next() {
+            Some(Component::RootDir) => target = PathBuf::from("/"),
+            Some(Component::CurDir) | None => {}
+            Some(Component::ParentDir) => {
+                target.pop();
+            }
+            _ => {
+                target.push(&part);
+                match fs::read_link(&target) {
+                    Ok(link) => {
+                        hops += 1;
+                        if hops > 40 {
+                            return Err("Configuration symlink chain exceeds 40 links".into());
+                        }
+                        target.pop();
+                        for part in link.components().rev() {
+                            pending.push_front(part.as_os_str().to_os_string());
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                        ) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+        }
+    }
+    Ok(target)
+}
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_checked(path, bytes, || Ok(()))
+}
+
+pub fn atomic_write_checked(
+    path: &Path,
+    bytes: &[u8],
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let target = publication_target(path)?;
+    let path = target.as_path();
     if let Some(p) = path.parent() {
         fs::create_dir_all(p).map_err(|e| e.to_string())?;
     }
@@ -169,6 +226,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             f.set_permissions(permissions).map_err(|e| e.to_string())?;
         }
         f.sync_all().map_err(|e| e.to_string())?;
+        before_rename()?;
         fs::rename(&tmp, path).map_err(|e| e.to_string())
     })();
     if r.is_err() {
@@ -194,26 +252,6 @@ pub fn read_json(path: &Path) -> Result<Value> {
     }
     Ok(v)
 }
-fn mutation_path(path: &Path, remaining: u8) -> Result<PathBuf> {
-    if remaining == 0 {
-        return Err("Too many symbolic links in configuration path".into());
-    }
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return Ok(canonical);
-    }
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        let target = fs::read_link(path).map_err(|e| e.to_string())?;
-        return mutation_path(
-            &path.parent().unwrap_or(Path::new(".")).join(target),
-            remaining - 1,
-        );
-    }
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
-    match (parent, path.file_name()) {
-        (Some(parent), Some(name)) => Ok(mutation_path(parent, remaining)?.join(name)),
-        _ => Ok(path.to_owned()),
-    }
-}
 const MCP_CONFLICT: &str = "Conflicting MCP command; pass --force to replace";
 pub fn check_mcp_command(req: &Value, command: Option<&str>, expected: &str) -> Result<()> {
     if req["op"] != "setup_remove"
@@ -232,7 +270,7 @@ pub fn mutate(
 ) -> Result<Value> {
     let dry = req["dry_run"] == true;
     let remove = req["op"] == "setup_remove";
-    let canonical = mutation_path(path, 40)?;
+    let canonical = publication_target(path)?;
     let path = canonical.as_path();
     let lock_path = {
         let mut s = path.as_os_str().to_os_string();
@@ -331,6 +369,44 @@ fn socket_io_error(error: std::io::Error) -> String {
     } else {
         error.to_string()
     }
+}
+
+/// Share bridge-clear settlement while each plugin supplies its process identity policy.
+pub fn update_badge(
+    req: &Value,
+    path: &Path,
+    pid: u32,
+    session: &str,
+    matches: impl Fn(&str) -> bool,
+) -> Result<Value> {
+    let clearing = req["badge"].is_null();
+    if clearing && !path.exists() {
+        return Ok(json!({"ok":true}));
+    }
+    match socket_call(
+        path,
+        &json!({"op":"status","session_id":session,"badge":req["badge"]}),
+    ) {
+        Ok(reply) if clearing && reply["error"] == "SESSION_MISMATCH" => Ok(json!({"ok":true})),
+        Err(_) if clearing && !process_command(pid).is_ok_and(|command| matches(&command)) => {
+            let _ = fs::remove_file(path);
+            Ok(json!({"ok":true}))
+        }
+        reply => reply,
+    }
+}
+
+/// Parse the executable once; concrete entrypoint policies remain plugin-owned.
+pub fn matches_process(command: &str, policy: impl FnOnce(&str, &str, bool) -> bool) -> bool {
+    let Some((program, script)) = process_entrypoint(command) else {
+        return false;
+    };
+    let entry = script.unwrap_or(program);
+    let name = Path::new(entry)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    policy(entry, name, script.is_some())
 }
 
 pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
@@ -1713,6 +1789,57 @@ impl Drop for ReadOnlySqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn atomic_publication_follows_dangling_chains_and_cleans_failed_temps() {
+        let root = std::env::temp_dir().join(format!(
+            "cito-publication-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let target = root.join("new/settings");
+        for index in (0..40).rev() {
+            let next = if index == 39 {
+                PathBuf::from("new/settings")
+            } else {
+                PathBuf::from(format!("link-{}", index + 1))
+            };
+            std::os::unix::fs::symlink(next, root.join(format!("link-{index}"))).unwrap();
+        }
+        let link = root.join("link-0");
+        atomic_write(&link, b"created").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"created");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write(&link, b"updated").unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(atomic_write_checked(&link, b"rejected", || Err("cancelled".into())).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"updated");
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+        std::os::unix::fs::symlink("link-0", root.join("too-many")).unwrap();
+        assert!(atomic_write(&root.join("too-many"), b"bad").is_err());
+        std::os::unix::fs::symlink("cycle", root.join("cycle")).unwrap();
+        assert!(atomic_write(&root.join("cycle"), b"bad").is_err());
+        std::os::unix::fs::symlink("missing/parent", root.join("parent-link")).unwrap();
+        atomic_write(&root.join("parent-link/child"), b"child").unwrap();
+        assert_eq!(
+            fs::read(root.join("missing/parent/child")).unwrap(),
+            b"child"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn alive_rejects_process_group_and_out_of_range_ids() {
         assert!(!alive(0));

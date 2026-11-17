@@ -167,15 +167,29 @@ fn register_human_device(
 ) -> Result<Value, String> {
     let previous = local_node(state, client, "human", "default")?;
     // The Hub owns Human identity, including retained keys and verified aliases.
-    let remote = client
-        .directory()?
-        .into_iter()
-        .find(|record| {
-            record["harness"] == "human"
-                && record["session_id"] == "default"
-                && principal_matches(string(record, "principal_id"), &client.identity)
-        })
-        .unwrap_or(Value::Null);
+    let matches = |record: &Value| {
+        record["harness"] == "human"
+            && record["session_id"] == "default"
+            && principal_matches(string(record, "principal_id"), &client.identity)
+    };
+    let known_id = previous
+        .as_ref()
+        .map(|row| string(row, "listener_id").to_owned())
+        .unwrap_or_else(|| {
+            listener_id(string(&client.identity, "principal_id"), "human", "default")
+        });
+    let remote = match client
+        .kv_get(&known_id)?
+        .map(|(record, _)| record)
+        .filter(matches)
+    {
+        Some(record) => record,
+        None => client
+            .directory()?
+            .into_iter()
+            .find(matches)
+            .unwrap_or(Value::Null),
+    };
     let channel = format!("{host}:human");
     let reuse = previous
         .as_ref()

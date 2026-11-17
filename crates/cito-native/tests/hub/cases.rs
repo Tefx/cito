@@ -6,6 +6,80 @@ fn temp() -> PathBuf {
     dir
 }
 #[test]
+fn committed_ack_and_human_reply_survive_notification_failure() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.pause_worker();
+    let owner = local_principal("alice");
+    let human = e.rpc("human_device_attach", &json!({"channel_id":"host:human","host_id":"host","host_name":"Host","binding_generation":1,"owner_token":"owner"}), Some(&owner)).unwrap()["record"]["listener_id"].as_str().unwrap().to_owned();
+    e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,enabled) VALUES('none#alice','fixture',1)", &[]).unwrap();
+    put(&e, "target", "none#bob", "workspace");
+    send(&e, &human, "ack-source");
+    send(&e, &human, "reply-source");
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = e.inner.processes.lock().unwrap();
+        panic!("Inject notification process-lock failure");
+    }));
+    assert!(poisoned.is_err());
+    let ack = json!({"node_id":human,"signal_ids":["ack-source"]});
+    assert!(
+        e.notify_ack(&ack).is_err(),
+        "The post-commit notification seam must actually fail"
+    );
+    let committed = e.rpc("signal_ack", &ack, Some(&owner)).unwrap();
+    assert!(committed["acked_at_ms"].is_number());
+    let request = json!({"to":"target","message":"Approved","in_reply_to":"reply-source","msg_id":"reply-once"});
+    let reply = e
+        .rpc("send_reply_from_human", &request, Some(&owner))
+        .unwrap();
+    assert_eq!(reply["ok"], true);
+    assert!(reply["acked_at_ms"].is_number());
+    let retried = e
+        .rpc("send_reply_from_human", &request, Some(&owner))
+        .unwrap();
+    assert_eq!(retried["signal_id"], reply["signal_id"]);
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT signal_id FROM hub_signals", &[])
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(e.inner.db.query("SELECT signal_id FROM hub_signals WHERE signal_id IN ('ack-source','reply-source') AND acked_at_ms IS NULL", &[]).unwrap().is_empty());
+    e.inner.processes.clear_poison();
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn failed_initial_configuration_evicts_process_before_retry() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.pause_worker();
+    let root = fixture(&dir);
+    let plugin = hub_plugins::discover(&[(root, false)], None)
+        .unwrap()
+        .remove(0);
+    e.inner
+        .db
+        .execute("DROP TABLE hub_plugin_services", &[])
+        .unwrap();
+    assert!(e.ensure_process(&plugin).is_err());
+    assert!(!e.inner.processes.lock().unwrap().contains_key(&plugin.id));
+    e.inner.db.execute("CREATE TABLE hub_plugin_services(plugin_id TEXT PRIMARY KEY,config_json TEXT NOT NULL DEFAULT '{}',service_state_json TEXT NOT NULL DEFAULT '{}',updated_ms INTEGER NOT NULL DEFAULT 0)", &[]).unwrap();
+    let process = e.ensure_process(&plugin).unwrap();
+    assert!(process.alive());
+    assert!(Arc::ptr_eq(
+        &process,
+        e.inner.processes.lock().unwrap().get(&plugin.id).unwrap()
+    ));
+    e.shutdown();
+    assert!(!process.alive());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn processed_reply_pruning_uses_a_monotonic_replay_floor_and_resets_with_credentials() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

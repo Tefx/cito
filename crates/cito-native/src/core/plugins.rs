@@ -1456,11 +1456,8 @@ pub fn handover_stale_daemon(config: &NativeConfig) -> Result<bool, String> {
 }
 
 pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
-    if let Some(existing) = probe_daemon_health(config) {
-        if existing.version.as_deref() == Some(CITO_VERSION) {
-            return Ok(());
-        }
-        stop_daemon(config, &existing)?;
+    if handover_stale_daemon(config)? {
+        return Ok(());
     }
 
     let exe = env::current_exe().map_err(|e| e.to_string())?;

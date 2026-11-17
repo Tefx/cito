@@ -3,19 +3,13 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 fn matches_process(command: &str) -> bool {
-    let Some((program, script)) = process_entrypoint(command) else {
-        return false;
-    };
-    let entry = script.unwrap_or(program);
-    let name = Path::new(entry)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if script.is_none() {
-        return matches!(name, "pi" | "pi-coding-agent");
-    }
-    matches!(name, "pi" | "pi.js" | "pi.mjs")
-        || (entry.contains("/pi-coding-agent/") && matches!(name, "cli.js" | "cli.mjs"))
+    crate::support::matches_process(command, |entry, name, script| {
+        if !script {
+            return matches!(name, "pi" | "pi-coding-agent");
+        }
+        matches!(name, "pi" | "pi.js" | "pi.mjs")
+            || (entry.contains("/pi-coding-agent/") && matches!(name, "cli.js" | "cli.mjs"))
+    })
 }
 fn paths(req: &Value) -> (PathBuf, PathBuf) {
     (
@@ -551,25 +545,13 @@ pub fn handle(input: &Value) -> Result<Value> {
             };
             let path = state(req).join(format!("sockets/pi-pid-{p}.sock"));
             if op == "update_badge" {
-                let clearing = req["badge"].is_null();
-                // An absent bridge has no status bar left to clear.
-                if clearing && !path.exists() {
-                    return Ok(json!({"ok":true}));
-                }
-                return match socket_call(&path, &request) {
-                    Ok(reply) if clearing && reply["error"] == "SESSION_MISMATCH" => {
-                        Ok(json!({"ok":true}))
-                    }
-                    Err(_)
-                        if clearing
-                            && !process_command(p)
-                                .is_ok_and(|command| matches_process(&command)) =>
-                    {
-                        let _ = fs::remove_file(&path);
-                        Ok(json!({"ok":true}))
-                    }
-                    reply => reply,
-                };
+                return update_badge(
+                    req,
+                    &path,
+                    p,
+                    req["session_id"].as_str().unwrap_or(""),
+                    matches_process,
+                );
             }
             for attempt in 0..3 {
                 match socket_call(&path, &request) {

@@ -74,9 +74,6 @@ pub fn parse_cli(
                     json!(read_value(args, &mut i, flag)?),
                 );
             }
-            "--channel" => {
-                meta.insert("channel".into(), json!(read_value(args, &mut i, flag)?));
-            }
             "--scope" if matches!(cmd, "listen" | "unlisten" | "inbox") => {
                 let value = read_value(args, &mut i, flag)?;
                 if !matches!(value.as_str(), "self" | "workspace") {
@@ -100,6 +97,9 @@ pub fn parse_cli(
             }
             "--title" | "-t" if cmd == "listen" => {
                 input.insert("title".into(), json!(read_value(args, &mut i, flag)?));
+            }
+            "--title" | "-t" | "--tag" if cmd == "unlisten" => {
+                return Err("INVALID_INPUT: Unlisten does not accept title or tag flags; use cito inbox to change Human inbox policy".into());
             }
             "--all" if cmd == "unlisten" => {
                 input.insert("all".into(), json!(true));
@@ -177,7 +177,9 @@ pub fn parse_cli(
     }
     if matches!(cmd, "listen" | "unlisten")
         && meta.get("expected_harness") == Some(&json!("human"))
-        && (input.contains_key("scope")
+        && (input.contains_key("title")
+            || input.contains_key("tag")
+            || input.contains_key("scope")
             || !positionals.is_empty()
             || meta.contains_key("expected_session_id"))
     {
@@ -642,6 +644,8 @@ mod tests {
         };
         for cmd in ["listen", "unlisten"] {
             for extra in [
+                vec!["--title", "Title"],
+                vec!["--tag", "review"],
                 vec!["--scope", "workspace"],
                 vec!["--team"],
                 vec!["Description"],

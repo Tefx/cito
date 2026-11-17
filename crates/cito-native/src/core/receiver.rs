@@ -278,16 +278,9 @@ pub fn poll_listener(
         .listener(hub, id)?
         .map(|r| r["ack_scan_seq"].as_u64().unwrap_or(0))
         .unwrap_or(0);
-    let mut current = local.current_signals(hub, id, usize::MAX)?;
-    current.sort_by_key(|signal| signal["seq"].as_u64().unwrap_or(0));
-    let mut pending: Vec<_> = current
-        .iter()
-        .filter(|signal| signal["seq"].as_u64().unwrap_or(0) > cursor)
-        .take(128)
-        .cloned()
-        .collect();
+    let mut pending = local.current_signal_metadata(hub, id, cursor, 128, None)?;
     if pending.is_empty() && cursor > 0 {
-        pending = current.into_iter().take(128).collect();
+        pending = local.current_signal_metadata(hub, id, 0, 128, None)?;
     }
     if !pending.is_empty() {
         if let Ok(remote) = client.rpc("stream_get_message",&json!({"stream":"CITO_SIGNALS","seqs":pending.iter().map(|r|r["seq"].clone()).collect::<Vec<_>>()})) {

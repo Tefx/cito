@@ -212,7 +212,7 @@ fn dispatch_action_inner(
             (s.raw_config()?, s.config.default_hub.clone())
         };
         let mut prepared = action.clone();
-        let mut submitted = if action["op"] == "paste_hub_invite" {
+        let submitted = if action["op"] == "paste_hub_invite" {
             parse_hub_invite(string(action, "invite"))?
         } else {
             action.clone()
@@ -233,12 +233,7 @@ fn dispatch_action_inner(
         let config = crate::core::config::discover_hub_config(
             crate::core::config::merge_hub_config(base, patch),
         )?;
-        if action["op"] == "paste_hub_invite" {
-            submitted = config;
-            prepared["invite"] = json!(submitted.to_string());
-        } else {
-            prepared["config"] = config;
-        }
+        prepared["config"] = config;
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
         s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
@@ -1058,9 +1053,6 @@ impl DaemonService {
                         string(&cfg, "url").trim()
                     )
                     .map_err(|error| format!("INVALID_INPUT: {error}"))?);
-                    if cfg["authMode"] == "oidc" {
-                        super::super::login::Settings::new(&cfg)?;
-                    }
                     let base_name = if requested_name.is_empty() {
                         hub_name_from_url(string(&cfg, "url"))
                     } else {
@@ -1135,7 +1127,10 @@ impl DaemonService {
                             m.remove("user");
                         }
                     }
-                    let set_default = cfg["set_default"].as_bool().unwrap_or(false);
+                    let set_default = action["set_default"]
+                        .as_bool()
+                        .or_else(|| cfg["set_default"].as_bool())
+                        .unwrap_or(false);
                     if let Some(m) = cfg.as_object_mut() {
                         if let Some(disabled) = m.remove("disabled") {
                             let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
@@ -1341,7 +1336,12 @@ impl DaemonService {
             }
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
             "paste_hub_invite" => {
-                let mut invite = parse_hub_invite(string(action, "invite"))?;
+                let mut invite =
+                    if let Some(config) = action.get("config").filter(|_| precondition.is_some()) {
+                        config.clone()
+                    } else {
+                        parse_hub_invite(string(action, "invite"))?
+                    };
                 if action["parse_only"] == true {
                     if let Some(port) = invite
                         .get("redirectPort")
@@ -1722,6 +1722,14 @@ impl DaemonService {
                         ""
                     },
                 )?;
+                let (all_total, all_unread) = if action["filter"].as_str().unwrap_or("all") == "all"
+                    && (action["mode"] != "activity" || string(action, "query").trim().is_empty())
+                {
+                    (total, unread)
+                } else {
+                    let (_, total, unread) = self.state.query_activity("all", "")?;
+                    (total, unread)
+                };
                 let activity = self.activity_dto(activity);
                 let warnings: Vec<String> = result["warnings"]
                     .as_array()
@@ -1731,7 +1739,7 @@ impl DaemonService {
                         format!("{}: {}", string(warning, "hub"), string(warning, "message"))
                     })
                     .collect();
-                let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":action["query"].as_str().unwrap_or(""),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"warnings":warnings,"activity":activity,"activity_total":total,"activity_all_total":self.state.query_activity("all","")?.1,"activity_has_any":self.state.query_activity("all","")?.1>0,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":self.state.activity()?.1});
+                let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":action["query"].as_str().unwrap_or(""),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"warnings":warnings,"activity":activity,"activity_total":total,"activity_all_total":all_total,"activity_has_any":all_total>0,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":all_unread});
                 self.emit(frame.clone());
                 return Ok(frame);
             }

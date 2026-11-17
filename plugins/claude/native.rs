@@ -7,19 +7,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 fn matches_process(command: &str) -> bool {
-    let Some((program, script)) = process_entrypoint(command) else {
-        return false;
-    };
-    let entry = script.unwrap_or(program);
-    let name = Path::new(entry)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if script.is_none() {
-        return name == "claude";
-    }
-    matches!(name, "claude" | "claude.js" | "claude.mjs")
-        || (entry.contains("/claude-code/") && matches!(name, "cli.js" | "cli.mjs"))
+    crate::support::matches_process(command, |entry, name, script| {
+        if !script {
+            return name == "claude";
+        }
+        matches!(name, "claude" | "claude.js" | "claude.mjs")
+            || (entry.contains("/claude-code/") && matches!(name, "cli.js" | "cli.mjs"))
+    })
 }
 fn interactive_candidate(req: &Value, p: u32) -> bool {
     let Ok(command) = process_command(p) else {
@@ -826,25 +820,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;
             let p = pid(req).ok_or("Endpoint PID is required")?;
             let path = state(req).join(format!("sockets/claude-pid-{p}.sock"));
-            if req["badge"].is_null() && !path.exists() {
-                return Ok(json!({"ok":true}));
-            }
-            match socket_call(
-                &path,
-                &json!({"op":"status","session_id":sid,"badge":req["badge"]}),
-            ) {
-                Ok(reply) if req["badge"].is_null() && reply["error"] == "SESSION_MISMATCH" => {
-                    Ok(json!({"ok":true}))
-                }
-                Err(_)
-                    if req["badge"].is_null()
-                        && !process_command(p).is_ok_and(|command| matches_process(&command)) =>
-                {
-                    let _ = fs::remove_file(&path);
-                    Ok(json!({"ok":true}))
-                }
-                reply => reply,
-            }
+            update_badge(req, &path, p, &sid, matches_process)
         }
         "wake" => {
             let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;
@@ -859,10 +835,25 @@ pub fn handle(req: &Value) -> Result<Value> {
                         let r = socket_call(
                             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
                             &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false}),
-                        )?;
-                        return Ok(
-                            json!({"ok":true,"outcome":if r["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":if r["ok"]==true {Value::Null} else {json!(response_diagnostic(&r,"Claude bridge rejected delivery"))}}),
                         );
+                        match r {
+                            Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
+                                return Ok(
+                                    json!({"ok":true,"outcome":"session_switched","reason":null}),
+                                );
+                            }
+                            Ok(reply) => {
+                                return Ok(
+                                    json!({"ok":true,"outcome":if reply["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":if reply["ok"]==true {Value::Null} else {json!(response_diagnostic(&reply,"Claude bridge rejected delivery"))}}),
+                                )
+                            }
+                            Err(_) => {
+                                append_wake(req, &sid)?;
+                                return Ok(
+                                    json!({"ok":true,"outcome":"delivered_unconfirmed","reason":"Queued for the next hook event"}),
+                                );
+                            }
+                        }
                     }
                     return Ok(
                         json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),

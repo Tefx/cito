@@ -725,14 +725,8 @@ fn desired_badges(
 ) -> Result<BTreeMap<Target, Intent>, String> {
     let mut rows = state.db.query("SELECT * FROM local_listeners ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC", &[])?;
     for row in &mut rows {
-        row["badge_unread"] = json!(state
-            .current_signals(string(row, "hub"), string(row, "listener_id"), usize::MAX)?
-            .iter()
-            .filter(
-                |signal| signal["expires_at_ms"].as_u64().unwrap_or(0) > now_ms()
-                    && signal["state"] != "EXPIRED_UNSENT"
-            )
-            .count());
+        row["badge_unread"] =
+            json!(state.unread_count(string(row, "hub"), string(row, "listener_id"), true)?);
     }
     let is_live = |row: &Value| {
         row["status"] == "ACTIVE"

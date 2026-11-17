@@ -2697,9 +2697,13 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             rpc(address, "previous-token")?;
 
             // A write failure after binding must restore the old socket and credentials.
-            let tmp = config
-                .config_path
-                .with_extension(format!("json.{}.tmp", std::process::id()));
+            // Obstruct the publication lock, independent of exclusive temporary names.
+            let mut lock_name = config.config_path.as_os_str().to_os_string();
+            lock_name.push(".lock");
+            let tmp = std::path::PathBuf::from(lock_name);
+            if tmp.is_file() {
+                fs::remove_file(&tmp).map_err(|e| e.to_string())?;
+            }
             fs::create_dir(&tmp).map_err(|e| e.to_string())?;
             let result =
                 service.action(&json!({"op":"set_host_hub","port":0,"token":"uncommitted-token"}));

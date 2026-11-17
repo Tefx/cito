@@ -7,20 +7,14 @@ use std::thread;
 use std::time::Duration;
 use toml_edit::{value, DocumentMut, Item, Table};
 fn matches_process(command: &str) -> bool {
-    let Some((program, script)) = process_entrypoint(command) else {
-        return false;
-    };
-    let entry = script.unwrap_or(program);
-    let name = Path::new(entry)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if script.is_some() {
-        return matches!(name, "codex" | "codex.js" | "codex.mjs");
-    }
-    name == "codex"
-        || (name == "Codex" && program.contains("/Codex.app/Contents/MacOS/"))
-        || (name == "ChatGPT" && program.contains("/ChatGPT.app/Contents/MacOS/"))
+    crate::support::matches_process(command, |entry, name, script| {
+        if script {
+            return matches!(name, "codex" | "codex.js" | "codex.mjs");
+        }
+        name == "codex"
+            || (name == "Codex" && entry.contains("/Codex.app/Contents/MacOS/"))
+            || (name == "ChatGPT" && entry.contains("/ChatGPT.app/Contents/MacOS/"))
+    })
 }
 fn desktop_command(command: &str) -> bool {
     process_entrypoint(command).is_some_and(|(program, script)| {

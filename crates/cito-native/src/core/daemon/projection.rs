@@ -474,7 +474,13 @@ impl DaemonService {
         let (activity, activity_total, activity_unread) = self
             .state
             .query_activity(&self.activity_filter, &self.activity_query)?;
-        let (_, activity_all_total, unread) = self.state.query_activity("all", "")?;
+        let (activity_all_total, unread) =
+            if self.activity_filter == "all" && self.activity_query.trim().is_empty() {
+                (activity_total, activity_unread)
+            } else {
+                let (_, total, unread) = self.state.query_activity("all", "")?;
+                (total, unread)
+            };
         let mut sessions: Vec<Value> = self
             .state
             .active()?
