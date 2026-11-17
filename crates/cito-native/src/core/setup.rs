@@ -461,7 +461,7 @@ where
             backup_path = Some(bak);
         }
         if let Some(ref nx) = next_content {
-            crate::support::atomic_write(path, nx.as_bytes())?;
+            crate::support::atomic_write_with_mode(path, nx.as_bytes(), Some(target_mode))?;
         }
         Ok(SetupAction {
             target: target.to_string(),
@@ -2388,6 +2388,37 @@ mod tests {
         let mut experimental = sample.clone();
         experimental.tier = "experimental".to_string();
         assert!(!should_setup_harness(&experimental, &empty, true));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn credential_save_restricts_existing_external_config_mode() {
+        let (root, _) = fixture();
+        let path = root.join("external/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"user":"alice"}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let next = r#"{"user":"alice","token":"secret"}"#;
+        let action = mutate_file("cito", &path, false, Some(0o600), |_| {
+            Ok((
+                "updated".into(),
+                Some(next.into()),
+                "Save credentials".into(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(action.status, "updated");
+        assert_eq!(fs::read_to_string(&path).unwrap(), next);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let backup = PathBuf::from(action.backup_path.unwrap());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), r#"{"user":"alice"}"#);
+        assert_eq!(
+            fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

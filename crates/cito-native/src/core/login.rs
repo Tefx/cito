@@ -365,7 +365,7 @@ fn response_json(response: ureq::Response, deadline: &Deadline<'_>) -> Result<Va
 }
 fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), String> {
     deadline.remaining()?;
-    crate::support::atomic_write_checked(path, cache.to_string().as_bytes(), || {
+    crate::support::atomic_write_checked(path, cache.to_string().as_bytes(), Some(0o600), || {
         deadline.remaining().map(|_| ())
     })
 }

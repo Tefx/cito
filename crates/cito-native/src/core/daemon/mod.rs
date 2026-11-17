@@ -1758,7 +1758,7 @@ impl DaemonService {
                     }
                 }
             }
-            crate::support::atomic_write(&target, rendered.as_bytes())?;
+            crate::support::atomic_write_with_mode(&target, rendered.as_bytes(), Some(0o600))?;
             Ok(())
         })
     }

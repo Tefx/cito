@@ -191,12 +191,18 @@ pub fn publication_target(path: &Path) -> Result<PathBuf> {
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    atomic_write_checked(path, bytes, || Ok(()))
+    atomic_write_with_mode(path, bytes, None)
+}
+
+/// Publish with an explicit final mode, or preserve the target mode when absent.
+pub fn atomic_write_with_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
+    atomic_write_checked(path, bytes, mode, || Ok(()))
 }
 
 pub fn atomic_write_checked(
     path: &Path,
     bytes: &[u8],
+    mode: Option<u32>,
     before_rename: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let target = publication_target(path)?;
@@ -213,7 +219,10 @@ pub fn atomic_write_checked(
         NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let tmp = PathBuf::from(tmp_name);
-    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
+    let permissions = mode
+        .map(fs::Permissions::from_mode)
+        .or_else(|| fs::metadata(path).ok().map(|m| m.permissions()))
+        .unwrap_or_else(|| fs::Permissions::from_mode(0o600));
     let mut f = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -222,9 +231,7 @@ pub fn atomic_write_checked(
         .map_err(|e| e.to_string())?;
     let r = (|| {
         f.write_all(bytes).map_err(|e| e.to_string())?;
-        if let Some(permissions) = permissions {
-            f.set_permissions(permissions).map_err(|e| e.to_string())?;
-        }
+        f.set_permissions(permissions).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
         before_rename()?;
         fs::rename(&tmp, path).map_err(|e| e.to_string())
@@ -1824,9 +1831,26 @@ mod tests {
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o640
         );
-        assert!(atomic_write_checked(&link, b"rejected", || Err("cancelled".into())).is_err());
+        assert!(atomic_write_checked(&link, b"rejected", Some(0o600), || {
+            Err("cancelled".into())
+        })
+        .is_err());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
         assert_eq!(fs::read(&target).unwrap(), b"updated");
         assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+        atomic_write_with_mode(&link, b"private", Some(0o600)).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"private");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         std::os::unix::fs::symlink("link-0", root.join("too-many")).unwrap();
         assert!(atomic_write(&root.join("too-many"), b"bad").is_err());
         std::os::unix::fs::symlink("cycle", root.join("cycle")).unwrap();

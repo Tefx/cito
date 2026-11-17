@@ -10,6 +10,54 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
 #[test]
+fn credential_save_restricts_existing_external_config_mode() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-config-mode-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("external")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("external/config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    let result = (|| -> Result<(), String> {
+        fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+        fs::set_permissions(&config.config_path, fs::Permissions::from_mode(0o644))
+            .map_err(|e| e.to_string())?;
+        let mut service = DaemonService::open(
+            &config,
+            &LoadedPlugins {
+                plugins: vec![],
+                rejected_ids: Default::default(),
+            },
+        )?;
+        let saved = service.mutate_config(|raw| {
+            raw["token"] = json!("secret");
+            Ok(())
+        });
+        service.shutdown();
+        saved?;
+        let stored: Value = serde_json::from_str(
+            &fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(stored["token"], "secret");
+        assert_eq!(
+            fs::metadata(&config.config_path)
+                .map_err(|e| e.to_string())?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(dir);
+    result
+}
+
+#[test]
 fn authoritative_commits_survive_secondary_local_projection_failures() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("cito-commit-projection-{}", random_uuid_v4()));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
