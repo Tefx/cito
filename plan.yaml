@@ -15271,3 +15271,314 @@ phases:
       passed; `packaging/release.py check` (`0.21.3`, no tag); **17 packaging tests**
       passed; `site-clipboard.mjs` passed; `~/.cito` sockets untouched and `/Applications/Cito.app`
       absent.'
+- id: v50
+  name: 'V50 Root-Cause Remediation (Contract §§1–7 & 17-Item Admitted Ledger #1–#17):
+    Restorable Manual Discovery Demand, Post-Commit Ack Isolation, Metadata-Only Signal
+    Queries, Shared Symlink-Safe Atomic Write, UI Request Correlation & Docs Parity
+    (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: pending
+  gate: 'All binding v50 requirements across Contract §§1–7 and the 17-item Admitted
+    Finding Ledger (#1–#17) pass; 3-way incremental [REQUIRES_SKILL: contract-and-simplicity]
+    audit convergence (uiux-auditor, pathway-auditor, structural-auditor) reaches
+    ZERO_NEW_ISSUES alongside the independent FULL gate; cargo fmt --all -- --check,
+    git diff --check, cargo clippy --workspace --all-targets -- -D warnings, full
+    cargo test --workspace, cargo build --release (0 warnings + staged binary rebuild/codesign),
+    python3 packaging/release.py check (version 0.21.3, NO release tag), python3 -m
+    unittest discover -s packaging, node crates/cito-native/tests/support/site-clipboard.mjs,
+    and zero §1.2/private-name violations pass before PASS.'
+  context: 'Implement converged Root-Cause Remediation Spec (Binding Contract §§1–7)
+    and 17-Item Admitted Finding Ledger (#1–#17) directly without repeating Stage
+    1 discovery: (1) v50.core (rust-engineer, depends_on: []): Contract §§2–6 across
+    Rust Core & Plugins (#1–#8, #11–#14, #16 plugins.rs 100Hz poll removal: §2/#1
+    keep 3-strike consecutive_probe_failures >= 3 -> hard_exit and enable background
+    discovery in DaemonService::update_discovery_demand when any enabled Hub slot
+    has autoListen == true OR a restorable manual listener with status == UNLISTENED
+    && user_stopped == 0 && listen_mode == manual && retirement_reason == hard_exit
+    whose harness is configured and not disconnected; §3/#2 isolate post-commit self.notify_ack(...)
+    errors in HubEngine::rpc after rpc_conn commits while keeping daemon/mcp.rs:send_from
+    PENDING_PUBLISH local-commit error propagation unchanged; §4/#3/#14 separate metadata-only
+    unread queries in LocalState omitting message/batch_card from full-payload cito_inbox
+    pagination and use across poll_listener bounded 128-item ACK reconciliation, desired_badges,
+    cito_status, cito_inbox ack_ids, isolate_stale_signals, and reconcile_wake_retry,
+    eliminate duplicate query_activity("all", "") calls in http_actions.rs:647 and
+    projection.rs:344, probe kv_get before directory() in register_human_device, and
+    use poll_until in core/login.rs; §5/#6/#7/#11/#12 place single shared 40-hop dangling-symlink
+    publication_target + 0o600 O_CREAT|O_EXCL sync_all atomic write primitive in plugin_support.rs
+    and redirect config.rs, setup.rs:mutate_file, daemon/mod.rs:mutate_config, and
+    login.rs:publish, clear all three OIDC fields in config::merge_hub_config only
+    on changed_url == true and strip stale natsUrl, and in http_actions.rs read action["set_default"].or(cfg["set_default"])
+    in save_hub, remove duplicate pre-discovery Settings::new validation, and avoid
+    paste_hub_invite JSON re-serialization; §6/#4/#5/#8/#13/#16 remove failed ChannelProcess
+    from self.inner.processes in HubEngine::ensure_process and call shutdown() outside
+    mutex, re-check STDIO_STOP after ensure_daemon in main.rs:307-326, map sidecar
+    SESSION_MISMATCH to outcome: session_switched and fall back to append_wake on
+    transient socket I/O errors in plugins/claude/native.rs, reject --title/--tag
+    on --harness human and remove dead --channel in core/cli.rs, reuse run_command_with_timeout
+    in host_hub.rs, handover_stale_daemon in plugins.rs, shared matches_process/update_badge
+    in plugin_support.rs, and replace setInterval(..., 10) in tests/support/plugins.rs:17);
+    (2) v50.ui (frontend-engineer, depends_on: [v50.core]): Contract §7 UI & UI Test
+    Calibration (#9, #15, #16 UI tests: unify in-flight request correlation and error
+    routing in Companion.swift and SettingsSurface.swift, trim addHubRedirectPort,
+    split rebuildSettingsPanel into per-tab builders, consolidate compactHomePath,
+    makePillTrack, and single-pass Frame decoding supporting Int/String redirect_port
+    in hub_invite, add 4 Gate 1 regression assertions in oracle_e2e.rs, oidc_settlement.rs,
+    and settings_hubs.rs, route url_only_oidc_edit_... through Fixture::daemon, and
+    decouple/relax fragile Gate 2 assertions in oracle_e2e.rs); (3) v50.docs (docs-editor,
+    depends_on: [v50.core]): Contract §7 Documentation & Env-Table Parity (#10, #17:
+    add CITO_OIDC_REDIRECT_PORT to Hub Server table in site/docs/hosting.html:183-193,
+    add table-scoped env-var parity checks across README.md, deploy/hub/README.md,
+    and site/docs/hosting.html in site-clipboard.mjs, verify/generalize prose version
+    strings in site/docs/guide.html & README.md, and trim historical episode micro-recipes
+    from docs/DESIGN.md §8.2 while keeping §§1–8.1 intact); (4) v50.review (gate-reviewer,
+    depends_on: [v50.core, v50.ui, v50.docs]): [REQUIRES_SKILL: contract-and-simplicity]
+    + 3-way incremental audit convergence (uiux-auditor, pathway-auditor, structural-auditor
+    to ZERO_NEW_ISSUES) + independent FULL gate + full workspace regression.'
+  depends_on:
+  - v49
+  steps:
+  - id: v50.core
+    name: 'V50 Rust Core & Plugins Root-Cause Closure: Restorable Manual Discovery
+      Demand, Post-Commit Ack Isolation, Metadata-Only Signal Queries & Shared Atomic
+      Write (Contract §§2–6, #1–#8, #11–#14, #16)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - src/macos/**\n    - README.md\n    - docs/**\n    -\
+      \ deploy/**\n    - site/**\n\nDeliver:\n- Implement converged Binding Contract\
+      \ §§2–6 across Rust Core & Plugins (`#1`–`#8`, `#11`–`#14`, plus `#16` `plugins.rs`\
+      \ 100Hz poll removal) without repeating Stage 1 discovery:\n  1. **§2 (`#1`)\
+      \ — Restorable Manual Listener Discovery Demand (`registration.rs:674`, `receiver_tests.rs:272`,\
+      \ `daemon/mod.rs:1653`)**:\n     - Keep the 3-strike `consecutive_probe_failures\
+      \ >= 3 -> hard_exit` transition (`registration.rs:674`, `receiver_tests.rs:272`).\n\
+      \     - In `DaemonService::update_discovery_demand` (`daemon/mod.rs:1653`),\
+      \ enable background discovery when any enabled Hub slot has `autoListen == true`\
+      \ OR has a restorable `manual` listener (`status == \"UNLISTENED\" && user_stopped\
+      \ == 0 && listen_mode == \"manual\" && retirement_reason == \"hard_exit\"`)\
+      \ whose `harness` is in `configured` (`inspect_setup` `configured == true` and\
+      \ `last_app_action.get(harness) != Some(\"disconnect\")`).\n  2. **§3 (`#2`)\
+      \ — Post-Commit `notify_ack` Isolation (`core/hub.rs:584-592`, `daemon/mcp.rs:send_from`)**:\n\
+      \     - In `HubEngine::rpc` (`core/hub.rs:584-592`), isolate post-commit `self.notify_ack(...)`\
+      \ errors after `rpc_conn` commits so committed `signal_ack` / `send_reply_from_human`\
+      \ results are returned intact.\n     - Keep `daemon/mcp.rs:send_from`'s `PENDING_PUBLISH`\
+      \ local-commit error propagation tested by `human_and_channels.rs:961-995` unchanged.\n\
+      \  3. **§4 (`#3`, `#14`) — Metadata-Only Unread Queries & Query Deduplication\
+      \ (`core/state.rs`, `core/receiver.rs`, `core/session_activity.rs`, `daemon/mcp.rs`,\
+      \ `daemon/http_actions.rs`, `daemon/projection.rs`, `core/registration.rs`,\
+      \ `core/login.rs`)**:\n     - Separate metadata-only unread queries in `LocalState`\
+      \ (`core/state.rs`, omitting `message` and `batch_card`) from full-payload `cito_inbox`\
+      \ pagination; use metadata-only queries in `poll_listener` ACK reconciliation\
+      \ (`core/receiver.rs`, bounded to 128 items ordered by `seq, signal_id`), `desired_badges`\
+      \ (`core/session_activity.rs`), `cito_status` & `cito_inbox` `ack_ids` (`daemon/mcp.rs`),\
+      \ `isolate_stale_signals`, and `reconcile_wake_retry`.\n     - Eliminate duplicate\
+      \ `query_activity(\"all\", \"\")` calls in `http_actions.rs:647` and `projection.rs:344`;\
+      \ probe `kv_get` before `directory()` in `register_human_device` (`core/registration.rs:134`);\
+      \ use `poll_until` instead of 20ms sleep in `core/login.rs`.\n  4. **§5 (`#6`,\
+      \ `#7`, `#11`, `#12`) — Shared 40-Hop Symlink-Safe Atomic Write & Hub Config\
+      \ Normalization (`plugin_support.rs`, `core/config.rs`, `core/setup.rs`, `core/daemon/mod.rs`,\
+      \ `core/login.rs`, `core/daemon/http_actions.rs`)**:\n     - Place the single\
+      \ shared 40-hop dangling-symlink `publication_target` + `0o600` exclusive-temp\
+      \ (`O_CREAT | O_EXCL`, `sync_all()`, cleanup on error) atomic write primitive\
+      \ in `crates/cito-native/src/plugin_support.rs` (`crate::support`, preserving\
+      \ standalone `src/bin/cito-plugin-*.rs` build boundaries) and redirect `core/config.rs`,\
+      \ `core/setup.rs:mutate_file`, `core/daemon/mod.rs:mutate_config`, and `core/login.rs:publish`\
+      \ to it.\n     - In `config::merge_hub_config`, clear all three OIDC fields\
+      \ (`issuer`, `clientId`, `redirectPort`) only on `changed_url == true` (letting\
+      \ per-key `null` clear only the targeted key) and strip stale `natsUrl` on URL\
+      \ updates.\n     - In `http_actions.rs`, read `action[\"set_default\"].or(cfg[\"\
+      set_default\"])` in `save_hub`, remove the duplicate pre-discovery `Settings::new`\
+      \ validation, and avoid `paste_hub_invite` JSON re-serialization.\n  5. **§6\
+      \ (`#4`, `#5`, `#8`, `#13`, `#16` `plugins.rs`) — Process Cleanup, Sidecar Stop\
+      \ Guard, Claude Wake Fallback, CLI Flags & Helper Reuse (`core/hub.rs`, `main.rs`,\
+      \ `plugins/claude/native.rs`, `core/cli.rs`, `daemon/host_hub.rs`, `core/plugins.rs`,\
+      \ `plugin_support.rs`, `tests/support/plugins.rs`)**:\n     - In `HubEngine::ensure_process`\
+      \ (`core/hub.rs:1084-1133`), remove the newly created `ChannelProcess` from\
+      \ `self.inner.processes` on initial `configure_process` failure and call `shutdown()`\
+      \ outside the mutex.\n     - In `crates/cito-native/src/main.rs:307-326`, re-check\
+      \ `STDIO_STOP` immediately after `ensure_daemon` before `http_post_mcp`.\n \
+      \    - In `plugins/claude/native.rs` `wake`, map sidecar `SESSION_MISMATCH`\
+      \ to `outcome: \"session_switched\"` and fall back to `append_wake` on transient\
+      \ socket I/O errors.\n     - In `core/cli.rs`, reject `--title` and `--tag`\
+      \ on `--harness human` (`INVALID_INPUT`) and remove dead `--channel`.\n    \
+      \ - Reuse `run_command_with_timeout` in `host_hub.rs:probe_tailscale_status`,\
+      \ `handover_stale_daemon` in `plugins.rs:ensure_daemon`, shared `matches_process`/`update_badge`\
+      \ helpers in `plugin_support.rs`, and replace `setInterval(..., 10)` in `tests/support/plugins.rs:17`.\n\
+      \nBoundary:\n- Owner: `rust-engineer`. Isolated worktree transaction modifying\
+      \ `crates/cito-native/**` (excluding `tests/support/ui/**` and `tests/support/site-clipboard.mjs`)\
+      \ and `plugins/**`.\n\nAdmit:\n- Depends on Phase `v49` completion (`2d99a5b`).\n\
+      - Verification: affected unit/integration tests (`cargo test -p cito-native\
+      \ --lib`, `daemon::`, `plugins::`) and `cargo clippy --workspace --all-targets\
+      \ -- -D warnings` pass with 0 warnings. Consumed by `v50.ui`, `v50.docs`, and\
+      \ `v50.review`.\n\nRecovery:\n- Repair any Rust, plugin, or test failure in\
+      \ place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native daemon:: && cargo test -p cito-native --test native plugins:: && cargo
+      clippy --workspace --all-targets -- -D warnings'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/daemon/human_and_channels.rs
+    - plugins/claude/native.rs
+    - plugins/pi/native.rs
+    - plugins/codex/native.rs
+    agent: rust-engineer
+  - id: v50.ui
+    name: 'V50 macOS Swift UI Correlation/Error Routing, Per-Tab Settings Builders
+      & UI Oracle Calibration (Contract §7, #9, #15, #16)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
+      \    - plugins/**\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
+      \nDeliver:\n- Implement converged Binding Contract §7 UI & UI Test Calibration\
+      \ (`#9`, `#15`, `#16` UI tests) across `src/macos/**` and `crates/cito-native/tests/support/ui/**`\
+      \ without repeating Stage 1 discovery:\n  1. **Unified In-Flight Request Correlation\
+      \ & Error Routing (`src/macos/Companion.swift`, `src/macos/SettingsSurface.swift`)**:\n\
+      \     - Correlated `set_host_hub` errors for `toggle_host_hub` and `toggle_host_hub_auth`\
+      \ in `pendingControls` settle, set `settingsBannerError`, and call `rebuildSettingsPanel()`\
+      \ (not returning early on `requestId != submittedHostHubRequestId`).\n     -\
+      \ Non-`channel_test_result` / non-`composer_result` frames with `ok == false`\
+      \ (`state` for `human_inbox_update` / `unlisten_all` and `directory`) route\
+      \ their error and redraw.\n     - `settleReceiptOnly` does not set `settingsBannerError`\
+      \ when the error routed to `addHubError`, and receipt-only `settings` `frame.warning`\
+      \ sets `menuBannerError` only when `!settingsVisible`.\n     - `paste_hub_invite`\
+      \ (`request_id == hubInviteRequest`) errors route to `settingsBannerError` even\
+      \ when `add_hub_form` is open (`pendingHubSave == nil`), and `sourceOp.isEmpty`\
+      \ errors clear `hubInvitePending` only when `frame.request_id == nil || frame.request_id\
+      \ == hubInviteRequest`.\n  2. **Port Trimming, Per-Tab Settings Builders & Shared\
+      \ UI Primitives (`src/macos/{SettingsSurface,PaletteAndMetrics,UIPrimitives,Models}.swift`)**:\n\
+      \     - Trim `addHubRedirectPort` on `SettingsSurface.swift:1274`.\n     - Split\
+      \ the 832-line `rebuildSettingsPanel` into per-tab builders.\n     - Consolidate\
+      \ `compactHomePath` (`PaletteAndMetrics.swift`), `makePillTrack` (`UIPrimitives.swift`),\
+      \ and single-pass `Frame` decoding (`Models.swift`, supporting `Int` and `String`\
+      \ `redirect_port` in `hub_invite`).\n  3. **Gate 1 Regression Assertions & Gate\
+      \ 2 Oracle Calibration (`crates/cito-native/tests/support/ui/{oracle_e2e,oidc_settlement,settings_hubs}.rs`)**:\n\
+      \     - Add the 4 Gate 1 regression assertions in `oracle_e2e.rs`, `oidc_settlement.rs`,\
+      \ and `settings_hubs.rs`.\n     - Route `url_only_oidc_edit_...` in `oidc_settlement.rs`\
+      \ through `Fixture::daemon`.\n     - Decouple `oracle_e2e.rs` and relax fragile\
+      \ Gate 2 exact-pixel/prose assertions into structural geometry checks.\n\nBoundary:\n\
+      - Owner: `frontend-engineer`. Isolated worktree transaction modifying `src/macos/**`,\
+      \ `crates/cito-native/tests/support/ui/**`, and `bin/**`.\n\nAdmit:\n- Depends\
+      \ on `v50.core`.\n- Verification: Swift/AppKit build + UI/oracle tests (`cargo\
+      \ test -p cito-native --test native ui::`) pass with 0 warnings and 0 `HeadlessOracle`\
+      \ violations. Consumed by `v50.review`.\n\nRecovery:\n- Repair any Swift build,\
+      \ layout, `HeadlessOracle`, or UI test failure in place within the worktree\
+      \ before completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/Models.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/UIPrimitives.swift
+    - crates/cito-native/tests/support/ui/mod.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/oidc_settlement.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    depends_on:
+    - v50.core
+    agent: frontend-engineer
+  - id: v50.docs
+    name: 'V50 Documentation & Env-Table Parity, Version Hygiene & DESIGN.md §8.2
+      Trim (Contract §7, #10, #17)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
+      \    - crates/cito-native/tests/support/site-clipboard.mjs\n    - packaging/**\n\
+      \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \    - src/macos/**\n    - plugins/**\n\nDeliver:\n- Implement converged Binding\
+      \ Contract §7 Documentation & Env-Table Parity (`#10`, `#17`) without repeating\
+      \ Stage 1 discovery:\n  1. Add `CITO_OIDC_REDIRECT_PORT` (`1..=65535`) to the\
+      \ **Hub Server** table in `site/docs/hosting.html:183-193`.\n  2. Add table-scoped\
+      \ env-var parity verification across `README.md`, `deploy/hub/README.md`, and\
+      \ `site/docs/hosting.html` in `crates/cito-native/tests/support/site-clipboard.mjs`.\n\
+      \  3. Verify/generalize prose version strings in `site/docs/guide.html` and\
+      \ `README.md` (`0.21.3`) and trim historical episode private-symbol micro-recipes\
+      \ from `docs/DESIGN.md` §8.2 while keeping architectural contracts in §§1–8.1\
+      \ intact.\n\nBoundary:\n- Owner: `docs-editor`. Isolated worktree transaction\
+      \ modifying `README.md`, `docs/**`, `deploy/**`, `site/**`, `crates/cito-native/tests/support/site-clipboard.mjs`,\
+      \ and `packaging/**`.\n\nAdmit:\n- Depends on `v50.core`.\n- Verification: `git\
+      \ diff --check`, `python3 packaging/release.py check`, `python3 -m unittest\
+      \ discover -s packaging`, and `node crates/cito-native/tests/support/site-clipboard.mjs`\
+      \ pass cleanly. Consumed by `v50.review`.\n\nRecovery:\n- Repair any documentation,\
+      \ `site-clipboard.mjs`, or packaging check discrepancy in place within the worktree\
+      \ before completion.\n"
+    verification: git diff --check && python3 packaging/release.py check && python3
+      -m unittest discover -s packaging && node crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - README.md
+    - docs/DESIGN.md
+    - deploy/hub/README.md
+    - site/docs/hosting.html
+    - site/docs/guide.html
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - packaging/release.py
+    depends_on:
+    - v50.core
+    agent: docs-editor
+  - id: v50.review
+    name: 'V50 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
+      Regression [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
+      - Terminal Phase `v50` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` over the integrated outcomes of `v50.core`, `v50.ui`,\
+      \ and `v50.docs`:\n  1. Execute and verify 3-way incremental `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` audit convergence (`uiux-auditor`, `pathway-auditor`,\
+      \ `structural-auditor` all reaching `ZERO_NEW_ISSUES`) plus the independent\
+      \ `FULL` gate across Binding Contract §§1–7 and all 17 Admitted Finding Ledger\
+      \ items (`#1`–`#17`).\n  2. Run and verify full workspace regression and packaging\
+      \ checks at version `0.21.3` (with NO release tag) before `PASS`:\n     - `cargo\
+      \ fmt --all -- --check` and `git diff --check`\n     - `cargo clippy --workspace\
+      \ --all-targets -- -D warnings`\n     - `cargo test --workspace`\n     - `cargo\
+      \ build --release` (0 warnings + staged binary rebuild/codesign verification)\n\
+      \     - `python3 packaging/release.py check` (version `0.21.3`, NO release tag)\
+      \ and `python3 -m unittest discover -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \     - Zero `§1.2` hardcoding violations across `crates/cito-native/src/core/`\
+      \ and `src/macos/`, and zero private/internal name matches (`rda\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`)\
+      \ across product and documentation paths.\n\nBoundary:\n- Owner: `gate-reviewer`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
+      \ no_repo_change`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
+      \nAdmit:\n- Depends on `v50.core`, `v50.ui`, and `v50.docs`.\n- Consumed evidence:\
+      \ integrated commits from `v50.core`, `v50.ui`, and `v50.docs`, 3-way incremental\
+      \ audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`\
+      \ to `ZERO_NEW_ISSUES`), independent `FULL` gate report, and full workspace\
+      \ regression outputs.\n\nRecovery:\n- If any audit finding, test failure, clippy/compiler\
+      \ warning, packaging mismatch, or `§1.2`/private-name violation remains open,\
+      \ fail the gate with concrete `file:line` evidence so a scoped repair can close\
+      \ it before Delta re-verification.\n"
+    verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
+      --all-targets -- -D warnings && cargo test --workspace && cargo build --release
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      && node crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - deploy/hub/README.md
+    - site/docs/hosting.html
+    - site/docs/guide.html
+    - packaging/release.py
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v50.core
+    - v50.ui
+    - v50.docs
+    agent: gate-reviewer
