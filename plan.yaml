@@ -15867,7 +15867,7 @@ phases:
 - id: v51
   name: 'V51 Multi-Frame Settlement, Opaque-ID Byte Sovereignty, Hard-Exit Signal
     Restoration & 21-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All 21 admitted findings (#1–#21) are closed; 3-way incremental [REQUIRES_SKILL:
     contract-and-simplicity] audit convergence (uiux-auditor, pathway-auditor, structural-auditor)
     reaches ZERO_NEW_ISSUES alongside independent FULL gate verification; cargo fmt
@@ -16213,7 +16213,7 @@ phases:
   - id: v51.review
     name: 'V51 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v51` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v51.core`, `v51.ui`,\
@@ -16270,6 +16270,44 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-18T07:20:45.914698Z'
+    done_at: '2026-11-18T07:34:30.328553+00:00'
+    evidence: 'Artifact:
+
+      - Integrated commits on main: 7b1334e (v51.core), de82afc (v51.docs), 6cdf172
+      (v51.ui), 0be8288 (v51.fix_core), 5ffac2b (v51.fix_idempotency), a04bca2 (v51.fix_hub_legacy)
+
+      - Gate report: /tmp/v51-review/report-gate.json (FULL PASS, POSITIVE_GATE_EVIDENCE,
+      21/21 PROVEN)
+
+
+      Verification:
+
+      - 3-way audit convergence: uiux-auditor (R1), structural-auditor (R3), pathway-auditor
+      (R4) all ZERO_NEW_ISSUES
+
+      - Run: cargo fmt --all -- --check && git diff --check -> exit 0
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> exit 0, 0 warnings
+
+      - Run: cargo test --workspace -- --test-threads=2 (detached, temp HOME) -> 588
+      passed, 0 failed, 4 ignored (includes 109 UI tests)
+
+      - Run: cargo build --release -> exit 0, 0 warnings; 7/7 strict codesign checks
+      passed
+
+      - Run: python3.12 packaging/release.py check -> exit 0 (version 0.21.3, no release
+      tag)
+
+      - Run: python3.12 -m unittest discover -s packaging -> 17 passed, 0 failed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> exit 0
+
+      - Run: §1.2 hardcoding & private-name scans -> 0 semantic violations / 0 matches
+
+
+      Spec link:
+
+      - Admitted Finding Ledger #1–#21, Phase v51 Gate'
   - id: v51.fix_core
     name: 'V51 Core & Codex Repair: Bound SQLite NUL-Safe Queries, Coherent Rollout/Effect
       Checkpoint & Legacy Idempotency Upgrade Fallback (F1–F3)'
