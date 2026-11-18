@@ -16373,7 +16373,7 @@ phases:
   - id: v51.fix_idempotency
     name: V51 Idempotency Legacy Fallback Validation & Delimiter-Collision Guard (F4
       / v51.R10)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/src/core/daemon/mcp.rs\n\
       \    - crates/cito-native/tests/hub/cases.rs\n    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs\n\
@@ -16427,3 +16427,5 @@ phases:
     depends_on:
     - v51.fix_core
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-18T06:47:50.835413Z'
