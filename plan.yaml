@@ -16267,7 +16267,7 @@ phases:
   - id: v51.fix_core
     name: 'V51 Core & Codex Repair: Bound SQLite NUL-Safe Queries, Coherent Rollout/Effect
       Checkpoint & Legacy Idempotency Upgrade Fallback (F1–F3)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
       \    - plugins/codex/**\n  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n\
@@ -16344,3 +16344,5 @@ phases:
     depends_on:
     - v51.core
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-18T06:23:08.523025Z'
