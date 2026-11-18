@@ -16373,7 +16373,7 @@ phases:
   - id: v51.fix_idempotency
     name: V51 Idempotency Legacy Fallback Validation & Delimiter-Collision Guard (F4
       / v51.R10)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/src/core/daemon/mcp.rs\n\
       \    - crates/cito-native/tests/hub/cases.rs\n    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs\n\
@@ -16429,3 +16429,25 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-18T06:47:50.835413Z'
+    done_at: '2026-11-18T06:58:28.455258+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 5ffac2b168307deae3ebdd83e3ba3a4eeb2ad828 (fast-forwarded to main)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> passed
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> passed (0 warnings)
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 301 passed, 4
+      ignored
+
+      - Run: detached hub:: (65 passed), daemon:: (76 passed), legacy_ (6 passed)
+      -> all passed
+
+
+      Spec link:
+
+      - pathway-auditor F4 (v51.R10)'
