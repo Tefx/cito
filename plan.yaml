@@ -16217,31 +16217,32 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v51` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v51.core`, `v51.ui`,\
-      \ `v51.docs`, and `v51.fix_core`:\n  1. Run `[REQUIRES_SKILL: contract-and-simplicity]`\
-      \ incremental/delta verification across `uiux-auditor`, `pathway-auditor`, and\
-      \ `structural-auditor` until `ZERO_NEW_ISSUES` (including delta closure of Round\
-      \ 1 `F1`–`F3` from `v51.fix_core`), followed by independent `FULL` gate verification\
-      \ across all 21 Admitted Finding Ledger items (`#1`–`#21`).\n  2. Run and verify\
-      \ full workspace regression and packaging checks at version `0.21.3` (with NO\
-      \ release tag):\n     - `cargo fmt --all -- --check` and `git diff --check`\n\
-      \     - `cargo clippy --workspace --all-targets -- -D warnings`\n     - `cargo\
-      \ test --workspace -- --test-threads=2`\n     - `cargo build --release` (0 warnings\
-      \ + staged binaries codesign)\n     - `python3 packaging/release.py check` (version\
-      \ `0.21.3`, NO release tag) and `python3 -m unittest discover -s packaging`\n\
-      \     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n     - Zero\
-      \ `§1.2` hardcoding violations across `crates/cito-native/src/core/` and `src/macos/`,\
-      \ and zero private/internal name matches (`rda\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`)\
+      \ `v51.docs`, `v51.fix_core`, and `v51.fix_idempotency`:\n  1. Run `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` incremental/delta verification across `uiux-auditor`,\
+      \ `pathway-auditor`, and `structural-auditor` until `ZERO_NEW_ISSUES` (including\
+      \ delta closure of `F1`–`F4` from `v51.fix_core` and `v51.fix_idempotency`),\
+      \ followed by independent `FULL` gate verification across all 21 Admitted Finding\
+      \ Ledger items (`#1`–`#21`).\n  2. Run and verify full workspace regression\
+      \ and packaging checks at version `0.21.3` (with NO release tag):\n     - `cargo\
+      \ fmt --all -- --check` and `git diff --check`\n     - `cargo clippy --workspace\
+      \ --all-targets -- -D warnings`\n     - `cargo test --workspace -- --test-threads=2`\n\
+      \     - `cargo build --release` (0 warnings + staged binaries codesign)\n  \
+      \   - `python3 packaging/release.py check` (version `0.21.3`, NO release tag)\
+      \ and `python3 -m unittest discover -s packaging`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \     - Zero `§1.2` hardcoding violations across `crates/cito-native/src/core/`\
+      \ and `src/macos/`, and zero private/internal name matches (`rda\\\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`)\
       \ across product and documentation paths.\n\nBoundary:\n- Owner: `gate-reviewer`\
       \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
       \ no_repo_change`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
-      \nAdmit:\n- Depends on `v51.core`, `v51.ui`, `v51.docs`, and `v51.fix_core`.\n\
-      - Consumed evidence: integrated commits from `v51.core`, `v51.ui`, `v51.docs`,\
-      \ and `v51.fix_core`, 3-way incremental audit convergence (`uiux-auditor`, `pathway-auditor`,\
-      \ `structural-auditor` to `ZERO_NEW_ISSUES`), independent `FULL` gate report,\
-      \ and full workspace regression outputs.\n\nRecovery:\n- If any audit finding,\
-      \ test failure, clippy/compiler warning, packaging mismatch, or `§1.2`/private-name\
-      \ violation remains open, fail the gate with concrete `file:line` evidence so\
-      \ a scoped repair can close it before Delta re-verification."
+      \nAdmit:\n- Depends on `v51.core`, `v51.ui`, `v51.docs`, `v51.fix_core`, and\
+      \ `v51.fix_idempotency`.\n- Consumed evidence: integrated commits from `v51.core`,\
+      \ `v51.ui`, `v51.docs`, `v51.fix_core`, and `v51.fix_idempotency`, 3-way incremental\
+      \ audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`\
+      \ to `ZERO_NEW_ISSUES`), independent `FULL` gate report, and full workspace\
+      \ regression outputs.\n\nRecovery:\n- If any audit finding, test failure, clippy/compiler\
+      \ warning, packaging mismatch, or `§1.2`/private-name violation remains open,\
+      \ fail the gate with concrete `file:line` evidence so a scoped repair can close\
+      \ it before Delta re-verification."
     verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace -- --test-threads=2 &&
       cargo build --release && python3 packaging/release.py check && python3 -m unittest
@@ -16263,6 +16264,7 @@ phases:
     - v51.ui
     - v51.docs
     - v51.fix_core
+    - v51.fix_idempotency
     agent: gate-reviewer
   - id: v51.fix_core
     name: 'V51 Core & Codex Repair: Bound SQLite NUL-Safe Queries, Coherent Rollout/Effect
@@ -16368,3 +16370,60 @@ phases:
       Spec link:
 
       - pathway-auditor F1–F3 (v51.R8, v51.R12, v51.R10)'
+  - id: v51.fix_idempotency
+    name: V51 Idempotency Legacy Fallback Validation & Delimiter-Collision Guard (F4
+      / v51.R10)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/src/core/daemon/mcp.rs\n\
+      \    - crates/cito-native/tests/hub/cases.rs\n    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs\n\
+      \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
+      \  - docs/**\n    - deploy/**\n    - site/**\n    - plugins/**\n\nDeliver:\n\
+      - Resolve pathway-auditor Round 2 finding `F4` (`v51.R10`):\n  1. **Hub Reply\
+      \ Legacy Fallback Identity Validation (`crates/cito-native/src/core/hub.rs:1787-1801`)**:\n\
+      \     - Before reusing a `legacy_msg_id` hit in `send_reply_from_human`, validate\
+      \ the candidate `hub_signals` row against persisted sender/target/payload identity\
+      \ (`from_listener_id`, `to_listener_id`, and payload fields).\n     - When `to_listener_id`,\
+      \ `from_listener_id`, or payload mismatch, do not reuse the legacy hit (treat\
+      \ as distinct and proceed with canonical `canonical_msg_id`).\n     - When tuple\
+      \ components contain `|` and retained legacy metadata cannot disambiguate whether\
+      \ the hit is an exact match or a delimiter-shifted collision, return an explicit\
+      \ indeterminate error rather than silently merging distinct tuples.\n  2. **Daemon\
+      \ MCP `cito_send` Legacy Fallback Identity Validation (`crates/cito-native/src/core/daemon/mcp.rs:1197-1215`)**:\n\
+      \     - Before reusing a `legacy_dedup` candidate in `local_sent_idempotency`,\
+      \ validate the candidate against persisted sender/target/payload identity (including\
+      \ any existing `signal_id` row in `local_signals` or retained reservation metadata\
+      \ across both `COMPLETED` and `PENDING_PUBLISH` branches).\n     - When sender/target/payload\
+      \ mismatch, do not reuse the legacy hit (treat as distinct and insert/proceed\
+      \ under canonical `dedup`).\n     - When tuple components contain `|` and retained\
+      \ legacy metadata cannot disambiguate whether the hit is an exact match or a\
+      \ delimiter-shifted collision, return an explicit indeterminate error rather\
+      \ than silently merging distinct tuples.\n  3. **Combined Upgrade + Collision\
+      \ Regression Tests (`crates/cito-native/tests/hub/cases.rs`, `crates/cito-native/tests/support/daemon/mcp_and_inbox.rs`)**:\n\
+      \     - Add combined upgrade + `|`-delimiter collision regression tests in `crates/cito-native/tests/hub/cases.rs`\
+      \ and `crates/cito-native/tests/support/daemon/mcp_and_inbox.rs` covering both\
+      \ Hub reply and local `COMPLETED` / `PENDING_PUBLISH` branches (proving legitimate\
+      \ non-colliding legacy upgrade retries succeed, mismatched target/sender/payload\
+      \ rows are not merged, and ambiguous `|`-bearing legacy collisions are rejected\
+      \ explicitly).\n\nBoundary:\n- Owner: `rust-engineer`. Isolated worktree modifying\
+      \ only `crates/cito-native/src/core/hub.rs`, `crates/cito-native/src/core/daemon/mcp.rs`,\
+      \ `crates/cito-native/tests/hub/cases.rs`, and `crates/cito-native/tests/support/daemon/mcp_and_inbox.rs`.\n\
+      \nAdmit:\n- Depends on `v51.fix_core`.\n- Verification: `cargo fmt --all --\
+      \ --check && cargo clippy --workspace --all-targets -- -D warnings && cargo\
+      \ test -p cito-native --lib -- --test-threads=2 && cargo test -p cito-native\
+      \ --test native daemon:: -- --test-threads=2 && cargo test -p cito-native --test\
+      \ native hub:: -- --test-threads=2`.\n- Consumed by `v51.review`.\n\nRecovery:\n\
+      - Repair any Rust compiler, clippy, or test failure in place within the worktree\
+      \ before completing the step."
+    verification: 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test -p cito-native --lib -- --test-threads=2 && cargo
+      test -p cito-native --test native daemon:: -- --test-threads=2 && cargo test
+      -p cito-native --test native hub:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/tests/hub/cases.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    depends_on:
+    - v51.fix_core
+    agent: rust-engineer
