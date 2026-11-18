@@ -16456,7 +16456,7 @@ phases:
   - id: v51.fix_hub_legacy
     name: V51 Hub Reply Legacy Sender Canonicalization & Same-Tuple Payload Conflict
       Guard (F5 / v51.R10)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/tests/hub/cases.rs\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
@@ -16497,3 +16497,5 @@ phases:
     depends_on:
     - v51.fix_idempotency
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-18T07:09:31.960170Z'
