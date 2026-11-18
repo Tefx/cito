@@ -16456,7 +16456,7 @@ phases:
   - id: v51.fix_hub_legacy
     name: V51 Hub Reply Legacy Sender Canonicalization & Same-Tuple Payload Conflict
       Guard (F5 / v51.R10)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/tests/hub/cases.rs\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
@@ -16499,3 +16499,24 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-18T07:09:31.960170Z'
+    done_at: '2026-11-18T07:15:50.446451+00:00'
+    evidence: 'Artifact:
+
+      - Commit: a04bca2d88ca56bd3de602380a46da72a8b2f423 (fast-forwarded to main)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> passed
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> passed (0 warnings)
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 302 passed, 4
+      ignored
+
+      - Run: detached hub:: --test-threads=2 -> 66 passed, 0 failed
+
+
+      Spec link:
+
+      - pathway-auditor F5 (v51.R10)'
