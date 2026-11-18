@@ -16061,7 +16061,7 @@ phases:
   - id: v51.ui
     name: 'V51 macOS Swift UI: Multi-Frame Settlement, Outbound Size Guard, Pending
       Controls & HeadlessOracle Calibration (#1–#6, #14, #18–#20)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
@@ -16130,10 +16130,12 @@ phases:
     depends_on:
     - v51.core
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-18T05:19:18.134452Z'
   - id: v51.docs
     name: 'V51 Documentation & Site Test Parity: 3-Section Environment Variable Parity
       & Plugin deliver Contract (#14, #21)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
       \    - crates/cito-native/tests/support/site-clipboard.mjs\n  blocked_paths:\n\
@@ -16165,6 +16167,8 @@ phases:
     depends_on:
     - v51.core
     agent: docs-editor
+    claimed_by: docs-editor
+    claimed_at: '2026-11-18T05:19:18.134579Z'
   - id: v51.review
     name: 'V51 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
