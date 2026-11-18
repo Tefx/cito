@@ -16217,9 +16217,10 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v51` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v51.core`, `v51.ui`,\
-      \ and `v51.docs`:\n  1. Run `[REQUIRES_SKILL: contract-and-simplicity]` incremental\
-      \ verification across `uiux-auditor`, `pathway-auditor`, and `structural-auditor`\
-      \ until `ZERO_NEW_ISSUES`, followed by independent `FULL` gate verification\
+      \ `v51.docs`, and `v51.fix_core`:\n  1. Run `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ incremental/delta verification across `uiux-auditor`, `pathway-auditor`, and\
+      \ `structural-auditor` until `ZERO_NEW_ISSUES` (including delta closure of Round\
+      \ 1 `F1`–`F3` from `v51.fix_core`), followed by independent `FULL` gate verification\
       \ across all 21 Admitted Finding Ledger items (`#1`–`#21`).\n  2. Run and verify\
       \ full workspace regression and packaging checks at version `0.21.3` (with NO\
       \ release tag):\n     - `cargo fmt --all -- --check` and `git diff --check`\n\
@@ -16233,14 +16234,14 @@ phases:
       \ across product and documentation paths.\n\nBoundary:\n- Owner: `gate-reviewer`\
       \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
       \ no_repo_change`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
-      \nAdmit:\n- Depends on `v51.core`, `v51.ui`, and `v51.docs`.\n- Consumed evidence:\
-      \ integrated commits from `v51.core`, `v51.ui`, and `v51.docs`, 3-way incremental\
-      \ audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`\
-      \ to `ZERO_NEW_ISSUES`), independent `FULL` gate report, and full workspace\
-      \ regression outputs.\n\nRecovery:\n- If any audit finding, test failure, clippy/compiler\
-      \ warning, packaging mismatch, or `§1.2`/private-name violation remains open,\
-      \ fail the gate with concrete `file:line` evidence so a scoped repair can close\
-      \ it before Delta re-verification.\n"
+      \nAdmit:\n- Depends on `v51.core`, `v51.ui`, `v51.docs`, and `v51.fix_core`.\n\
+      - Consumed evidence: integrated commits from `v51.core`, `v51.ui`, `v51.docs`,\
+      \ and `v51.fix_core`, 3-way incremental audit convergence (`uiux-auditor`, `pathway-auditor`,\
+      \ `structural-auditor` to `ZERO_NEW_ISSUES`), independent `FULL` gate report,\
+      \ and full workspace regression outputs.\n\nRecovery:\n- If any audit finding,\
+      \ test failure, clippy/compiler warning, packaging mismatch, or `§1.2`/private-name\
+      \ violation remains open, fail the gate with concrete `file:line` evidence so\
+      \ a scoped repair can close it before Delta re-verification."
     verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace -- --test-threads=2 &&
       cargo build --release && python3 packaging/release.py check && python3 -m unittest
@@ -16253,8 +16254,93 @@ phases:
     - site/docs/plugins.html
     - packaging/release.py
     - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/hub.rs
     depends_on:
     - v51.core
     - v51.ui
     - v51.docs
+    - v51.fix_core
     agent: gate-reviewer
+  - id: v51.fix_core
+    name: 'V51 Core & Codex Repair: Bound SQLite NUL-Safe Queries, Coherent Rollout/Effect
+      Checkpoint & Legacy Idempotency Upgrade Fallback (F1–F3)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
+      \    - plugins/codex/**\n  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n\
+      \    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\nDeliver:\n\
+      - Resolve the 3 Tier 1 pathway-auditor Round 1 regressions (`F1`, `F2`, `F3`)\
+      \ in Rust Core and the Codex plugin:\n  1. **F1 — Length-Aware Bound SQLite\
+      \ Parameters for NUL-Bearing External Codex IDs (`v51.R8`, `crates/cito-native/src/plugin_support.rs`,\
+      \ `plugins/codex/native.rs`)**:\n     - Add length-aware bound text parameter\
+      \ support (`sqlite3_bind_text` with explicit byte length `s.len()`) to `ReadOnlySqlite`\
+      \ in `crates/cito-native/src/plugin_support.rs` (e.g., `rows_with_params(sql,\
+      \ params)` or parameterized `rows`) so query parameter values never pass through\
+      \ `CString::new(sql)` on interpolated SQL text.\n     - Use bound parameters\
+      \ in `plugins/codex/native.rs` `row_for_id` (`SELECT * FROM threads WHERE id\
+      \ = ?`) and `try_rows` (`retained_session_ids` `id IN (?, ...)` when non-empty,\
+      \ omitting the empty `id IN ()` clause or false predicate when empty) so NUL-bearing\
+      \ external IDs work end-to-end across `discover_sessions`, `resolve_caller`,\
+      \ `probe`, and retained discovery without failing `CString::new(sql)` or breaking\
+      \ discovery of unrelated threads.\n  2. **F2 — Single Coherent Atomic Checkpoint\
+      \ for Codex Rollout Cursor & Effect Ledger (`v51.R12`, `plugins/codex/native.rs`)**:\n\
+      \     - In `plugins/codex/native.rs` (`source_activity` and `record_effect`\
+      \ / ledger readers), persist rollout cursor state (`device`, `inode`, `offset`,\
+      \ `user_at_ms`, `saw_effect`, `revision`) and `effects` / `fallback` consumption\
+      \ in one coherent atomic file checkpoint (`atomic_write(&path, ...)` on the\
+      \ locked session effect ledger, with backward-compatible read fallback to legacy\
+      \ `source.json` when upgrading an existing session) instead of two separate\
+      \ `atomic_write` calls (`cursor_path` + `path`), ensuring an interrupted write\
+      \ between files can never advance `offset` without consuming the matched effect\
+      \ hash or vice versa.\n  3. **F3 — Legacy-Format Fallback Lookup for Unexpired\
+      \ Idempotency Reservations Across Upgrade (`v51.R10`, `crates/cito-native/src/core/daemon/mcp.rs`,\
+      \ `crates/cito-native/src/core/hub.rs`)**:\n     - In `crates/cito-native/src/core/daemon/mcp.rs`\
+      \ (`cito_send` reservation transaction around line `1181-1197`), compute both\
+      \ the canonical unambiguous JSON-tuple keys (`dedup`, `request_hash`) and the\
+      \ legacy delimiter-joined keys (`legacy_dedup = hash(&format!(\"{endpoint}|{}|{canonical}|{key}\"\
+      , string(&slot.config, \"url\")))`, `legacy_request_hash = hash(&format!(\"\
+      {message}|{}\", reply_to.as_str().unwrap_or(\"\")))`). When querying `local_sent_idempotency`,\
+      \ look up `dedup_id = ?` (new) and fall back to `dedup_id = ?` (legacy) if unexpired,\
+      \ accepting either `request_hash` or `legacy_request_hash` on a matched legacy\
+      \ row and preserving the matched row's `dedup_id` / `signal_id` for retry publication\
+      \ and status updates while inserting new reservations strictly under the canonical\
+      \ JSON-tuple `dedup` and `request_hash`.\n     - In `crates/cito-native/src/core/hub.rs`\
+      \ (`send_reply_from_human` around line `1773-1786`), check whether an existing\
+      \ `hub_signals` row already exists under the legacy reply `msg_id` (`hash(&format!(\"\
+      {pid}:{host_id}:human:{target_id}:{key}\"))`) before publishing under the canonical\
+      \ JSON-tuple `msg_id` (`hash(&json!([pid, host_id, \"human\", target_id, key]).to_string())`),\
+      \ reusing the legacy `msg_id` when already committed so retries across a daemon/hub\
+      \ upgrade within the 30-minute reservation window remain idempotent without\
+      \ duplicating signals.\n- Add targeted regression tests in `crates/cito-native/tests/`\
+      \ covering:\n  - NUL-bearing Codex thread IDs across `discover_sessions` (including\
+      \ inside `retained_session_ids` alongside normal threads), `resolve_caller`,\
+      \ and `probe`;\n  - Single-checkpoint atomic persistence of Codex rollout cursor\
+      \ and consumed effect hashes;\n  - Pre-upgrade legacy `local_sent_idempotency`\
+      \ and Hub reply `msg_id` retry recovery within the active reservation window\
+      \ alongside collision-free JSON-tuple reservation for new sends.\n\nBoundary:\n\
+      - Owner: `rust-engineer`. Isolated worktree modifying only `crates/cito-native/src/**`,\
+      \ `crates/cito-native/tests/**`, and `plugins/codex/**`.\n\nAdmit:\n- Depends\
+      \ on `v51.core`.\n- Verification: `cargo fmt --all -- --check && cargo clippy\
+      \ --workspace --all-targets -- -D warnings && cargo test -p cito-native --lib\
+      \ -- --test-threads=2 && cargo test -p cito-native --test native daemon:: --\
+      \ --test-threads=2 && cargo test -p cito-native --test native plugins:: -- --test-threads=2\
+      \ && cargo test -p cito-native --test native hub:: -- --test-threads=2`.\n-\
+      \ Consumed by `v51.review`.\n\nRecovery:\n- Repair any Rust compiler, clippy,\
+      \ or test failure in place within the worktree before completing the step."
+    verification: 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test -p cito-native --lib -- --test-threads=2 && cargo
+      test -p cito-native --test native daemon:: -- --test-threads=2 && cargo test
+      -p cito-native --test native plugins:: -- --test-threads=2 && cargo test -p
+      cito-native --test native hub:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    depends_on:
+    - v51.core
+    agent: rust-engineer
