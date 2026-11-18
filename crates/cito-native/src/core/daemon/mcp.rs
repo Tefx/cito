@@ -1202,11 +1202,44 @@ impl DaemonService {
             string(&slot.config, "url")
         ));
         let legacy_request_hash = hash(&format!("{message}|{reply_to}"));
+        // Unlike Hub publications, legacy reservations do not retain structured
+        // sender/key metadata. Do not guess their identity when delimiters can
+        // move tuple boundaries (or message/reply boundaries in the old hash).
+        let ambiguous_legacy = [
+            string(&slot.identity, "principal_id"),
+            &self.host_id,
+            caller
+                .as_ref()
+                .map(|c| string(c, "harness"))
+                .unwrap_or("unbound"),
+            caller
+                .as_ref()
+                .map(|c| string(c, "session_id"))
+                .unwrap_or("default"),
+            string(&slot.config, "url"),
+            canonical,
+            &key,
+            &message,
+            reply_to.as_str().unwrap_or(""),
+        ]
+        .iter()
+        .any(|part| part.contains('|'));
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
             if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
-            if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(legacy_dedup)])?.into_iter().next(){if old["request_hash"]!=legacy_request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
+            if let Some(old) = c.query(
+                "SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",
+                &[json!(hub), json!(legacy_dedup)],
+            )?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
+                if ambiguous_legacy {
+                    return Err("IDEMPOTENCY_KEY_INDETERMINATE: Legacy reservation lacks tuple identity".into());
+                }
+                if old["request_hash"] != legacy_request_hash {
+                    return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());
+                }
+                return Ok(old);
+            }
             let id=format!("sig_{}",random_uuid_v4().replace('-',""));c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?)",&[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(now+1_800_000)),json!(now+1_800_000)])?;
             c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next().ok_or("Sent reservation missing".into())
         })?;

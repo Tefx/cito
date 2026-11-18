@@ -20,11 +20,28 @@ fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
         format!("{}|human|target|{}", tuples[0].0, tuples[0].1),
         format!("{}|human|target|{}", tuples[1].0, tuples[1].1)
     );
+    let mut first = None;
     let replies = tuples.map(|(host, key)| {
         let request = json!({"to":"target","message":"Approved","host_id":host,"msg_id":key});
         let reply = engine
             .rpc("send_reply_from_human", &request, Some(&owner))
             .unwrap();
+        if first.is_none() {
+            // Model a live pre-upgrade publication, then submit its colliding tuple.
+            let legacy = hash(&format!(
+                "{}|{host}|human|target|{key}",
+                owner["principal_id"].as_str().unwrap()
+            ));
+            engine
+                .inner
+                .db
+                .execute(
+                    "UPDATE hub_signals SET msg_id=? WHERE seq=?",
+                    &[json!(legacy), reply["seq"].clone()],
+                )
+                .unwrap();
+            first = Some(request.clone());
+        }
         let retry = engine
             .rpc("send_reply_from_human", &request, Some(&owner))
             .unwrap();
@@ -32,6 +49,24 @@ fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
         assert_eq!(retry["seq"], reply["seq"]);
         reply
     });
+    let retried_first = engine
+        .rpc("send_reply_from_human", &first.unwrap(), Some(&owner))
+        .unwrap();
+    assert_eq!(retried_first["signal_id"], replies[0]["signal_id"]);
+    assert_eq!(retried_first["seq"], replies[0]["seq"]);
+    let stored = engine
+        .inner
+        .db
+        .query(
+            "SELECT CAST(data AS TEXT) AS data FROM hub_signals ORDER BY seq",
+            &[],
+        )
+        .unwrap();
+    for (row, (host, _)) in stored.iter().zip(tuples) {
+        let payload: Value = serde_json::from_str(row["data"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["from"]["host_id"], host);
+        assert_eq!(payload["to"], "target");
+    }
     assert_ne!(replies[0]["signal_id"], replies[1]["signal_id"]);
     assert_ne!(replies[0]["seq"], replies[1]["seq"]);
     assert_eq!(

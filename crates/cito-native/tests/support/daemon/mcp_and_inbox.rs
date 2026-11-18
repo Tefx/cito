@@ -1208,6 +1208,139 @@ fn legacy_live_send_reservations_recover_completed_and_pending_publications() {
 }
 
 #[test]
+fn legacy_reservations_reject_other_targets_and_ambiguous_identity() {
+    use cito_native::core::identity::hash;
+    let _lock = serial();
+    for pending in [false, true] {
+        let f = Fixture::new(json!({}));
+        let meta = f.provider("delivered_unconfirmed");
+        f.daemon(&[]);
+        let target = enroll(&f, meta);
+        let args =
+            json!({"to":target["listener_id"],"message":"Legacy retry","idempotency_key":"stable"});
+        let first = send_human(&f, args.clone());
+        let local = f.db("state.sqlite");
+        let hub = f.db("hub.sqlite");
+        let old = local
+            .query("SELECT * FROM local_sent_idempotency", &[])
+            .unwrap()[0]
+            .clone();
+        let publication = hub
+            .query(
+                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",
+                &[old["signal_id"].clone()],
+            )
+            .unwrap()[0]
+            .clone();
+        let payload: Value = serde_json::from_str(publication["data"].as_str().unwrap()).unwrap();
+        let endpoint = payload["sender_endpoint_key"].as_str().unwrap();
+        let canonical = old["to_listener_id"].as_str().unwrap();
+        let legacy = hash(&format!("{endpoint}|local://|{canonical}|stable"));
+        local
+            .execute(
+                "UPDATE local_sent_idempotency SET dedup_id=?,request_hash=?,status=?,seq=?",
+                &[
+                    json!(legacy),
+                    json!(hash("Legacy retry|null")),
+                    json!(if pending {
+                        "PENDING_PUBLISH"
+                    } else {
+                        "wake_accepted"
+                    }),
+                    if pending {
+                        json!(0)
+                    } else {
+                        first["seq"].clone()
+                    },
+                ],
+            )
+            .unwrap();
+
+        // Seed a retained legacy row for another destination under the incoming
+        // legacy key. The missing sender/key columns cannot reconstruct its tuple;
+        // its stored destination alone proves it cannot belong to this request.
+        let other_key = "other|key";
+        let collision = hash(&format!("{endpoint}|local://|{canonical}|{other_key}"));
+        local
+            .execute(
+                "UPDATE local_sent_idempotency SET dedup_id=?,to_listener_id='c_other'",
+                &[json!(collision)],
+            )
+            .unwrap();
+        let mut other_args = args.clone();
+        other_args["idempotency_key"] = json!(other_key);
+        let second = send_human(&f, other_args.clone());
+        assert_ne!(second["signal_id"], first["signal_id"]);
+        assert_ne!(second["seq"], first["seq"]);
+        let retried = send_human(&f, other_args);
+        assert_eq!(retried["signal_id"], second["signal_id"]);
+        assert_eq!(retried["seq"], second["seq"]);
+        assert_eq!(
+            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                .unwrap()[0]["n"],
+            2
+        );
+        let retained = local
+            .query(
+                "SELECT * FROM local_sent_idempotency WHERE dedup_id=?",
+                &[json!(collision)],
+            )
+            .unwrap()[0]
+            .clone();
+        assert_eq!(retained["signal_id"], old["signal_id"]);
+        assert_eq!(retained["to_listener_id"], "c_other");
+        assert_eq!(
+            retained["status"],
+            if pending {
+                "PENDING_PUBLISH"
+            } else {
+                "wake_accepted"
+            }
+        );
+
+        // If the target also matches, ambiguous legacy identity must fail closed
+        // without changing the retained reservation or publishing a third signal.
+        local
+            .execute(
+                "DELETE FROM local_sent_idempotency WHERE dedup_id<>?",
+                &[json!(collision)],
+            )
+            .unwrap();
+        local
+            .execute(
+                "UPDATE local_sent_idempotency SET to_listener_id=?",
+                &[json!(canonical)],
+            )
+            .unwrap();
+        let ambiguous = send_human_result(
+            &f,
+            json!({
+                "to":target["listener_id"],"message":"Legacy retry","idempotency_key":other_key
+            }),
+        );
+        assert_eq!(ambiguous["http_status"], 400, "{ambiguous}");
+        assert!(
+            ambiguous
+                .to_string()
+                .contains("IDEMPOTENCY_KEY_INDETERMINATE"),
+            "{ambiguous}"
+        );
+        assert_eq!(
+            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                .unwrap()[0]["n"],
+            2
+        );
+        assert_eq!(
+            local
+                .query("SELECT * FROM local_sent_idempotency", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
 fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

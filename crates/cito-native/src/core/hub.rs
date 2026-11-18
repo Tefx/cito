@@ -1793,10 +1793,22 @@ fn publish_human_reply(
             .is_none()
                 && one(
                     c,
-                    "SELECT seq FROM hub_signals WHERE msg_id=? AND created_ms>=?",
+                    "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE msg_id=? AND created_ms>=?",
                     &[json!(legacy), json!(cutoff)],
                 )?
-                .is_some()
+                .is_some_and(|row| {
+                    // The legacy hash lost tuple boundaries. Its structured payload
+                    // must prove the sender, destination and request still match.
+                    let stored = parse(&row, "data");
+                    stored["from"]["principal_id"] == pid
+                        && stored["from"]["host_id"] == host_id
+                        && stored["from"]["harness"] == "human"
+                        && stored["from"]["listener_id"]
+                            == super::identity::public_listener_id(owner, &human)
+                        && stored["to"] == target_id
+                        && stored["message"] == text
+                        && stored["in_reply_to"] == json!(in_reply_to)
+                })
             {
                 Ok::<_, String>(legacy)
             } else {
