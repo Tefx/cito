@@ -16061,7 +16061,7 @@ phases:
   - id: v51.ui
     name: 'V51 macOS Swift UI: Multi-Frame Settlement, Outbound Size Guard, Pending
       Controls & HeadlessOracle Calibration (#1–#6, #14, #18–#20)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n\
@@ -16132,6 +16132,26 @@ phases:
     agent: frontend-engineer
     claimed_by: frontend-engineer
     claimed_at: '2026-11-18T05:19:18.134452Z'
+    done_at: '2026-11-18T05:21:23.518730+00:00'
+    evidence: 'Artifact:
+
+      - Commit: ff430656fc11acfc88ef940e657c9c2df388f1d4 (rebased onto main after
+      disjoint v51.docs)
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --test native ui:: -- --test-threads=2 -> 108
+      passed, 0 failed (0 compiler warnings, 0 HeadlessOracle violations)
+
+      - Run: cargo fmt --all -- --check -> passed
+
+      - Run: git diff --check -> passed
+
+
+      Spec link:
+
+      - Admitted Finding Ledger #1–#6, #14, #18–#20 (v51.ui)'
   - id: v51.docs
     name: 'V51 Documentation & Site Test Parity: 3-Section Environment Variable Parity
       & Plugin deliver Contract (#14, #21)'
