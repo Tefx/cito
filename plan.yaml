@@ -16135,7 +16135,7 @@ phases:
   - id: v51.docs
     name: 'V51 Documentation & Site Test Parity: 3-Section Environment Variable Parity
       & Plugin deliver Contract (#14, #21)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - docs/**\n    - deploy/**\n    - site/**\n\
       \    - crates/cito-native/tests/support/site-clipboard.mjs\n  blocked_paths:\n\
@@ -16169,6 +16169,27 @@ phases:
     agent: docs-editor
     claimed_by: docs-editor
     claimed_at: '2026-11-18T05:19:18.134579Z'
+    done_at: '2026-11-18T05:21:08.778151+00:00'
+    evidence: 'Artifact:
+
+      - Commit: de82afc0ace31b8b6fe61d4c599479f252941c14 (fast-forwarded to main;
+      actual executor: executor)
+
+
+      Verification:
+
+      - Run: git diff --check -> passed
+
+      - Run: python3.12 packaging/release.py check -> passed (version 0.21.3)
+
+      - Run: python3.12 -m unittest discover -s packaging -> 17 passed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> passed
+
+
+      Spec link:
+
+      - Admitted Finding Ledger #14, #21 (v51.docs)'
   - id: v51.review
     name: 'V51 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
