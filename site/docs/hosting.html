@@ -234,7 +234,7 @@ sqlite3 /srv/backups/cito-hub.sqlite 'PRAGMA integrity_check;'</code></pre>
 <tr><td><code>CITO_USER</code></td><td>Local username override; otherwise configured user or OS username. OIDC identity comes from verified tokens.</td></tr>
 <tr><td><code>CITO_HOST_NAME</code></td><td>Overrides the host display name; otherwise the system hostname.</td></tr>
 <tr><td><code>CITO_DAEMON_PORT</code></td><td><code>4290</code>; loopback daemon HTTP port, overrides <code>daemonPort</code> in config.</td></tr>
-<tr><td><code>CITO_OIDC_REDIRECT_PORT</code></td><td>Server <code>--redirect-port</code> publishes the callback hint through <code>/health</code>; integer <code>1..65535</code>. On clients this is a fallback only when <code>redirectPort</code> is omitted. Explicit client <code>0</code> forces an ephemeral port.</td></tr>
+<tr><td><code>CITO_OIDC_REDIRECT_PORT</code></td><td>Loopback callback fallback when <code>redirectPort</code> is absent; integer <code>1..=65535</code>. An explicit <code>redirectPort: 0</code> selects an ephemeral port.</td></tr>
 <tr><td><code>CITO_BROWSER_BIN</code></td><td>Browser opener used for OIDC login; platform default (<code>open</code> on macOS).</td></tr>
 <tr><td><code>CITO_TAILSCALE_HOST</code></td><td>Overrides advertised Tailscale host discovery for Hub invitations.</td></tr>
 <tr><td><code>CITO_DISABLE_TAILSCALE_PROBE</code></td><td>Set <code>1</code> to skip the Tailscale CLI probe.</td></tr>
