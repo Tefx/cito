@@ -709,9 +709,9 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     });
     control(&f, p, "act_filter:all");
     for (reason, label) in [
-        ("stale_generation", "Session reloaded"),
+        ("stale_generation", "App reloaded"),
         ("driver_unavailable", "App unavailable"),
-        ("session_switched", "Session changed"),
+        ("session_switched", "Conversation changed"),
         ("unlistened", "Listening paused"),
         ("unlistened_before_dispatch", "Listening paused"),
         ("fenced_before_dispatch", "Connection changed"),

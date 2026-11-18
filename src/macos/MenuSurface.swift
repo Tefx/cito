@@ -228,8 +228,8 @@ extension Companion: NSMenuDelegate {
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = statusText; drawer.addSubview(detail)
-            layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
-            if hub.error != nil || measureTextWidth(statusText,font:detail.font ?? .systemFont(ofSize:11)) > detail.frame.width {
+            let detailWidth = drawer.bounds.width - 24 - drawerControls.reduce(CGFloat(0)) { $0 + $1.frame.width + 4 }
+            if hub.error != nil || measureTextWidth(statusText,font:detail.font ?? .systemFont(ofSize:11)) > detailWidth {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
@@ -713,12 +713,16 @@ extension Companion: NSMenuDelegate {
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
                         listenBtn.toolTip = "Start listening in \(candidateTitle)"
                         listenBtn.isEnabled = !targetHub.isEmpty
+                        pendingLabel(listenBtn,isPending("listen_session",hub:targetHub,target:"\(c.harness):\(c.session_id)"),"Listening…")
+                        info.frame.size.width = min(info.frame.width, listenBtn.frame.minX - 54)
+                        location.frame.size.width = info.frame.width
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
                             self.pendingMutation = true
                             listenBtn?.setLeadingSymbol(nil)
                             listenBtn?.label.stringValue = "…"
-                            listenBtn?.setAccessibilityLabel("…")
+                            listenBtn?.isEnabled = false
+                            listenBtn?.setAccessibilityLabel("Listening…")
                             var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.custom_title == true ? c.title : candidateTitle]
                             if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
                             action["hub"] = targetHub

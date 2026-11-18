@@ -55,7 +55,7 @@ extension Companion {
     }
 
     @discardableResult
-    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) -> Bool {
+    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, sourceOp: String? = nil, confirmHubSave: Bool = false) -> Bool {
         let previousUi = channelUiStates
         settings = value
         if !selectedChannelHub.isEmpty && !value.hubs.contains(where: { $0.name == selectedChannelHub && $0.enabled }) {
@@ -104,10 +104,11 @@ extension Companion {
             let key=target + "|" + channel.id
             var ui = channelUiStates[key] ?? ChannelUiState()
             let previous = previousChannels.first { $0.id == channel.id }
-            if previous?.status != channel.status || previous?.detail != channel.detail || previous?.warning != channel.warning {
+            let preservePairing = sourceOp == "channel_pair" || value.channel_inventory_error != nil
+            if sourceOp != "channel_test" && (previous?.status != channel.status || previous?.detail != channel.detail || previous?.warning != channel.warning) {
                 ui.testResultIsLatest = false
             }
-            if channel.configured && channel.status != "pairing_pending" &&
+            if !preservePairing && channel.configured && channel.status != "pairing_pending" &&
                 (previous?.configured == false || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) {
                 ui.resetPersonal(preservePendingPair: true)
             }
@@ -140,11 +141,11 @@ extension Companion {
             if acknowledged?.scope == "hub" && acknowledged?.unchanged == true && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
                 ui.editingGateway = false
             }
-            if let instruction = channel.pairing_instruction, !instruction.isEmpty {
+            if !preservePairing, let instruction = channel.pairing_instruction, !instruction.isEmpty {
                 ui.pairingInstruction = instruction
                 ui.pairingCommand = channel.pairing_command ?? channel.pairing_code
                 ui.pairingURL = channel.pairing_url
-            } else if channel.status != "pairing_pending" && ui.pendingPairRequest == nil {
+            } else if !preservePairing && channel.status != "pairing_pending" && ui.pendingPairRequest == nil {
                 ui.pairingInstruction = ""
                 ui.pairingCommand = nil
                 ui.pairingURL = nil
@@ -152,86 +153,6 @@ extension Companion {
             channelUiStates[key] = ui
         }
         return reconciledHub || channelUiStates != previousUi
-    }
-
-    @discardableResult
-    func settleChannelReceipt(_ frame: Frame) -> Bool {
-        let operation = frame.source_op ?? frame.action ?? (frame.op == "pair_code" ? "channel_pair" : frame.op == "channel_test_result" ? "channel_test" : "")
-        guard let request = frame.request_id,
-              let pending = pendingControls[request], pending.op == operation,
-              frame.hub == nil || pending.hub == frame.hub,
-              pending.target == (frame.channel_id ?? frame.channel ?? "") else { return false }
-        let hub = pending.hub
-        pendingControls.removeValue(forKey: request)
-        let key = "\(hub)|\(pending.target)"
-        if let reset = pendingChannelResets.removeValue(forKey: request),
-           (frame.ok == true || frame.committed == true), frame.authority_changed != true {
-            let unchanged = (channelUiStates[key] ?? ChannelUiState()) == reset.submitted
-            let fields = channelSettingsByHub[hub]?.first { $0.id == pending.target }?.fields ?? []
-            for field in fields where reset.all || field.scope == "user" {
-                if channelUiStates[key]?.drafts[field.key] == reset.submitted.drafts[field.key] {
-                    channelUiStates[key]?.drafts.removeValue(forKey: field.key)
-                }
-            }
-            if unchanged {
-                if reset.all { channelUiStates[key, default: ChannelUiState()].resetAll() }
-                else { channelUiStates[key, default: ChannelUiState()].resetPersonal() }
-            }
-        }
-        if let entry = pendingChannelValues[request], entry.hub == hub, entry.channelId == pending.target,
-           ["channel_save", "save_hub_service"].contains(operation), frame.settings == nil || frame.authority_changed == true {
-            pendingChannelValues.removeValue(forKey: request)
-            // Retire only submitted secrets, which settings never echo. Keep
-            // non-secret drafts until fresh settings reconcile their values,
-            // and preserve all drafts on a replacement authority.
-            if frame.committed == true && frame.authority_changed != true {
-                let fields = channelSettingsByHub[hub]?.first { $0.id == pending.target }?.fields ?? []
-                for field in fields where field.type == "secret" {
-                    if let sent = entry.values[field.key], channelUiStates[key]?.drafts[field.key] == sent {
-                        channelUiStates[key]?.drafts.removeValue(forKey: field.key)
-                    }
-                }
-            }
-        }
-        if operation == "channel_pair", channelUiStates[key]?.pendingPairRequest == request {
-            channelUiStates[key]?.pendingPairRequest = nil
-        }
-        if let warning = frame.warning { settingsBannerError = warning }
-        return true
-    }
-
-    @discardableResult
-    func settleReceiptOnly(_ frame: Frame) -> Bool {
-        var settled = settleChannelReceipt(frame)
-        var routedToForm = false
-        guard let request = frame.request_id else { return settled }
-        let operation = frame.source_op ?? frame.action ?? ""
-        let failed = frame.ok == false || frame.op == "error"
-        let message = frame.warning ?? frame.error
-        if let pending = pendingHubSave, request == pending.requestId,
-           operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation) {
-            pendingHubSave = nil
-            if failed { addHubError = message ?? "Hub save failed."; routedToForm = true }
-            else if frame.authority_changed != true && (frame.committed == true || frame.ok == true) {
-                finishHubSave(pending)
-            }
-            settled = true
-        }
-        if !hubInviteRequest.isEmpty && request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation)) {
-            hubInvitePending = false; settled = true
-        }
-        if request == submittedHostHubRequestId && (operation.isEmpty || operation == "set_host_hub") {
-            hostHubPortPending = false; submittedHostHubRequestId = ""; settled = true
-        }
-        if (operation.isEmpty || operation == "setup_apply"), pendingAppChecks.removeValue(forKey: request) != nil { settled = true }
-        if let pending = pendingControls[request], pending.op == operation || operation.isEmpty,
-           frame.hub == nil || frame.hub == pending.hub,
-           frame.channel_id == nil || frame.channel_id == pending.target,
-           frame.channel == nil || frame.channel == pending.target {
-            pendingControls.removeValue(forKey: request); settled = true
-        }
-        if settled && !routedToForm, let message = message { settingsBannerError = message }
-        return settled
     }
 
     func updateInbox(paused: Bool? = nil, hub: String, scope: String? = nil) {
@@ -362,7 +283,7 @@ extension Companion {
         let systemText = appPasteboard.string(forType:.string) ?? ""
         let raw = (systemText.isEmpty && headless ? clipboardString : systemText).trimmingCharacters(in:.whitespacesAndNewlines)
         let isURL = (raw.hasPrefix("http://") || raw.hasPrefix("https://")) && URL(string:raw)?.host != nil
-        let isCLI = raw.hasPrefix("cito setup ") && raw.contains("--hub") && raw.contains("--url")
+        let isCLI = raw.hasPrefix("cito setup ") && raw.contains("--url")
         let invite = raw.data(using:.utf8).flatMap { try? JSONSerialization.jsonObject(with:$0) } as? [String:Any]
         let inviteURL = (invite?["url"] as? String).flatMap { URL(string:$0) }
         let isJSON = inviteURL?.host != nil && ["http", "https"].contains(inviteURL?.scheme ?? "")
@@ -637,7 +558,7 @@ extension Companion {
             let btn = MenuControl(actionTitle,frame:NSRect(x:0,y:0,width:MenuControl.intrinsicWidth(actionTitle),height:24))
             btn.identifier = NSUserInterfaceItemIdentifier("setup_app:\(app.id)")
             btn.style = app.isConfigured ? .neutral : .prominent
-            if Date() < (appCheckedUntil[app.id] ?? .distantPast) { btn.copied("✓ Checked") }
+            if let until = appCheckedUntil[app.id], Date() < until { btn.copied("✓ Checked", for: max(0.01, until.timeIntervalSinceNow)) }
             let appPending = isPending("setup_apply",target:app.id) || isPending("setup_remove_app",target:app.id)
             btn.isEnabled = !appPending
             pendingLabel(btn,isPending("setup_apply",target:app.id),actionTitle == "Check & Repair" ? "Checking…" : "Setting Up…")
@@ -796,7 +717,9 @@ extension Companion {
             }
             let gatewayRoleH=roleHeight(gatewayRole)
             let hubStratumH: CGFloat = !showHubStratum ? 0 : (hubGatewayExpanded ? 36 + gatewayRoleH + guideH + hubFieldsH + (!hubFields.isEmpty ? 32 : 0) : 36)
-            let userStratumH: CGFloat = !gatewayActive ? 0 : (personalCollapsed ? 38 : 40 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34)
+            let collapsedSummary = Date() < (channelUi.savedUntil["user"] ?? .distantPast) ? "✓ Saved" : "Paired · \(ch.display_label ?? userFields.first?.value ?? "")"
+            let collapsedSummaryHeight = max(16,ceil((collapsedSummary as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height))
+            let userStratumH: CGFloat = !gatewayActive ? 0 : (personalCollapsed ? 44 + collapsedSummaryHeight : 40 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34)
             let channelResult = (ch.warning == true || ch.status == "error") && !channelUi.testResultIsLatest ? nil : channelUi.testResult
             let showDetail = ch.status == "error" || ch.warning == true || channelResult != nil
             let detailHeight = showDetail ? max(14,ceil((presentationError(channelResult?.detail ?? ch.detail) as NSString).boundingRect(with:NSSize(width:422,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height)) : 0
@@ -847,6 +770,8 @@ extension Companion {
                     button.label.font = .systemFont(ofSize:10)
                     button.identifier=NSUserInterfaceItemIdentifier("recover_channel:\(ch.id):\(id)")
                     button.style = ["clear","unpair"].contains(id) ? .destructiveHover : .neutral
+                    let recoveryOp = ["clear":"disconnect_human_channel", "test":"channel_test", "unpair":"channel_unpair"][id]
+                    if let op = recoveryOp { pendingLabel(button,isPending(op,hub:effectiveChannelHub,target:ch.id),id == "test" ? "Testing…" : id == "clear" ? "Clearing…" : "Unpairing…") }
                     button.pressed={ [weak self] in guard let self=self else{return}; switch id {
                     case "clear": self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false])
                     case "test": self.emit(["op":"channel_test","hub":self.effectiveChannelHub,"channel_id":ch.id,"values":self.channelUiStates[channelKey]?.drafts ?? [:]])
@@ -999,7 +924,7 @@ extension Companion {
                 copy.pressed={ [weak self, weak copy] in
                     self?.copyText(channelUi.pairingCommand ?? instruction, control: copy)
                 }
-                if Date() < channelUi.pairCopiedUntil { copy.copied() }
+                if Date() < channelUi.pairCopiedUntil { copy.copied(for: max(0.01, channelUi.pairCopiedUntil.timeIntervalSinceNow)) }
                 if let raw=channelUi.pairingURL, let url=URL(string:raw) {
                     let open=MenuControl(ch.pairing_open_url_label ?? "Open Pairing Link ↗",frame:NSRect(x:12,y:42,width:150,height:22))
                     open.identifier=NSUserInterfaceItemIdentifier("open_pair_url:\(ch.id)"); open.style = .prominent
@@ -1056,16 +981,15 @@ extension Companion {
             }
             gate(saveBtn)
             if ch.can_edit_personal == true && !personalCollapsed && gatewayActive && (!disclosure || manualExpanded) { userStratum.addSubview(saveBtn) } else { saveBtn.isHidden=true }
-            if Date() < (channelUi.savedUntil["user"] ?? .distantPast) { saveBtn.copied("✓ Saved") }
+            if let until = channelUi.savedUntil["user"], Date() < until { saveBtn.copied("✓ Saved", for: max(0.01, until.timeIntervalSinceNow)) }
             pendingLabel(saveBtn,channelSavePending("channel_save",hub:effectiveChannelHub,channel:ch.id,scope:"user"),"Saving…")
 
             layoutBar(in: hubStratum, y: hubStratumH-29, height: 22, flexible: hubTitle, trailing: [gatewayStatus] + gatewayTop)
             if hubGatewayExpanded { layoutBar(in: hubStratum, y: 8, height: 24, leading: gatewayLeading, trailing: gatewayTrailing) }
             if personalCollapsed {
-                let chatId = userFields.first?.value ?? ""
                 let saved = Date() < (channelUi.savedUntil["user"] ?? .distantPast)
-                let summary = textLabel(saved ? "✓ Saved" : "Paired · \(ch.display_label ?? chatId)", NSRect(x:12,y:10,width:188,height:16),size:10,color:saved ? CitoPalette.successText : CitoPalette.secondaryText)
-                summary.identifier = NSUserInterfaceItemIdentifier("channel_summary:\(ch.id)"); summary.toolTip = summary.stringValue; summary.lineBreakMode = .byTruncatingMiddle
+                let summary = textLabel(collapsedSummary, NSRect(x:12,y:38,width:432,height:collapsedSummaryHeight),size:10,color:saved ? CitoPalette.successText : CitoPalette.secondaryText)
+                summary.identifier = NSUserInterfaceItemIdentifier("channel_summary:\(ch.id)"); summary.toolTip = summary.stringValue; summary.lineBreakMode = .byWordWrapping; summary.maximumNumberOfLines = 0
                 userStratum.addSubview(summary)
                 let edit = MenuControl("Edit…",frame:NSRect(x:0,y:6,width:MenuControl.intrinsicWidth("Edit…"),height:24))
                 edit.identifier = NSUserInterfaceItemIdentifier("edit_user_channel:\(ch.id)"); edit.style = .neutral
@@ -1077,7 +1001,7 @@ extension Companion {
                 }
                 let toggle = personalActions.first { $0.identifier?.rawValue == "toggle_channel:\(ch.id)" }
                 let unpair = personalActions.first { $0.identifier?.rawValue == "unpair_channel:\(ch.id)" }
-                layoutBar(in:userStratum,y:7,height:24,spacing:8,flexible:summary,trailing:[testBtn] + [toggle].compactMap { $0 } + [edit] + [unpair].compactMap { $0 })
+                layoutBar(in:userStratum,y:7,height:24,spacing:8,trailing:[testBtn] + [toggle].compactMap { $0 } + [edit] + [unpair].compactMap { $0 })
             } else if gatewayActive {
                 var topActions: [NSView] = []
                 if ch.configured {
@@ -1212,17 +1136,11 @@ extension Companion {
         let apply=MenuControl("Apply",frame:NSRect(x:394,y:12,width:72,height:24),radius:6)
         apply.identifier=NSUserInterfaceItemIdentifier("apply_host_hub_port")
         apply.isEnabled = !hostHubPortPending && Int((hostHubPortDraft ?? "\(hostHub.port)").trimmingCharacters(in: .whitespacesAndNewlines)) != hostHub.port
-        if hostHubPortSaved && Date() < hostHubPortSavedUntil { apply.copied("✓ Saved") }
+        if hostHubPortSaved && Date() < hostHubPortSavedUntil { apply.copied("✓ Saved", for: max(0.01, hostHubPortSavedUntil.timeIntervalSinceNow)) }
         pendingLabel(apply,hostHubPortPending,"Applying…")
         apply.pressed={ [weak self] in
             guard let self=self else{return}
-            let raw=(self.settingsFieldControls["host_hub_port"]?.stringValue ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
-            guard let port=Int(raw), (1...65535).contains(port) else {
-                self.hostHubPortError="Port must be an integer from 1 to 65535."
-                self.hostHubPortSaved=false
-                self.rebuildSettingsPanel()
-                return
-            }
+            guard let port = self.validHostPort(fallback: hostHub.port) else { return }
             let requestId = UUID().uuidString
             self.hostHubPortError=nil; self.hostHubPortPending=true; self.hostHubPortSaved=false; self.submittedHostHubPort=port
             self.submittedHostHubRequestId = requestId
@@ -1245,7 +1163,7 @@ extension Companion {
 
         let pasteBtn = MenuControl("Join from Clipboard", frame: NSRect(x: 250, y: 190 + hubOffset, width: MenuControl.intrinsicWidth("Join from Clipboard", leadingSymbol:"doc.on.clipboard"), height: 22), leadingSymbol: "doc.on.clipboard", radius: 6)
         pasteBtn.identifier = NSUserInterfaceItemIdentifier("paste_hub_invite")
-        if Date() < hubInvitePastedUntil { pasteBtn.copied("✓ Joined") }
+        if Date() < hubInvitePastedUntil { pasteBtn.copied("✓ Joined", for: max(0.01, hubInvitePastedUntil.timeIntervalSinceNow)) }
         pendingLabel(pasteBtn,hubInvitePending,"Joining…")
         pasteBtn.pressed = { [weak self] in self?.handlePasteHubInvite() }
         hubsView.addSubview(pasteBtn)
@@ -1367,7 +1285,7 @@ extension Companion {
                 let name = proposedHubName(self.addHubName,url:url,existing:knownHubs,creating:!self.editingExistingHub,original:self.editingOriginalHub)
                 let validation: String?
                 if name.isEmpty { validation="Hub name must contain a letter or number." }
-                else if !self.editingExistingHub && knownHubs.contains(where:{$0.name == name && ($0.is_builtin == true || $0.url != url)}) { validation="Hub name already exists. Choose a different name." }
+                else if !self.editingExistingHub && knownHubs.contains(where:{$0.name == name && ($0.is_builtin == true || normalizedHubURL($0.url) != url)}) { validation="Hub name already exists. Choose a different name." }
                 else if !["http://","https://","local://"].contains(where:{url.hasPrefix($0)}) { validation="Hub URL must start with http:// or https://." }
                 else if !self.editingExistingHub && self.addHubAuth == "token" && self.addHubToken.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { validation="Shared access token is required." }
                 else if self.addHubAuth == "oidc" && !self.addHubRedirectPort.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !(Int(self.addHubRedirectPort.trimmingCharacters(in:.whitespacesAndNewlines)).map { (0...65535).contains($0) } ?? false) { validation="Redirect port must be an integer from 0 to 65535." }
@@ -1459,6 +1377,7 @@ extension Companion {
                 if needsSignIn {
                     let loginBtn = MenuControl("Sign In…", frame: NSRect(x: 184, y: rowHeight-25, width: 70, height: 22), radius: 6)
                     loginBtn.identifier = NSUserInterfaceItemIdentifier("login_hub:\(hub.name)")
+                    pendingLabel(loginBtn,isPending("hub_action",hub:hub.name),"Signing In…")
                     let hubName = hub.name
                     loginBtn.pressed = { [weak self] in
                         self?.emit(["op": "hub_action", "hub": hubName, "action": "login"])
@@ -1469,6 +1388,7 @@ extension Companion {
                 let toggleBtn = MenuControl(hub.enabled ? "Disable" : "Enable", frame: NSRect(x: 0, y: rowHeight-25, width: 72, height: 22), radius: 6)
                 toggleBtn.identifier = NSUserInterfaceItemIdentifier("toggle_hub:\(hub.name)")
                 toggleBtn.style = hub.enabled ? .neutral : .prominent
+                pendingLabel(toggleBtn,isPending("setup_toggle_hub",hub:hub.name),"Applying…")
                 let hubName = hub.name
                 let nextEnabled = !hub.enabled
                 toggleBtn.pressed = { [weak self] in
@@ -1481,6 +1401,7 @@ extension Companion {
                     let removeBtn = MenuControl("Remove", frame: NSRect(x: 396, y: rowHeight-25, width: 72, height: 22), radius: 6)
                     removeBtn.identifier = NSUserInterfaceItemIdentifier("remove_hub:\(hub.name)")
                     removeBtn.style = .destructiveHover
+                    pendingLabel(removeBtn,isPending("setup_remove_hub",hub:hub.name),"Removing…")
                     removeBtn.pressed = { [weak self] in
                         self?.emit(["op": "setup_remove_hub", "hub": hubName])
                     }

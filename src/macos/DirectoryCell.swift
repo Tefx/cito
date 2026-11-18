@@ -241,8 +241,8 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_activity_msg:\(item.signal_id)")
         copyControl.pressed = { [weak copyControl] in if let c = copyControl { onCopy(c) } }
         copyControl.applyVisualState()
-        let held = ["stale_generation":"Session reloaded","driver_unavailable":"App unavailable",
-            "session_switched":"Session changed","unlistened":"Listening paused",
+        let held = ["stale_generation":"App reloaded","driver_unavailable":"App unavailable",
+            "session_switched":"Conversation changed","unlistened":"Listening paused",
             "unlistened_before_dispatch":"Listening paused","fenced_before_dispatch":"Connection changed",
             "sender_ack_timeout":"Awaiting acknowledgment"][item.held_reason ?? ""]
         let senderTitle = distinctAbout(item.from_title,title:"",user:item.from_user)

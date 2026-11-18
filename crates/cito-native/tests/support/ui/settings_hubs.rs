@@ -1,6 +1,92 @@
 use super::*;
 
 #[test]
+fn host_hub_failed_projection_and_trailing_error_have_one_error_surface() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["host_hub"]["enabled"] = json!(true);
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"4292"}),
+    );
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    cfg["host_hub"]["error"] = json!("Cannot start sharing: Address already in use");
+    cfg["host_hub"]["running"] = json!(false);
+    f.send(p, json!({"op":"settings","source_op":"set_host_hub","request_id":action["request_id"],"ok":false,"error":"Cannot start sharing: Address already in use","settings":cfg}));
+    f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":action["request_id"],"error":"Cannot start sharing: Address already in use"}));
+    let s = inspect(&f, p);
+    assert_eq!(s["host_hub_port_pending"], false);
+    assert_eq!(s["pending_controls"], json!([]));
+    assert_eq!(
+        node(&s, "settings_items", "host_hub_error")["text"],
+        "Cannot start sharing: Address already in use"
+    );
+    assert!(node(&s, "settings_items", "settings_error_banner").is_null());
+    assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], "4292");
+}
+
+#[test]
+fn hub_row_mutations_disable_duplicate_submission_and_settle_correlated_receipts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["hubs"][1]["can_login"] = json!(true);
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    for (id, op) in [
+        ("login_hub:work", "hub_action"),
+        ("toggle_hub:work", "setup_toggle_hub"),
+        ("remove_hub:work", "setup_remove_hub"),
+    ] {
+        let before = f.frames(p).len();
+        control(&f, p, id);
+        let pending = inspect(&f, p);
+        assert_eq!(node(&pending, "settings_items", id)["enabled"], false);
+        control(&f, p, id);
+        inspect(&f, p);
+        let actions: Vec<_> = f
+            .frames(p)
+            .into_iter()
+            .skip(before)
+            .filter(|a| a["op"] == op)
+            .collect();
+        assert_eq!(actions.len(), 1);
+        let action = &actions[0];
+        assert!(!action["request_id"].as_str().unwrap().is_empty());
+        f.send(p, json!({"op":"state","source_op":op,"request_id":"stale","ok":true,"committed":true,"warning":"An older request"}));
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", id)["enabled"],
+            false
+        );
+        f.send(p, json!({"op":"state","source_op":op,"request_id":action["request_id"],"ok":true,"committed":true,"warning":"Saved; refresh unavailable"}));
+        let settled = inspect(&f, p);
+        assert_eq!(node(&settled, "settings_items", id)["enabled"], true);
+        assert_eq!(settled["pending_controls"], json!([]));
+        assert_eq!(
+            node(&settled, "settings_items", "settings_error_label")["text"],
+            "Saved; refresh unavailable"
+        );
+    }
+}
+
+#[test]
 fn host_toggle_failures_settle_and_redraw_the_settings_banner() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

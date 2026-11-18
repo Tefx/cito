@@ -159,6 +159,13 @@ extension Companion {
                     parent.addSubview(blocker)
                 }
                 if let header = roots.first(where: { $0.identifier?.rawValue == "header" }) {
+                    if kind == "low_contrast_icons" {
+                        let icon = NSImageView(frame:NSRect(x:0,y:0,width:12,height:12))
+                        icon.identifier = NSUserInterfaceItemIdentifier("icon_contrast_probe")
+                        icon.image = NSImage(systemSymbolName:"circle.fill",accessibilityDescription:"Contrast probe")
+                        icon.contentTintColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01)
+                        header.addSubview(icon)
+                    }
                     if kind == "strip_anchor", let scroll = header.subviews.first(where: { $0.identifier?.rawValue == "header_hub_strip" }) as? NSScrollView {
                         for pill in scroll.documentView?.subviews ?? [] { pill.frame.origin.x -= 8 }
                     }
@@ -468,7 +475,8 @@ extension Companion {
             var ancestor: NSView? = view
             while let current = ancestor {
                 let id = current.identifier?.rawValue ?? ""
-                if ["host_hub_endpoint","inbox_control_title","inbox_control_summary"].contains(id) || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || id.hasPrefix("channel_summary:") || current is DirectoryPeerCellView { return true }
+                if id.hasPrefix("act_held:") { return false }
+                if id == "host_hub_endpoint" || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || current is DirectoryPeerCellView { return true }
                 ancestor = current.superview
             }
             return false
@@ -522,6 +530,13 @@ extension Companion {
                     let labelName = (label.superview as? MenuControl).map { name($0) } ?? name(label)
                     lowContrastLabels.append("\(labelName): \(String(format: "%.2f", Double(ratio)))")
                 }
+            }
+            if visible, enabled, opacity > 0.6, let image = view as? NSImageView, image.image != nil, let tint = image.contentTintColor {
+                let foreground = blended(resolved(tint, in: view.effectiveAppearance), over: surface, opacity: opacity)
+                let a = luminance(foreground), b = luminance(surface)
+                let ratio = (max(a,b)+0.05)/(min(a,b)+0.05)
+                contrast = ratio
+                if ratio < 3 { lowContrastLabels.append("\(name(image)): \(String(format: "%.2f", Double(ratio)))") }
             }
             if visible, let label = view as? NSTextField, label.isEditable {
                 if label.frame.width < 48 || measureTextWidth(label.placeholderString ?? "", font:label.font ?? .systemFont(ofSize:12)) > label.frame.width - 8 { truncatedLabels.append(name(label)) }

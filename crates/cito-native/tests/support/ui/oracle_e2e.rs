@@ -192,7 +192,7 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
 }
 
 #[test]
-fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
+fn activity_clear_confirmation_and_dynamic_accessibility() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -232,7 +232,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     assert!(nodes(&activity["children"])
         .iter()
         .all(|child| child["tooltip"].as_str().unwrap_or("").is_empty()));
-    render_png_as(&f, p, "menu", "menu-dark.png", Some("dark"));
     control(&f, p, "open_directory");
     let mut schema = peer("schema");
     schema["harness"] = json!("pi");
@@ -262,7 +261,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         node(&directory, "directory_items", "directory_facet_separator")["x"],
         151
     );
-    render_png_as(&f, p, "directory", "directory-dark.png", Some("dark"));
     control(&f, p, "copy_dir:personal:schema");
     let copied = inspect(&f, p);
     assert_eq!(
@@ -282,7 +280,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         .frames(p)
         .iter()
         .any(|v| v["op"] == "ack_signals" && v["signal_ids"] == json!(["review"])));
-    render_png_as(&f, p, "directory", "activity-dark.png", Some("dark"));
     control(&f, p, "composer_cancel");
     inspect(&f, p);
     control(&f, p, "activity_clear");
@@ -335,16 +332,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         .unwrap();
     assert_eq!(cleared["filter"], "all");
     assert_eq!(cleared["query"], "");
-    control(&f, p, "open_settings");
-    for (tab, file) in [
-        ("apps", "settings-apps-dark.png"),
-        ("channels", "settings-channels-dark.png"),
-        ("hubs", "settings-hubs-dark.png"),
-    ] {
-        control(&f, p, &format!("settings_tab:{tab}"));
-        inspect(&f, p);
-        render_png_as(&f, p, "settings", file, Some("dark"));
-    }
 }
 
 #[test]
@@ -785,7 +772,8 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     let busy = occupied.local_addr().unwrap().port().to_string();
     l.input("host_hub_port", &busy);
     l.control("apply_host_hub_port");
-    let failed_port = l.until(|s| !node(s, "settings_items", "settings_error_banner").is_null());
+    let failed_port = l.until(|s| !node(s, "settings_items", "host_hub_error").is_null());
+    assert!(node(&failed_port, "settings_items", "settings_error_banner").is_null());
     assert_eq!(
         node(&failed_port, "settings_items", "host_hub_error")["text"],
         "Cannot start sharing: Address already in use"
@@ -796,7 +784,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             .unwrap()
             .contains("Cannot start sharing:")
     );
-    l.snapshot("settings", "r3_settings_error_banner.png");
+    l.snapshot("settings", "r3_host_hub_error.png");
     l.control("settings_tab:apps");
     l.control("settings_tab:hubs");
     let s = l.until(|s| node(s, "settings_items", "host_hub_port")["text"] == busy);
@@ -937,9 +925,20 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             .iter()
             .any(|frame| frame["op"] == result_op && frame["request_id"] == action["request_id"]));
         if *status >= 400 {
-            assert!(l.frames.iter().any(|frame| frame["op"] == "error"
-                && frame["source_op"] == action["op"]
-                && frame["request_id"] == action["request_id"]));
+            assert!(
+                l.frames
+                    .iter()
+                    .any(|frame| (frame["ok"] == false || frame["op"] == "error")
+                        && frame["source_op"] == action["op"]
+                        && frame["request_id"] == action["request_id"]
+                        && (frame["error"].is_string()
+                            || frame["settings"]["host_hub"]["error"].is_string())),
+                "Missing failure receipt for {action}: {:?}",
+                l.frames
+                    .iter()
+                    .filter(|frame| frame["request_id"] == action["request_id"])
+                    .collect::<Vec<_>>()
+            );
         }
     }
     for (name, op) in [("office-mac", "error"), ("scratch", "settings")] {
@@ -1174,7 +1173,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let paired = inspect(&f, p);
     assert_eq!(
         node(&paired, "settings_items", "stratum_user:channel")["height"],
-        38
+        60
     );
     assert!(node(&paired, "settings_items", "channel_field:channel:account").is_null());
     assert_eq!(
@@ -1813,6 +1812,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
         for (kind, oracle) in [
             ("bar_anchor", "clipped_views"),
             ("fractional_truncation", "truncated_labels"),
+            ("low_contrast_icons", "low_contrast_labels"),
             ("card_padding", "clipped_views"),
             ("strip_anchor", "clipped_views"),
             ("status_emoji", "jargon_leaks"),
@@ -2476,7 +2476,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
 }
 
 #[test]
-fn v29_correlation_editor_keys_and_four_surface_oracle() {
+fn correlation_editor_keys_and_modal_escape() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -2540,27 +2540,10 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
     );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["settings_open"], true);
-    for appearance in ["light", "dark"] {
-        let s = inspect_as(&f, p, Some(appearance));
-        for invariant in [
-            "truncated_labels",
-            "overlapping_siblings",
-            "clipped_views",
-            "low_contrast_labels",
-            "jargon_leaks",
-            "address_mismatches",
-        ] {
-            assert_eq!(s[invariant], json!([]), "{appearance}: {invariant}");
-        }
-        assert!(!s["settings_items"].as_array().unwrap().is_empty());
-        render_png_as(
-            &f,
-            p,
-            "settings",
-            &format!("v40-settings-{appearance}.png"),
-            Some(appearance),
-        );
-    }
+    assert!(!inspect(&f, p)["settings_items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

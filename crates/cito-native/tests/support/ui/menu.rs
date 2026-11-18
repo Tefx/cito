@@ -977,6 +977,13 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
         "Fixture"
     );
     initial = state();
+    initial["source_op"] = json!("listen_session");
+    initial["request_id"] = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "listen_session")
+        .unwrap()["request_id"]
+        .clone();
     initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","custom_title":true,"cwd":"/tmp"}]);
     f.send(p, initial);
     let custom = inspect(&f, p);
