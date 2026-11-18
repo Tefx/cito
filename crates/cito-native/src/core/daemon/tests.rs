@@ -10,6 +10,122 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
 #[test]
+fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-frame-settlement-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+    let service = Arc::new(Mutex::new(DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: HashSet::new(),
+        },
+    )?));
+    let result = (|| {
+        {
+            let mut s = service.lock().unwrap();
+            assert!(s
+                .tool(
+                    "cito_status",
+                    &json!({}),
+                    &json!({"expected_session_id":" \t "})
+                )
+                .unwrap_err()
+                .starts_with("INVALID_INPUT:"));
+            assert!(s
+                .tool(
+                    "cito_status",
+                    &json!({}),
+                    &json!({"expected_harness":" human "})
+                )
+                .unwrap_err()
+                .starts_with("FORBIDDEN:"));
+            s.listen(
+                "local",
+                &json!({"about":"Old receiver"}),
+                &json!({"harness":"fixture","session_id":"old","endpoint_pid":12345}),
+            )?;
+            s.state.db.execute("CREATE TRIGGER fail_retirement BEFORE UPDATE OF status ON local_listeners WHEN OLD.session_id='old' BEGIN SELECT RAISE(ABORT,'retirement unavailable'); END", &[])?;
+            let registered = s.listen(
+                "local",
+                &json!({"about":"New receiver"}),
+                &json!({"harness":"fixture","session_id":"new","endpoint_pid":12345}),
+            )?;
+            assert_eq!(registered["committed"], true, "{registered}");
+            assert!(
+                string(&registered, "warning").contains("retirement unavailable"),
+                "{registered}"
+            );
+            s.state.db.execute("DROP TRIGGER fail_retirement", &[])?;
+            s.slot("local")?.closed.store(true, Ordering::SeqCst);
+            let renamed = s.rename_session("fixture", "new", "Custom title")?;
+            assert!(!renamed["warnings"].as_array().unwrap().is_empty());
+            assert!(renamed["warning"].is_string());
+            s.slot("local")?.closed.store(false, Ordering::SeqCst);
+            s.mutate_config(|raw| {
+                raw["hubs"] = json!({"local":{"url":"local://"},"work":{"url":"local://"}});
+                Ok(())
+            })?;
+            s.reload_slots()?;
+            let node = s
+                .state
+                .active()?
+                .into_iter()
+                .find(|row| row["session_id"] == "new")
+                .unwrap();
+            s.state.db.execute("CREATE TRIGGER fail_source_detach BEFORE UPDATE OF status ON local_listeners WHEN OLD.hub='local' BEGIN SELECT RAISE(ABORT,'source detach unavailable'); END",&[])?;
+            let switched = s.action(&json!({"op":"switch_hub","from_hub":"local","to_hub":"work","listener_id":node["listener_id"]}))?;
+            assert_eq!(switched["committed"], true, "{switched}");
+            assert!(
+                string(&switched, "warning").contains("source detach unavailable"),
+                "{switched}"
+            );
+            assert!(s
+                .state
+                .active()?
+                .iter()
+                .any(|row| row["hub"] == "work" && row["session_id"] == "new"));
+            s.state.db.execute("DROP TRIGGER fail_source_detach", &[])?;
+        }
+        for action in [
+            json!({"op":"channel_test","channel_id":"missing","hub":"local","request_id":"test"}),
+            json!({"op":"channel_save","channel_id":"missing","hub":"local","request_id":"save"}),
+            json!({"op":"set_host_hub","enabled":true,"bind":"invalid address","request_id":"host"}),
+        ] {
+            let mailbox = Arc::new(UiMailbox::default());
+            service.lock().unwrap().ui = Some(mailbox.clone());
+            assert!(http_actions::dispatch_action(&service, &action, None).is_err());
+            let mut settlements = 0;
+            while !mailbox.pending.lock().unwrap().is_empty() {
+                let frame: Value =
+                    serde_json::from_slice(&mailbox.next().unwrap()).map_err(|e| e.to_string())?;
+                assert_ne!(frame["op"], "error", "{frame}");
+                if frame["op"] == "settings" {
+                    settlements += 1;
+                    assert_eq!(frame["ok"], false);
+                    assert_eq!(frame["request_id"], action["request_id"]);
+                    assert_eq!(frame["source_op"], action["op"]);
+                    assert!(frame["error"].is_string(), "{frame}");
+                }
+            }
+            assert_eq!(settlements, 1);
+        }
+        Ok(())
+    })();
+    service.lock().unwrap().shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
 fn credential_save_restricts_existing_external_config_mode() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("cito-config-mode-{}", random_uuid_v4()));
     fs::create_dir_all(dir.join("external")).map_err(|e| e.to_string())?;

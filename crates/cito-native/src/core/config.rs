@@ -136,6 +136,29 @@ pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
     }
 }
 
+/// Collapse supported Hub/OIDC aliases with canonical-key precedence.
+pub fn canonicalize_hub_aliases(config: &mut Value) {
+    let Some(map) = config.as_object_mut() else {
+        return;
+    };
+    for (canonical, aliases) in [
+        ("authMode", &["auth_mode", "auth"][..]),
+        ("issuer", &["oidcIssuer"][..]),
+        ("clientId", &["client_id", "oidcClientId"][..]),
+        ("redirectPort", &["redirect_port", "oidcRedirectPort"][..]),
+        ("scopes", &["oidcScopes"][..]),
+    ] {
+        if !map.contains_key(canonical) {
+            if let Some(value) = aliases.iter().find_map(|key| map.get(*key)).cloned() {
+                map.insert(canonical.into(), value);
+            }
+        }
+        for alias in aliases {
+            map.remove(*alias);
+        }
+    }
+}
+
 pub type NormalizedConfig = (String, Map<String, Value>, Map<String, Value>);
 
 pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConfig, String> {
@@ -152,6 +175,7 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         hubs.insert("local".to_string(), json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true, "defaultScope":"workspace"}));
     }
     for (name, value) in &mut hubs {
+        canonicalize_hub_aliases(value);
         let hm = value
             .as_object_mut()
             .ok_or_else(|| format!("Expected object for hub {name}"))?;
@@ -161,31 +185,9 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
             .and_then(Value::as_str)
             .unwrap_or("local://")
             .to_string();
-        let auth = canonical_auth_mode(
-            hm.get("authMode")
-                .or_else(|| hm.get("auth_mode"))
-                .or_else(|| hm.get("auth"))
-                .and_then(Value::as_str)
-                .unwrap_or("none"),
-        )?;
-        for (canonical, aliases) in [
-            ("issuer", &["oidcIssuer"][..]),
-            ("clientId", &["client_id", "oidcClientId"][..]),
-            ("redirectPort", &["redirect_port", "oidcRedirectPort"][..]),
-            ("scopes", &["oidcScopes"][..]),
-        ] {
-            if !hm.contains_key(canonical) {
-                if let Some(value) = aliases.iter().find_map(|key| hm.get(*key)).cloned() {
-                    hm.insert(canonical.into(), value);
-                }
-            }
-            for alias in aliases {
-                hm.remove(*alias);
-            }
-        }
+        let auth =
+            canonical_auth_mode(hm.get("authMode").and_then(Value::as_str).unwrap_or("none"))?;
         hm.remove("request_id");
-        hm.remove("auth");
-        hm.remove("auth_mode");
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));
         hm.insert("authMode".to_string(), json!(auth));
@@ -209,26 +211,8 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
 pub fn merge_hub_config(base: &Value, patch: &Value) -> Value {
     let mut base = base.clone();
     let mut patch = patch.clone();
-    for config in [&mut base, &mut patch] {
-        for (canonical, aliases) in [
-            ("authMode", &["auth_mode", "auth"][..]),
-            ("issuer", &["oidcIssuer"][..]),
-            ("clientId", &["client_id", "oidcClientId"][..]),
-            ("redirectPort", &["redirect_port", "oidcRedirectPort"][..]),
-            ("scopes", &["oidcScopes"][..]),
-        ] {
-            if config.get(canonical).is_none() {
-                if let Some(value) = aliases.iter().find_map(|key| config.get(*key)).cloned() {
-                    config[canonical] = value;
-                }
-            }
-            for alias in aliases {
-                if let Some(m) = config.as_object_mut() {
-                    m.remove(*alias);
-                }
-            }
-        }
-    }
+    canonicalize_hub_aliases(&mut base);
+    canonicalize_hub_aliases(&mut patch);
     let mut merged = base.as_object().cloned().unwrap_or_default();
     let changed_url = patch
         .get("url")

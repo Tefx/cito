@@ -213,7 +213,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
                         continue;
                     };
                     if row["type"] == "session" || row.get("type").is_none() {
-                        if let Some(id) = str_at(&row, "id") {
+                        if let Some(id) = raw_str_at(&row, "id") {
                             value["session_id"] = json!(id);
                         }
                     }
@@ -291,7 +291,7 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
         let v = response.ok()?;
         (v["ok"] == true
             && interactive_candidate(req, p).unwrap_or(false)
-            && str_at(&v, "session_id").is_some()
+            && raw_str_at(&v, "session_id").is_some()
             && str_at(&v, "cwd").is_some())
         .then_some(v)
     })
@@ -325,7 +325,7 @@ fn candidates(req: &Value) -> Result<Candidates> {
                         ));
                     }
                     if v["ok"] == true
-                        && str_at(&v, "session_id").is_some()
+                        && raw_str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
                         && v.get("pi_pid")
                             .is_none_or(|id| id.as_u64() == Some(p as u64))
@@ -387,7 +387,7 @@ fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
     let mut result = caller(
         req,
         "pi",
-        str_at(v, "session_id").unwrap_or(""),
+        raw_str_at(v, "session_id").unwrap_or(""),
         str_at(v, "cwd").unwrap_or(""),
         Some(p),
         str_at(v, "session_name"),
@@ -440,7 +440,8 @@ pub fn handle(input: &Value) -> Result<Value> {
                             && !pid(&c).is_some_and(|p| {
                                 identify(req, p).is_ok_and(|v| {
                                     v["ok"] == true
-                                        && str_at(&v, "session_id") == str_at(&c, "session_id")
+                                        && raw_str_at(&v, "session_id")
+                                            == raw_str_at(&c, "session_id")
                                 })
                             })
                         {
@@ -527,8 +528,8 @@ pub fn handle(input: &Value) -> Result<Value> {
                     json!({"ok":true,"status":"closed_definitive","reason":"Run /reload in Pi to enable 1-click listen"}),
                 );
             }
-            let sid = str_at(v, "session_id");
-            let mut result = json!({"ok":true,"status":if sid==str_at(req,"session_id"){"alive"}else{"switched"},"current_session_id":sid,"reason":null});
+            let sid = raw_str_at(v, "session_id");
+            let mut result = json!({"ok":true,"status":if sid==raw_str_at(req,"session_id"){"alive"}else{"switched"},"current_session_id":sid,"reason":null});
             if let Some(badge) = v.get("badge") {
                 result["badge"] = badge.clone();
             }

@@ -1947,6 +1947,55 @@ fn codex_rollout_errors_are_isolated_and_non_utf8_lines_are_lossy() {
     f.stop(process);
 }
 #[test]
+fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "credential = 'secret-value' unexpected\n").unwrap();
+    let rejected = f.plugin(CODEX, json!({"op":"setup_inspect"}));
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert!(!rejected.to_string().contains("secret-value"), "{rejected}");
+    fs::write(&config, "").unwrap();
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)",&[]).unwrap();
+    let rollout = f.dir.join("empty.jsonl");
+    fs::write(&rollout, b"{\"payload\":{\"type\":\"tool_output\"}}\n").unwrap();
+    let sid = " thread\0suffix ";
+    db.execute(
+        "INSERT INTO threads VALUES(?,'/repo',0,1,?)",
+        &[json!(sid), json!(rollout)],
+    )
+    .unwrap();
+    let discovered = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
+    );
+    assert_eq!(discovered["sessions"][0]["session_id"], sid, "{discovered}");
+    let cursor = fs::read_dir(f.state.join("activity/codex"))
+        .unwrap()
+        .flatten()
+        .find(|entry| entry.path().to_string_lossy().ends_with(".source.json"))
+        .unwrap()
+        .path();
+    let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
+    assert_eq!(checkpoint["offset"], fs::metadata(&rollout).unwrap().len());
+    let again = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
+    );
+    assert_eq!(again["sessions"][0]["session_id"], sid, "{again}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(cursor).unwrap()).unwrap(),
+        checkpoint
+    );
+}
+
+#[test]
 fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -2052,7 +2101,7 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         before,
         "Cito effects cannot renew qualifying user activity"
     );
-    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":"Next user turn"}})).unwrap();
+    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":wake}})).unwrap();
     // Tool output after a user turn can exceed a fixed tail slice. It must not
     // hide the qualifying turn or become new activity on subsequent refreshes.
     writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:03:00.000Z","payload":{"type":"tool_output","text":"x".repeat(300_000)}})).unwrap();

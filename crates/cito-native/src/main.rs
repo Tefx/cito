@@ -127,6 +127,40 @@ fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
         pending.extend_from_slice(&bytes[..count as usize]);
     }
 }
+fn daemon_rpc_response(body: &str, status: u16, id: Option<&Value>) -> Result<Value, String> {
+    let body = extract_jsonrpc_from_http_body(body)
+        .ok_or_else(|| format!("Invalid daemon response (HTTP {status})"))?;
+    if body.get("jsonrpc").is_none() {
+        let message = body["error"]
+            .as_str()
+            .or_else(|| body["message"].as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Daemon request failed (HTTP {status})"));
+        return Ok(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}}));
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+    #[test]
+    fn http_failures_preserve_jsonrpc_request_ids() {
+        for id in [json!(37), json!("request"), Value::Null] {
+            let rpc = daemon_rpc_response(r#"{"error":"Access denied"}"#, 403, Some(&id)).unwrap();
+            assert_eq!(rpc["jsonrpc"], "2.0");
+            assert_eq!(rpc["id"], id);
+            assert_eq!(rpc["error"]["code"], -32603);
+            assert_eq!(rpc["error"]["message"], "Access denied");
+        }
+        let original = json!({"jsonrpc":"2.0","id":"original","result":{}});
+        assert_eq!(
+            daemon_rpc_response(&original.to_string(), 200, None).unwrap(),
+            original
+        );
+    }
+}
+
 static STDIO_READ: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 fn run_mcp_stdio() {
     let wake = match cito_native::support::WakePipe::new() {
@@ -328,10 +362,7 @@ fn run_mcp_stdio() {
                     Duration::from_secs(60),
                 )
             })
-            .and_then(|r| {
-                extract_jsonrpc_from_http_body(&r.body)
-                    .ok_or_else(|| format!("Invalid daemon response (HTTP {})", r.status))
-            });
+            .and_then(|r| daemon_rpc_response(&r.body, r.status, id.as_ref()));
         if let Some(id) = id {
             match result {
                 Ok(mut rpc) => {

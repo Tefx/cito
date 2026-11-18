@@ -270,7 +270,11 @@ fn register_locked(
     }
     let harness = string(caller, "harness");
     let session = string(caller, "session_id");
-    if harness.is_empty() || session.is_empty() || (harness == "human" && session != "default") {
+    if harness.is_empty()
+        || harness.contains('|')
+        || session.trim().is_empty()
+        || (harness == "human" && session != "default")
+    {
         return Err("INVALID_INPUT: Invalid Node session identity".into());
     }
     if harness == "human" {
@@ -472,6 +476,18 @@ fn register_locked(
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(if stale { "UNLISTENED" } else { "ACTIVE" }),json!(generation),json!(owner),json!(now_ms().max(cutoff))],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
+            if let Some(previous) = local.as_ref().filter(|row| {
+                !stale && row["status"] == "UNLISTENED" && row["user_stopped"] == 0
+                    && row["retirement_reason"] == "hard_exit"
+                    && row["hub_url"] == client.config["url"]
+                    && principal_ids_equal(string(row, "principal_id"), string(&client.identity, "principal_id"))
+            }) {
+                let unread = connection.query("SELECT signal_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation<=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND expires_at_ms>? AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?) AND COALESCE(held_reason,'') IN ('','driver_unavailable','unlistened')", &[json!(hub),json!(id),previous["binding_generation"].clone(),json!(now_ms()),json!(now_ms())])?;
+                for signal in unread.iter().filter(|signal| super::state::signal_matches_listener(signal, previous)) {
+                    // Retain batch identity and insertion checkpoints; only dispatch authority changes.
+                    connection.execute("UPDATE local_signals SET binding_generation=?,state='RECEIVED',held_reason=NULL,dispatcher_token=NULL WHERE hub=? AND signal_id=?", &[json!(generation),json!(hub),signal["signal_id"].clone()])?;
+                }
+            }
             let source = super::state::qualifying_activity(caller);
             let seeded = source.map(|(_, at)| at.min(now_ms())).unwrap_or_else(now_ms);
             let advancing = source.filter(|(revision,_)| local.as_ref().and_then(|r|super::state::activity_revision(r,"last_activity_revision")).is_none_or(|old|*revision>old));
@@ -488,6 +504,9 @@ fn register_locked(
                 Ok(RegistrationCommit::StaleDiscovery)
             } else {
                 connection.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+                if super::state::reconcile_wake_retry(connection, hub, &id)? {
+                    connection.execute("INSERT OR IGNORE INTO wake_retries(hub,listener_id,retry_at_ms) VALUES(?,?,?)", &[json!(hub),json!(id),json!(now_ms())])?;
+                }
                 Ok(RegistrationCommit::Committed)
             }
         })?;

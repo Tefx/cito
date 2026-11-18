@@ -59,7 +59,7 @@ pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String
             "limit" => value
                 .as_u64()
                 .is_some_and(|n| n > 0 && n <= if name == "cito_find" { 50 } else { 1000 }),
-            "ack_all" | "wake" => value.is_boolean(),
+            "ack_all" => value.is_boolean(),
             "ack_ids" => value.as_array().is_some_and(|a| {
                 a.len() <= 1000
                     && a.iter()
@@ -230,7 +230,7 @@ impl DaemonService {
         let pid_hint = crate::support::caller_pid_hint(meta, true)?.map(u64::from);
         let requested_pid = pid_hint.or_else(|| meta["_http_client"].as_u64());
         let explicit_pid = pid_hint.is_some();
-        let expected = string(meta, "expected_harness");
+        let expected = string(meta, "expected_harness").trim();
         if expected == "human" {
             return Err("FORBIDDEN: MCP callers must be agent sessions".into());
         }
@@ -386,7 +386,14 @@ impl DaemonService {
                 }
             }
         }
-        Ok(json!({"ok":true,"title":title,"warnings":warnings}))
+        let warning = (!warnings.is_empty()).then(|| {
+            warnings
+                .iter()
+                .map(|w| string(w, "message"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
+        Ok(json!({"ok":true,"title":title,"warning":warning,"warnings":warnings}))
     }
 
     pub(super) fn listen(&self, hub: &str, args: &Value, caller: &Value) -> Result<Value, String> {
@@ -432,8 +439,16 @@ impl DaemonService {
             caller,
         )?;
         // The new remote/local binding commits before the previous endpoint is revoked.
+        let mut warnings = Vec::new();
         for row in previous {
-            self.retire_id(hub, string(&row, "listener_id"), "hard_exit")?;
+            if let Err(error) = self.retire_id(hub, string(&row, "listener_id"), "hard_exit") {
+                warnings.push(error);
+            }
+        }
+        if !warnings.is_empty() {
+            result["committed"] = json!(true);
+            result["warning"] = json!(warnings.join("; "));
+            result["warnings"] = json!(warnings);
         }
         // Registration commits the Hub-scoped PID and transition timestamp together.
         // Do not rewrite binding metadata after releasing registration authority.
@@ -761,14 +776,14 @@ impl DaemonService {
 
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
         if (name != "cito_find" && args["harness"] == "human")
-            || meta["expected_harness"] == "human"
+            || string(meta, "expected_harness").trim() == "human"
         {
             return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
         }
         validate_tool_input(name, args)?;
         if meta
             .get("expected_session_id")
-            .is_some_and(|v| v.as_str().is_none_or(str::is_empty))
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.trim().is_empty()))
         {
             return Err("INVALID_INPUT: expected_session_id must be nonempty".into());
         }
@@ -1179,11 +1194,9 @@ impl DaemonService {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(random_uuid_v4);
-        let dedup = hash(&format!(
-            "{endpoint}|{}|{canonical}|{key}",
-            string(&slot.config, "url")
-        ));
-        let request_hash = hash(&format!("{message}|{}", reply_to));
+        let dedup =
+            hash(&json!([endpoint, string(&slot.config, "url"), canonical, key]).to_string());
+        let request_hash = hash(&json!([message, reply_to]).to_string());
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;

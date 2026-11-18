@@ -639,7 +639,7 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
     let configured = |frame: &Value| {
         frame["settings"]["apps"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("Missing settings apps in {frame}"))
             .iter()
             .find(|app| app["id"] == "fixture")
             .unwrap()["configured"]

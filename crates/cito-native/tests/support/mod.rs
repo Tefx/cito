@@ -162,7 +162,7 @@ impl Fixture {
         ] {
             env.insert(k.into(), v);
         }
-        for key in ["CITO_OPEN_BIN", "CITO_BROWSER_BIN", "CITO_LAUNCHCTL_BIN"] {
+        for key in ["CITO_OPEN_BIN", "CITO_BROWSER_BIN"] {
             env.insert(key.into(), mock.display().to_string());
         }
         Self {

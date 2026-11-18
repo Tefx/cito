@@ -84,8 +84,8 @@ fn binary(req: &Value) -> Option<PathBuf> {
 }
 fn parse(s: Option<&str>) -> Result<DocumentMut> {
     s.unwrap_or("")
-        .parse()
-        .map_err(|e| format!("Invalid config.toml: {e}"))
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Invalid config.toml: {}", e.message()))
 }
 fn configured(doc: &DocumentMut, cmd: &str) -> bool {
     doc.get("mcp_servers")
@@ -188,9 +188,7 @@ fn record_effect(req: &Value, sid: &str, text: &str, activity: Option<(u64, u64)
     let mut ledger = read_json(&path)?;
     let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
     let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
-    if !effects.contains(&hash) {
-        effects.push(hash);
-    }
+    effects.push(hash);
     ledger["effects"] = json!(effects);
     if let Some((revision, at)) = activity {
         ledger["fallback"] = json!({"revision":revision,"at_ms":at});
@@ -223,11 +221,12 @@ fn idle_wake_guard(path: &Path) -> Result<Option<std::fs::File>> {
 fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
-    let path = effect_path(req, str_at(row, "id").unwrap_or(""));
+    let path = effect_path(req, raw_str_at(row, "id").unwrap_or(""));
     std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
         .map_err(|_| "Cannot save session activity")?;
     let _lock = FileLock::acquire(&path.with_extension("lock"))?;
-    let ledger = read_json(&path)?;
+    let mut ledger = read_json(&path)?;
+    let previous_ledger = ledger.clone();
     let Some((source_revision, recency)) = activity_at(row) else {
         return Ok(Value::Null);
     };
@@ -243,6 +242,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     let Some(_idle) = idle_wake_guard(&path.with_extension("wake.lock"))? else {
         return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
     };
+    let mut scanned_activity = None;
     if let Some(rollout) = str_at(row, "rollout_path") {
         match std::fs::File::open(rollout) {
             Ok(mut file) => {
@@ -301,8 +301,13 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                     };
                     let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
                     let effect = ledger["effects"]
-                        .as_array()
-                        .is_some_and(|effects| effects.contains(&hash));
+                        .as_array_mut()
+                        .and_then(|effects| {
+                            let index = effects.iter().position(|value| value == &hash)?;
+                            effects.remove(index);
+                            Some(())
+                        })
+                        .is_some();
                     if effect {
                         saw_effect = true;
                     } else if let Some(at) =
@@ -313,15 +318,13 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                 }
                 // The cursor bounds repeat work, not the activity revision. Revision
                 // remains the durable DB source integer across scans and restarts.
-                let observed = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision});
-                if observed != previous {
-                    atomic_write(&cursor_path, observed.to_string().as_bytes())?;
-                }
+                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision});
                 if let Some(at) = latest {
-                    return Ok(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
-                }
-                if saw_effect {
-                    return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+                    scanned_activity =
+                        Some(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
+                } else if saw_effect {
+                    scanned_activity =
+                        Some(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -331,6 +334,12 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     cached["revision"] = json!(revision);
     if cached != previous {
         atomic_write(&cursor_path, cached.to_string().as_bytes())?;
+    }
+    if ledger != previous_ledger {
+        atomic_write(&path, ledger.to_string().as_bytes())?;
+    }
+    if let Some(activity) = scanned_activity {
+        return Ok(activity);
     }
     if let (Some(effect_revision), Some(effect_at)) = (
         ledger["fallback"]["revision"].as_u64(),
@@ -472,14 +481,14 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         ))?
         .into_iter()
         // Preserve caller validation for whitespace-only IDs and working directories.
-        .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
+        .filter(|row| raw_str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
         .collect())
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];
     for source in [&req["meta"], &req["_meta"]] {
         for key in ["openai/threadId", "threadId", "codexThreadId"] {
-            if let Some(s) = str_at(source, key) {
+            if let Some(s) = raw_str_at(source, key) {
                 ids.push(s.to_string())
             }
         }
@@ -497,7 +506,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
                 fragment.clone()
             };
             for key in ["thread_id", "session_id"] {
-                if let Some(s) = str_at(&parsed, key) {
+                if let Some(s) = raw_str_at(&parsed, key) {
                     ids.push(s.into())
                 }
             }
@@ -508,13 +517,13 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             .iter()
             .all(|source| str_at(source, "expected_harness").is_none_or(|id| id == "codex"))
         {
-            if let Some(s) = str_at(req, "explicit_session_id") {
+            if let Some(s) = raw_str_at(req, "explicit_session_id") {
                 ids.push(s.into())
             }
         }
         for source in [&req["meta"], &req["_meta"]] {
             if str_at(source, "expected_harness") == Some("codex") {
-                if let Some(s) = str_at(source, "expected_session_id") {
+                if let Some(s) = raw_str_at(source, "expected_session_id") {
                     ids.push(s.into())
                 }
             }
@@ -522,7 +531,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
     }
     if let Some(s) = env_value(req, "CODEX_THREAD_ID") {
         if !s.trim().is_empty() {
-            ids.push(s.trim().to_owned())
+            ids.push(s)
         }
     }
     ids.sort();
@@ -704,7 +713,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     json!({"ok":true,"status":"closed_definitive","reason":"Integration is disconnected"}),
                 );
             }
-            let id = str_at(req, "session_id").unwrap_or("");
+            let id = raw_str_at(req, "session_id").unwrap_or("");
             let archived = match row_for_id(req, id) {
                 Ok(row) => row.and_then(|r| r["archived"].as_str().map(|s| s != "0")),
                 Err(error)
@@ -736,7 +745,7 @@ pub fn handle(req: &Value) -> Result<Value> {
         }
         "update_badge" => Ok(json!({"ok":true})),
         "wake" => {
-            let sid = str_at(req, "session_id").ok_or("Session ID is required")?;
+            let sid = raw_str_at(req, "session_id").ok_or("Session ID is required")?;
             let text = req["text"].as_str().ok_or("Wake text is required")?;
             let run = |mut command: Command, timeout: Duration| {
                 command

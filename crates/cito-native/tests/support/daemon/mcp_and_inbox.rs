@@ -519,11 +519,19 @@ fn codex_padded_metadata_and_raw_cached_session_have_consistent_fences() {
         for envelope in ["meta", "_meta"] {
             let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
             req[envelope] = json!({"threadId":"selected-session","expected_harness":" codex ","expected_session_id":"selected-session"});
-            let resolved = f.plugin(CODEX, req);
-            assert_eq!(
-                resolved["caller"]["session_id"], "selected-session",
-                "{resolved}"
-            );
+            let resolved = f.plugin(CODEX, req.clone());
+            if thread_id.trim().is_empty() {
+                assert_eq!(
+                    resolved["caller"]["session_id"], "selected-session",
+                    "{resolved}"
+                );
+            } else {
+                assert_eq!(resolved["error_code"], "INVALID_INPUT", "{resolved}");
+                req[envelope]["threadId"] = json!(thread_id);
+                req[envelope]["expected_session_id"] = json!(thread_id);
+                let matched = f.plugin(CODEX, req);
+                assert_eq!(matched["caller"]["session_id"], thread_id, "{matched}");
+            }
         }
     }
     f.env.remove("CODEX_THREAD_ID");
@@ -596,11 +604,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             let mut req = json!({"op":"resolve_caller","require_open":false,
                 "endpoint_pid":pid,"cached_caller":if use_cache {cached.clone()} else {Value::Null}});
             if let Some(key) = envelope {
-                req[key] = json!({"expected_session_id":"selected-session"});
+                req[key] = json!({"expected_session_id":" selected-session "});
             }
             let resolved = f.plugin(PI, req);
             assert_eq!(
-                resolved["caller"]["session_id"], "selected-session",
+                resolved["caller"]["session_id"], " selected-session ",
                 "{use_cache}/{envelope:?}: {resolved}"
             );
             assert_eq!(resolved["caller"]["endpoint_pid"], pid, "{resolved}");
@@ -1135,6 +1143,10 @@ fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let args = json!({"to":target["listener_id"],"message":"Recovery","idempotency_key":"same"});
     assert_eq!(send_human_result(&f, args.clone())["http_status"], 400);
     let row = f.rows("SELECT * FROM local_sent_idempotency")[0].clone();
+    assert_eq!(
+        row["request_hash"],
+        cito_native::core::identity::hash(&json!(["Recovery", Value::Null]).to_string())
+    );
     assert_eq!(row["status"], "PENDING_PUBLISH");
     db.execute("DROP TRIGGER reject_publish", &[]).unwrap();
     let recovered = send_human(&f, args.clone());

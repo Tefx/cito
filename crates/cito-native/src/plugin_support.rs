@@ -15,6 +15,12 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+/// Preserve opaque identifier bytes while rejecting blank carriers.
+pub fn raw_str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+}
 pub fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key)
         .and_then(Value::as_str)
@@ -57,7 +63,6 @@ pub fn config_home(req: &Value, env: &str, default: &str) -> PathBuf {
     expand(req, &env_value(req, env).unwrap_or_else(|| default.into()))
 }
 pub fn validate_session(s: &str) -> Result<String> {
-    let s = s.trim();
     if s.is_empty()
         || s.len() > 128
         || !s.as_bytes()[0].is_ascii_alphanumeric()
@@ -632,7 +637,7 @@ fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
             return Err("Conflicting caller metadata".into());
         }
     }
-    if let Some(expected) = str_at(meta, "expected_session_id") {
+    if let Some(expected) = raw_str_at(meta, "expected_session_id") {
         if caller["session_id"] != expected {
             return Err("Conflicting caller metadata".into());
         }
@@ -642,7 +647,7 @@ fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
 pub fn verify(caller: &Value, req: &Value) -> Result<()> {
     verify_expected_identity(caller, &req["meta"])?;
     verify_expected_identity(caller, &req["_meta"])?;
-    if let Some(expected) = str_at(req, "explicit_session_id") {
+    if let Some(expected) = raw_str_at(req, "explicit_session_id") {
         if caller["session_id"] != expected {
             return Err("Conflicting caller metadata".into());
         }
@@ -964,9 +969,9 @@ pub fn has_generic_session_mismatch(req: &Value, actual_sid: &str) -> bool {
     ["meta", "_meta"]
         .iter()
         .all(|key| str_at(&req[key], "expected_harness").is_none())
-        && ["meta", "_meta"]
-            .iter()
-            .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid))
+        && ["meta", "_meta"].iter().any(|key| {
+            raw_str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid)
+        })
 }
 // Concrete plugins validate their own session binding after the shared cache and
 // process checks, before request metadata fences. The host owns cache storage.
@@ -991,7 +996,6 @@ pub fn cached_caller(
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| error("INVALID_INPUT", "Cached session identity is missing"))?;
-    validate_session(session).map_err(|e| error("INVALID_INPUT", e))?;
     let pid = pid(req)
         .ok_or_else(|| error("BINDING_REQUIRED", "Cached caller requires an endpoint PID"))?;
     if cached["endpoint_pid"].as_u64() != Some(u64::from(pid)) {
@@ -1532,35 +1536,19 @@ extern "C" {
         arg: *mut libc::c_void,
         err: *mut *mut libc::c_char,
     ) -> libc::c_int;
-    fn sqlite3_free(p: *mut libc::c_void);
-}
-unsafe extern "C" fn collect(
-    arg: *mut libc::c_void,
-    n: libc::c_int,
-    vals: *mut *mut libc::c_char,
-    names: *mut *mut libc::c_char,
-) -> libc::c_int {
-    // SAFETY: sqlite3_exec invokes this synchronously with n valid pointers and our live Vec.
-    let rows = unsafe { &mut *(arg as *mut Vec<Value>) };
-    let mut row = serde_json::Map::new();
-    for i in 0..n as isize {
-        let key = unsafe { std::ffi::CStr::from_ptr(*names.offset(i)) }
-            .to_string_lossy()
-            .into_owned();
-        let p = unsafe { *vals.offset(i) };
-        let v = if p.is_null() {
-            Value::Null
-        } else {
-            Value::String(
-                unsafe { std::ffi::CStr::from_ptr(p) }
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        };
-        row.insert(key, v);
-    }
-    rows.push(Value::Object(row));
-    0
+    fn sqlite3_prepare_v2(
+        db: *mut libc::c_void,
+        sql: *const libc::c_char,
+        n: libc::c_int,
+        stmt: *mut *mut libc::c_void,
+        tail: *mut *const libc::c_char,
+    ) -> libc::c_int;
+    fn sqlite3_step(stmt: *mut libc::c_void) -> libc::c_int;
+    fn sqlite3_finalize(stmt: *mut libc::c_void) -> libc::c_int;
+    fn sqlite3_column_count(stmt: *mut libc::c_void) -> libc::c_int;
+    fn sqlite3_column_name(stmt: *mut libc::c_void, i: libc::c_int) -> *const libc::c_char;
+    fn sqlite3_column_text(stmt: *mut libc::c_void, i: libc::c_int) -> *const u8;
+    fn sqlite3_column_bytes(stmt: *mut libc::c_void, i: libc::c_int) -> libc::c_int;
 }
 /// Extract a bounded protocol diagnostic without exposing the JSON envelope.
 pub fn response_diagnostic(response: &Value, fallback: &str) -> String {
@@ -1699,9 +1687,8 @@ impl ReadOnlySqlite {
                 return Err("Session database deadline exceeded".into());
             }
             let mut rows: Vec<Value> = Vec::new();
-            let mut err = std::ptr::null_mut();
-            // SAFETY: this owns the connection, SQL lives through exec, and the
-            // synchronous callback exclusively borrows rows. SQLite owns err.
+            // SAFETY: this owns the connection; SQL and statement remain live
+            // until finalize. Column bytes are copied before the next step.
             let rc = unsafe {
                 sqlite3_busy_timeout(
                     self.db.get(),
@@ -1713,22 +1700,49 @@ impl ReadOnlySqlite {
                     Some(sqlite_deadline),
                     &self.deadline as *const _ as *mut libc::c_void,
                 );
-                let rc = sqlite3_exec(
+                let mut stmt = std::ptr::null_mut();
+                let mut rc = sqlite3_prepare_v2(
                     self.db.get(),
                     sql.as_ptr(),
-                    Some(collect),
-                    &mut rows as *mut _ as *mut libc::c_void,
-                    &mut err,
+                    -1,
+                    &mut stmt,
+                    std::ptr::null_mut(),
                 );
+                if rc == 0 && !stmt.is_null() {
+                    loop {
+                        rc = sqlite3_step(stmt);
+                        if rc != 100 {
+                            break;
+                        }
+                        let mut row = serde_json::Map::new();
+                        for i in 0..sqlite3_column_count(stmt) {
+                            let key = std::ffi::CStr::from_ptr(sqlite3_column_name(stmt, i))
+                                .to_string_lossy()
+                                .into_owned();
+                            let p = sqlite3_column_text(stmt, i);
+                            let value = if p.is_null() {
+                                Value::Null
+                            } else {
+                                let bytes = std::slice::from_raw_parts(
+                                    p,
+                                    sqlite3_column_bytes(stmt, i) as usize,
+                                );
+                                json!(String::from_utf8_lossy(bytes))
+                            };
+                            row.insert(key, value);
+                        }
+                        rows.push(Value::Object(row));
+                    }
+                    if rc == 101 {
+                        rc = 0;
+                    }
+                }
+                if !stmt.is_null() {
+                    sqlite3_finalize(stmt);
+                }
                 sqlite3_progress_handler(self.db.get(), 0, None, std::ptr::null_mut());
                 rc
             };
-            if !err.is_null() {
-                // SAFETY: sqlite3_exec allocated this diagnostic, which never escapes.
-                unsafe {
-                    sqlite3_free(err.cast());
-                }
-            }
             if rc == 0 {
                 return Ok(rows);
             }
@@ -1796,6 +1810,43 @@ impl Drop for ReadOnlySqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_strings_keep_padding_and_sqlite_embedded_nuls() -> Result<()> {
+        let value = json!({"session_id":" session\0id ","name":" command ","blank":" \t "});
+        assert_eq!(raw_str_at(&value, "session_id"), Some(" session\0id "));
+        assert_eq!(str_at(&value, "name"), Some("command"));
+        assert_eq!(raw_str_at(&value, "blank"), None);
+        let root = std::env::temp_dir().join(format!(
+            "cito-sqlite-bytes-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let path = root.join("sessions.sqlite");
+            let filename = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            let mut db = std::ptr::null_mut();
+            // SAFETY: owned output pointer and static SQL stay live through calls.
+            unsafe {
+                assert_eq!(
+                    sqlite3_open_v2(filename.as_ptr(), &mut db, 2 | 4, std::ptr::null()),
+                    0
+                );
+                let rc = sqlite3_exec(db, c"CREATE TABLE sessions(id TEXT); INSERT INTO sessions VALUES(CAST(X'2073657373696F6E00696420' AS TEXT))".as_ptr(), None, std::ptr::null_mut(), std::ptr::null_mut());
+                sqlite3_close(db);
+                assert_eq!(rc, 0);
+            }
+            let reader = ReadOnlySqlite::open(&path, Duration::from_secs(1))?;
+            assert_eq!(
+                reader.rows("SELECT id FROM sessions")?[0]["id"],
+                value["session_id"]
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        result
+    }
     #[test]
     fn atomic_publication_follows_dangling_chains_and_cleans_failed_temps() {
         let root = std::env::temp_dir().join(format!(

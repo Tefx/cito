@@ -182,7 +182,13 @@ export default function citoBridge(pi: BridgeAPI): void {
       lastActiveMs = Date.now();
     }
     sessionId = nextSessionId;
-    if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
+    if (sessionId) {
+      const delivered = sessions.get(sessionId) ?? new Set<string>();
+      sessions.delete(sessionId);
+      sessions.set(sessionId, delivered);
+      // Keep recent inactive sessions for deduplication without unbounded growth.
+      while (sessions.size > 128) sessions.delete(sessions.keys().next().value!);
+    }
   }
   let renderedBadge: string | undefined;
   let renderedContext: BridgeContext | undefined;

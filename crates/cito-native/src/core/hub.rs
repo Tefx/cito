@@ -1255,6 +1255,11 @@ impl HubEngine {
                     else if let Some(patch) = p.get("user_config") {
                         let prev = config.clone();
                         merge_channel_config(&plugin, "user", &mut config, patch, clear_secret);
+                        if let Some(key) = plugin.manifest["pairing"]["privateIdentityField"].as_str() {
+                            if let Some(value) = config[key].as_str() {
+                                config[key] = json!(value.trim());
+                            }
+                        }
                         identity_changed = plugin.manifest["pairing"]["privateIdentityField"].as_str().map(|key|prev[key]!=config[key]).unwrap_or_else(||fields(&plugin).iter().any(|f| s(f,"scope") == "user" && prev[s(f,"key")] != config[s(f,"key")]));
                         if identity_changed {
                             let cleared = plugin.manifest["pairing"]["privateIdentityField"].as_str().is_some_and(|identity| s(&config, identity).is_empty());
@@ -1771,7 +1776,7 @@ fn publish_human_reply(
     let host_name = p["host_name"].as_str().unwrap_or(channel);
     let msg_id = p["msg_id"]
         .as_str()
-        .map(|key| hash(&format!("{pid}|{host_id}|human|{target_id}|{key}")));
+        .map(|key| hash(&json!([pid, host_id, "human", target_id, key]).to_string()));
     let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":"Human","about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
     let published = publish(
         c,
@@ -2264,12 +2269,12 @@ fn replace_destination(
     let id = &plugin.id;
     let identity = |v: &Value| {
         (
-            v["_external_chat_id"].clone(),
-            v["_external_user_id"].clone(),
+            v["_external_chat_id"].as_str().map(|s| s.trim().to_owned()),
+            v["_external_user_id"].as_str().map(|s| s.trim().to_owned()),
         )
     };
     let next = identity(config);
-    if next.0.is_string() && next.1.is_string() {
+    if next.0.is_some() && next.1.is_some() {
         for binding in c.query(
             "SELECT * FROM hub_human_channels WHERE plugin_id=?",
             &[json!(id)],
@@ -2283,8 +2288,8 @@ fn replace_destination(
     }
     if old.is_some_and(|old| {
         identity(old) != next
-            || next.0.is_null()
-                && next.1.is_null()
+            || next.0.is_none()
+                && next.1.is_none()
                 && plugin.manifest["pairing"]["privateIdentityField"]
                     .as_str()
                     .map(|key| old[key] != config[key])

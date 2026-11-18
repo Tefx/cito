@@ -175,6 +175,33 @@ impl DaemonService {
         self.settings_for_hub(hub)
     }
 
+    fn enabled_hub_dto(&self, name: &str, slot: &HubClient) -> Value {
+        let capabilities = slot.capabilities();
+        let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
+            "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),
+            "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==self.config.default_hub,
+            "is_builtin":slot.config["url"] == "local://","supports_workspace_scope":slot.config["url"] != "local://",
+            "can_login":slot.config["authMode"] == "oidc" && capabilities["status"] != "connected",
+            "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
+        let record = slot.cached_directory().into_iter().find(|row| {
+            row["harness"] == "human"
+                && crate::core::auth::principal_matches(string(row, "principal_id"), &slot.identity)
+        });
+        let projection = self.project_human(
+            record.as_ref(),
+            capabilities["observation_current"] == true,
+            capabilities["auth_valid"] == true && slot.config["url"] != "local://",
+        );
+        if let (Some(out), Some(fields)) = (hub.as_object_mut(), projection.as_object()) {
+            out.extend(fields.clone());
+        }
+        hub["attachments"] = json!(record
+            .as_ref()
+            .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
+            .unwrap_or_default());
+        hub
+    }
+
     pub(super) fn settings_for_hub(&self, channel_hub: &str) -> Value {
         let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p| {
             let inspection = self.inspect_setup(p);
@@ -195,32 +222,7 @@ impl DaemonService {
         let mut channels = Vec::new();
         let mut channel_inventory_error: Option<String> = None;
         for (name, slot) in &self.slots {
-            let capabilities = slot.capabilities();
-            hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),"capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
-            if let Some(item) = hubs.last_mut().and_then(Value::as_object_mut) {
-                let record = slot.cached_directory().into_iter().find(|row| {
-                    row["harness"] == "human"
-                        && crate::core::auth::principal_matches(
-                            string(row, "principal_id"),
-                            &slot.identity,
-                        )
-                });
-                let projection = self.project_human(
-                    record.as_ref(),
-                    capabilities["observation_current"] == true,
-                    capabilities["auth_valid"] == true && slot.config["url"] != "local://",
-                );
-                if let Some(fields) = projection.as_object() {
-                    item.extend(fields.clone());
-                }
-                item.insert(
-                    "attachments".into(),
-                    json!(record
-                        .as_ref()
-                        .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
-                        .unwrap_or_default()),
-                );
-            }
+            hubs.push(self.enabled_hub_dto(name, slot));
             if name == channel_hub {
                 let inventory = if slot.local.is_some() {
                     slot.rpc("human_channels_list", &json!({}))
@@ -305,23 +307,11 @@ impl DaemonService {
                 .map(|s| &s.config)
                 .or_else(|| raw["hubs"].get(string(item, "name")));
             if let Some(cfg) = cfg {
-                item["redirect_port"] = cfg
-                    .get("redirectPort")
-                    .or_else(|| cfg.get("redirect_port"))
-                    .or_else(|| cfg.get("oidcRedirectPort"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                item["issuer"] = cfg
-                    .get("issuer")
-                    .or_else(|| cfg.get("oidcIssuer"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                item["client_id"] = cfg
-                    .get("clientId")
-                    .or_else(|| cfg.get("client_id"))
-                    .or_else(|| cfg.get("oidcClientId"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let mut cfg = cfg.clone();
+                crate::core::config::canonicalize_hub_aliases(&mut cfg);
+                item["redirect_port"] = cfg["redirectPort"].clone();
+                item["issuer"] = cfg["issuer"].clone();
+                item["client_id"] = cfg["clientId"].clone();
             }
             if item.get("human_state_status").is_none() {
                 let projection = self.human_projection(string(item, "name"));
@@ -764,17 +754,11 @@ impl DaemonService {
         });
         frame["listeners"] = json!(sessions);
         frame["sessions"] = frame["listeners"].clone();
-        let hubs: Vec<_> = self.slots.iter().map(|(name, slot)| {
-            let capabilities = slot.capabilities();
-            let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
-                "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),
-                "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,
-                "is_builtin":slot.config["url"] == "local://","supports_workspace_scope":slot.config["url"] != "local://",
-                "can_login":slot.config["authMode"] == "oidc" && capabilities["status"] != "connected",
-                "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
-            if let (Some(out),Some(projection)) = (hub.as_object_mut(),self.human_projection(name).as_object()) { out.extend(projection.clone()); }
-            hub
-        }).collect();
+        let hubs: Vec<_> = self
+            .slots
+            .iter()
+            .map(|(name, slot)| self.enabled_hub_dto(name, slot))
+            .collect();
         frame["hubs"] = json!(hubs);
         frame["hub"] = json!(self.config.default_hub);
         Ok(frame)

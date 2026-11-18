@@ -763,7 +763,7 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let bob = json!({"principal_id":"none#bob","owner_user":"bob"});
     e.human_rpc(
         "human_channels_configure",
-        &json!({"plugin_id":"fixture","user_config":{"destination":"42"},"enabled":false}),
+        &json!({"plugin_id":"fixture","user_config":{"destination":" 42 "},"enabled":false}),
         Some(&alice),
     )
     .unwrap();
@@ -777,14 +777,17 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
         parse(&binding, "user_config_json")["_external_user_id"],
         "42"
     );
-    assert!(e
-        .human_rpc(
-            "human_channels_configure",
-            &json!({"plugin_id":"fixture","user_config":{"destination":"42"}}),
-            Some(&bob)
-        )
-        .unwrap_err()
-        .contains("DESTINATION_IN_USE"));
+    assert_eq!(parse(&binding, "user_config_json")["destination"], "42");
+    for destination in ["42", " 42 "] {
+        assert!(e
+            .human_rpc(
+                "human_channels_configure",
+                &json!({"plugin_id":"fixture","user_config":{"destination":destination}}),
+                Some(&bob)
+            )
+            .unwrap_err()
+            .contains("DESTINATION_IN_USE"));
+    }
     e.inner.db.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms) VALUES('cito-owner','fixture','none#bob','bob',?,?)",&[json!(now_ms()),json!(now_ms()+60_000)]).unwrap();
     assert!(e.redeem("fixture",&json!({"code":"cito-owner","is_private_chat":true,"external_chat_id":"42","external_user_id":"42","user_config_patch":{"destination":"42"}})).unwrap_err().contains("DESTINATION_IN_USE"));
     let plugin = e.plugin("fixture").unwrap();

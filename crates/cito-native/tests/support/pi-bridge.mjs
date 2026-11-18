@@ -72,6 +72,10 @@ try {
  await request({op:'status',session_id:session,badge:'active'});session='session-b';assert.equal((await request({op:'identify'})).session_id,'session-b');assert.equal(badges.at(-1),undefined);
  assert.equal((await request({...delivery,session_id:session})).deduplicated,false);session='session-a';await handlers.get('session_tree')({},context);assert.equal((await request(delivery)).deduplicated,true);
  for(let i=0;i<201;i++)await request({...delivery,batch_id:`evict-${i}`});assert.equal((await request(delivery)).deduplicated,false);
+ for(let i=0;i<128;i++){session=`inactive-${i}`;await handlers.get('session_tree')({},context);}
+ session='session-a';await handlers.get('session_tree')({},context);
+ assert.equal((await request(delivery)).deduplicated,false,'The oldest inactive session must be evicted');
+ assert.equal((await request(delivery)).deduplicated,true,'The active session must retain deduplication');
  const plain={fg:(_n,t)=>t,bg:(_n,t)=>t,bold:t=>t};
  const narrow=renderer({content:'\u4e2d👩‍💻é'.repeat(8)},{expanded:false,outputPad:4},plain);
  for(let width=1;width<=12;width++)for(const line of narrow.render(width)){const cells=Array.from(line.replaceAll('\u4e2d','XX').replaceAll('👩‍💻','XX').replaceAll('é','e')).length;assert(cells<=width,`width ${width}: ${line}`);}

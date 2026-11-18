@@ -109,7 +109,11 @@ fn committed_projection(mut result: Value, projection: Result<(), String>) -> Va
         result["ok"] = json!(true);
         result["committed"] = json!(true);
         if let Err(error) = projection {
-            result["warning"] = json!(format!("Saved successfully; local refresh failed: {error}"));
+            let warning = format!("Saved successfully; local refresh failed: {error}");
+            result["warning"] = json!(match result["warning"].as_str() {
+                Some(previous) => format!("{previous}; {warning}"),
+                None => warning,
+            });
         }
     }
     result
@@ -175,9 +179,13 @@ pub(super) fn dispatch_action(
         s.record_hub_result(action, &result, None);
     }
     if let Err(error) = &result {
-        s.emit(
+        if channel_action_kind(action) != Some(super::channels::ChannelActionKind::Mutation)
+            && action["op"] != "set_host_hub"
+        {
+            s.emit(
             json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
         );
+        }
     }
     if refresh_setup && result.is_ok() {
         s.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings(),"warning":result.as_ref().ok().and_then(|value| value.get("warning"))}));
@@ -690,11 +698,26 @@ impl DaemonService {
                 value
             });
         self.record_hub_result(action, &result, resolved_hub.as_deref());
+        if action["op"] == "set_host_hub" {
+            if let Err(error) = &result {
+                self.emit(json!({"op":"settings","ok":false,"source_op":"set_host_hub","request_id":action["request_id"],"error":error,"settings":self.settings()}));
+            }
+        }
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
             self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings(),"warning":result.as_ref().ok().and_then(|value| value.get("warning"))}));
         }
-        if let Some(warning) = result.as_ref().ok().and_then(|value| value.get("warning")) {
-            self.emit(json!({"op":"state","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"warning":warning}));
+        if !matches!(
+            string(action, "op"),
+            "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
+        ) {
+            if let Some(warning) = result
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("warning"))
+                .filter(|value| !value.is_null())
+            {
+                self.emit(json!({"op":"state","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"warning":warning}));
+            }
         }
         if result
             .as_ref()
@@ -1003,9 +1026,11 @@ impl DaemonService {
                 if let Some(activity) = self.session_activity.as_mut() {
                     activity.remove_candidates(id);
                 }
-                return Ok(
-                    json!({"ok":true,"notice":notice,"detach_status":if detach_errors.is_empty(){"complete"}else{"pending"},"warnings":detach_errors}),
-                );
+                let mut result = json!({"ok":true,"notice":notice,"detach_status":if detach_errors.is_empty(){"complete"}else{"pending"},"warnings":detach_errors});
+                if !detach_errors.is_empty() {
+                    result["warning"] = json!(detach_errors.join("; "));
+                }
+                return Ok(result);
             }
             "setup_save_hub" | "save_hub" => {
                 let requested_name = string(action, "name").trim();
@@ -1350,7 +1375,7 @@ impl DaemonService {
                     {
                         invite["redirect_port"] = port;
                     }
-                    self.emit(json!({"op":"hub_invite","request_id":action["request_id"],"config":invite}));
+                    self.emit(json!({"op":"hub_invite","source_op":"paste_hub_invite","request_id":action["request_id"],"config":invite}));
                     return Ok(json!({"ok":true}));
                 }
                 let raw = self.raw_config()?;
@@ -1768,6 +1793,7 @@ impl DaemonService {
                         string(&row, "harness"),
                         string(&row, "session_id"),
                     )?;
+                    let mut attached = json!({"ok":true});
                     if !existing.is_some_and(|value| value["status"] == "ACTIVE") {
                         let scope = if destination.config["authMode"] == "oidc"
                             && self.slot(from)?.config["authMode"] != "oidc"
@@ -1780,9 +1806,13 @@ impl DaemonService {
                         if row["tag"].is_string() {
                             request["tag"] = row["tag"].clone();
                         }
-                        self.listen(to, &request, &row)?;
+                        attached = self.listen(to, &request, &row)?;
                     }
-                    self.unlisten_id(from, string(&row, "listener_id"))?;
+                    return Ok(committed_projection(
+                        attached,
+                        self.unlisten_id(from, string(&row, "listener_id"))
+                            .map(|_| ()),
+                    ));
                 }
             }
             "set_host_hub" => {
@@ -1835,11 +1865,13 @@ impl DaemonService {
                 self.host_server = server;
                 self.host_hub_reload_failed = false;
                 if let Err(error) = result {
+                    let error = match rollback {
+                        Ok(()) => error,
+                        Err(rollback) => {
+                            format!("{error}; failed to restore host hub listener: {rollback}")
+                        }
+                    };
                     self.last_host_hub_error = Some(error.clone());
-                    self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
-                    rollback.map_err(|rollback| {
-                        format!("{error}; failed to restore host hub listener: {rollback}")
-                    })?;
                     return Err(error);
                 }
                 self.applied_host_config =

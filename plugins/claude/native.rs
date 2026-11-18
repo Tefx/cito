@@ -239,7 +239,7 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
 fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool) -> Result<()> {
     let ids: HashSet<_> = wakes
         .iter()
-        .filter_map(|w| Some((str_at(w, "ack_session")?, str_at(w, "batch_id")?)))
+        .filter_map(|w| Some((raw_str_at(w, "ack_session")?, str_at(w, "batch_id")?)))
         .collect();
     let mut sessions = sessions.to_vec();
     sessions.sort();
@@ -435,8 +435,8 @@ fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Va
 fn metadata_session(req: &Value) -> Result<Option<String>> {
     let mut explicit = vec![];
     for s in [
-        str_at(req, "explicit_session_id"),
-        str_at(&req["headers"], "x-claude-session-id"),
+        raw_str_at(req, "explicit_session_id"),
+        raw_str_at(&req["headers"], "x-claude-session-id"),
     ]
     .into_iter()
     .flatten()
@@ -445,12 +445,12 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
     }
     for source in [&req["meta"], &req["_meta"]] {
         for key in ["claudeSessionId", "sessionId", "claude_session_id"] {
-            if let Some(s) = str_at(source, key) {
+            if let Some(s) = raw_str_at(source, key) {
                 explicit.push(validate_session(s)?);
             }
         }
         if str_at(source, "expected_harness") == Some("claude") {
-            if let Some(s) = str_at(source, "expected_session_id") {
+            if let Some(s) = raw_str_at(source, "expected_session_id") {
                 explicit.push(validate_session(s)?);
             }
         }
@@ -476,7 +476,7 @@ fn resolve(req: &Value) -> Result<String> {
                 && str_at(&v, "start").is_some()
                 && v["cwd"] == cwd
             {
-                if let Some(s) = str_at(&v, "session_id") {
+                if let Some(s) = raw_str_at(&v, "session_id") {
                     if explicit.as_ref().map(|id| id != s).unwrap_or(false) {
                         return Err("Conflicting caller metadata for the endpoint".into());
                     }
@@ -635,7 +635,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                         || !matches_process(str_at(&identity, "command").unwrap_or(""))
                         || (binding["process_identity"].is_object()
                             && binding["process_identity"] != identity)
-                        || str_at(&binding, "session_id").is_none()
+                        || raw_str_at(&binding, "session_id").is_none()
                         || str_at(&binding, "cwd").is_none()
                     {
                         return Err(error);
@@ -660,7 +660,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 let mut session = caller(
                     &r,
                     "claude",
-                    str_at(&v, "session_id").unwrap_or(""),
+                    raw_str_at(&v, "session_id").unwrap_or(""),
                     str_at(&v, "cwd").unwrap_or(""),
                     Some(p),
                     str_at(&v, "session_name"),
@@ -702,7 +702,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                         if let Ok(binding) = read_json(&binding_path(req, p)) {
                             if str_at(&binding, "start").is_some()
                                 && str_at(&binding, "start").map(str::to_owned) == process_start(p)
-                                && str_at(&binding, "session_id")
+                                && raw_str_at(&binding, "session_id")
                                     .is_some_and(|sid| c["session_id"] != sid)
                             {
                                 return Err(error(
@@ -721,7 +721,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
             if let (Some(expected), Some(actual)) = (
                 hint.as_deref(),
-                live.as_ref().and_then(|v| str_at(v, "session_id")),
+                live.as_ref().and_then(|v| raw_str_at(v, "session_id")),
             ) {
                 if expected != actual {
                     return Ok(error("INVALID_INPUT", "Conflicting caller metadata"));
@@ -729,7 +729,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
             let sid = match live
                 .as_ref()
-                .and_then(|v| str_at(v, "session_id"))
+                .and_then(|v| raw_str_at(v, "session_id"))
                 .map(str::to_string)
                 .map(Ok)
                 .unwrap_or_else(|| resolve(req))
@@ -808,7 +808,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ),
                 Err(_) => match resolve(req) {
                     Ok(current) => Ok(
-                        json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
+                        json!({"ok":true,"status":if Some(current.as_str()) == raw_str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
                     ),
                     Err(reason) => {
                         Ok(json!({"ok":true,"status":"transient_error","reason":reason}))
@@ -817,13 +817,15 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
         }
         "update_badge" => {
-            let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;
+            let sid =
+                validate_session(raw_str_at(req, "session_id").ok_or("Session ID is required")?)?;
             let p = pid(req).ok_or("Endpoint PID is required")?;
             let path = state(req).join(format!("sockets/claude-pid-{p}.sock"));
             update_badge(req, &path, p, &sid, matches_process)
         }
         "wake" => {
-            let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;
+            let sid =
+                validate_session(raw_str_at(req, "session_id").ok_or("Session ID is required")?)?;
             if let Some(p) = pid(req) {
                 if let Ok(v) = bridge(req) {
                     if v["ok"] == true {
@@ -911,7 +913,7 @@ pub fn hook_main() {
         }
         let mut req = json!({"cwd":input["cwd"],"explicit_session_id":input["session_id"]});
         let p = hook_endpoint(&req);
-        let sid = match str_at(&req, "explicit_session_id") {
+        let sid = match raw_str_at(&req, "explicit_session_id") {
             Some(s) => validate_session(s).map_err(|_| "Invalid Claude session identifier")?,
             None => match resolve(&req) {
                 Ok(s) => s,
@@ -940,7 +942,7 @@ pub fn hook_main() {
             }
         }
         let alias = read_optional(&state(&req).join("claude/aliases").join(&sid))?
-            .and_then(|s| validate_session(&s).ok())
+            .and_then(|s| validate_session(s.strip_suffix('\n').unwrap_or(&s)).ok())
             .filter(|s| s.starts_with("claude-") && s != &sid);
         let sessions: Vec<_> = alias
             .as_deref()
@@ -1186,7 +1188,8 @@ fn alias_for_fallback(req: &Value, fallback: &str) -> Option<String> {
         .flatten()
         .find_map(|entry| {
             let name = entry.file_name().to_str()?.to_string();
-            if fs::read_to_string(entry.path()).ok()?.trim() == fallback {
+            let value = fs::read_to_string(entry.path()).ok()?;
+            if value.strip_suffix('\n').unwrap_or(&value) == fallback {
                 validate_session(&name).ok()
             } else {
                 None
@@ -1307,7 +1310,7 @@ fn sidecar(req: Value) -> Result<()> {
                         && str_at(&binding, "start").is_some()
                         && str_at(&binding, "start").map(str::to_string) == process_start(p)
                     {
-                        next = str_at(&binding, "session_id").map(str::to_string);
+                        next = raw_str_at(&binding, "session_id").map(str::to_string);
                         alias_active = next.as_deref().is_some_and(|sid| {
                             alias_for_fallback(&req, &fallback).as_deref() == Some(sid)
                         });
@@ -1389,7 +1392,7 @@ fn sidecar(req: Value) -> Result<()> {
                     && str_at(&binding, "start").is_some()
                     && str_at(&binding, "start").map(str::to_owned) == process_start(p)
                 {
-                    if let Some(sid) = str_at(&binding, "session_id") {
+                    if let Some(sid) = raw_str_at(&binding, "session_id") {
                         // A hook can commit while this request waits for the leaf lock.
                         // Keep an established fallback alias, otherwise adopt its identity.
                         alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);

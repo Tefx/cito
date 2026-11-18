@@ -312,6 +312,95 @@ fn probe_transport_and_negative_responses_count_toward_retirement() -> Result<()
 }
 
 #[test]
+fn hard_exit_rebind_restores_only_unread_current_authority_work() -> Result<(), String> {
+    {
+        let f = Fixture::new()?;
+        let mut caller = f.row.clone();
+        caller["harness"] = json!("invalid|harness");
+        assert!(register_listener(
+            &f.state,
+            &f.client,
+            "host",
+            &json!({"about":"Invalid identity"}),
+            &caller
+        )
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    }
+    for stopped in [false, true] {
+        let f = Fixture::new()?;
+        for id in ["pending", "batch-peer", "mismatch", "expired", "read"] {
+            f.seed(id)?;
+        }
+        apply_probe(
+            &f.state,
+            &f.client,
+            &f.row,
+            &json!({"ok":true,"status":"closed_definitive"}),
+        )?;
+        f.state.db.execute("UPDATE local_signals SET batch_id='retained',batch_expires_at_ms=?,queue_written=1,queue_confirmed=1 WHERE signal_id IN ('pending','batch-peer')", &[json!(now_ms()+60_000)])?;
+        f.state.db.execute(
+            "UPDATE local_signals SET held_reason='authority_mismatch' WHERE signal_id='mismatch'",
+            &[],
+        )?;
+        f.state.db.execute(
+            "UPDATE local_signals SET expires_at_ms=0 WHERE signal_id='expired'",
+            &[],
+        )?;
+        f.state.db.execute(
+            "UPDATE local_signals SET acknowledged_at_ms=1 WHERE signal_id='read'",
+            &[],
+        )?;
+        if stopped {
+            f.state
+                .db
+                .execute("UPDATE local_listeners SET user_stopped=1", &[])?;
+        }
+        register_listener(
+            &f.state,
+            &f.client,
+            "host",
+            &json!({"about":"Restored receiver"}),
+            &f.row,
+        )?;
+        let current = f
+            .state
+            .listener("local", string(&f.row, "listener_id"))?
+            .unwrap();
+        assert!(current["binding_generation"].as_u64() > f.row["binding_generation"].as_u64());
+        let rows = f
+            .state
+            .db
+            .query("SELECT * FROM local_signals ORDER BY signal_id", &[])?;
+        for row in rows {
+            let restored =
+                !stopped && matches!(string(&row, "signal_id"), "pending" | "batch-peer");
+            assert_eq!(
+                row["state"],
+                if restored {
+                    "RECEIVED"
+                } else {
+                    "STORED_PASSIVE"
+                },
+                "{row}"
+            );
+            if restored {
+                assert_eq!(row["binding_generation"], current["binding_generation"]);
+                assert_eq!(row["queue_written"], 1);
+                assert_eq!(row["queue_confirmed"], 1);
+                assert_eq!(row["batch_id"], "retained");
+                assert!(row["held_reason"].is_null());
+            }
+        }
+        assert_eq!(
+            f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
+            usize::from(!stopped)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Result<(), String> {
     let f = Fixture::new()?;
     let id = string(&f.row, "listener_id");

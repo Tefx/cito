@@ -261,109 +261,131 @@ pub(super) fn dispatch_channel_action(
     kind: ChannelActionKind,
     ui_generation: Option<u64>,
 ) -> Result<Value, String> {
-    let (slot, inventory, plugins, observed_gen) = {
+    let mut settled = false;
+    let outcome = (|| {
+        let (slot, inventory, plugins, observed_gen) = {
+            let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+            s.validate_ui_generation(ui_generation)?;
+            if s.closing || shutdown_requested() {
+                return Err("Shutting down".into());
+            }
+            if kind == ChannelActionKind::Mutation {
+                channel_id(action)?;
+            }
+            s.reload_slots()?;
+            let hub = action["hub"]
+                .as_str()
+                .unwrap_or(&s.config.default_hub)
+                .to_string();
+            s.active_settings_hub = Some(hub.clone());
+            if kind == ChannelActionKind::Read {
+                s.refresh_available()?;
+            }
+            let slot = match s.slot(&hub).cloned() {
+                Ok(slot) => slot,
+                Err(error) => {
+                    if kind == ChannelActionKind::Read {
+                        // Settings still opens for disabled hubs so they can be restored.
+                        s.emit(
+                            json!({"op":"settings","hub":hub,"settings":s.settings_for_hub(&hub)}),
+                        );
+                        return Ok(json!({"ok":true}));
+                    }
+                    let result = Err(error);
+                    s.finish_channel_action(&hub, action, &result, true, false);
+                    settled = true;
+                    return result;
+                }
+            };
+            let inventory = s.channel_inventory(&slot);
+            // Pure reads can use the cached projection while this slot's owner is
+            // busy. Its completion publishes fresh settings, without another RPC.
+            if kind == ChannelActionKind::Read
+                && matches!(
+                    inventory.serial.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                )
+            {
+                s.emit(json!({"op":"settings","hub":hub,"settings":s.settings_for_hub(&hub)}));
+                return Ok(json!({"ok":true}));
+            }
+            let observed_gen = inventory
+                .cached
+                .lock()
+                .map_err(|e| e.to_string())?
+                .completed_gen;
+            (slot, inventory, s.plugins.clone(), observed_gen)
+        };
+        // All waits and channel I/O use the shared per-hub owner without service.
+        let mut result = match kind {
+            ChannelActionKind::Read => inventory
+                .refresh(&slot, observed_gen)
+                .map(|_| json!({"ok":true})),
+            ChannelActionKind::Mutation => inventory.mutate(&slot, &plugins, action),
+        };
+        if kind == ChannelActionKind::Mutation {
+            if let Ok(value) = &mut result {
+                if value["ok"] != false {
+                    value["ok"] = json!(true);
+                    value["committed"] = json!(true);
+                }
+                value["hub"] = json!(slot.name);
+                value["channel"] = json!(channel_id(action)?);
+                value["channel_id"] = value["channel"].clone();
+                value["action"] = action["op"].clone();
+                value["request_id"] = action["request_id"].clone();
+                value["authority_changed"] = json!(false);
+                value["receipt_authority"] = json!({"hub":slot.name,"url":slot.config["url"],"principal_id":slot.identity["principal_id"]});
+            }
+        }
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
         s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
-            return Err("Shutting down".into());
+            return after_channel_action(
+                result,
+                kind,
+                "Shutting down after channel request".into(),
+            );
+        }
+        let reload = s.reload_slots();
+        // Reload may replace authority even when it fails later. Check the live
+        // slot before emitting any pairing/test payload from the original owner.
+        let authority_changed = slot.closed.load(Ordering::SeqCst)
+            || !s
+                .slots
+                .get(&slot.name)
+                .is_some_and(|current| remote_channels_identity(current) == inventory.identity);
+        if reload.is_err() || authority_changed {
+            let warning = reload
+                .err()
+                .unwrap_or_else(|| "Hub authority changed after channel request committed".into());
+            let result = after_channel_action(result, kind, warning).map(|mut value| {
+                value["authority_changed"] = json!(authority_changed);
+                value
+            });
+            if kind == ChannelActionKind::Mutation {
+                s.finish_channel_action(&slot.name, action, &result, false, authority_changed);
+                settled = true;
+            }
+            return result;
         }
         if kind == ChannelActionKind::Mutation {
-            channel_id(action)?;
+            s.finish_channel_action(&slot.name, action, &result, true, false);
+            settled = true;
+        } else {
+            s.emit(
+                json!({"op":"settings","hub":slot.name,"settings":s.settings_for_hub(&slot.name)}),
+            );
         }
-        s.reload_slots()?;
-        let hub = action["hub"]
-            .as_str()
-            .unwrap_or(&s.config.default_hub)
-            .to_string();
-        s.active_settings_hub = Some(hub.clone());
-        if kind == ChannelActionKind::Read {
-            s.refresh_available()?;
-        }
-        let slot = match s.slot(&hub).cloned() {
-            Ok(slot) => slot,
-            Err(error) => {
-                if kind == ChannelActionKind::Read {
-                    // Settings still opens for disabled hubs so they can be restored.
-                    s.emit(json!({"op":"settings","hub":hub,"settings":s.settings_for_hub(&hub)}));
-                    return Ok(json!({"ok":true}));
-                }
-                let result = Err(error);
-                s.finish_channel_action(&hub, action, &result, true, false);
-                return result;
-            }
-        };
-        let inventory = s.channel_inventory(&slot);
-        // Pure reads can use the cached projection while this slot's owner is
-        // busy. Its completion publishes fresh settings, without another RPC.
-        if kind == ChannelActionKind::Read
-            && matches!(
-                inventory.serial.try_lock(),
-                Err(std::sync::TryLockError::WouldBlock)
-            )
-        {
-            s.emit(json!({"op":"settings","hub":hub,"settings":s.settings_for_hub(&hub)}));
-            return Ok(json!({"ok":true}));
-        }
-        let observed_gen = inventory
-            .cached
-            .lock()
-            .map_err(|e| e.to_string())?
-            .completed_gen;
-        (slot, inventory, s.plugins.clone(), observed_gen)
-    };
-    // All waits and channel I/O use the shared per-hub owner without service.
-    let mut result = match kind {
-        ChannelActionKind::Read => inventory
-            .refresh(&slot, observed_gen)
-            .map(|_| json!({"ok":true})),
-        ChannelActionKind::Mutation => inventory.mutate(&slot, &plugins, action),
-    };
-    if kind == ChannelActionKind::Mutation {
-        if let Ok(value) = &mut result {
-            if value["ok"] != false {
-                value["ok"] = json!(true);
-                value["committed"] = json!(true);
-            }
-            value["hub"] = json!(slot.name);
-            value["channel"] = json!(channel_id(action)?);
-            value["channel_id"] = value["channel"].clone();
-            value["action"] = action["op"].clone();
-            value["request_id"] = action["request_id"].clone();
-            value["authority_changed"] = json!(false);
-            value["receipt_authority"] = json!({"hub":slot.name,"url":slot.config["url"],"principal_id":slot.identity["principal_id"]});
-        }
+        result
+    })();
+    if !settled && outcome.is_err() && kind == ChannelActionKind::Mutation {
+        let s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
+        let hub = action["hub"].as_str().unwrap_or(&s.config.default_hub);
+        s.finish_channel_action(hub, action, &outcome, true, false);
     }
-    let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-    if s.closing || shutdown_requested() {
-        return after_channel_action(result, kind, "Shutting down after channel request".into());
-    }
-    let reload = s.reload_slots();
-    // Reload may replace authority even when it fails later. Check the live
-    // slot before emitting any pairing/test payload from the original owner.
-    let authority_changed = slot.closed.load(Ordering::SeqCst)
-        || !s
-            .slots
-            .get(&slot.name)
-            .is_some_and(|current| remote_channels_identity(current) == inventory.identity);
-    if reload.is_err() || authority_changed {
-        let warning = reload
-            .err()
-            .unwrap_or_else(|| "Hub authority changed after channel request committed".into());
-        let result = after_channel_action(result, kind, warning).map(|mut value| {
-            value["authority_changed"] = json!(authority_changed);
-            value
-        });
-        if kind == ChannelActionKind::Mutation {
-            s.finish_channel_action(&slot.name, action, &result, false, authority_changed);
-        }
-        return result;
-    }
-    if kind == ChannelActionKind::Mutation {
-        s.finish_channel_action(&slot.name, action, &result, true, false);
-    } else {
-        s.emit(json!({"op":"settings","hub":slot.name,"settings":s.settings_for_hub(&slot.name)}));
-    }
-    result
+    outcome
 }
 
 fn after_channel_action(
@@ -420,10 +442,15 @@ impl DaemonService {
                 frame["request_id"] = action["request_id"].clone();
                 self.emit(frame);
             }
-            Err(error) => self.emit(json!({"op":if rpc == "human_channels_test" {"channel_test_result"} else {"error"},"channel_id":id,"channel":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
+            Err(error) if rpc == "human_channels_test" => self.emit(json!({"op":"channel_test_result","channel_id":id,"channel":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
             _ => {}
         }
         let mut settlement = json!({"op":"settings","hub":hub,"channel_id":id,"channel":id,"action":action["op"],"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"authority_changed":authority_changed});
+        if !authority_changed {
+            if let Err(error) = result {
+                settlement["error"] = json!(error);
+            }
+        }
         if let Ok(value) = result {
             settlement["committed"] = json!(value["ok"] != false);
             for key in ["committed", "maintenance_warning", "receipt_authority"] {
@@ -505,6 +532,11 @@ mod remediation_tests {
     #[test]
     fn dispatcher_settles_save_without_settings_when_reload_fails() -> Result<(), String> {
         dispatcher_committed_receipt("channel_save", true, false)
+    }
+
+    #[test]
+    fn replaced_ui_cannot_receive_in_flight_channel_settlement() -> Result<(), String> {
+        dispatcher_committed_receipt("test_human_channel", true, false)
     }
 
     fn dispatcher_committed_receipt(
@@ -604,7 +636,7 @@ mod remediation_tests {
                     &service,
                     &json!({"op":op,"hub":"work","channel_id":"messenger","enabled":true,"request_id":"original-request"}),
                     ChannelActionKind::Mutation,
-                    None,
+                    Some(0),
                 )
             })
         };
@@ -613,6 +645,9 @@ mod remediation_tests {
             .map_err(|e| e.to_string())?;
         {
             let mut s = service.lock().unwrap();
+            if op == "test_human_channel" {
+                s.ui_generation += 1;
+            }
             if reload_failure {
                 // Gate the committed receipt until a concurrent config change
                 // and an incomplete external edit have reached the daemon.
@@ -634,8 +669,16 @@ mod remediation_tests {
             }
         }
         release_tx.send(()).map_err(|e| e.to_string())?;
-        let result = dispatcher.join().map_err(|_| "Dispatcher panicked")??;
+        let result = dispatcher.join().map_err(|_| "Dispatcher panicked")?;
         server.join().map_err(|_| "Authority server panicked")?;
+        if op == "test_human_channel" {
+            assert_eq!(result.unwrap_err(), "UI connection replaced");
+            assert!(mailbox.pending.lock().unwrap().is_empty());
+            service.lock().unwrap().shutdown();
+            std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        let result = result?;
         assert_eq!(result["receipt"], "original");
         assert_eq!(result["committed"], true);
         assert_eq!(result["authority_changed"], replace_authority);

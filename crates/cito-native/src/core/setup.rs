@@ -390,8 +390,7 @@ pub fn set_launch_at_login(
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&plist_path, xml).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&plist_path, fs::Permissions::from_mode(0o644));
+    crate::support::atomic_write_with_mode(&plist_path, xml.as_bytes(), Some(0o644))?;
     Ok(plist_path)
 }
 
@@ -1929,7 +1928,13 @@ mod tests {
         } else if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
             let root = PathBuf::from(env::var("HOME").unwrap());
             let plugins = crate::plugins::load_plugins(&root);
+            use std::os::unix::fs::MetadataExt;
+            let path = set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
+            let previous = fs::File::open(&path).unwrap();
             set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            assert_ne!(previous.metadata().unwrap().ino(), metadata.ino());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
         } else if env::var("CITO_SETUP_TEST_LOAD_CONFIG").is_ok() {
             let (config, _) = crate::plugins::load_native_config().unwrap();
             assert_eq!(
