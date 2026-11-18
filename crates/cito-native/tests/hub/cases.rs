@@ -82,6 +82,75 @@ fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
 }
 
 #[test]
+fn human_legacy_retry_survives_username_change_and_rejects_payload_conflicts() {
+    let dir = temp();
+    let engine = HubEngine::open(&dir).unwrap();
+    engine.pause_worker();
+    // Model verified OIDC identities: issuer/sub stay fixed as preferred_username changes.
+    let owner = json!({"principal_id":"oidc:https://id.example.com|subject","sub":"subject","owner_user":"alice","oidc":true});
+    let mut renamed = owner.clone();
+    renamed["owner_user"] = json!("alice-renamed");
+    let pid = owner["principal_id"].as_str().unwrap();
+    let human = listener_id(pid, "human", "default");
+    assert_eq!(
+        listener_id(
+            renamed["principal_id"].as_str().unwrap(),
+            "human",
+            "default"
+        ),
+        human
+    );
+    put(&engine, "target", "none#bob", "workspace");
+    let request = json!({"to":"target","message":"Approved","host_id":"host","msg_id":"once","in_reply_to":"source"});
+    let original = engine
+        .rpc("send_reply_from_human", &request, Some(&owner))
+        .unwrap();
+    let legacy = hash(&format!("{pid}|host|human|target|once"));
+    engine
+        .inner
+        .db
+        .execute(
+            "UPDATE hub_signals SET msg_id=? WHERE seq=?",
+            &[json!(legacy), original["seq"].clone()],
+        )
+        .unwrap();
+    for identity in [&owner, &renamed] {
+        for (field, value) in [("message", "Rejected"), ("in_reply_to", "other-source")] {
+            let mut conflict = request.clone();
+            conflict[field] = json!(value);
+            let error = engine
+                .rpc("send_reply_from_human", &conflict, Some(identity))
+                .unwrap_err();
+            assert!(error.starts_with("IDEMPOTENCY_CONFLICT:"), "{error}");
+        }
+        let retry = engine
+            .rpc("send_reply_from_human", &request, Some(identity))
+            .unwrap();
+        assert_eq!(retry["signal_id"], original["signal_id"]);
+        assert_eq!(retry["seq"], original["seq"]);
+        let rows = engine
+            .inner
+            .db
+            .query(
+                "SELECT msg_id,CAST(data AS TEXT) AS data FROM hub_signals",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["msg_id"], legacy);
+        let payload = parse(&rows[0], "data");
+        assert_eq!(
+            payload["from"]["listener_id"],
+            super::super::identity::public_listener_id("alice", &human)
+        );
+        assert_eq!(payload["message"], request["message"]);
+        assert_eq!(payload["in_reply_to"], request["in_reply_to"]);
+    }
+    engine.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn committed_ack_and_human_reply_survive_notification_failure() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

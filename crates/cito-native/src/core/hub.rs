@@ -1791,29 +1791,32 @@ fn publish_human_reply(
                 &[json!(current), json!(cutoff)],
             )?
             .is_none()
-                && one(
+            {
+                if let Some(row) = one(
                     c,
                     "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE msg_id=? AND created_ms>=?",
                     &[json!(legacy), json!(cutoff)],
-                )?
-                .is_some_and(|row| {
-                    // The legacy hash lost tuple boundaries. Its structured payload
-                    // must prove the sender, destination and request still match.
+                )? {
+                    // The legacy hash lost tuple boundaries. Prove stable identity
+                    // separately from payload compatibility, ignoring display names.
                     let stored = parse(&row, "data");
-                    stored["from"]["principal_id"] == pid
+                    if stored["from"]["principal_id"] == pid
                         && stored["from"]["host_id"] == host_id
                         && stored["from"]["harness"] == "human"
-                        && stored["from"]["listener_id"]
-                            == super::identity::public_listener_id(owner, &human)
+                        && super::identity::canonical_node_id(s(&stored["from"], "listener_id"))
+                            .is_ok_and(|id| id == human)
                         && stored["to"] == target_id
-                        && stored["message"] == text
-                        && stored["in_reply_to"] == json!(in_reply_to)
-                })
-            {
-                Ok::<_, String>(legacy)
-            } else {
-                Ok(current)
+                    {
+                        if stored["message"] != text
+                            || stored["in_reply_to"] != json!(in_reply_to)
+                        {
+                            return Err("IDEMPOTENCY_CONFLICT: retained legacy reply payload differs".into());
+                        }
+                        return Ok(legacy);
+                    }
+                }
             }
+            Ok::<_, String>(current)
         })
         .transpose()?;
     let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":"Human","about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
