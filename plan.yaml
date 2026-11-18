@@ -15867,7 +15867,7 @@ phases:
 - id: v51
   name: 'V51 Multi-Frame Settlement, Opaque-ID Byte Sovereignty, Hard-Exit Signal
     Restoration & 21-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: in_progress
   gate: 'All 21 admitted findings (#1–#21) are closed; 3-way incremental [REQUIRES_SKILL:
     contract-and-simplicity] audit convergence (uiux-auditor, pathway-auditor, structural-auditor)
     reaches ZERO_NEW_ISSUES alongside independent FULL gate verification; cargo fmt
@@ -15906,7 +15906,7 @@ phases:
     name: 'V51 Rust Core & Plugins: Daemon Action Frame Settlement, Opaque-ID Byte
       Sovereignty, NUL-Safe SQLite, Hard-Exit Signal Restoration & Codex Hygiene (#1,
       #3–#13, #15–#18, #20)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - bin/cito-test-runner\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
@@ -16024,6 +16024,8 @@ phases:
     - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
     - bin/cito-test-runner
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-18T04:35:27.005667Z'
   - id: v51.ui
     name: 'V51 macOS Swift UI: Multi-Frame Settlement, Outbound Size Guard, Pending
       Controls & HeadlessOracle Calibration (#1–#6, #14, #18–#20)'
