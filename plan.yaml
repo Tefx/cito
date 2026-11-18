@@ -15906,7 +15906,7 @@ phases:
     name: 'V51 Rust Core & Plugins: Daemon Action Frame Settlement, Opaque-ID Byte
       Sovereignty, NUL-Safe SQLite, Hard-Exit Signal Restoration & Codex Hygiene (#1,
       #3–#13, #15–#18, #20)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - bin/cito-test-runner\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - README.md\n  \
@@ -16026,6 +16026,38 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-18T04:35:27.005667Z'
+    done_at: '2026-11-18T05:02:39.173851+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 963561fb887d3a033b419ed7c9d2e5c1371a7e64 (fast-forwarded to main)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> passed
+
+      - Run: git diff --check -> passed
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> passed (0 warnings)
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 305 passed, 0
+      failed, 4 ignored
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      (detached) -> 78 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native plugins:: -- --test-threads=2
+      (detached) -> 50 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native hub:: -- --test-threads=2 (detached)
+      -> 47 passed, 0 failed
+
+      - Run: plugins/pi/cito-bridge.test.ts -> 4 passed, 0 failed
+
+
+      Spec link:
+
+      - Admitted Finding Ledger #1, #3–#13, #15–#18, #20 (v51.core)'
   - id: v51.ui
     name: 'V51 macOS Swift UI: Multi-Frame Settlement, Outbound Size Guard, Pending
       Controls & HeadlessOracle Calibration (#1–#6, #14, #18–#20)'
