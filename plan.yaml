@@ -16267,7 +16267,7 @@ phases:
   - id: v51.fix_core
     name: 'V51 Core & Codex Repair: Bound SQLite NUL-Safe Queries, Coherent Rollout/Effect
       Checkpoint & Legacy Idempotency Upgrade Fallback (F1–F3)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
       \    - plugins/codex/**\n  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n\
@@ -16346,3 +16346,25 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-18T06:23:08.523025Z'
+    done_at: '2026-11-18T06:36:53.181986+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 0be8288af4ad1ce90691361016023cf97c99ea21 (fast-forwarded to main)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> passed
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> passed (0 warnings)
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 301 passed, 4
+      ignored
+
+      - Run: detached plugins:: (49 passed), daemon:: (75 passed), hub:: (65 passed)
+      -> all passed
+
+
+      Spec link:
+
+      - pathway-auditor F1–F3 (v51.R8, v51.R12, v51.R10)'
