@@ -6,6 +6,47 @@ fn temp() -> PathBuf {
     dir
 }
 #[test]
+fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
+    let dir = temp();
+    let engine = HubEngine::open(&dir).unwrap();
+    engine.pause_worker();
+    let owner = local_principal("alice");
+    put(&engine, "target", "none#bob", "workspace");
+    let tuples = [
+        ("host", "key|human|target|tail"),
+        ("host|human|target|key", "tail"),
+    ];
+    assert_eq!(
+        format!("{}|human|target|{}", tuples[0].0, tuples[0].1),
+        format!("{}|human|target|{}", tuples[1].0, tuples[1].1)
+    );
+    let replies = tuples.map(|(host, key)| {
+        let request = json!({"to":"target","message":"Approved","host_id":host,"msg_id":key});
+        let reply = engine
+            .rpc("send_reply_from_human", &request, Some(&owner))
+            .unwrap();
+        let retry = engine
+            .rpc("send_reply_from_human", &request, Some(&owner))
+            .unwrap();
+        assert_eq!(retry["signal_id"], reply["signal_id"]);
+        assert_eq!(retry["seq"], reply["seq"]);
+        reply
+    });
+    assert_ne!(replies[0]["signal_id"], replies[1]["signal_id"]);
+    assert_ne!(replies[0]["seq"], replies[1]["seq"]);
+    assert_eq!(
+        engine
+            .inner
+            .db
+            .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+            .unwrap()[0]["n"],
+        2
+    );
+    engine.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn committed_ack_and_human_reply_survive_notification_failure() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

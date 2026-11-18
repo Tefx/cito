@@ -1543,6 +1543,13 @@ extern "C" {
         stmt: *mut *mut libc::c_void,
         tail: *mut *const libc::c_char,
     ) -> libc::c_int;
+    fn sqlite3_bind_text(
+        stmt: *mut libc::c_void,
+        index: libc::c_int,
+        text: *const libc::c_char,
+        length: libc::c_int,
+        destructor: Option<unsafe extern "C" fn(*mut libc::c_void)>,
+    ) -> libc::c_int;
     fn sqlite3_step(stmt: *mut libc::c_void) -> libc::c_int;
     fn sqlite3_finalize(stmt: *mut libc::c_void) -> libc::c_int;
     fn sqlite3_column_count(stmt: *mut libc::c_void) -> libc::c_int;
@@ -1678,7 +1685,16 @@ impl ReadOnlySqlite {
         }
     }
     pub fn rows(&self, sql: &str) -> Result<Vec<Value>> {
-        let sql = std::ffi::CString::new(sql).map_err(|e| e.to_string())?;
+        self.rows_params(sql, &[])
+    }
+    pub fn rows_params(&self, sql: &str, params: &[&str]) -> Result<Vec<Value>> {
+        let sql = std::ffi::CString::new(sql).map_err(|_| "Invalid session query")?;
+        let lengths = params
+            .iter()
+            .map(|text| {
+                i32::try_from(text.len()).map_err(|_| "Session query parameter is too large")
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         loop {
             let remaining = self
                 .deadline
@@ -1708,6 +1724,22 @@ impl ReadOnlySqlite {
                     &mut stmt,
                     std::ptr::null_mut(),
                 );
+                if rc == 0 && !stmt.is_null() {
+                    for (index, (text, length)) in params.iter().zip(&lengths).enumerate() {
+                        // SQLITE_STATIC: borrowed parameter bytes stay live until
+                        // this statement is finalized, including every step/retry.
+                        rc = sqlite3_bind_text(
+                            stmt,
+                            (index + 1) as i32,
+                            text.as_ptr().cast(),
+                            *length,
+                            None,
+                        );
+                        if rc != 0 {
+                            break;
+                        }
+                    }
+                }
                 if rc == 0 && !stmt.is_null() {
                     loop {
                         rc = sqlite3_step(stmt);

@@ -1197,13 +1197,21 @@ impl DaemonService {
         let dedup =
             hash(&json!([endpoint, string(&slot.config, "url"), canonical, key]).to_string());
         let request_hash = hash(&json!([message, reply_to]).to_string());
+        let legacy_dedup = hash(&format!(
+            "{endpoint}|{}|{canonical}|{key}",
+            string(&slot.config, "url")
+        ));
+        let legacy_request_hash = hash(&format!("{message}|{reply_to}"));
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
             if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
+            if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(legacy_dedup)])?.into_iter().next(){if old["request_hash"]!=legacy_request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
             let id=format!("sig_{}",random_uuid_v4().replace('-',""));c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?)",&[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(now+1_800_000)),json!(now+1_800_000)])?;
             c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next().ok_or("Sent reservation missing".into())
         })?;
+        // Pending legacy reservations must retry their original Hub publication key.
+        let dedup = string(&reservation, "dedup_id");
         let mut signal_id = string(&reservation, "signal_id").to_owned();
         let mut seq = reservation["seq"].as_u64().unwrap_or(0);
         if reservation["status"] == "PENDING_PUBLISH" {

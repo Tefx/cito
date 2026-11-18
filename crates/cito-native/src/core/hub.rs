@@ -1776,7 +1776,34 @@ fn publish_human_reply(
     let host_name = p["host_name"].as_str().unwrap_or(channel);
     let msg_id = p["msg_id"]
         .as_str()
-        .map(|key| hash(&json!([pid, host_id, "human", target_id, key]).to_string()));
+        .map(|key| {
+            let current = hash(&json!([pid, host_id, "human", target_id, key]).to_string());
+            let legacy = hash(&format!("{pid}|{host_id}|human|{target_id}|{key}"));
+            let window = stream_info(c, SIGNALS)?["config"]["duplicate_window"]
+                .as_i64()
+                .unwrap_or(1_800_000_000_000)
+                / 1_000_000;
+            // Prefer the unambiguous key; retain live pre-upgrade publications.
+            let cutoff = now_ms() - window.max(0);
+            if one(
+                c,
+                "SELECT seq FROM hub_signals WHERE msg_id=? AND created_ms>=?",
+                &[json!(current), json!(cutoff)],
+            )?
+            .is_none()
+                && one(
+                    c,
+                    "SELECT seq FROM hub_signals WHERE msg_id=? AND created_ms>=?",
+                    &[json!(legacy), json!(cutoff)],
+                )?
+                .is_some()
+            {
+                Ok::<_, String>(legacy)
+            } else {
+                Ok(current)
+            }
+        })
+        .transpose()?;
     let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":"Human","about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
     let published = publish(
         c,

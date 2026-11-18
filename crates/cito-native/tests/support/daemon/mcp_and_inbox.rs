@@ -1132,6 +1132,82 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
         .any(|l| serde_json::from_str::<Value>(l).unwrap()["op"] == "wake"));
 }
 #[test]
+fn legacy_live_send_reservations_recover_completed_and_pending_publications() {
+    use cito_native::core::identity::hash;
+    let _lock = serial();
+    for human in [false, true] {
+        for pending in [false, true] {
+            let f = Fixture::new(json!({}));
+            let meta = f.provider("delivered_unconfirmed");
+            f.daemon(&[]);
+            let target = enroll(&f, meta);
+            let args = json!({"to":target["listener_id"],"message":"Legacy retry","idempotency_key":"stable"});
+            let send = || {
+                if human {
+                    send_human(&f, args.clone())
+                } else {
+                    f.tool("cito_send", args.clone(), json!({}))
+                }
+            };
+            let first = send();
+            assert_eq!(first["ok"], true, "{first}");
+            let local = f.db("state.sqlite");
+            let hub = f.db("hub.sqlite");
+            let old = local
+                .query("SELECT * FROM local_sent_idempotency", &[])
+                .unwrap()[0]
+                .clone();
+            let publication = hub
+                .query(
+                    "SELECT * FROM hub_signals WHERE signal_id=?",
+                    &[old["signal_id"].clone()],
+                )
+                .unwrap()[0]
+                .clone();
+            let payload: Value =
+                serde_json::from_str(publication["data"].as_str().unwrap()).unwrap();
+            let endpoint = payload["sender_endpoint_key"].as_str().unwrap();
+            let canonical = old["to_listener_id"].as_str().unwrap();
+            let legacy = hash(&format!("{endpoint}|local://|{canonical}|stable"));
+            let legacy_hub = if human {
+                hash(&format!(
+                    "{}|{}|human|{canonical}|{legacy}",
+                    payload["from"]["principal_id"].as_str().unwrap(),
+                    payload["from"]["host_id"].as_str().unwrap()
+                ))
+            } else {
+                legacy.clone()
+            };
+            hub.execute(
+                "UPDATE hub_signals SET msg_id=? WHERE seq=?",
+                &[json!(legacy_hub), publication["seq"].clone()],
+            )
+            .unwrap();
+            local.execute("UPDATE local_sent_idempotency SET dedup_id=?,request_hash=?,status=?,seq=? WHERE dedup_id=?", &[
+                json!(legacy), json!(hash("Legacy retry|null")),
+                json!(if pending {"PENDING_PUBLISH"} else {"wake_accepted"}),
+                if pending {json!(0)} else {publication["seq"].clone()}, old["dedup_id"].clone()
+            ]).unwrap();
+            let recovered = send();
+            assert_eq!(recovered["signal_id"], first["signal_id"], "{recovered}");
+            assert_eq!(recovered["seq"], first["seq"]);
+            assert_eq!(send()["seq"], first["seq"]);
+            assert_eq!(
+                hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                    .unwrap()[0]["n"],
+                1
+            );
+            let saved = local
+                .query("SELECT * FROM local_sent_idempotency", &[])
+                .unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0]["status"], "wake_accepted");
+            assert_eq!(saved[0]["seq"], first["seq"]);
+        }
+    }
+}
+
+#[test]
 fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

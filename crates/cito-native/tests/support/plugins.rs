@@ -1957,6 +1957,7 @@ fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
     assert_eq!(rejected["ok"], false, "{rejected}");
     assert!(!rejected.to_string().contains("secret-value"), "{rejected}");
     fs::write(&config, "").unwrap();
+    assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
     let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
@@ -1979,11 +1980,49 @@ fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
     let cursor = fs::read_dir(f.state.join("activity/codex"))
         .unwrap()
         .flatten()
-        .find(|entry| entry.path().to_string_lossy().ends_with(".source.json"))
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .unwrap()
         .path();
     let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
-    assert_eq!(checkpoint["offset"], fs::metadata(&rollout).unwrap().len());
+    assert_eq!(
+        checkpoint["cursor"]["offset"],
+        fs::metadata(&rollout).unwrap().len()
+    );
+    for op in ["resolve_caller", "probe"] {
+        let response = f.plugin(
+            CODEX,
+            json!({"op":op,"session_id":sid,"meta":{"threadId":sid}}),
+        );
+        assert_eq!(response["ok"], true, "{response}");
+        if op == "resolve_caller" {
+            assert_eq!(response["caller"]["session_id"], sid);
+            assert_eq!(response["caller"]["cwd"], "/repo");
+        } else {
+            assert_eq!(response["status"], "alive", "{response}");
+            assert_eq!(response["current_session_id"], sid);
+        }
+    }
+    for i in 0..10 {
+        db.execute(
+            "INSERT INTO threads VALUES(?,'/repo',0,2,NULL)",
+            &[json!(format!("unrelated-{i}"))],
+        )
+        .unwrap();
+    }
+    let retained = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","retained_session_ids":[sid],"recent_window_ms":0}),
+    );
+    let sessions = retained["sessions"].as_array().unwrap();
+    assert!(
+        sessions.iter().any(|row| row["session_id"] == sid),
+        "{retained}"
+    );
+    assert!(sessions
+        .iter()
+        .any(|row| row["session_id"] == "unrelated-9"));
+    db.execute("DELETE FROM threads WHERE id!=?", &[json!(sid)])
+        .unwrap();
     let again = f.plugin(
         CODEX,
         json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
@@ -1993,6 +2032,88 @@ fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
         serde_json::from_slice::<Value>(&fs::read(cursor).unwrap()).unwrap(),
         checkpoint
     );
+}
+
+#[test]
+fn codex_checkpoint_interruption_preserves_cursor_and_effect_consumption() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)", &[]).unwrap();
+    let rollout = f.dir.join("rollout.jsonl");
+    let event = |timestamp| {
+        format!(
+            "{}\n",
+            json!({"timestamp":timestamp,"payload":{"type":"user_message","message":"Identical text"}})
+        )
+    };
+    fs::write(&rollout, event("2026-01-01T00:00:00.000Z")).unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES('thread','/repo',0,1,?)",
+        &[json!(rollout)],
+    )
+    .unwrap();
+    let checkpoint = f
+        .state
+        .join("activity/codex")
+        .join(format!("{:x}.json", Sha256::digest(b"thread")));
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    let effects = json!([format!("{:x}", Sha256::digest(b"Identical text"))]);
+    // Legacy state migrates on the next successful atomic publication.
+    fs::write(&checkpoint, json!({"effects":effects}).to_string()).unwrap();
+    fs::write(checkpoint.with_extension("source.json"), "{}").unwrap();
+    // Fail the real atomic publication primitive after staging the complete
+    // checkpoint but before rename, as when a process exits at this boundary.
+    let metadata = fs::metadata(&rollout).unwrap();
+    let prior = fs::read(&checkpoint).unwrap();
+    let next = json!({"effects":[],"cursor":{"offset":metadata.len(),"device":metadata.dev(),"inode":metadata.ino(),"saw_effect":true,"revision":1}});
+    let failed = cito_native::support::atomic_write_checked(
+        &checkpoint,
+        next.to_string().as_bytes(),
+        None,
+        || Err("Interrupted before checkpoint publication".into()),
+    );
+    assert!(failed.is_err());
+    assert_eq!(fs::read(&checkpoint).unwrap(), prior);
+    assert_eq!(
+        fs::read(checkpoint.with_extension("source.json")).unwrap(),
+        b"{}"
+    );
+    let discover = || {
+        let response = f.plugin(CODEX, json!({"op":"discover_sessions"}));
+        assert_eq!(response["ok"], true, "{response}");
+        response["sessions"][0]["activity"].clone()
+    };
+    assert_eq!(discover()["kind"], "cito_effect");
+    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(saved["effects"], json!([]));
+    assert_eq!(saved["cursor"]["offset"], metadata.len());
+    let inode = fs::metadata(&checkpoint).unwrap().ino();
+    assert_eq!(
+        discover()["kind"],
+        "cito_effect",
+        "Consumed effects must not replay"
+    );
+    assert_eq!(
+        fs::metadata(&checkpoint).unwrap().ino(),
+        inode,
+        "No-op scan must not rewrite checkpoint"
+    );
+    // Each invocation restarts the provider; an identical genuine user message
+    // after the consumed wake must receive user attribution.
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout).unwrap();
+    write!(file, "{}", event("2026-01-01T00:01:00.000Z")).unwrap();
+    let user = discover();
+    assert_eq!(user["kind"], "user_turn");
+    assert_eq!(user["at_ms"], 1_767_225_660_000u64);
+    assert_eq!(discover(), user);
+    f.stop(process);
 }
 
 #[test]
@@ -2060,7 +2181,7 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         let mut rows: Vec<_> = fs::read_dir(f.state.join("activity/codex"))
             .unwrap()
             .flatten()
-            .filter(|entry| entry.path().to_string_lossy().ends_with(".source.json"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
             .map(|entry| {
                 let m = entry.metadata().unwrap();
                 (entry.path(), m.ino(), m.mtime(), m.mtime_nsec())
@@ -2302,7 +2423,7 @@ fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
         let cursor = fs::read_dir(f.state.join("activity/codex"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| path.to_string_lossy().ends_with(".source.json"))
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
             .unwrap();
         let checkpoint = fs::read(&cursor).unwrap();
         let marker = f.dir.join("published");
@@ -2380,7 +2501,7 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
                 before,
                 "Failed delivery must release the guard without adding an effect"
             );
-            let ledger = cursor.with_extension("").with_extension("json");
+            let ledger = cursor.clone();
             if ledger.exists() {
                 let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
                 assert!(ledger["effects"].as_array().is_none_or(Vec::is_empty));

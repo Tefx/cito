@@ -230,9 +230,12 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     let Some((source_revision, recency)) = activity_at(row) else {
         return Ok(Value::Null);
     };
-    let cursor_path = path.with_extension("source.json");
-    let mut cached = read_json(&cursor_path)?;
-    let previous = cached.clone();
+    // Migrate the legacy cursor on the first successful checkpoint. Once present,
+    // the embedded cursor and effect consumption share a single atomic rename.
+    let mut cached = match ledger.get("cursor") {
+        Some(cursor) => cursor.clone(),
+        None => read_json(&path.with_extension("source.json"))?,
+    };
     // Retain the maximum observed source integer, never a refresh counter. This
     // also prevents a source timestamp rollback from decreasing the revision.
     let revision = source_revision.max(cached["revision"].as_u64().unwrap_or(0));
@@ -332,9 +335,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
         }
     }
     cached["revision"] = json!(revision);
-    if cached != previous {
-        atomic_write(&cursor_path, cached.to_string().as_bytes())?;
-    }
+    ledger["cursor"] = cached;
     if ledger != previous_ledger {
         atomic_write(&path, ledger.to_string().as_bytes())?;
     }
@@ -390,10 +391,7 @@ fn row_for_id(req: &Value, id: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     Ok(connection
-        .rows(&format!(
-            "SELECT * FROM threads WHERE id = '{}'",
-            id.replace('\'', "''")
-        ))?
+        .rows_params("SELECT * FROM threads WHERE id = ?", &[id])?
         .into_iter()
         .next())
 }
@@ -454,6 +452,12 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
     order.push("rowid DESC");
     let predicate = predicates.join(" AND ");
     let order = order.join(", ");
+    let retained = req["retained_session_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
     let window = if req["op"] == "discover_sessions" {
         let recency = match (has("recency_at_ms"), has("updated_at")) {
             (true, true) => "COALESCE(recency_at_ms,updated_at,0)",
@@ -462,23 +466,21 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
             (false, false) => "0",
         };
         let cutoff = now_ms().saturating_sub(req["recent_window_ms"].as_u64().unwrap_or(900_000));
-        let retained = req["retained_session_ids"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(|id| format!("'{}'", id.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(",");
+        let retained = vec!["?"; retained.len()].join(",");
         // One coherent snapshot covers display, recent enrollment and restoration.
         format!(" AND (id IN ({retained}) OR rowid IN (SELECT rowid FROM threads WHERE {predicate} ORDER BY {order} LIMIT 8) OR CASE WHEN {recency}<100000000000 THEN {recency}*1000 ELSE {recency} END >= {cutoff})")
     } else {
         String::new()
     };
     Ok(connection
-        .rows(&format!(
-            "SELECT {projection} FROM threads WHERE {predicate}{window} ORDER BY {order}"
-        ))?
+        .rows_params(
+            &format!("SELECT {projection} FROM threads WHERE {predicate}{window} ORDER BY {order}"),
+            if req["op"] == "discover_sessions" {
+                &retained
+            } else {
+                &[]
+            },
+        )?
         .into_iter()
         // Preserve caller validation for whitespace-only IDs and working directories.
         .filter(|row| raw_str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
