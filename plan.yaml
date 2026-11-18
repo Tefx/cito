@@ -16213,7 +16213,7 @@ phases:
   - id: v51.review
     name: 'V51 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Terminal Phase `v51` acceptance decision (`PASS` or `FAIL`) under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` over the integrated outcomes of `v51.core`, `v51.ui`,\
@@ -16268,6 +16268,8 @@ phases:
     - v51.fix_idempotency
     - v51.fix_hub_legacy
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-18T07:20:45.914698Z'
   - id: v51.fix_core
     name: 'V51 Core & Codex Repair: Bound SQLite NUL-Safe Queries, Coherent Rollout/Effect
       Checkpoint & Legacy Idempotency Upgrade Fallback (F1–F3)'
