@@ -17836,7 +17836,7 @@ phases:
   - id: v53.audit_fix
     name: 'V53 Pathway Audit Round 1 Remediation: Staged Shim Symlink Unlink, Post-Commit
       Custom-Title Persistence & Fallible Fixture Teardown Probe (V53-PATH-1..3)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n  blocked_paths:\n    - plan.yaml\n\
       \    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\nDeliver:\n\
@@ -17911,3 +17911,67 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-19T13:47:11.173177Z'
+    done_at: '2026-11-19T14:04:12.573916+00:00'
+    evidence: 'Artifact:
+
+      - Integrated commit: ac79dbe395bcaac9663b9155ca618c252f768688 (fast-forwarded
+      from 72dd86832008c43993b51c90081c10118484c5cf; retained ref refs/vectl/candidates/v53.audit_fix).
+      Worktree /Users/tefx/Projects/cito/.vectl/worktrees/v53.audit_fix removed cleanly
+      (413Gi free).
+
+      - Product version unchanged at 0.21.3 (no SemVer bump, no git tag).
+
+
+      Closure summary (V53-PATH-1..3):
+
+      - V53-PATH-1 (`crates/cito-native/src/core/setup.rs`): `ensure_plugins_staged`
+      unlinks copied symlink entries at `shim_path` (`cito`, `cito-mcp`) before writing/chmodding
+      generated regular shims while leaving resource symlinks untouched; added `generated_shims_replace_symlinks_without_mutating_active_targets`.
+
+      - V53-PATH-2 (`crates/cito-native/src/core/registration.rs`, `daemon/mcp.rs`,
+      `daemon/http_actions.rs`): `register_locked` validates requested `title` upfront
+      via `validate_title`, uses it in memory for Hub/local registration, and persists
+      `set_custom_title` + sibling-Hub propagation only after enrollment commits,
+      folding any post-commit failure into `committed: true`, `warning`, and `maintenance_warning`;
+      added `title_bearing_cli_and_mcp_enrollment_preserves_siblings_on_remote_failure`
+      and `cli_and_mcp_enrollment_report_post_commit_title_failures`.
+
+      - V53-PATH-3 (`crates/cito-native/tests/support/mod.rs`): `Fixture::drop` uses
+      fallible `try_http`, completes `fs::remove_dir_all` before reporting ordinary
+      teardown failures, and suppresses secondary cleanup failures when `std::thread::panicking()`;
+      added `fixture_teardown_health_failures_do_not_abort_or_skip_cleanup`.
+
+
+      Verification:
+
+      - `cargo fmt --all -- --check && git diff --check`: exit 0
+
+      - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0 (0
+      warnings)
+
+      - `cargo test --locked --lib core::setup:: -- --test-threads=2`: 20 passed,
+      0 failed, 1 ignored
+
+      - `cargo test --locked --lib core::registration:: -- --test-threads=2`: 3 passed,
+      0 failed
+
+      - `cargo test --locked --lib core::daemon:: -- --test-threads=2`: 53 passed,
+      0 failed
+
+      - `cargo test --locked --test native cli_and_mcp_enrollment -- --test-threads=2`:
+      2 passed, 0 failed
+
+      - `cargo test --locked --test native listen_preflight_preserves -- --test-threads=2`:
+      1 passed, 0 failed
+
+      - `cargo test --locked --test native support:: -- --test-threads=2`: 1 passed,
+      0 failed, 1 ignored
+
+      - `cargo test --locked --test native daemon:: -- --test-threads=2`: 76 passed
+      + 4 ancestor-guarded tests verified 4 passed, 0 failed in neutral non-`pi` ancestor
+      chain (`os.fork()` double-fork)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §§2.2, 4.1, 8.1; plan.yaml step v53.audit_fix'
