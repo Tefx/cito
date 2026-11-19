@@ -16942,10 +16942,11 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v52` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the integrated outcomes\
-      \ of `v52.core`, `v52.ui`, and `v52.fix_review`:\n  1. Load `[REQUIRES_SKILL:\
-      \ contract-and-simplicity]` and verify all 27 admitted findings (`#1`–`#27`)\
-      \ plus the `v52.fix_review` repairs (`GATE-1`..`GATE-5`, `V52-14`, `structural\
-      \ W1`..`W2`) are closed with discriminating regression coverage.\n  2. Run 3-way\
+      \ of `v52.core`, `v52.ui`, `v52.fix_review`, and `v52.fix_worker_wait`:\n  1.\
+      \ Load `[REQUIRES_SKILL: contract-and-simplicity]` and verify all 27 admitted\
+      \ findings (`#1`–`#27`) plus the `v52.fix_review` (`GATE-1`..`GATE-5`, `V52-14`,\
+      \ `structural W1`..`W2`) and `v52.fix_worker_wait` (`PATH-DELTA-1` / `GATE-D1`)\
+      \ repairs are closed with discriminating regression coverage.\n  2. Run 3-way\
       \ incremental audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`)\
       \ on the `v52` delta to `ZERO_NEW_ISSUES` alongside the independent `FULL` gate.\n\
       \  3. Run full post-convergence workspace verification at version `0.21.3` (NO\
@@ -16959,14 +16960,14 @@ phases:
       \ contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
       \ no_repo_change`, `verification_scope: FULL`) bound to the integrated Git `HEAD`\
       \ of `/Users/tefx/Projects/cito`.\n\nAdmit:\n- Depends on `v52.core`, `v52.ui`,\
-      \ and `v52.fix_review`.\n- Consumed evidence: integrated commits from `v52.core`,\
-      \ `v52.ui`, and `v52.fix_review`, 3-way incremental audit convergence (`uiux-auditor`,\
-      \ `pathway-auditor`, `structural-auditor` to `ZERO_NEW_ISSUES`), independent\
-      \ `FULL` gate report, and full post-convergence workspace regression outputs.\n\
-      \nRecovery:\n- If any audit finding, test failure, clippy/compiler warning,\
-      \ packaging mismatch, or `§1.2`/private-name violation remains open, fail the\
-      \ gate with concrete `file:line` evidence so a scoped repair can close it before\
-      \ Delta re-verification."
+      \ `v52.fix_review`, and `v52.fix_worker_wait`.\n- Consumed evidence: integrated\
+      \ commits from `v52.core`, `v52.ui`, `v52.fix_review`, and `v52.fix_worker_wait`,\
+      \ 3-way incremental audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`\
+      \ to `ZERO_NEW_ISSUES`), independent `FULL` gate report, and full post-convergence\
+      \ workspace regression outputs.\n\nRecovery:\n- If any audit finding, test failure,\
+      \ clippy/compiler warning, packaging mismatch, or `§1.2`/private-name violation\
+      \ remains open, fail the gate with concrete `file:line` evidence so a scoped\
+      \ repair can close it before Delta re-verification."
     verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
       --all-targets --locked -- -D warnings && cargo test --workspace --locked --
       --test-threads=2 && cargo build --release --locked && python3 packaging/release.py
@@ -16993,6 +16994,7 @@ phases:
     - v52.core
     - v52.ui
     - v52.fix_review
+    - v52.fix_worker_wait
     agent: gate-reviewer
   - id: v52.fix_review
     name: 'V52 Review Repair: Legacy OIDC Tuple Alias Guard, Bounded Channel Poll-Error
@@ -17148,3 +17150,63 @@ phases:
       Spec link:
 
       - docs/DESIGN.md (§§1-6), plan.yaml v52.fix_review'
+  - id: v52.fix_worker_wait
+    name: 'V52 Worker Wait & Shutdown Wake Repair: Preserve Shutdown/Work Wakeups
+      Across Failed Channel Ticks (PATH-DELTA-1 / GATE-D1)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n  blocked_paths:\n    - plan.yaml\n\
+      \    - src/macos/**\n    - site/**\n    - README.md\n    - docs/**\n    - deploy/**\n\
+      \    - packaging/**\n    - plugins/**\n\nDeliver:\n- Close `PATH-DELTA-1` /\
+      \ `GATE-D1` (`V52-05`, `crates/cito-native/src/core/hub.rs:425-459`) at version\
+      \ `0.21.3` (NO SemVer bump, NO git tag):\n  1. **Eliminate the failed-tick `observed\
+      \ = *version` rebase that swallows `shutdown()` (`closed`) and genuine-work\
+      \ wakeups arriving between `tick()` and `wait_timeout_while`**:\n     - Wait\
+      \ admission MUST check `closed` (before waiting and inside the `wait_timeout_while`\
+      \ predicate) so `HubEngine::shutdown()` wakes and exits promptly even if called\
+      \ during a failed tick.\n     - Preserve genuine-work wake generations (e.g.,\
+      \ new signals/RPC commits arriving while another channel's tick fails) while\
+      \ suppressing only the failed tick's own diagnostic `set_poll_error` self-wake,\
+      \ retaining the bounded 5-second non-spinning retry wait on persistent channel\
+      \ failures.\n  2. **Add discriminating regression tests proving**:\n     - (a)\
+      \ `HubEngine::shutdown()` / daemon `SIGTERM` during a failed channel tick (e.g.,\
+      \ hanging channel stdin or failing tick) exits promptly well within `stop_daemon`'s\
+      \ 5-second budget without sleeping 5 seconds;\n     - (b) a genuine signal/work\
+      \ commit during a failing channel tick still wakes the worker immediately rather\
+      \ than inheriting a 5-second failed-channel delay;\n     - (c) persistent missing-executable\
+      \ failures still preserve bounded non-spinning 5s retry waits and no-op identical-health\
+      \ persistence.\n\nImplementation Notes (Non-Binding):\n- In `crates/cito-native/src/core/hub.rs:425-459`,\
+      \ the worker loop currently drops `e` after `tick()` and `worker_delay()`, locks\
+      \ `changed.0`, and rebases `let observed = if failed { *version } else { observed\
+      \ };` before calling `changed.1.wait_timeout_while(version, ..., |v| *v == observed)`.\
+      \ Any `shutdown()` or `rpc()` / signal commit that bumped `changed.0` while\
+      \ `tick()` was running is overwritten by `*version`, and `wait_timeout_while`\
+      \ does not check `closed`.\n- Also inspect `set_poll_error` (`crates/cito-native/src/core/hub.rs:1194-1212`),\
+      \ which currently calls `save_service(c, id, &cfg)?` unconditionally inside\
+      \ the SQLite transaction even when `serialized == previous`, firing SQLite's\
+      \ commit notifier (`wake_worker()`) on every repeated error poll, as well as\
+      \ any diagnostic commits inside `tick_channels()` / `replay()`. Ensure self-diagnostic\
+      \ commits do not cause spin wakes while external `rpc()` / signal wakes and\
+      \ `shutdown()` (`closed`) always wake the worker immediately.\n\nBoundary:\n\
+      - Owner: `rust-engineer`. Isolated worktree transaction modifying `crates/cito-native/**`\
+      \ only (`plan.yaml`, `src/macos/**`, `site/**`, `README.md`, `docs/**`, `deploy/**`,\
+      \ `packaging/**`, and `plugins/**` are blocked). Keep version at `0.21.3` (NO\
+      \ SemVer bump, NO git tag).\n\nAdmit:\n- Depends on `v52.fix_review`.\n- Verification:\
+      \ fast targeted checks (`cargo fmt --all -- --check && git diff --check && cargo\
+      \ clippy --workspace --all-targets --locked -- -D warnings && cargo test -p\
+      \ cito-native --lib -- --test-threads=2 && cargo test -p cito-native --test\
+      \ native hub:: -- --test-threads=2 && cargo test -p cito-native --test native\
+      \ daemon:: -- --test-threads=2`). Consumed by `v52.review` (Delta re-verification).\n\
+      \nRecovery:\n- Repair any Rust or test failure in place within the worktree\
+      \ before completion."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets --locked -- -D warnings && cargo test -p cito-native
+      --lib -- --test-threads=2 && cargo test -p cito-native --test native hub:: --
+      --test-threads=2 && cargo test -p cito-native --test native daemon:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/hub_plugin_cases.rs
+    - crates/cito-native/tests/support/daemon/mod.rs
+    depends_on:
+    - v52.fix_review
+    agent: rust-engineer
