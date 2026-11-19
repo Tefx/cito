@@ -279,7 +279,7 @@ fn v48_oracle_detects_borderless_padding_mid_y_nested_overlap_and_data_labels() 
         ("borderless_padding", "tight_padding"),
         ("bar_midY", "non_anchored_action_bars"),
         ("footer_midY", "non_anchored_action_bars"),
-        ("nested_overlap", "overlapping_views"),
+        ("nested_overlap", "overlapping_siblings"),
         ("data_row_truncation", "truncated_labels"),
     ] {
         f.send(ui, json!({"op":"test_oracle_calibration","kind":kind}));
@@ -287,10 +287,12 @@ fn v48_oracle_detects_borderless_padding_mid_y_nested_overlap_and_data_labels() 
         assert!(!s[key].as_array().unwrap().is_empty(), "{kind}");
         if kind == "footer_midY" {
             assert_eq!(node(&s, "settings_items", "settings_footer")["height"], 44);
-            assert!(s[key].as_array().unwrap().iter().any(|issue| issue
-                .as_str()
-                .unwrap()
-                .contains("settings_footer: top row controls are not vertically centered")));
+            assert!(s[key].as_array().unwrap().iter().any(|issue| {
+                issue
+                    .as_str()
+                    .unwrap()
+                    .contains("settings_footer: top row controls are not vertically centered")
+            }));
         }
         if kind == "nested_overlap" {
             assert!(s[key]
@@ -299,6 +301,58 @@ fn v48_oracle_detects_borderless_padding_mid_y_nested_overlap_and_data_labels() 
                 .iter()
                 .any(|v| v.as_str().unwrap().contains("(nested)")));
         }
+        f.send(ui, json!({"op":"test_oracle_calibration","kind":"reset"}));
+        inspect(&f, ui);
+    }
+}
+
+#[test]
+fn oracle_calibration_checks_text_metadata_and_nested_geometry() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let ui = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(ui, frame);
+    control(&f, ui, "open_settings");
+    control(&f, ui, "settings_tab:channels");
+    control(&f, ui, "edit_hub_service:channel");
+    let field = "channel_field:channel:secret";
+    for (kind, key, diagnostic) in [
+        ("nonwrapping_label", "truncated_labels", "dir_oracle_probe"),
+        ("data_row_height", "truncated_labels", "dir_oracle_probe"),
+        ("tooltip_jargon", "jargon_leaks", "quit: tooltip"),
+        (
+            "accessibility_jargon",
+            "jargon_leaks",
+            "quit: accessibility label",
+        ),
+        (
+            "editable_hit_test",
+            "overlapping_siblings",
+            "settings > channel_field:channel:secret: occluded in hitTest",
+        ),
+        (
+            "label_background",
+            "low_contrast_labels",
+            "background_probe: 1.00",
+        ),
+        (
+            "nested_padding",
+            "tight_padding",
+            "inbox_control_bar > inbox_control_title: card padding < 6pt",
+        ),
+    ] {
+        f.send(
+            ui,
+            json!({"op":"test_oracle_calibration","kind":kind,"id":field}),
+        );
+        let s = inspect_unchecked(&f, ui, None);
+        assert!(
+            s[key].as_array().unwrap().contains(&json!(diagnostic)),
+            "{kind}: {}",
+            s[key]
+        );
         f.send(ui, json!({"op":"test_oracle_calibration","kind":"reset"}));
         inspect(&f, ui);
     }
@@ -386,6 +440,9 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
         for action in trailing {
             assert!((mid_y(&action) - 24.0).abs() <= 1.5);
         }
+        let inbox_summary = node(&s, "settings_items", "inbox_control_summary");
+        assert_eq!(inbox_summary["wraps"], true);
+        assert_eq!(inbox_summary["maximum_lines"], 2);
         for id in ["inbox_control_title", "inbox_control_summary"] {
             let label = node(&s, "settings_items", id);
             assert!(

@@ -41,7 +41,7 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
     let updated = inspect(&f, p);
     assert_eq!(updated["rebuilds"], scope["rebuilds"]);
     assert_eq!(
-        node(&updated, "directory_items", "directory_warning")["hidden"],
+        node(&updated, "directory_items", "directory_warning_label")["hidden"],
         false
     );
     assert_eq!(
@@ -57,7 +57,7 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
     let same_scope = inspect(&f, p);
     assert_eq!(same_scope["rebuilds"], scope["rebuilds"]);
     assert_eq!(
-        node(&same_scope, "directory_items", "directory_warning")["hidden"],
+        node(&same_scope, "directory_items", "directory_warning_label")["hidden"],
         true
     );
 }
@@ -290,7 +290,7 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
     f.send(p, json!({"op":"error","source_op":"query_directory","error":"Directory temporarily unavailable"}));
     let failed = inspect(&f, p);
     assert!(
-        !node(&failed, "directory_items", "directory_warning")["hidden"]
+        !node(&failed, "directory_items", "directory_warning_label")["hidden"]
             .as_bool()
             .unwrap()
     );
@@ -306,7 +306,7 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
         "Peer without a timestamp"
     );
     assert_eq!(
-        node(&cleared, "directory_items", "directory_warning")["hidden"],
+        node(&cleared, "directory_items", "directory_warning_label")["hidden"],
         true
     );
     send_fixture(

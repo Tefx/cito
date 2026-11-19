@@ -56,11 +56,11 @@ fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() 
                         .find(|n| n["text"] == title_text)
                         .unwrap();
                     let rename = node(&s, "items", &format!("rename:{id}"));
-                    assert!(title["width"].as_f64().unwrap() >= 122.0);
+                    let title_end = title["x"].as_f64().unwrap() + title["width"].as_f64().unwrap();
+                    let rename_x = rename["x"].as_f64().unwrap();
+                    assert_eq!(rename_x - title_end, 6.0);
                     assert!(
-                        rename["x"].as_f64().unwrap() + rename["width"].as_f64().unwrap()
-                            - title["x"].as_f64().unwrap()
-                            >= 146.0,
+                        rename_x + rename["width"].as_f64().unwrap() <= pin["x"].as_f64().unwrap(),
                         "title={title}; rename={rename}; pin={pin}; mode={mode}, auto={hub_auto}"
                     );
                     let scope = node(&s, "items", &format!("scope:{id}"));
@@ -101,6 +101,29 @@ fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() 
             }
         }
     }
+}
+
+#[test]
+fn pencil_stays_next_to_a_short_title() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["hubs"][0]["auto_listen"] = json!(true);
+    frame["listeners"][0]["title"] = json!("Fix");
+    f.send(p, frame);
+    let s = inspect(&f, p);
+    let card = node(&s, "items", "session:personal:repo-abcdefghijkl");
+    let title = nodes(&card["children"])
+        .into_iter()
+        .find(|n| n["text"] == "Fix")
+        .unwrap();
+    let rename = node(&s, "items", "rename:personal:repo-abcdefghijkl");
+    assert_eq!(title["width"], 44);
+    assert_eq!(
+        rename["x"].as_f64().unwrap(),
+        title["x"].as_f64().unwrap() + 50.0
+    );
 }
 
 #[test]
@@ -611,7 +634,11 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         let s = inspect_as(&f, p, Some(appearance));
         assert_eq!(s["settings_open"], false);
         assert!(node(&s, "settings_items", "settings_error_banner").is_null());
-        assert!(!node(&s, "items", "menu_error_row").is_null());
+        let row = node(&s, "items", "menu_error_row");
+        let label = &row["children"][0];
+        assert_eq!(label["text"], "Connection unavailable");
+        assert_eq!(label["wraps"], true);
+        assert_eq!(label["maximum_lines"], 2);
         assert_eq!(
             s["low_contrast_labels"],
             json!([]),

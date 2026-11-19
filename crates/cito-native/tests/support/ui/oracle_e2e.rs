@@ -26,10 +26,10 @@ fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
         f.send(p, json!({"op":"state","ok":false,"source_op":operation,"request_id":request["request_id"],"error":"Mutation failed"}));
         let s = inspect(&f, p);
         assert_eq!(s["pending_controls"], json!([]));
-        assert_eq!(
-            node(&s, "settings_items", "settings_error_label")["text"],
-            "Mutation failed"
-        );
+        let label = node(&s, "settings_items", "settings_error_label");
+        assert_eq!(label["text"], "Mutation failed");
+        assert_eq!(label["wraps"], true);
+        assert_eq!(label["maximum_lines"], 2);
     }
     control(&f, p, "open_directory");
     inspect(&f, p);
@@ -48,13 +48,90 @@ fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
         let error = format!("Directory unavailable: {op}/{source}");
         f.send(p, json!({"op":op,"ok":false,"source_op":source,"request_id":query["request_id"],"error":error}));
         let s = inspect(&f, p);
-        assert!(s["directory_items"].to_string().contains(&error));
+        let warning = node(&s, "directory_items", "directory_warning_label");
+        assert_eq!(warning["hidden"], false);
+        assert_eq!(
+            warning["text"],
+            "Cannot refresh Directory. Showing the last available results."
+        );
+        assert_eq!(warning["tooltip"], error);
         assert_eq!(
             node(&s, "settings_items", "settings_error_label")["text"],
             "Mutation failed",
             "Directory failures must not replace the Settings banner"
         );
     }
+}
+
+#[test]
+fn partial_settings_keep_channels_and_recovery_uses_saved_values_and_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    let mut cfg = settings();
+    let channel = &mut cfg["channels"][0];
+    channel["configured"] = json!(true);
+    channel["status"] = json!("error");
+    channel["fields"][1]["value"] = json!("saved-account");
+    channel["fields"].as_array_mut().unwrap().push(json!({
+        "key":"gateway", "scope":"hub", "label":"Gateway", "type":"string",
+        "required":false, "placeholder":"Gateway", "value":"saved-gateway", "configured":true
+    }));
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    cfg.as_object_mut().unwrap().remove("channels");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "recover_channel:channel:test")["enabled"],
+        true
+    );
+    control(&f, p, "recover_channel:channel:test");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "channel_test")
+        .unwrap();
+    assert_eq!(
+        action["values"],
+        json!({"account":"saved-account","gateway":"saved-gateway"})
+    );
+    f.send(p, json!({"op":"channel_test_result","request_id":action["request_id"],"channel_id":"channel","ok":true}));
+    control(&f, p, "edit_user_channel:channel");
+    f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"draft-account"}));
+    control(&f, p, "recover_channel:channel:test");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "channel_test")
+        .unwrap();
+    assert_eq!(
+        action["values"],
+        json!({"account":"draft-account","gateway":"saved-gateway"})
+    );
+    control(&f, p, "recover_channel:channel:unpair");
+    let s = inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "channel_unpair")
+        .unwrap();
+    assert_eq!(s["pending_channel_resets"], json!([action["request_id"]]));
+    f.send(
+        p,
+        json!({"op":"error","request_id":action["request_id"],"error":"Try again"}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["pending_channel_resets"], json!([]));
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:account")["text"],
+        "draft-account"
+    );
 }
 
 #[test]
@@ -912,7 +989,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             .count(),
         3
     );
-    // Command-specific results and generic failures must retain the UI's identity.
+    // Composer failures settle on their result frame; host errors retain the action tag.
     for (action, status, _) in &l.results {
         let result_op = match action["op"].as_str() {
             Some("send_signal" | "send_reply_from_human") => "composer_result",
@@ -925,19 +1002,33 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             .iter()
             .any(|frame| frame["op"] == result_op && frame["request_id"] == action["request_id"]));
         if *status >= 400 {
+            let matching = l
+                .frames
+                .iter()
+                .filter(|frame| frame["request_id"] == action["request_id"]);
+            if result_op == "composer_result" {
+                let receipts: Vec<_> = matching.collect();
+                assert_eq!(
+                    receipts.len(),
+                    1,
+                    "Composer failure owns one result: {receipts:?}"
+                );
+                assert_eq!(receipts[0]["op"], "composer_result");
+                assert_eq!(receipts[0]["ok"], false);
+                assert!(receipts[0]["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()));
+                continue;
+            }
             assert!(
-                l.frames
-                    .iter()
+                matching
+                    .clone()
                     .any(|frame| (frame["ok"] == false || frame["op"] == "error")
                         && frame["source_op"] == action["op"]
-                        && frame["request_id"] == action["request_id"]
                         && (frame["error"].is_string()
                             || frame["settings"]["host_hub"]["error"].is_string())),
                 "Missing failure receipt for {action}: {:?}",
-                l.frames
-                    .iter()
-                    .filter(|frame| frame["request_id"] == action["request_id"])
-                    .collect::<Vec<_>>()
+                matching.collect::<Vec<_>>()
             );
         }
     }
@@ -2422,7 +2513,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 160);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 8);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 252);
-    assert_eq!(node(&s, "settings_items", "hub_visibility_caption")["text"], "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.");
+    assert_eq!(
+        node(&s, "settings_items", "hub_visibility_caption")["text"],
+        "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team."
+    );
     assert_eq!(s["overlapping_siblings"], json!([]));
     assert_eq!(s["clipped_views"], json!([]));
     assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
@@ -2515,7 +2609,24 @@ fn correlation_editor_keys_and_modal_escape() {
         inspect(&f, p)["directory_selected_id"],
         before["directory_selected_id"]
     );
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one"),peer("two")]}),
+    );
+    control(&f, p, "dir_peer:personal:one");
     control(&f, p, "msg_dir:personal:one");
+    f.send(p, json!({"op":"test_focus_field","id":"composer_input"}));
+    let selected = inspect(&f, p);
+    assert!(selected["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "composer_input"));
+    for via in ["field", "handler"] {
+        f.send(p, json!({"op":"test_directory_key","key":"down","via":via}));
+        assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
+    }
     f.send(p, json!({"op":"test_directory_key","key":"return"}));
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "composer_error")["text"],
@@ -2525,11 +2636,64 @@ fn correlation_editor_keys_and_modal_escape() {
     assert_eq!(inspect(&f, p)["composer_open"], false);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:hubs");
-    control(&f, p, "open_add_hub");
+    control(&f, p, "edit_hub:personal");
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "submit_add_hub")["text"],
+        "Save"
+    );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
-    assert_eq!(inspect(&f, p)["settings_open"], true);
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_open"], true);
+    assert!(node(&s, "settings_items", "add_hub_form").is_null());
+
+    control(&f, p, "open_add_hub");
+    f.send(p, json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://id.example.com"}));
+    f.send(p, json!({"op":"test_focus_field","id":"settings_hub_url"}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "submit_add_hub")["text"],
+        "Join Hub"
+    );
+    assert!(s["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "settings_hub_url"));
     control(&f, p, "open_uninstall_confirm");
     let modal = inspect(&f, p);
+    assert_eq!(
+        node(&modal, "settings_items", "settings_hub_url")["enabled"],
+        false
+    );
+    assert_eq!(
+        node(&modal, "settings_items", "settings_tab:apps")["enabled"],
+        false
+    );
+    assert_eq!(
+        node(&modal, "settings_items", "cancel_uninstall_all")["enabled"],
+        true
+    );
+    assert!(!modal["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "settings_hub_url"));
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"https://changed.example.com"}),
+    );
+    f.send(p, json!({"op":"test_tab","surface":"settings"}));
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"command-v","via":"panel"}),
+    );
+    control(&f, p, "settings_tab:apps");
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_tab"], "hubs");
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_url")["text"],
+        "https://id.example.com"
+    );
     assert_eq!(
         node(&modal, "settings_items", "uninstall_modal_overlay")["width"],
         520
@@ -2539,11 +2703,15 @@ fn correlation_editor_keys_and_modal_escape() {
         false
     );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
-    assert_eq!(inspect(&f, p)["settings_open"], true);
-    assert!(!inspect(&f, p)["settings_items"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_open"], true);
+    assert!(node(&s, "settings_items", "uninstall_modal_overlay").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_url")["enabled"],
+        true
+    );
+    f.send(p, json!({"op":"test_settings_key","key":"escape"}));
+    assert!(node(&inspect(&f, p), "settings_items", "add_hub_form").is_null());
 }
 
 #[test]

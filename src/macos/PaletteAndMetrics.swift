@@ -8,7 +8,6 @@ enum CitoMetrics {
     static let settingsWidth: CGFloat = 520
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
-    static let headerInset: CGFloat = 14
     static let cardRadius: CGFloat = 10
     static let sessionTextX: CGFloat = 48
     static let sessionPathWidth = menuRailWidth - sessionTextX - cardInset - 52

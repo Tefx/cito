@@ -135,11 +135,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var settings: SettingsPayload?
     var settingsVisible = false
     var settingsActiveTab = "apps" { didSet {
-        if oldValue != settingsActiveTab { settingsBannerError = nil; hostHubPortError = nil }
+        if oldValue != settingsActiveTab { settingsBannerError = nil; hostPort.error = nil }
     } }
     var settingsPanel: KeyPanel?
-    var addHubFormOpen = false
-    var addHubError: String?
     struct PendingHubSave {
         let name: String
         let url: String
@@ -147,35 +145,62 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let generation: Int
         let issuer: String, clientId: String, redirectPort: String
     }
-    var pendingHubSave: PendingHubSave?
-    // A confirmed save can precede its canonical settings projection.
-    var hubSaveAwaitingSettings: PendingHubSave?
+    struct HubFormState {
+        enum Mode {
+            case closed
+            case add
+            case edit(name: String, initial: HubConfigItem?)
+        }
+
+        var mode: Mode
+        var isOpen: Bool { if case .closed = mode { return false }; return true }
+        var isEditing: Bool { if case .edit = mode { return true }; return false }
+        var originalName: String { if case let .edit(name, _) = mode { return name }; return "" }
+        var initialHub: HubConfigItem? { if case let .edit(_, initial) = mode { return initial }; return nil }
+        var error: String?
+        var parseRequest = ""
+        var pendingSave: PendingHubSave?
+        // A confirmed save can precede its canonical settings projection.
+        var awaitingSettings: PendingHubSave?
+        var generation = 0
+        var name = ""
+        var url = ""
+        var auth = "none"
+        var authExplicit = false
+        var token = ""
+        var user = ""
+        var issuer = ""
+        var clientId = ""
+        var redirectPort = ""
+
+        init(mode: Mode = .closed) { self.mode = mode }
+        init(editing hub: HubConfigItem) {
+            mode = .edit(name: hub.name, initial: hub)
+            name = hub.name
+            url = hub.url
+            auth = hub.auth_mode
+            authExplicit = true
+            user = hub.user ?? ""
+            issuer = hub.issuer ?? ""
+            clientId = hub.client_id ?? ""
+            redirectPort = hub.redirect_port.map(String.init) ?? ""
+        }
+    }
+    var hubForm = HubFormState()
+    struct HostHubPortState {
+        var pending = false
+        var savedUntil: Date?
+        var error: String?
+        var draft: String?
+        var submittedPort: Int?
+        var requestId = ""
+    }
+    var hostPort = HostHubPortState()
     var settingsBannerError: String?
     var menuBannerError: String?
-    var inviteParseRequest = ""
     var hubInvitePending = false
     var hubInviteRequest = ""
     var hubInvitePastedUntil = Date.distantPast
-    var editingExistingHub = false
-    var editingOriginalHub = ""
-    var editingInitialHub: HubConfigItem?
-    var hostHubPortPending = false
-    var hostHubPortSaved = false
-    var hostHubPortSavedUntil = Date.distantPast
-    var hostHubPortError: String?
-    var hostHubPortDraft: String?
-    var submittedHostHubPort: Int?
-    var submittedHostHubRequestId = ""
-    var addHubName = ""
-    var addHubUrl = ""
-    var addHubDraftGeneration = 0
-    var addHubAuth = "none"
-    var addHubAuthExplicit = false
-    var addHubToken = ""
-    var addHubUser = ""
-    var addHubIssuer = ""
-    var addHubClientId = ""
-    var addHubRedirectPort = ""
     var settingsFieldControls: [String: NSTextField] = [:]
     var channelUiStates: [String: ChannelUiState] = [:]
     var appCheckedUntil: [String: Date] = [:]
@@ -228,7 +253,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     }
 
     func handleTextEditShortcut(_ key: String, in window: NSWindow?) -> Bool {
-        guard let editor = window?.firstResponder as? NSTextView else { return false }
+        guard !(uninstallConfirmOpen && window === settingsPanel),
+              let editor = window?.firstResponder as? NSTextView else { return false }
         guard editor.isEditable, !editor.hasMarkedText() else { return false }
         let field = editor.delegate as? NSTextField
         func changeText(_ change: () -> Void) {
@@ -285,6 +311,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         settingsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
             let window = event.window ?? NSApp.keyWindow
+            if self.uninstallConfirmOpen && window === self.settingsPanel && event.keyCode == 48 { return nil }
             if (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return event }
             if let key = panelShortcutKey(event), self.handleTextEditShortcut(key, in: window) { return nil }
             // Text Services must see navigation and commit keys before our shortcuts.
@@ -420,10 +447,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let operation = frame.source_op ?? frame.action ?? ""
         let failed = frame.ok == false || frame.op == "error"
         let message = frame.warning ?? frame.error
-        if let pending = pendingHubSave, request == pending.requestId,
+        if let pending = hubForm.pendingSave, request == pending.requestId,
            operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation) {
-            pendingHubSave = nil
-            if failed { addHubError = message ?? "Hub save failed."; routedToForm = true }
+            hubForm.pendingSave = nil
+            if failed { hubForm.error = message ?? "Hub save failed."; routedToForm = true }
             else if frame.authority_changed != true && (frame.committed == true || frame.ok == true) {
                 finishHubSave(pending)
             }
@@ -432,15 +459,17 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if !hubInviteRequest.isEmpty && request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation)) {
             hubInvitePending = false; settled = true
         }
-        if request == submittedHostHubRequestId && (operation.isEmpty || operation == "set_host_hub") {
-            hostHubPortPending = false; submittedHostHubRequestId = ""; settled = true
+        if request == hostPort.requestId && (operation.isEmpty || operation == "set_host_hub") {
+            hostPort.pending = false; hostPort.requestId = ""; settled = true
         }
         if (operation.isEmpty || operation == "setup_apply"), pendingAppChecks.removeValue(forKey: request) != nil { settled = true }
         if let pending = pendingControls[request], pending.op == operation || operation.isEmpty,
            frame.hub == nil || frame.hub == pending.hub,
            frame.channel_id == nil || frame.channel_id == pending.target,
            frame.channel == nil || frame.channel == pending.target {
-            pendingControls.removeValue(forKey: request); settled = true
+            pendingControls.removeValue(forKey: request)
+            pendingChannelResets.removeValue(forKey: request)
+            settled = true
         }
         if settled && !routedToForm && operation != "channel_test", let message = message, !message.isEmpty { settingsBannerError = message }
         return settled
@@ -450,15 +479,15 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if handleHeadlessTestCommand(data) { return }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.op == "hub_invite" {
-            guard !inviteParseRequest.isEmpty, frame.request_id == inviteParseRequest, let cfg = frame.config else { return }
-            inviteParseRequest=""; addHubError=nil
-            addHubUrl=cfg.url ?? ""; addHubName=cfg.name ?? ""
-            addHubAuth=cfg.authMode ?? cfg.auth_mode ?? "none"
-            addHubAuthExplicit = cfg.authMode != nil || cfg.auth_mode != nil
-            addHubToken=cfg.token ?? ""; addHubUser=cfg.user ?? ""
-            addHubIssuer=cfg.issuer ?? cfg.oidcIssuer ?? ""
-            addHubClientId=cfg.clientId ?? cfg.client_id ?? cfg.oidcClientId ?? ""
-            addHubRedirectPort=(cfg.redirect_port ?? cfg.redirectPort ?? cfg.oidcRedirectPort)?.text ?? ""
+            guard !hubForm.parseRequest.isEmpty, frame.request_id == hubForm.parseRequest, let cfg = frame.config else { return }
+            hubForm.parseRequest=""; hubForm.error=nil
+            hubForm.url=cfg.url ?? ""; hubForm.name=cfg.name ?? ""
+            hubForm.auth=cfg.authMode ?? cfg.auth_mode ?? "none"
+            hubForm.authExplicit = cfg.authMode != nil || cfg.auth_mode != nil
+            hubForm.token=cfg.token ?? ""; hubForm.user=cfg.user ?? ""
+            hubForm.issuer=cfg.issuer ?? cfg.oidcIssuer ?? ""
+            hubForm.clientId=cfg.clientId ?? cfg.client_id ?? cfg.oidcClientId ?? ""
+            hubForm.redirectPort=(cfg.redirect_port ?? cfg.redirectPort ?? cfg.oidcRedirectPort)?.text ?? ""
             rebuildSettingsPanel(syncFields: false); return
         }
         // Receipt-only settlements never project settings or results from an
@@ -491,8 +520,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if let request = frame.request_id, let pending = pendingControls[request],
            frame.op != "pair_code" && frame.op != "channel_test_result",
            frame.source_op == pending.op || frame.op == "error" ||
-           (frame.op == "settings" && frame.source_op == nil && pending.op == "set_host_hub" && request == submittedHostHubRequestId) {
-            pendingControls.removeValue(forKey: request); settledControl = true
+           (frame.op == "settings" && frame.source_op == nil && pending.op == "set_host_hub" && request == hostPort.requestId) {
+            pendingControls.removeValue(forKey: request)
+            pendingChannelResets.removeValue(forKey: request)
+            settledControl = true
         }
         if frame.op == "state", (frame.request_id == nil || settledControl), let message = frame.error ?? frame.warning, !message.isEmpty {
             if settingsVisible { settingsBannerError = message } else { menuBannerError = message }
@@ -553,10 +584,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
             if sourceOp == "paste_hub_invite", let request = frame.request_id {
-                guard (!inviteParseRequest.isEmpty && request == inviteParseRequest) ||
+                guard (!hubForm.parseRequest.isEmpty && request == hubForm.parseRequest) ||
                       (!hubInviteRequest.isEmpty && request == hubInviteRequest) ||
-                      (pendingHubSave != nil && request == pendingHubSave?.requestId) else { return }
-                if !inviteParseRequest.isEmpty && request == inviteParseRequest { inviteParseRequest=""; return }
+                      (hubForm.pendingSave != nil && request == hubForm.pendingSave?.requestId) else { return }
+                if !hubForm.parseRequest.isEmpty && request == hubForm.parseRequest { hubForm.parseRequest=""; return }
                 if !hubInviteRequest.isEmpty && request == hubInviteRequest { hubInvitePending = false }
             }
             // A command may emit both its result and a trailing generic error.
@@ -564,36 +595,36 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if ["send_signal", "send_reply_from_human"].contains(sourceOp),
                (pendingComposer == nil || frame.request_id != pendingComposer?.requestId) { return }
             if sourceOp == "set_host_hub", let requestId = frame.request_id,
-               requestId != submittedHostHubRequestId && !settledControl { return }
-            let isAddHubOp = ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(sourceOp) || (pendingHubSave != nil && frame.request_id == pendingHubSave?.requestId)
+               requestId != hostPort.requestId && !settledControl { return }
+            let isAddHubOp = ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(sourceOp) || (hubForm.pendingSave != nil && frame.request_id == hubForm.pendingSave?.requestId)
             if ["setup_save_hub", "save_hub"].contains(sourceOp), let requestId = frame.request_id,
-               requestId != pendingHubSave?.requestId { return }
+               requestId != hubForm.pendingSave?.requestId { return }
             // Only the matching save result owns an active form submission.
             // Untagged invite/transport failures remain visible in the settings banner.
             let isAddHubError: Bool
-            if let pending = pendingHubSave {
+            if let pending = hubForm.pendingSave {
                 isAddHubError = isAddHubOp && frame.request_id == pending.requestId
             } else {
-                isAddHubError = addHubFormOpen && isAddHubOp && sourceOp != "paste_hub_invite"
+                isAddHubError = hubForm.isOpen && isAddHubOp && sourceOp != "paste_hub_invite"
             }
             let error = frame.error ?? frame.warning ?? ""
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
             if (sourceOp == "set_host_hub" || sourceOp.isEmpty) &&
-               frame.request_id == submittedHostHubRequestId {
-                hostHubPortPending = false
-                submittedHostHubRequestId = ""
+               frame.request_id == hostPort.requestId {
+                hostPort.pending = false
+                hostPort.requestId = ""
             }
             if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || (sourceOp.isEmpty && (frame.request_id == nil || (!hubInviteRequest.isEmpty && frame.request_id == hubInviteRequest))) {
                 hubInvitePending=false; hubInvitePastedUntil = .distantPast
             }
-            if isAddHubError { pendingHubSave = nil }
+            if isAddHubError { hubForm.pendingSave = nil }
             let isComposerError = ["send_signal", "send_reply_from_human", ""].contains(sourceOp) &&
                 pendingComposer != nil && frame.request_id == pendingComposer?.requestId
             if error.isEmpty { }
             else if isComposerError {
                 setComposerStatus(error)
                 pendingComposer = nil
-            } else if isAddHubError { addHubError = error }
+            } else if isAddHubError { hubForm.error = error }
             else if ["query_directory", "open_directory", "directory"].contains(sourceOp) || (frame.op == "directory" && sourceOp.isEmpty) {
                 if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
             }
@@ -601,7 +632,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 directoryActionError = error; directoryActionErrorSourceOp = sourceOp; updateDirectoryWarnings()
             }
             else if sourceOp == "channel_test" || (sourceOp == "set_host_hub" && presentationError(settings?.host_hub.error ?? "") == presentationError(error)) { }
-            else if settingsVisible || pendingHubSave != nil || sourceOp == "paste_hub_invite" { settingsBannerError = error }
+            else if settingsVisible || hubForm.pendingSave != nil || sourceOp == "paste_hub_invite" { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild()
@@ -623,7 +654,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         if frame.op == "settings", let value = frame.settings {
             let target = value.settings_hub ?? value.channel_hub ?? frame.hub ?? effectiveChannelHub
-            let changed = value != settings || channelSettingsByHub[target] != (value.channels ?? [])
+            let changed = value != settings || (value.channels.map { channelSettingsByHub[target] != $0 } ?? false)
             let receipt = settledControl || frame.request_id != nil || frame.source_op != nil
             if let request = frame.request_id, let app = pendingAppChecks.removeValue(forKey: request),
                frame.ok == true && frame.source_op == "setup_apply" {
@@ -637,7 +668,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? ""))
             if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
                !(frame.source_op == "set_host_hub" && presentationError(value.host_hub.error ?? "") == presentationError(warning)) { settingsBannerError = warning }
-            if changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId { rebuildSettingsPanel(preservingEditor: !receipt) }
+            if changed || receipt || uiChanged || frame.request_id == hostPort.requestId { rebuildSettingsPanel(preservingEditor: !receipt) }
             return
         }
         if frame.op == "pair_code", frame.authority_changed != true, let id = frame.channel_id {
@@ -694,9 +725,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if harnessesChanged { harnesses = nextHarnesses }
             let nextSettings = preserveCollections && settings != nil ? settings : frame.settings ?? settings
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
-            let settingsChanged = nextSettings != settings || (hostHubPortPending && frame.request_id == submittedHostHubRequestId)
+            let settingsChanged = nextSettings != settings || (hostPort.pending && frame.request_id == hostPort.requestId)
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name, savedRequest: frame.request_id) }
-            if let error = frame.composer_error, !error.isEmpty { setComposerStatus(error) }
             if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
                 updateStatusItem()
             } else {
@@ -774,9 +804,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: outgoing, options: [.sortedKeys]), data.count <= 1_048_576 else {
             let message = "This action is too large to send. Shorten the input and try again."
-            if operation == "setup_save_hub" { pendingHubSave = nil; addHubError = message }
-            else if operation == "set_host_hub" { hostHubPortPending = false; hostHubPortError = message }
-            else if operation == "paste_hub_invite" { hubInvitePending = false; inviteParseRequest = ""; settingsBannerError = message }
+            if operation == "setup_save_hub" { hubForm.pendingSave = nil; hubForm.error = message }
+            else if operation == "set_host_hub" { hostPort.pending = false; hostPort.error = message }
+            else if operation == "paste_hub_invite" { hubInvitePending = false; hubForm.parseRequest = ""; settingsBannerError = message }
             else if ["send_signal", "send_reply_from_human"].contains(operation) { pendingComposer = nil; setComposerStatus(message) }
             else { settingsBannerError = message; menuBannerError = message }
             rebuild(); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
@@ -786,7 +816,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let channel = outgoing["channel_id"] as? String
             let hub = outgoing["hub"] as? String ?? (channel == nil ? "" : effectiveChannelHub)
             let session = (outgoing["session_id"] as? String).map { "\(outgoing["harness"] as? String ?? ""):\($0)" }
-            let hostTarget = action["auth_mode"] != nil ? "access" : (request == submittedHostHubRequestId ? "port" : "sharing")
+            let hostTarget = action["auth_mode"] != nil ? "access" : (request == hostPort.requestId ? "port" : "sharing")
             let target = channel ?? session ?? outgoing["harness"] as? String ?? (operation == "set_host_hub" ? hostTarget : "")
             pendingControls[request] = PendingControl(op: operation, hub: hub, target: target)
         }
@@ -850,6 +880,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ obj: Notification) {
+        if uninstallConfirmOpen, let control = obj.object as? NSControl, control.window === settingsPanel { return }
         if let field = obj.object as? NSSearchField, field === directorySearchField {
             activityClearConfirm = false; clearDirectoryActionError(); updateDirectoryFacetStyles()
             directoryQuery = field.stringValue
@@ -862,7 +893,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         if let field = obj.object as? NSTextField, field === composerInputField { composerDraftIdempotencyKey = UUID().uuidString }
-        if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostHubPortDraft=field.stringValue; hostHubPortSaved=false; hostHubPortError=nil; if let root=settingsPanel?.contentView { findControl(in:root,id:"apply_host_hub_port")?.isEnabled = !hostHubPortPending && Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) != settings?.host_hub.port } }
+        if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostPort.draft=field.stringValue; hostPort.savedUntil=nil; hostPort.error=nil; if let root=settingsPanel?.contentView { findControl(in:root,id:"apply_host_hub_port")?.isEnabled = !hostPort.pending && Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) != settings?.host_hub.port } }
         if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue {
             if id.hasPrefix("channel_field:"),
                let ch=(channelSettingsByHub[effectiveChannelHub] ?? []).first(where:{id.hasPrefix("channel_field:\($0.id):")}),
@@ -889,14 +920,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                     test.isEnabled = !isPending("channel_test",hub:effectiveChannelHub,target:ch.id) && ch.canSendTest(drafts:channelUiStates[key]?.drafts ?? [:],visibleFields:visibleFields)
                 }
             }
-            else if id.hasPrefix("settings_hub_") { addHubDraftGeneration += 1; inviteParseRequest="" }
+            else if id.hasPrefix("settings_hub_") { hubForm.generation += 1; hubForm.parseRequest="" }
         }
         syncAddHubFieldsFromControls()
         if let field=obj.object as? NSTextField, field.identifier?.rawValue == "settings_hub_url" {
             let raw=field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines)
             if raw.hasPrefix("cito setup ") || raw.hasPrefix("{") {
-                inviteParseRequest=UUID().uuidString
-                emit(["op":"paste_hub_invite","invite":raw,"parse_only":true,"request_id":inviteParseRequest])
+                hubForm.parseRequest=UUID().uuidString
+                emit(["op":"paste_hub_invite","invite":raw,"parse_only":true,"request_id":hubForm.parseRequest])
             }
         }
         settingsFieldControls["settings_hub_name"]?.placeholderString = hubNamePlaceholder
@@ -924,6 +955,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return false
         }
         if control.window === settingsPanel {
+            if uninstallConfirmOpen {
+                if commandSelector == #selector(NSResponder.cancelOperation(_:)) { handleSettingsKey("escape") }
+                return true
+            }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleSettingsKey("return"); return true }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 handleSettingsKey("escape")
@@ -931,8 +966,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             }
             return false
         }
-        if commandSelector == #selector(NSResponder.moveDown(_:)) { handleDirectoryKey("down"); return true }
-        if commandSelector == #selector(NSResponder.moveUp(_:)) { handleDirectoryKey("up"); return true }
+        if commandSelector == #selector(NSResponder.moveDown(_:)) || commandSelector == #selector(NSResponder.moveUp(_:)) {
+            guard control !== composerInputField else { return false }
+            handleDirectoryKey(commandSelector == #selector(NSResponder.moveDown(_:)) ? "down" : "up")
+            return true
+        }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleDirectoryKey(NSApp.currentEvent?.modifierFlags.contains(.shift) == true ? "shift-return" : "return"); return true }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { handleDirectoryKey("escape"); return true }
         return false

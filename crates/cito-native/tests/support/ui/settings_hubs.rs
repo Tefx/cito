@@ -1031,6 +1031,15 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     );
     assert!(!f.frames(p).iter().any(|v| v["op"] == "setup_uninstall_all"));
     control(&f, p, "settings_tab:hubs");
+    let modal = inspect(&f, p);
+    assert_eq!(modal["settings_tab"], "channels");
+    assert_eq!(
+        node(&modal, "settings_items", "settings_tab:hubs")["enabled"],
+        false
+    );
+    assert!(!node(&modal, "settings_items", "uninstall_confirm_box").is_null());
+    control(&f, p, "cancel_uninstall_all");
+    control(&f, p, "settings_tab:hubs");
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "uninstall_confirm_box").is_null());
     assert_eq!(

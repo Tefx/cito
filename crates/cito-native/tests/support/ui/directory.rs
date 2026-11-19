@@ -880,11 +880,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     );
     let warned = inspect(&f, p);
     assert_eq!(
-        node(&warned, "directory_items", "directory_warning")["hidden"],
+        node(&warned, "directory_items", "directory_warning_label")["hidden"],
         false
     );
     assert!(
-        node(&warned, "directory_items", "directory_warning")["tooltip"]
+        node(&warned, "directory_items", "directory_warning_label")["tooltip"]
             .as_str()
             .unwrap()
             .contains("work")
@@ -896,7 +896,7 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     f.send(p,json!({"op":"error","source_op":"query_directory","error":"CONNECTION_FAILED: Remote Hub unavailable (os error 61)"}));
     let failed = inspect(&f, p);
     assert!(
-        node(&failed, "directory_items", "directory_warning")["text"]
+        node(&failed, "directory_items", "directory_warning_label")["text"]
             .as_str()
             .unwrap()
             .starts_with("Cannot refresh")
@@ -912,7 +912,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         json!({"op":"directory","peers":[peer("one")],"warnings":[]}),
     );
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true
     );
     control(&f, p, "open_settings");
@@ -1020,17 +1024,19 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         let s = inspect(&f, p);
         assert_eq!(
-            node(&s, "directory_items", "directory_warning")["hidden"],
+            node(&s, "directory_items", "directory_warning_label")["hidden"],
             false
         );
         assert_eq!(
-            node(&s, "directory_items", "directory_warning")["text"],
+            node(&s, "directory_items", "directory_warning_label")["text"],
             "Cannot update Activity. Please try again."
         );
-        assert!(node(&s, "directory_items", "directory_warning")["tooltip"]
-            .as_str()
-            .unwrap()
-            .contains(op));
+        assert!(
+            node(&s, "directory_items", "directory_warning_label")["tooltip"]
+                .as_str()
+                .unwrap()
+                .contains(op)
+        );
         assert!(node(&s, "settings_items", "settings_error_banner").is_null());
         let request = f
             .frames(p)
@@ -1040,7 +1046,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
             .unwrap();
         f.send(p,json!({"op":"error","source_op":"query_directory","request_id":request["request_id"],"error":"Directory lookup failed"}));
         assert!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["tooltip"]
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["tooltip"]
                 .as_str()
                 .unwrap()
                 .contains(op),
@@ -1048,7 +1058,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[],"warnings":[]}));
         assert!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["tooltip"]
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["tooltip"]
                 .as_str()
                 .unwrap()
                 .contains(op),
@@ -1056,7 +1070,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         control(&f, p, "dir_mode:directory");
         assert_eq!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["hidden"],
             true
         );
         control(&f, p, "dir_mode:activity");
@@ -1079,14 +1097,22 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     for op in ["error", "state"] {
         f.send(p,json!({"op":op,"ok":false,"source_op":"clear_activity_history","request_id":a["request_id"],"error":"Late failure from A"}));
         assert_eq!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["hidden"],
             true,
             "Superseded {op} failure must not own B's feedback"
         );
     }
     f.send(p,json!({"op":"state","ok":false,"source_op":"clear_activity_history","request_id":b["request_id"],"error":"Current failure from B"}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         false,
         "Matching ok:false mutation results must be visible"
     );
@@ -1096,32 +1122,52 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     success["request_id"] = a["request_id"].clone();
     f.send(p, success.clone());
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         false,
         "A's success cannot settle B's error"
     );
     success["request_id"] = b["request_id"].clone();
     f.send(p, success);
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true,
         "B's matching state success settles its feedback"
     );
     f.send(p,json!({"op":"error","source_op":"clear_activity_history","request_id":a["request_id"],"error":"A after B completed"}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true
     );
     control(&f, p, "delete_activity:sig-0");
     let c = latest_delete();
     f.send(p,json!({"op":"error","source_op":"clear_activity_history","request_id":c["request_id"],"error":"Current failure from C"}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         false
     );
     f.send(p,json!({"op":"directory","ok":true,"source_op":"clear_activity_history","request_id":c["request_id"],"peers":[]}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true,
         "A matching Directory receipt also settles the action independently of query correlation"
     );
@@ -1634,13 +1680,17 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             .find(|action| action["op"] == "query_directory" || action["op"] == "open_directory")
             .unwrap();
         f.send(l.ui,json!({"op":"directory","request_id":query["request_id"],"query":query["query"],"scope":query["scope"],"harness":query["harness"],"peers":[],"warnings":[]}));
-        let warning = node(&inspect(&f, l.ui), "directory_items", "directory_warning");
+        let warning = node(
+            &inspect(&f, l.ui),
+            "directory_items",
+            "directory_warning_label",
+        );
         assert_eq!(warning["hidden"], false);
         assert_eq!(warning["tooltip"], "Message unavailable");
         l.control(&control_id);
         let success = l.until(|s| s["clipboard"] == message.trim());
         assert_eq!(
-            node(&success, "directory_items", "directory_warning")["hidden"],
+            node(&success, "directory_items", "directory_warning_label")["hidden"],
             true,
             "Only the successful correlated retry settles the copy error"
         );
@@ -1715,7 +1765,11 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             })
         });
         assert_eq!(
-            node(&inspect(&f, l.ui), "directory_items", "directory_warning")["hidden"],
+            node(
+                &inspect(&f, l.ui),
+                "directory_items",
+                "directory_warning_label"
+            )["hidden"],
             true
         );
     }

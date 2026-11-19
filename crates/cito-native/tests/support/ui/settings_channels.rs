@@ -676,6 +676,12 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     let manual = node(&s, "settings_items", "manual_channel:channel");
     assert_eq!(manual["x"], 12);
     assert_eq!(manual["children"][0]["x"], 0);
+    let width = manual["width"].as_f64().unwrap();
+    assert!(width >= manual["label_measured_width"].as_f64().unwrap());
+    assert!(
+        width < 190.0,
+        "short disclosure text should not reserve a fixed width"
+    );
     for round in 0..2 {
         control(&f, p, "pair_channel:channel");
         inspect(&f, p);

@@ -28,7 +28,7 @@ extension Companion: NSMenuDelegate {
         row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
         row.appearance = testAppearance
         let label = textLabel(presentationError(error),NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
-        label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=label.stringValue
+        label.maximumNumberOfLines = 2; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = label.stringValue
         row.addSubview(label)
         let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
         dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
@@ -436,7 +436,7 @@ extension Companion: NSMenuDelegate {
                 let field = existingRenameField ?? NSTextField(string: renameDraft ?? listener.title)
                 field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
                 field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(listener.scoped_id)")
-                field.setAccessibilityLabel("Session title")
+                field.setAccessibilityLabel("Conversation title")
                 field.delegate = self; field.font = .systemFont(ofSize: 13)
                 if let draft = renameDraft, field.stringValue != draft { field.stringValue = draft }
                 card.addSubview(field); renameField = field
@@ -449,7 +449,9 @@ extension Companion: NSMenuDelegate {
                     }
                 }
             } else {
-                let titleW = max(122, min(rightEdge - titleX - 28, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
+                let maxTitleW = max(0, rightEdge - titleX - 28)
+                let measuredW = measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))
+                let titleW = min(maxTitleW, max(44, ceil(measuredW) + 4))
                 title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
                 let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 6, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
                 renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")

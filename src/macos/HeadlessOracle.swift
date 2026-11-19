@@ -122,6 +122,15 @@ extension Companion {
                 if let c = control("quit") {
                     if kind == "truncated_labels" { c.label.stringValue = String(repeating:"Wide chrome ",count:20) }
                     if kind == "jargon_leaks" { c.label.stringValue = object["text"] as? String ?? "Human receiver" }
+                    if kind == "tooltip_jargon" { c.toolTip = "Human receiver" }
+                    if kind == "accessibility_jargon" { c.setAccessibilityLabel("Human receiver") }
+                    if kind == "label_background", let parent = c.superview {
+                        let label = textLabel("Contrast probe",c.frame,color:.systemBlue)
+                        label.identifier = NSUserInterfaceItemIdentifier("background_probe")
+                        label.drawsBackground = true
+                        label.backgroundColor = .systemBlue
+                        parent.addSubview(label)
+                    }
                     if kind == "fractional_truncation", let cell = c.label.cell {
                         let slack = cell.drawingRect(forBounds:c.label.bounds).width - cell.cellSize.width
                         c.label.frame.size.width -= max(0,slack) + 0.25
@@ -140,10 +149,24 @@ extension Companion {
                         label.identifier = NSUserInterfaceItemIdentifier("nested_label_probe")
                         stack.addSubview(label); bar.addSubview(stack)
                     }
-                    if kind == "data_row_truncation" {
-                        let label = textLabel("Unprotected data label",NSRect(x:12,y:6,width:10,height:15),size:11)
+                    if ["data_row_truncation", "nonwrapping_label", "data_row_height"].contains(kind) {
+                        let multiline = kind == "data_row_height"
+                        let label = textLabel(multiline ? "First line\nSecond line" : "Unprotected data label",
+                                              NSRect(x:12,y:6,width:multiline ? 100 : 10,height:15),size:11)
                         label.identifier = NSUserInterfaceItemIdentifier("dir_oracle_probe")
+                        if kind != "data_row_truncation" {
+                            label.maximumNumberOfLines = 2
+                            label.lineBreakMode = multiline ? .byWordWrapping : .byClipping
+                            label.cell?.wraps = multiline
+                        }
                         bar.addSubview(label)
+                    }
+                    if kind == "nested_padding", let label = bar.subviews.first(where: { $0.identifier?.rawValue == "inbox_control_title" }) {
+                        let group = NSView(frame: label.frame)
+                        bar.addSubview(group)
+                        label.removeFromSuperview()
+                        label.frame.origin = NSPoint(x:2 - group.frame.minX,y:0)
+                        group.addSubview(label)
                     }
                 }
                 if kind == "card_padding", let card = roots.flatMap({$0.subviews}).first(where:{$0 is SurfaceView && ($0.layer?.borderWidth ?? 0)>0 && $0.frame.width>=60 && $0.frame.height>=32}), let child = card.subviews.first(where:{!$0.isHidden && !($0 is NSVisualEffectView)}) { child.frame.origin.x = 2 }
@@ -153,7 +176,13 @@ extension Companion {
                    let cell = table.view(atColumn:0,row:row,makeIfNecessary:true) as? DirectoryPeerCellView {
                     cell.line1TitleLabel.stringValue = object["text"] as? String ?? "@bob → Human Node"
                 }
-                if kind == "hit_test", let target = control("open_settings"), let parent = target.superview {
+                let hitTarget: NSView?
+                switch kind {
+                case "hit_test": hitTarget = control("open_settings")
+                case "editable_hit_test": hitTarget = (object["id"] as? String).flatMap { settingsFieldControls[$0] }
+                default: hitTarget = nil
+                }
+                if let target = hitTarget, let parent = target.superview {
                     let blocker = NSView(frame:target.frame)
                     blocker.identifier = NSUserInterfaceItemIdentifier("hit_test_probe")
                     parent.addSubview(blocker)
@@ -314,6 +343,12 @@ extension Companion {
             }
             if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
                 let window = op == "test_settings_key" ? settingsPanel : directoryPanel
+                if object["via"] as? String == "field", let editor = window?.firstResponder as? NSTextView,
+                   let field = editor.delegate as? NSTextField, ["up", "down"].contains(key) {
+                    let selector = key == "up" ? #selector(NSResponder.moveUp(_:)) : #selector(NSResponder.moveDown(_:))
+                    _ = control(field, textView: editor, doCommandBy: selector)
+                    return true
+                }
                 if object["via"] as? String == "panel" {
                     let character = key.hasSuffix("comma") ? "," : String(key.suffix(1))
                     let flags: NSEvent.ModifierFlags = key.hasPrefix("shift-") ? [.command, .shift] : [.command]
@@ -503,8 +538,7 @@ extension Companion {
         func project(_ view: NSView, visible: Bool = true, background: NSColor? = nil, opacity: CGFloat = 1, enabled: Bool = true) -> [String: Any] {
             let visible = visible && !view.isHidden
             let opacity = opacity * view.alphaValue
-            let modalBackground = uninstallConfirmOpen && (view.identifier?.rawValue == "settings_header" || view.identifier?.rawValue == "settings_footer" || view is NSScrollView && view.window === settingsPanel)
-            let enabled = enabled && !modalBackground && ((view as? NSControl)?.isEnabled ?? true)
+            let enabled = enabled && ((view as? NSControl)?.isEnabled ?? true)
             let base = background ?? resolved(CitoPalette.surfaceBackground, in: view.effectiveAppearance)
             var surface = base
             // Resolve dynamic layer-backed fills in the same appearance as the text.
@@ -516,8 +550,12 @@ extension Companion {
             } else {
                 fill = view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }
             }
+            let textBackground = (view as? NSTextField).flatMap { $0.drawsBackground ? $0.backgroundColor : nil }
             if let fill = fill {
                 surface = blended(resolved(fill, in: view.effectiveAppearance), over: base, opacity: opacity)
+            }
+            if let fill = textBackground {
+                surface = blended(resolved(fill, in: view.effectiveAppearance), over: surface, opacity: opacity)
             }
             var contrast: CGFloat?
             if visible, enabled, opacity > 0.6, let label = view as? NSTextField,
@@ -541,23 +579,29 @@ extension Companion {
             if visible, let label = view as? NSTextField, label.isEditable {
                 if label.frame.width < 48 || measureTextWidth(label.placeholderString ?? "", font:label.font ?? .systemFont(ofSize:12)) > label.frame.width - 8 { truncatedLabels.append(name(label)) }
             }
-            if visible, let label = view as? NSTextField, !label.isEditable,
-               (!isDataRow(label) || label.maximumNumberOfLines == 1),
-               !(isDataRow(label) && (label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail) && !(label.toolTip ?? "").isEmpty) {
+            if visible, let label = view as? NSTextField, !label.isEditable {
                 let font = label.font ?? .systemFont(ofSize:12)
+                let hasTooltip = !(label.toolTip ?? "").isEmpty
                 let truncated: Bool
-                if label.maximumNumberOfLines == 1 {
+                if label.maximumNumberOfLines == 1 || label.cell?.wraps == false {
+                    let intentional = isDataRow(label) && hasTooltip && (label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail)
                     // Native cell insets and attributed glyph metrics determine
                     // what AppKit can actually draw, not the outer field width.
                     let drawingWidth = label.cell?.drawingRect(forBounds:label.bounds).width ?? label.bounds.width
                     // NSCell can retain a narrower cached width after a color/appearance update.
                     let requiredWidth = max(label.cell?.cellSize.width ?? 0,label.attributedStringValue.size().width)
-                    truncated = requiredWidth > drawingWidth
+                    truncated = !intentional && requiredWidth > drawingWidth
+                } else if name(label).hasPrefix("act_msg:") && hasTooltip {
+                    // Expanded Activity messages deliberately cap the preview height.
+                    truncated = false
                 } else {
                     let height = ceil((label.stringValue as NSString).boundingRect(with:NSSize(width:label.frame.width,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:font]).height)
                     truncated = height > label.frame.height + 2
                 }
                 if truncated { truncatedLabels.append((label.superview as? MenuControl).map { name($0) } ?? name(label)) }
+            }
+            func hasJargon(_ text: String) -> Bool {
+                text.range(of:jargonPattern,options:.regularExpression) != nil
             }
             if visible, let label = view as? NSTextField, !label.isEditable {
                 let id = name(label)
@@ -576,8 +620,19 @@ extension Companion {
                         generatedText = "→ " + target
                     }
                 }
-                let dataJargon = id.hasPrefix("act_title:") && generatedText.range(of:jargonPattern,options:.regularExpression) != nil
-                if dataJargon || !data && label.stringValue.range(of:jargonPattern,options:.regularExpression) != nil { jargonLeaks.append(id) }
+                if hasJargon(data ? (id.hasPrefix("act_title:") ? generatedText : "") : label.stringValue) { jargonLeaks.append(id) }
+            }
+            if visible {
+                for (source, value) in [("tooltip",view.toolTip),("accessibility label",view.accessibilityLabel())] {
+                    guard let value else { continue }
+                    // A data label's repeated payload follows the same provenance as its visible text.
+                    if let label = view as? NSTextField, !label.isEditable {
+                        if value == label.stringValue { continue }
+                        if name(label).hasPrefix("act_msg:"),
+                           value == (label.superview as? DirectoryPeerCellView)?.activityItem?.message { continue }
+                    }
+                    if hasJargon(value) { jargonLeaks.append("\(name(view)): \(source)") }
+                }
             }
             if visible, let control = view as? MenuControl {
                 let id = control.identifier?.rawValue ?? ""
@@ -604,8 +659,15 @@ extension Companion {
                 let defaultLayout: Bool
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
-                case "settings_channels_tab": defaultLayout = settings?.channel_inventory_error == nil && settings?.channels?.count == 1 && !channelUiStates.values.contains(where: { $0.editingGateway || $0.editingPersonal || $0.manualEntry }) && (settings?.channels ?? []).allSatisfy { (channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.pairingInstruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.testResult == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
-                case "settings_hubs_tab": defaultLayout = !addHubFormOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
+                case "settings_channels_tab":
+                    let hub = effectiveChannelHub
+                    let channels = channelSettingsByHub[hub] ?? []
+                    defaultLayout = channelInventoryErrorsByHub[hub] == nil && channels.count == 1 && channels.allSatisfy { channel in
+                        let ui = channelUiStates["\(hub)|\(channel.id)"] ?? ChannelUiState()
+                        return !ui.editingGateway && !ui.editingPersonal && !ui.manualEntry && ui.pairingInstruction.isEmpty &&
+                            channel.status != "error" && channel.warning != true && ui.testResult == nil && channel.fields.count <= 2
+                    }
+                case "settings_hubs_tab": defaultLayout = !hubForm.isOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }
@@ -696,15 +758,26 @@ extension Companion {
                         }
                     }
                 }
+                let paddedSurface = (view as? SurfaceView).map { $0.fillColor.alphaComponent > 0 || ($0.layer?.borderWidth ?? 0)>0 } ?? false
+                if (paddedSurface || view is DirectoryPeerCellView) && view.frame.width >= 60 && view.frame.height >= 32
+                   && !["settings_panel","directory_panel"].contains(id) {
+                    func checkPadding(_ child: NSView) {
+                        guard !child.isHidden, !(child is NSVisualEffectView) else { return }
+                        let terminal = child is NSControl || child is NSImageView || child.subviews.isEmpty
+                        let painted = (child as? SurfaceView).map { $0.fillColor.alphaComponent > 0 || ($0.layer?.borderWidth ?? 0) > 0 } ?? false
+                        if terminal || painted {
+                            let f = child.convert(child.bounds,to:view)
+                            if f.width > 5 && f.height > 5, !parentBounds.insetBy(dx:6,dy:6).contains(f) {
+                                let issue = "\(id) > \(name(child)): card padding < 6pt"
+                                tightPadding.append(issue); clippedViews.append(issue)
+                            }
+                        }
+                        if !terminal { child.subviews.forEach(checkPadding) }
+                    }
+                    children.forEach(checkPadding)
+                }
                 for (index, child) in children.enumerated() {
                     let f = frame(child)
-                    let paddedSurface = (view as? SurfaceView).map { $0.fillColor.alphaComponent > 0 || ($0.layer?.borderWidth ?? 0)>0 } ?? false
-                    if (paddedSurface || view is DirectoryPeerCellView) && view.frame.width>=60 && view.frame.height>=32
-                       && !["settings_panel","directory_panel"].contains(id) && f.width>5 && f.height>5,
-                       f.minX<6 || f.minY<6 || f.maxX>parentBounds.width-6 || f.maxY>parentBounds.height-6 {
-                        let issue = "\(name(view)) > \(name(child)): card padding < 6pt"
-                        tightPadding.append(issue); clippedViews.append(issue)
-                    }
                     if f.minX < -0.5 || f.minY < -0.5 || f.maxX > parentBounds.width + 0.5 || f.maxY > parentBounds.height + 0.5 {
                         clippedViews.append("\(name(view)) > \(name(child))")
                     }
@@ -719,7 +792,7 @@ extension Companion {
                 "children": childViews.map { project($0, visible: visible, background: surface, opacity: opacity, enabled: enabled) }]
             if let effect=view as? NSVisualEffectView { result["material"]=effect.material.rawValue }
             result["contrast"] = contrast
-            result["background"] = components(fill)
+            result["background"] = components(textBackground ?? fill)
             result["border"] = components(view.layer?.borderColor.flatMap { NSColor(cgColor: $0) })
             result["border_width"] = view.layer?.borderWidth ?? 0
             if let tooltip=view.toolTip { result["tooltip"]=tooltip }
@@ -740,6 +813,9 @@ extension Companion {
             if let label = view as? NSTextField {
                 result["text"] = label is NSSecureTextField ? "••••" : label.stringValue
                 result["secure"] = label is NSSecureTextField
+                result["editable"] = label.isEditable
+                result["wraps"] = label.cell?.wraps ?? false
+                result["maximum_lines"] = label.maximumNumberOfLines
                 result["placeholder"] = label.placeholderString ?? ""
                 result["tooltip"] = label.toolTip ?? ""
                 result["label_width"] = label.cell?.drawingRect(forBounds: label.bounds).width ?? label.bounds.width
@@ -766,20 +842,23 @@ extension Companion {
         func checkHitTests(_ view: NSView, root: NSView, surface: String, visible: Bool = true) {
             let visible = visible && !view.isHidden && view.alphaValue > 0.01
             guard visible else { return }
-            if let control = view as? MenuControl, control.isEnabled, control.pressed != nil {
-                // Scrolling may clip the nominal center onto a hit-test boundary.
-                // Sample the interior of the portion the user can actually click.
-                let visibleBounds = control.visibleRect
-                let center = NSPoint(x:visibleBounds.midX,y:visibleBounds.midY)
-                let modal = settingsPanel?.contentView?.subviews.first { $0.identifier?.rawValue == "uninstall_modal_overlay" }
-                let inModal = modal.map { control.isDescendant(of:$0) } ?? false
-                if !(surface == "settings" && uninstallConfirmOpen && !inModal), !visibleBounds.isEmpty {
-                    let point = control.convert(center,to:root)
-                    if root.hitTest(point) !== control {
+            let field = view as? NSTextField
+            if let control = view as? NSControl, control.isEnabled,
+               (control as? MenuControl)?.pressed != nil || field?.isEditable == true {
+                // Sample the visible interior in the root's superview coordinates.
+                let bounds = control.bounds.intersection(control.visibleRect)
+                if !bounds.isEmpty {
+                    let point = control.convert(NSPoint(x:bounds.midX,y:bounds.midY),to:root.superview)
+                    let hit = root.hitTest(point)
+                    let editor = field?.currentEditor()
+                    // AppKit may host the search field's editable region in a native subview.
+                    let nativeSearchHit = control is NSSearchField && hit?.isDescendant(of: control) == true
+                    if hit !== control && (editor == nil || hit !== editor) && !nativeSearchHit {
                         overlappingSiblings.append("\(surface) > \(name(control)): occluded in hitTest")
                     }
                 }
             }
+            if field != nil { return }
             for child in view.subviews { checkHitTests(child,root:root,surface:surface,visible:visible) }
         }
         for item in cardMenu.items where !item.isHidden {
@@ -835,7 +914,7 @@ extension Companion {
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
-        let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "overlapping_views": overlappingSiblings, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
+        let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "rename_field_identity": renameField.map { String(describing:ObjectIdentifier($0)) } ?? "",
             "tracking_cancellations": (cardMenu as? HeadlessMenu)?.trackingCancellations ?? 0,
@@ -869,10 +948,11 @@ extension Companion {
             "directory_selected_id": selectedId, "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
             "directory_selection_visible": directoryTableView.map { table in directorySelectedIndex >= 0 && directorySelectedIndex < table.numberOfRows && table.visibleRect.contains(table.rect(ofRow:directorySelectedIndex)) } ?? false,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
-            "pending_hub_save": pendingHubSave?.requestId ?? "",
-            "hub_invite_pending": hubInvitePending, "host_hub_port_pending": hostHubPortPending,
+            "pending_hub_save": hubForm.pendingSave?.requestId ?? "",
+            "hub_invite_pending": hubInvitePending, "host_hub_port_pending": hostPort.pending,
             "pending_app_checks": Array(pendingAppChecks.keys).sorted(),
             "pending_channel_saves": Array(pendingChannelValues.keys).sorted(),
+            "pending_channel_resets": Array(pendingChannelResets.keys).sorted(),
             "pending_controls": Array(pendingControls.keys).sorted(),
             "settings_rebuild_deferred": settingsRebuildDeferred,
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,

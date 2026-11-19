@@ -288,7 +288,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryScrollView = scroll
         root.addSubview(scroll)
         let warning = textLabel("",NSRect(x:16,y:338,width:528,height:20),size:11,color:CitoPalette.secondaryText)
-        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning")
+        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning_label")
         warning.isHidden = true
         root.addSubview(warning)
         directoryWarningLabel = warning
@@ -787,7 +787,10 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func handleDirectoryKey(_ key: String) {
         if (directoryPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
         if handleTextEditShortcut(key, in: directoryPanel) { return }
-        switch key.lowercased() {
+        let key = key.lowercased()
+        if (key == "up" || key == "down"), let editor = composerInputField?.currentEditor(),
+           directoryPanel?.firstResponder === editor { return }
+        switch key {
         case "down":
             let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
             guard count > 0 else { return }

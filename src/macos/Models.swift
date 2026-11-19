@@ -314,7 +314,6 @@ struct Frame: Decodable {
     let warning: String?
     let authority_changed: Bool?
     let request_id: String?
-    let composer_error: String?
     let channel_id: String?
     let code: String?
     let instruction: String?
