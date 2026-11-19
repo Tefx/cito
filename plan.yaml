@@ -17768,29 +17768,32 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v53` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the integrated outcomes\
-      \ of `v53.core` and `v53.ui`:\n  1. Load `[REQUIRES_SKILL: contract-and-simplicity]`\
-      \ and verify all 30 admitted findings (`#1`–`#30`) are closed with discriminating\
-      \ regression coverage.\n  2. Run 3-way incremental audit convergence (`uiux-auditor`,\
-      \ `pathway-auditor`, `structural-auditor`) on the `v53` delta to `ZERO_NEW_ISSUES`\
-      \ alongside the independent `FULL` gate.\n  3. Run full post-convergence workspace\
-      \ verification at version `0.21.3` (NO SemVer bump, NO git tag):\n     - `cargo\
-      \ fmt --all -- --check`\n     - `git diff --check`\n     - `cargo clippy --workspace\
-      \ --all-targets --locked -- -D warnings`\n     - `cargo test --workspace --locked\
-      \ -- --test-threads=2`\n     - `cargo build --release --locked`\n     - `python3\
-      \ packaging/release.py check`\n     - `python3 -m unittest discover -s packaging\
-      \ -p 'test_*.py' -v`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
-      \     - `/usr/bin/ruby -c packaging/homebrew/cito.rb`\n\nBoundary:\n- Owner:\
-      \ `gate-reviewer` (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal\
-      \ gate (`repo_change_policy: no_repo_change`, `verification_scope: FULL`) bound\
-      \ to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\nAdmit:\n-\
-      \ Depends on `v53.core` and `v53.ui`.\n- Consumed evidence: integrated commits\
-      \ from `v53.core` and `v53.ui`, 3-way incremental audit convergence (`uiux-auditor`,\
-      \ `pathway-auditor`, `structural-auditor` to `ZERO_NEW_ISSUES`), independent\
-      \ `FULL` gate report, and full post-convergence workspace regression outputs.\n\
-      \nRecovery:\n- If any audit finding, test failure, clippy/compiler warning,\
-      \ packaging mismatch, or `§1.2`/private-name violation remains open, fail the\
-      \ gate with concrete `file:line` evidence so a scoped repair can close it before\
-      \ Delta re-verification."
+      \ of `v53.core`, `v53.ui`, and `v53.audit_fix`:\n  1. Load `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` and verify all 30 admitted findings (`#1`–`#30`)\
+      \ and Round 1 pathway findings (`V53-PATH-1`, `V53-PATH-2`, `V53-PATH-3`) are\
+      \ closed with discriminating regression coverage.\n  2. Verify 3-way incremental\
+      \ audit convergence on the `v53` delta (`uiux-auditor` and `structural-auditor`\
+      \ converged to `ZERO_NEW_ISSUES` in Round 1; `pathway-auditor` performs a Delta\
+      \ re-check over `v53.audit_fix` to `ZERO_NEW_ISSUES`) alongside the independent\
+      \ `FULL` gate.\n  3. Run full post-convergence workspace verification at version\
+      \ `0.21.3` (NO SemVer bump, NO git tag):\n     - `cargo fmt --all -- --check`\n\
+      \     - `git diff --check`\n     - `cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings`\n     - `cargo test --workspace --locked -- --test-threads=2`\n\
+      \     - `cargo build --release --locked`\n     - `python3 packaging/release.py\
+      \ check`\n     - `python3 -m unittest discover -s packaging -p 'test_*.py' -v`\n\
+      \     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n     - `/usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb`\n\nBoundary:\n- Owner: `gate-reviewer` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
+      \ no_repo_change`, `verification_scope: FULL`) bound to the integrated Git `HEAD`\
+      \ of `/Users/tefx/Projects/cito`.\n\nAdmit:\n- Depends on `v53.core`, `v53.ui`,\
+      \ and `v53.audit_fix`.\n- Consumed evidence: integrated commits from `v53.core`,\
+      \ `v53.ui`, and `v53.audit_fix`, 3-way incremental audit convergence (`uiux-auditor`\
+      \ + `structural-auditor` Round 1 `ZERO_NEW_ISSUES`, `pathway-auditor` Delta\
+      \ re-check to `ZERO_NEW_ISSUES`), independent `FULL` gate report, and full post-convergence\
+      \ workspace regression outputs.\n\nRecovery:\n- If any audit finding, test failure,\
+      \ clippy/compiler warning, packaging mismatch, or `§1.2`/private-name violation\
+      \ remains open, fail the gate with concrete `file:line` evidence so a scoped\
+      \ repair can close it before Delta re-verification."
     verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
       --all-targets --locked -- -D warnings && cargo test --workspace --locked --
       --test-threads=2 && cargo build --release --locked && python3 packaging/release.py
@@ -17828,4 +17831,81 @@ phases:
     depends_on:
     - v53.core
     - v53.ui
+    - v53.audit_fix
     agent: gate-reviewer
+  - id: v53.audit_fix
+    name: 'V53 Pathway Audit Round 1 Remediation: Staged Shim Symlink Unlink, Post-Commit
+      Custom-Title Persistence & Fallible Fixture Teardown Probe (V53-PATH-1..3)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n  blocked_paths:\n    - plan.yaml\n\
+      \    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\nDeliver:\n\
+      - Close the 3 `pathway-auditor` Round 1 findings (`V53-PATH-1`, `V53-PATH-2`,\
+      \ `V53-PATH-3`) at version `0.21.3` (NO SemVer bump, NO git tag) with discriminating\
+      \ regression coverage:\n  1. `V53-PATH-1` (`crates/cito-native/src/core/setup.rs:255`,\
+      \ `#17`): In `ensure_plugins_staged`, unlink/replace any copied symlink at `shim_path`\
+      \ (`cito`, `cito-mcp`) inside the candidate `bin_dir` before writing/chmodding\
+      \ generated shims so staging never mutates external symlink targets or breaks\
+      \ relocated relative links while preserving symlinks in resource trees. Add\
+      \ a discriminating regression test verifying a failing staging operation leaves\
+      \ symlink targets and active shims byte/mode-identical, and successful publication\
+      \ yields runnable regular generated shims while resource symlinks remain intact.\n\
+      \  2. `V53-PATH-2` (`crates/cito-native/src/core/registration.rs:287`, `crates/cito-native/src/core/daemon/mcp.rs:832-839`,\
+      \ `#3`): In `register_locked` and the CLI/MCP `cito_listen` pathway (`cito listen\
+      \ --title` / `cito_listen({about, title})`), do not persist `state.set_custom_title(harness,\
+      \ session, title)` before remote `kv_get`/`kv_save` and local SQLite registration\
+      \ commit; validate and pass the requested title in memory for the Hub payload,\
+      \ persist `custom_title` only after remote + local registration commits, and\
+      \ isolate post-commit title-maintenance failure (`set_custom_title` / `rename_session`\
+      \ across sibling hubs) into a warning (`committed: true`, `warning`, `maintenance_warning`)\
+      \ without rolling back the committed enrollment (matching `listen_session`).\
+      \ Add discriminating regression coverage for failed remote CAS/read on title-bearing\
+      \ CLI/MCP enrollment with sibling Hub registrations (verifying neither local\
+      \ `session_custom_titles` nor sibling Hub titles are mutated), plus post-commit\
+      \ title-maintenance failure returning success with warning.\n  3. `V53-PATH-3`\
+      \ (`crates/cito-native/tests/support/mod.rs:422`, `#19`): In `Fixture::drop`,\
+      \ use a fallible/non-panicking HTTP health probe during teardown so connection-close\
+      \ races or malformed `/health` responses while `std::thread::panicking()` never\
+      \ trigger a double-panic `SIGABRT` and always complete remaining cleanup (retaining\
+      \ diagnostic failures during normal non-panicking teardown). Add discriminating\
+      \ regression coverage verifying a primary assertion failure paired with a failing/closed\
+      \ `/health` probe exits as a normal test failure rather than `SIGABRT` and still\
+      \ runs cleanup.\n\nImplementation Notes (Non-Binding):\n- `setup.rs:242-258`:\
+      \ After `copy_dir_recursive(&state_dir.join(\"bin\"), &bin_dir)`, `bin_dir.join(bin_name)`\
+      \ may be a symlink copied from `state_dir/bin`. Checking `fs::symlink_metadata(&shim_path)`\
+      \ (or removing any existing entry at `shim_path` before `fs::write`) ensures\
+      \ `fs::write` and `fs::set_permissions` create a fresh regular file in `bin_dir`\
+      \ rather than traversing through a symlink.\n- `registration.rs:283-292` & `mcp.rs:831-840`:\
+      \ Validate `args[\"title\"]` via `validate_title(title)?` before network IO,\
+      \ compute the effective title and `custom_title: true` in memory for the Hub\
+      \ payload, and persist `state.set_custom_title` / `rename_session` only after\
+      \ the registration commits, folding any post-commit title persistence/sync error\
+      \ into `committed: true`, `warning`, and `maintenance_warning`.\n- `tests/support/mod.rs:421-443`:\
+      \ A non-panicking `try_http` helper (or fallible `/health` request) in `Fixture::drop`\
+      \ avoids panicking inside `http(...)` when the socket closes between `TcpStream::connect`\
+      \ and the HTTP read or when unwinding.\n\nBoundary:\n- Owner: `rust-engineer`.\
+      \ Allowed paths: `crates/cito-native/**` (excluding `crates/cito-native/tests/support/ui/**`).\
+      \ Blocked paths: `plan.yaml`, `src/macos/**`, `crates/cito-native/tests/support/ui/**`.\
+      \ Keep version at `0.21.3` (NO SemVer bump, NO git tag).\n\nAdmit:\n- Depends\
+      \ on `v53.core` and `v53.ui`.\n- Verification: `cargo fmt --all -- --check &&\
+      \ git diff --check`, `cargo clippy --workspace --all-targets --locked -- -D\
+      \ warnings`, and targeted tests covering `setup`, `registration`, `daemon::`,\
+      \ and `tests/support/mod.rs` (`-- --test-threads=2`). Consumed by `v53.review`.\n\
+      \nRecovery:\n- Repair any Rust or test regression in place within the worktree\
+      \ before completing the step."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets --locked -- -D warnings && cargo test -p cito-native
+      --lib setup:: -- --test-threads=2 && cargo test -p cito-native --lib registration::
+      -- --test-threads=2 && cargo test -p cito-native --test native daemon:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    depends_on:
+    - v53.core
+    - v53.ui
+    agent: rust-engineer
