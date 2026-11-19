@@ -17336,7 +17336,7 @@ phases:
     name: 'V53 Rust Core, Hub, Daemon, Plugins, Docs & Test Hygiene: CLI/Inbox Routing,
       Hub Invalidation & Bot Isolation, Scope/Probe Locks, Post-Commit Send Preservation
       & Core Consolidations (#1–#17, #19–#26, #28–#30)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - packaging/**\n\
       \    - docs/DESIGN.md\n    - README.md\n    - site/docs/architecture.html\n\
@@ -17548,6 +17548,88 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-19T11:16:30.696448Z'
+    done_at: '2026-11-19T13:05:47.952152+00:00'
+    evidence: 'Artifact:
+
+      - Integrated commit: 1f057f0669b42d711f6d4257ec42212d34531824 (rebased from
+      candidate 3f0ad84d6e91ef00d2c359fe6a575f70eef0fe61 on cc1b3ac2c7082ac5a7658fbbe4d4b7193b2dd211;
+      retained ref refs/vectl/candidates/v53.core). Worktree /Users/tefx/Projects/cito/.vectl/worktrees/v53.core
+      removed cleanly; disk free 416Gi.
+
+      - Product version unchanged at 0.21.3 (no SemVer bump, no git tag).
+
+
+      Closure summary (#1–#17, #19–#26, #28–#30):
+
+      - #1–#5: Inbox policy routing & mutual exclusion + README/architecture.html
+      updates; built-in CLI flags reserved before plugin flags, boolean `=value` rejected,
+      `--flag=-value` allowed; listen_session commits listen before rename with maintenance
+      warning & blank agent about fallback; `local` hub URL invariant, no legacy `natsUrl`,
+      user validation, and daemon `/control` notify on CLI setup mutations; strict
+      protocol error code validation (500 fallback) and `Transfer-Encoding` 400 rejection
+      in daemon HTTP.
+
+      - #6–#11: `kv` invalidation on attach/redeem and payload-free hint on workspace->self
+      transition; serviceIdentity-scoped bot cursor/dedup/reply correlation isolation;
+      decoupled `human_observed_at` vs `directory_observed_at`; globally bounded <=32
+      reservations per tick and pre-send backpressure without remote attempt increment;
+      diagnostic Telegram fallback refuses fabricated cursor offset; trimmed OIDC
+      username claims with sub fallback.
+
+      - #12–#17: Agent heartbeat acquires `registration_lock(hub)`; transient probe
+      revocation guarded on `lease_until_ms` and active `''DISPATCHING''`; `send_from`
+      dedup tuple-array hash with guarded fallbacks; post-commit local SQLite failure
+      isolated with `maintenance_warning`; `ui_ipc::bound_fields` token/invite exemptions
+      and idle-retired `auto_listen` activity revision guard across both modes; Claude
+      badge inode ownership, Pi `commandGen` fence & config parse surfacing, symlink-preserving
+      bundle copy + required assets + shim error propagation, process-group cleanup,
+      and `tap_ssh` `cleanup_steps`.
+
+      - #19–#26, #28–#30: Strengthened test oracles, panic-aware drops, RAII guards,
+      shared `cli_value.rs` / `http_boundary.rs` / `subprocess.rs` / `state/activity.rs`
+      / `setup/app_bundle.rs` / `hub/http.rs` / `daemon/http_actions/transport.rs`,
+      projection & lookup optimizations, dead code removal, DESIGN.md §§5.2 & 8.1
+      cleanup, and test deduplication/in-process CLI unit tests.
+
+
+      Verification (run by rust-engineer in isolated worktree before rebase onto plan-only
+      commit b9ade97):
+
+      - `cargo fmt --all -- --check`: exit 0
+
+      - `git diff --check`: exit 0
+
+      - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0 (0
+      warnings)
+
+      - `cargo test -p cito-native --lib -- --test-threads=2`: 325 passed, 0 failed,
+      4 ignored
+
+      - `cargo test -p cito-native --test native daemon:: -- --test-threads=2`: 78
+      passed, 0 failed
+
+      - `cargo test -p cito-native --test native plugins:: -- --test-threads=2`: 50
+      passed, 0 failed (including dependency-free Pi TS harness)
+
+      - `python3.14 -m unittest discover -s packaging -p ''test_*.py'' -v`: 19 passed
+
+      - `node crates/cito-native/tests/support/site-clipboard.mjs`: exit 0
+
+      - `python3.14 packaging/release.py check`: exit 0 (`0.21.3`)
+
+
+      Gaps/Notes:
+
+      - #12 concurrency serialization is source-verified (no dedicated high-contention
+      stress test).
+
+      - #18, #27, #29-ui belong to v53.ui; full workspace regression/release build/3-way
+      audit run in v53.review.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §§1–6, 8; plan.yaml phase v53 step v53.core'
   - id: v53.ui
     name: 'V53 macOS Swift UI, HeadlessOracle & UI Tests: Two-Frame Pair Warning Settlement,
       Activity Key Shortcuts, Inbox Control Bar Sync, Dynamic Error Heights & UI Consolidations
