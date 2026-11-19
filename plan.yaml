@@ -16817,7 +16817,7 @@ phases:
     name: 'V52 macOS Swift UI & HeadlessOracle: Modal Focus Guard, 2-Line Word Wrapping,
       Channel State Conservation, Hit-Test/Tooltip Oracle Calibration & UI Hygiene
       (#17–#19, #20c, #25e, #26a, #27a)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - site/styles/tokens.css\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n\
@@ -16896,6 +16896,8 @@ phases:
     depends_on:
     - v52.core
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-19T03:46:16.917604Z'
   - id: v52.review
     name: 'V52 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
