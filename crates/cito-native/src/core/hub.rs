@@ -304,6 +304,9 @@ impl Drop for Subscription {
         }
     }
 }
+#[cfg(test)]
+type WorkerWaitHook = Box<dyn FnOnce() + Send>;
+
 struct Inner {
     db: Database,
     user_plugins_dir: PathBuf,
@@ -316,6 +319,8 @@ struct Inner {
     lifecycle: Mutex<()>,
     #[cfg(test)]
     worker_ticks: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    before_worker_wait: Mutex<Option<WorkerWaitHook>>,
     default_human_scope: &'static str,
 }
 #[derive(Clone)]
@@ -405,6 +410,8 @@ impl HubEngine {
                 lifecycle: Mutex::new(()),
                 #[cfg(test)]
                 worker_ticks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                before_worker_wait: Mutex::new(None),
                 default_human_scope: if auth_mode == "none" {
                     "workspace"
                 } else {
@@ -439,10 +446,18 @@ impl HubEngine {
                 .map_err(|err| eprintln!("cito hub: {err}"))
                 .is_err();
             let delay = e.worker_delay().unwrap_or(Duration::from_secs(5));
-            drop(e);
+            #[cfg(test)]
+            if failed {
+                if let Some(hook) = e.inner.before_worker_wait.lock().unwrap().take() {
+                    hook();
+                }
+            }
             let Ok(version) = changed.0.lock() else { break };
-            // Diagnostic commits made by a failed tick must not bypass its retry wait.
-            let observed = if failed { *version } else { observed };
+            if e.inner.closed.load(Ordering::SeqCst) {
+                break;
+            }
+            // Keep work committed during tick pending. Diagnostic-only transactions
+            // do not advance this generation, so persistent failures still back off.
             let _ = changed.1.wait_timeout_while(
                 version,
                 if failed {
@@ -450,7 +465,7 @@ impl HubEngine {
                 } else {
                     delay
                 },
-                |v| *v == observed,
+                |v| *v == observed && !e.inner.closed.load(Ordering::SeqCst),
             );
         });
         *engine
@@ -1192,7 +1207,7 @@ impl HubEngine {
         }
     }
     fn set_poll_error(&self, id: &str, error: Option<&str>) -> Result<(), String> {
-        self.inner.db.transaction(|c| {
+        self.inner.db.diagnostic_transaction(|c| {
             let (cfg, mut state) = service(c, id)?;
             save_service(c, id, &cfg)?;
             let previous = state.to_string();
@@ -2539,6 +2554,113 @@ mod resilience_tests {
         hub.shutdown();
         let _ = std::fs::remove_dir_all(dir);
         result
+    }
+
+    // Stop a real missing-executable tick at the exact tick-to-wait boundary.
+    fn failed_worker_boundary(blocked_input: bool) -> (HubEngine, PathBuf, mpsc::Sender<()>) {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-worker-boundary-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir).unwrap();
+        let guard = hub.inner.lifecycle.lock().unwrap();
+        std::fs::create_dir_all(dir.join("missing")).unwrap();
+        *hub.inner.plugins.lock().unwrap() = vec![ChannelPlugin {
+            is_builtin: false,
+            id: "missing".into(),
+            dir: dir.join("missing"),
+            command: if blocked_input {
+                vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()]
+            } else {
+                vec![dir.join("unavailable").to_string_lossy().into_owned()]
+            },
+            manifest: json!({"kind":"human-channel","fields":[]}),
+        }];
+        let (entered, boundary) = mpsc::channel();
+        let (resume, released) = mpsc::channel();
+        *hub.inner.before_worker_wait.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(3)).unwrap();
+        }));
+        hub.inner.db.transaction(|c| save_service(c, "missing", &json!({"payload": if blocked_input { "x".repeat(128 * 1024) } else { "enabled".into() }}))).unwrap();
+        drop(guard);
+        boundary.recv_timeout(Duration::from_secs(4)).unwrap();
+        let error = hub
+            .inner
+            .db
+            .transaction(|c| service(c, "missing"))
+            .unwrap()
+            .1;
+        let error = error["poll_error"].as_str().unwrap();
+        assert!(
+            error.contains(if blocked_input {
+                "timed out"
+            } else {
+                "No such file"
+            }),
+            "{error}"
+        );
+        (hub, dir, resume)
+    }
+
+    #[test]
+    fn shutdown_at_failed_tick_wait_boundary_is_prompt() {
+        for blocked_input in [false, true] {
+            let (hub, dir, resume) = failed_worker_boundary(blocked_input);
+            let closing = hub.clone();
+            let started = std::time::Instant::now();
+            let shutdown = thread::spawn(move || closing.shutdown());
+            while !hub.inner.closed.load(Ordering::SeqCst) {
+                assert!(started.elapsed() < Duration::from_secs(1));
+                thread::yield_now();
+            }
+            resume.send(()).unwrap();
+            shutdown.join().unwrap();
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn work_committed_at_failed_tick_wait_boundary_is_not_lost() {
+        let (hub, dir, resume) = failed_worker_boundary(false);
+        let before = hub.inner.worker_ticks.load(Ordering::SeqCst);
+        // No event emission: the durable commit notifier alone must preserve the wake.
+        hub.inner.db.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES('cito.signal.node','new',?,X'7B7D')", &[json!(now_ms())]).unwrap();
+        let started = std::time::Instant::now();
+        resume.send(()).unwrap();
+        while hub.inner.worker_ticks.load(Ordering::SeqCst) == before {
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "Work inherited the failed-channel retry delay"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        hub.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persistent_failed_tick_waits_five_seconds_without_health_writes() {
+        let (hub, dir, resume) = failed_worker_boundary(false);
+        let revision = hub.inner.db.mutation_revision().unwrap();
+        let started = std::time::Instant::now();
+        resume.send(()).unwrap();
+        // The setup commit may itself have arrived during the first tick; allow
+        // that genuine pending generation to drain before observing the retry.
+        thread::sleep(Duration::from_millis(350));
+        let (retried, retry) = mpsc::channel();
+        *hub.inner.before_worker_wait.lock().unwrap() = Some(Box::new(move || {
+            retried.send(()).unwrap();
+        }));
+        retry.recv_timeout(Duration::from_secs(7)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(4800));
+        assert!(started.elapsed() < Duration::from_secs(7));
+        assert_eq!(hub.inner.db.mutation_revision().unwrap(), revision);
+        let started = std::time::Instant::now();
+        hub.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

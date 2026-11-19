@@ -339,6 +339,20 @@ impl Database {
         &self,
         action: impl FnOnce(&Connection) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.transaction_notifying(action, true)
+    }
+    /// Persist diagnostics without scheduling more work from their own commit.
+    pub(super) fn diagnostic_transaction<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.transaction_notifying(action, false)
+    }
+    fn transaction_notifying<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> Result<T, String>,
+        notify: bool,
+    ) -> Result<T, String> {
         let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
         // SAFETY: the connection lock keeps the SQLite handle exclusively owned.
         let before = unsafe { sqlite3_total_changes(conn.raw) };
@@ -358,7 +372,7 @@ impl Database {
         let changed = unsafe { sqlite3_total_changes(conn.raw) } != before;
         drop(rollback);
         drop(conn);
-        if changed {
+        if changed && notify {
             self.notify_committed();
         }
         Ok(result)
