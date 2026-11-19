@@ -16998,7 +16998,7 @@ phases:
     name: 'V52 Review Repair: Legacy OIDC Tuple Alias Guard, Bounded Channel Poll-Error
       Retry, Shutdown Login Wake, Pre-Arm Composer Settlement, Unified Config Lock
       & Unhooked Claude/Pi Hygiene (GATE-1..5, V52-14, W1..W2)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - src/macos/**\n    - site/**\n    - README.md\n    -\
@@ -17108,3 +17108,5 @@ phases:
     - v52.core
     - v52.ui
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-19T05:02:47.387680Z'
