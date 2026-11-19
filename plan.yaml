@@ -16564,7 +16564,7 @@ phases:
   name: 'V52 Lease-Before-Renewal Ordering, SSE Large-Line Resilience, Stop-All Manual
     Retirement, Modal Focus Guard & 27-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL:
     contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All 27 admitted findings (#1–#27) are closed with discriminating regression
     coverage; 3-way incremental [REQUIRES_SKILL: contract-and-simplicity] audit convergence
     (uiux-auditor, pathway-auditor, structural-auditor) on the v52 delta reaches ZERO_NEW_ISSUES
@@ -16938,7 +16938,7 @@ phases:
   - id: v52.review
     name: 'V52 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v52` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the integrated outcomes\
@@ -16998,6 +16998,63 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-19T06:10:26.852831Z'
+    done_at: '2026-11-19T06:28:29.139027+00:00'
+    evidence: 'Artifact:
+
+      - Integrated commits on main: 7045f55 (v52.core), 3a5ac6a (v52.ui), bc09210
+      (v52.fix_review), 46ac119 (v52.fix_worker_wait), evaluated at git:940ebf2e55534112646cdc796c47913abb1817dd
+      (version 0.21.3, no SemVer bump, no release tag created/moved).
+
+
+      3-Way Audit & Independent Gate Convergence:
+
+      - uiux-auditor (verifier.report.v2): COMPLETED + PROVEN (POSITIVE_EVIDENCE,
+      valid:true, binding_checked:true, findings=[], uninspected_gaps=NONE)
+
+      - structural-auditor (Round 1 + Delta + Delta 2 verifier.report.v2): COMPLETED
+      + PROVEN (POSITIVE_EVIDENCE, valid:true, binding_checked:true, findings=[],
+      uninspected_gaps=NONE)
+
+      - pathway-auditor (Round 1 + Delta + Delta 2 verifier.report.v2): COMPLETED
+      + PROVEN (POSITIVE_EVIDENCE, valid:true, binding_checked:true, findings=[],
+      uninspected_gaps=NONE; PATH-1..4 and PATH-DELTA-1 closed)
+
+      - gate-reviewer (PHASE_GATE FULL -> DELTA -> DELTA 2 gate.report.v2): PASS (POSITIVE_GATE_EVIDENCE,
+      valid:true, binding_checked:true, findings=[], V52-05 and V52-FULL-REGRESSION
+      PROVEN; live 128 KiB configure failure + SIGTERM exit 2.062s, concurrent work
+      wake 2.242s, HubEngine::shutdown 2.184s)
+
+
+      Full Post-Convergence Verification (clean detached worktree .vectl/worktrees/v52-verify,
+      removed after check):
+
+      - cargo fmt --all -- --check -> Passed (exit 0)
+
+      - git diff --check -> Passed (exit 0)
+
+      - cargo clippy --workspace --all-targets --locked -- -D warnings -> Passed (0
+      warnings)
+
+      - cargo test --workspace --locked -- --test-threads=2 -> 606 passed, 0 failed,
+      4 ignored (reparented via fork->setsid->fork outside live Pi ancestry, preserving
+      all guards/assertions)
+
+      - cargo build --release --locked -> Passed (exit 0)
+
+      - /Users/tefx/.local/bin/python3.12 packaging/release.py check -> 0.21.3 (exit
+      0)
+
+      - /Users/tefx/.local/bin/python3.12 -m unittest discover -s packaging -p ''test_*.py''
+      -v -> 19 passed
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed (exit 0)
+
+      - /usr/bin/ruby -c packaging/homebrew/cito.rb -> Syntax OK (exit 0)
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1-6), AGENTS.md, plan.yaml#v52'
   - id: v52.fix_review
     name: 'V52 Review Repair: Legacy OIDC Tuple Alias Guard, Bounded Channel Poll-Error
       Retry, Shutdown Login Wake, Pre-Arm Composer Settlement, Unified Config Lock
