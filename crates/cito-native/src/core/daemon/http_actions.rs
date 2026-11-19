@@ -4,23 +4,21 @@ use super::{
         advertised_hub_host, host_hub_auth_mode, host_hub_server_config, hub_name_from_url,
         lan_advertised_host, parse_hub_invite, replace_host_hub_server, tailscale_advertised_host,
     },
-    mcp::{tools_list, validate_tool_input, wait_send_receipt},
+    mcp::validate_tool_input,
     request_shutdown, shutdown_requested,
-    ui_ipc::{bounded_frame, REQUEST_LIMIT},
+    ui_ipc::bounded_frame,
     wake_daemon, DaemonService, SHUTDOWN_REQUESTED,
 };
 use crate::core::{
     config::repair_default_hub,
     identity::{listener_id, local_host_name, normalize_slug, string},
 };
-use crate::plugins::{now_ms, CITO_VERSION};
+use crate::plugins::now_ms;
 use crate::setup::{
     apply_plugin_setup, ensure_single_plugin_staged, remove_plugin_setup, set_launch_at_login,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -48,54 +46,8 @@ fn login_cache_snapshot(path: &std::path::Path) -> Option<(Value, Value)> {
     Some((cache, generation))
 }
 
-fn respond_bytes(stream: &mut TcpStream, status: u16, body: &[u8]) {
-    let header=format!("HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",body.len());
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(body);
-}
-
-pub(super) fn respond(stream: &mut TcpStream, status: u16, value: &Value) {
-    if let Ok(body) = serde_json::to_vec(value) {
-        respond_bytes(stream, status, &body);
-    }
-}
-
-fn http_client_pid(stream: &TcpStream) -> Option<u32> {
-    let remote = stream.peer_addr().ok()?.port();
-    let local = stream.local_addr().ok()?.port();
-    let mut command = Command::new("/usr/sbin/lsof");
-    command
-        .args([
-            "-nP",
-            &format!("-iTCP:{remote}"),
-            "-sTCP:ESTABLISHED",
-            "-Fpn",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let output =
-        crate::support::run_command_with_timeout(command, Duration::from_millis(250)).ok()??;
-    let expected = format!("n127.0.0.1:{remote}->127.0.0.1:{local}");
-    let mut pid = None;
-    let mut matches = std::collections::HashSet::new();
-    for line in std::str::from_utf8(&output.stdout).ok()?.lines() {
-        if let Some(value) = line.strip_prefix('p') {
-            pid = value.parse::<u32>().ok();
-        }
-        if line == expected {
-            if let Some(pid) = pid {
-                matches.insert(pid);
-            }
-        }
-    }
-    matches.remove(&std::process::id());
-    if matches.len() == 1 {
-        matches.into_iter().next()
-    } else {
-        None
-    }
-}
+mod transport;
+pub(super) use transport::{handle_http, respond};
 
 pub(super) fn interactive_login(action: &Value) -> bool {
     action["op"] == "login_hub"
@@ -370,194 +322,6 @@ fn dispatch_action_inner(
     Ok(
         json!({"ok":true,"committed":true,"user":identity["owner_user"],"authenticated":!token.is_empty()}),
     )
-}
-
-pub(super) fn handle_http(
-    mut stream: TcpStream,
-    service: Arc<Mutex<DaemonService>>,
-    health: Arc<Value>,
-) {
-    if stream.set_nonblocking(false).is_err() {
-        return;
-    }
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let Ok(copy) = stream.try_clone() else {
-        return;
-    };
-    let mut reader = BufReader::new(copy);
-    let mut request = String::new();
-    if reader
-        .by_ref()
-        .take(8193)
-        .read_line(&mut request)
-        .unwrap_or(0)
-        > 8192
-    {
-        return;
-    }
-    let mut parts = request.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("/");
-    let mut length = 0;
-    let mut headers = Map::new();
-    let mut header_size = 0;
-    loop {
-        let mut line = String::new();
-        let n = reader.by_ref().take(8193).read_line(&mut line).unwrap_or(0);
-        header_size += n;
-        if n == 0 || line == "\r\n" || line == "\n" {
-            break;
-        }
-        if header_size > 16_384 {
-            respond(&mut stream, 431, &json!({"error":"Headers too large"}));
-            return;
-        }
-        if let Some((k, v)) = line.split_once(':') {
-            let k = k.trim().to_ascii_lowercase();
-            if k == "content-length" {
-                let Ok(n) = v.trim().parse::<usize>() else {
-                    respond(&mut stream, 400, &json!({"error":"Invalid Content-Length"}));
-                    return;
-                };
-                length = n;
-            }
-            if headers.insert(k, json!(v.trim())).is_some() {
-                respond(&mut stream, 400, &json!({"error":"Duplicate header"}));
-                return;
-            }
-        }
-    }
-    let Ok(bound) = stream.local_addr() else {
-        return;
-    };
-    if let Err((status, error)) = crate::core::http_boundary::validate(
-        bound,
-        method,
-        headers.get("host").and_then(Value::as_str),
-        headers.get("origin").and_then(Value::as_str),
-        headers.get("content-type").and_then(Value::as_str),
-    ) {
-        respond(&mut stream, status, &json!({"error":error}));
-        return;
-    }
-    if length > REQUEST_LIMIT {
-        respond(
-            &mut stream,
-            413,
-            &json!({"error":"Request body exceeds 1 MiB"}),
-        );
-        return;
-    }
-    let mut body = vec![0; length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
-    }
-    if path == "/health" && method == "GET" {
-        if shutdown_requested() {
-            respond(
-                &mut stream,
-                503,
-                &json!({"ok":false,"error":"Shutting down"}),
-            );
-        } else {
-            respond(&mut stream, 200, &health);
-        }
-        return;
-    }
-    if method != "POST" {
-        respond(&mut stream, 404, &json!({"error":"Not found"}));
-        return;
-    }
-    let Ok(mut parsed) = serde_json::from_slice::<Value>(&body) else {
-        respond(&mut stream, 400, &json!({"error":"Invalid JSON"}));
-        return;
-    };
-    if matches!(path, "/ui" | "/action" | "/control") {
-        match dispatch_action(&service, &parsed, None) {
-            Ok(v) => match bounded_frame(v) {
-                Ok(bytes) => respond_bytes(&mut stream, 200, &bytes),
-                Err(error) => respond(&mut stream, 500, &json!({"ok":false,"error":error})),
-            },
-            Err(e) => respond(&mut stream, 400, &json!({"ok":false,"error":e})),
-        }
-        return;
-    }
-    let Ok(mut s) = service.lock() else {
-        return;
-    };
-    if s.closing || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-        respond(&mut stream, 503, &json!({"error":"Shutting down"}));
-        return;
-    }
-    if path != "/mcp" {
-        respond(&mut stream, 404, &json!({"error":"Not found"}));
-        return;
-    }
-    let id = parsed["id"].clone();
-    if !parsed.is_object() || parsed["jsonrpc"] != "2.0" || !parsed["method"].is_string() {
-        respond(
-            &mut stream,
-            400,
-            &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"Invalid Request"}}),
-        );
-        return;
-    }
-    let method = string(&parsed, "method").to_string();
-    if id.is_null() || method.starts_with("notifications/") {
-        respond(&mut stream, 202, &Value::Null);
-        return;
-    }
-    let result = match method.as_str() {
-        "initialize" => {
-            json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"cito","version":CITO_VERSION}})
-        }
-        "tools/list" => tools_list(),
-        "ping" => json!({}),
-        "tools/call" => {
-            if !parsed["params"].is_object() {
-                parsed["params"] = json!({});
-            }
-            let name = string(&parsed["params"], "name").to_string();
-            if !parsed["params"]["_meta"].is_object() {
-                parsed["params"]["_meta"] = json!({});
-            }
-            parsed["params"]["_meta"]["headers"] = Value::Object(headers);
-            if let Some(pid) = http_client_pid(&stream) {
-                parsed["params"]["_meta"]["_http_client"] = json!(pid);
-            }
-            let args = parsed["params"]["arguments"].clone();
-            let tool = s.tool(&name, &args, &parsed["params"]["_meta"]);
-            drop(s);
-            match tool {
-                Ok(mut payload) => {
-                    if name == "cito_send" {
-                        wait_send_receipt(&service, &mut payload);
-                    }
-                    json!({"isError":false,"content":[{"type":"text","text":payload.to_string()}]})
-                }
-                Err(error) => {
-                    let (code, message) = error
-                        .split_once(':')
-                        .unwrap_or(("INTERNAL_ERROR", error.as_str()));
-                    json!({"isError":true,"content":[{"type":"text","text":json!({"ok":false,"error":{"code":code,"message":message.trim(),"retryable":matches!(code,"NATS_UNAVAILABLE"|"AUTH_UNAVAILABLE"|"STALE_GENERATION")}}).to_string()}]})
-                }
-            }
-        }
-        _ => {
-            respond(
-                &mut stream,
-                200,
-                &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}),
-            );
-            return;
-        }
-    };
-    respond(
-        &mut stream,
-        200,
-        &json!({"jsonrpc":"2.0","id":id,"result":result}),
-    );
 }
 
 pub(super) fn mutating_action(action: &Value) -> bool {
@@ -1187,6 +951,9 @@ impl DaemonService {
                     if !crate::plugins::validate_hub_name(&name) {
                         return Err("INVALID_INPUT: Invalid hub name".into());
                     }
+                    if name == "local" && cfg["url"] != "local://" {
+                        return Err("INVALID_INPUT: The local hub must use local://".into());
+                    }
                     if editing && original == "local" && name != "local" {
                         return Err("INVALID_INPUT: Cannot rename the local hub".into());
                     }
@@ -1531,72 +1298,24 @@ impl DaemonService {
                     if op == "send_reply_from_human" {
                         // Keep the reply action's response shape while sharing the atomic Human RPC.
                         let unscoped = |key| string(&result, key).rsplit(':').next().unwrap_or("");
-                        json!({"ok":true,"signal_id":unscoped("signal_id"),"target_display":unscoped("to"),"error":null})
+                        json!({"ok":true,"signal_id":unscoped("signal_id"),"seq":result["seq"],"target_display":unscoped("to"),"error":null,"maintenance_warning":result["maintenance_warning"]})
                     } else {
                         result
                     }
                 });
             }
             "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
-                let ids = action["signal_ids"].as_array().cloned().unwrap_or_default();
                 let bulk = op == "mark_all_activity_read" || action["ack_all"] == true;
-                let rows = self.state.db.query(
-                    "SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
-                    &[json!(if bulk { action["filter"].as_str().unwrap_or(&self.activity_filter) } else { "all" })],
+                self.state.acknowledge_activity(
+                    action,
+                    &self.activity_filter,
+                    &self.host_id,
+                    bulk,
                 )?;
-                for row in rows {
-                    if !crate::core::state::joined_signal_is_current(&row) {
-                        continue;
-                    }
-                    let requested_hub = string(action, "hub");
-                    if !requested_hub.is_empty() && row["hub"] != requested_hub {
-                        continue;
-                    }
-                    if bulk
-                        && !crate::core::state::matches_activity(
-                            &row,
-                            action["query"].as_str().unwrap_or(""),
-                        )
-                    {
-                        continue;
-                    }
-                    if bulk
-                        || ids.iter().any(|id| {
-                            id == &row["signal_id"]
-                                || id.as_str()
-                                    == Some(
-                                        format!(
-                                            "{}:{}",
-                                            string(&row, "hub"),
-                                            string(&row, "signal_id")
-                                        )
-                                        .as_str(),
-                                    )
-                                || id == &row["batch_id"]
-                        })
-                    {
-                        self.state.acknowledge(
-                            string(&row, "hub"),
-                            string(&row, "listener_id"),
-                            &[row["signal_id"].clone()],
-                            &format!("{}:{}", self.host_id, string(&row, "target_harness")),
-                        )?;
-                    }
-                }
                 self.flush_acks();
             }
             "copy_activity_message" => {
-                let row = self
-                    .state
-                    .db
-                    .query(
-                        "SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status FROM local_signals s LEFT JOIN local_listeners l ON s.hub=l.hub AND s.listener_id=l.listener_id WHERE s.hub=? AND s.signal_id=?",
-                        &[json!(hub), action["signal_id"].clone()],
-                    )?
-                    .into_iter()
-                    .next()
-                    .filter(crate::core::state::joined_signal_is_current)
-                    .ok_or("LISTENER_NOT_FOUND: Message no longer available")?;
+                let row = self.state.activity_message(&hub, &action["signal_id"])?;
                 let message = string(&row, "message");
                 let characters: Vec<_> = message.chars().collect();
                 let chunks: Vec<String> = if characters.is_empty() {
@@ -1613,19 +1332,8 @@ impl DaemonService {
                 return Ok(json!({"ok":true}));
             }
             "clear_activity_history" => {
-                self.state.db.transaction(|c| {
-                    let selected = action["hub"].as_str().unwrap_or("");
-                    let signal_id = action["signal_id"].as_str().unwrap_or("");
-                    let filter=action["filter"].as_str().unwrap_or(&self.activity_filter);
-                    c.query_while("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
-                        if !crate::core::state::joined_signal_is_current(&row) || !crate::core::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { return Ok(true); }
-                        if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES(?,?,?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms()),row["hub_url"].clone(),row["principal_id"].clone()])?; }
-                        c.execute("UPDATE local_signals SET activity_hidden=1,acknowledged_at_ms=CASE WHEN ?='human' THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END WHERE hub=? AND signal_id=?", &[row["target_harness"].clone(),json!(now_ms()),row["hub"].clone(),row["signal_id"].clone()])?;
-                        crate::core::state::reconcile_wake_retry(c, string(&row, "hub"), string(&row, "listener_id"))?;
-                        Ok(true)
-                    })?;
-                    Ok(())
-                })?;
+                self.state
+                    .clear_activity_history(action, &self.activity_filter, &self.host_id)?;
                 self.flush_acks();
             }
             "listen_session" => {
@@ -1668,21 +1376,12 @@ impl DaemonService {
                 if caller["harness"] == "human" && caller["session_id"] != "default" {
                     return Err("INVALID_INPUT: Human session must be default".into());
                 }
-                if caller["harness"] != "human" {
-                    if let Some(title) = action["title"].as_str() {
-                        self.rename_session(
-                            string(&caller, "harness"),
-                            string(&caller, "session_id"),
-                            title,
-                        )?;
-                    }
-                }
                 if caller["harness"] == "human" && string(&caller, "title").trim().is_empty() {
                     caller["title"] = json!("Human");
                 }
                 let about = action["about"]
                     .as_str()
-                    .filter(|about| caller["harness"] != "human" || !about.trim().is_empty())
+                    .filter(|about| !about.trim().is_empty())
                     .unwrap_or_else(|| {
                         action["title"]
                             .as_str()
@@ -1696,7 +1395,32 @@ impl DaemonService {
                 if let Some(tag) = action.get("tag") {
                     args["tag"] = tag.clone();
                 }
-                return self.listen(&hub, &args, &caller);
+                let mut result = self.listen(&hub, &args, &caller)?;
+                if caller["harness"] != "human" {
+                    if let Some(title) = action["title"].as_str() {
+                        let renamed = self.rename_session(
+                            string(&caller, "harness"),
+                            string(&caller, "session_id"),
+                            title,
+                        );
+                        let incomplete = match renamed {
+                            Ok(value) => value["warning"].is_string(),
+                            Err(_) => true,
+                        };
+                        if incomplete {
+                            let warning =
+                                "Listening committed; session title maintenance is incomplete";
+                            let combined = result["warning"]
+                                .as_str()
+                                .map(|previous| format!("{previous}; {warning}"))
+                                .unwrap_or_else(|| warning.to_owned());
+                            result["committed"] = json!(true);
+                            result["warning"] = json!(combined);
+                            result["maintenance_warning"] = json!(warning);
+                        }
+                    }
+                }
+                return Ok(result);
             }
             "unlisten" => {
                 if !action["hub"].is_null() {

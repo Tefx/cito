@@ -67,13 +67,6 @@ fn claude_wake_distinguishes_session_switch_from_transient_socket_failure() {
     }
 }
 
-// Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
-fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
-    let mut command = vec!["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp(sys.argv[1],sys.argv[1:])", bin];
-    command.extend_from_slice(args);
-    f.spawn("python3", &command, extra)
-}
-
 // Run hooks from their actual endpoint parent, including intermediary regressions.
 fn spawn_hook_parent(f: &Fixture, extra: &[(&str, &str)]) -> usize {
     let app = f.dir.join("claude.mjs");
@@ -99,7 +92,8 @@ fs.watch(dir, (_event, name)=>{
        : req.mode==='shell'
          ? spawnSync('/bin/sh',['-c','"$TEST_HOOK"; status=$?; exit "$status"'],options)
          : spawnSync(process.env.TEST_HOOK,[],options);
- fs.writeFileSync(join(dir,`hook-result-${process.pid}`),JSON.stringify({out:result.stdout,err:result.stderr}));
+ const resultPath=join(dir,`hook-result-${process.pid}`), temporary=resultPath+'.tmp';
+ fs.writeFileSync(temporary,JSON.stringify({out:result.stdout,err:result.stderr}));fs.renameSync(temporary,resultPath);
 });
 console.log('ready');
 "#).unwrap();
@@ -3392,25 +3386,33 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
             .count(),
         2
     );
-    // Cleanup owns the badge key even if an atomic writer replaced its inode.
+    // Cleanup cannot remove a badge generation published by a different writer.
     let badge = f.state.join("claude/badges/session-a");
     fs::write(badge.with_extension("replacement"), "new badge").unwrap();
     fs::rename(badge.with_extension("replacement"), &badge).unwrap();
     f.eof(p);
     wait(|| f.exited(p));
     assert!(!path.exists());
-    assert!(!badge.exists());
+    assert_eq!(fs::read_to_string(&badge).unwrap(), "new badge");
     for signal in [libc::SIGINT, libc::SIGTERM] {
         let p = f.spawn(CLAUDE, &[], &[]);
         let mut env = f.env.clone();
         env.insert("CLAUDE_SESSION_ID".into(), "signal-session".into());
         f.send(p,json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":endpoint,"cwd":"/repo"}));
         wait(|| f.frames(p).iter().any(|frame| frame["op"] == "ready"));
+        socket(
+            &path,
+            json!({"op":"status","session_id":"signal-session","badge":"owned"}),
+        );
+        let owned = f.state.join("claude/badges/signal-session");
+        assert!(owned.exists());
         let started = std::time::Instant::now();
         f.signal(p, signal);
         wait(|| f.exited(p));
         assert!(started.elapsed() < std::time::Duration::from_millis(250));
         assert!(!path.exists());
+        assert!(!owned.exists());
+        assert_eq!(fs::read_to_string(&badge).unwrap(), "new badge");
     }
 }
 #[test]
@@ -3456,18 +3458,17 @@ fn explicit_pid_claims_reject_invalid_conflicting_and_unreachable_endpoints() {
             json!({"pi_pid":"12"}),
             json!({"pi_pid":123,"caller_pid":124}),
         ] {
-            assert_ne!(
-                f.plugin(bin, json!({"op":"resolve_caller","meta":meta}))["ok"],
-                true
-            );
+            let result = f.plugin(bin, json!({"op":"resolve_caller","meta":meta}));
+            assert_eq!(result["ok"], false);
+            assert_eq!(result["error_code"], "INVALID_INPUT", "{result}");
         }
     }
     assert_eq!(
         f.plugin(
             PI,
             json!({"op":"resolve_caller","meta":{"pi_pid":2147483647}})
-        )["ok"],
-        false
+        )["error_code"],
+        "BINDING_REQUIRED"
     );
 }
 
@@ -3500,18 +3501,25 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
             .is_none()
     );
     assert!(started.elapsed() < Duration::from_millis(500));
-    // The parent exits successfully but a descendant retains both inherited
-    // pipes. EOF must share the command deadline, with no unbounded reader join.
+    // Parent exit must kill its owned group, including inherited-pipe holders,
+    // so a successful result settles promptly without waiting for the deadline.
     let inherited =
-        "import subprocess; subprocess.Popen(['python3','-c','import time; time.sleep(10)'])";
+        "import subprocess,pathlib; p=subprocess.Popen(['python3','-c','import time; time.sleep(10)']); pathlib.Path('grandchild.pid').write_text(str(p.pid))";
     let command = f.command_builder("python3", &["-c", inherited]);
     let started = Instant::now();
     assert!(
         cito_native::support::run_command_with_timeout(command, Duration::from_millis(200))
             .unwrap()
-            .is_none()
+            .unwrap()
+            .status
+            .success()
     );
     assert!(started.elapsed() < Duration::from_millis(700));
+    let grandchild: u32 = fs::read_to_string(f.dir.join("grandchild.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(|| !cito_native::support::alive(grandchild));
 
     let dir = f.state.join("plugins/inherited");
     fs::create_dir_all(&dir).unwrap();
@@ -3519,7 +3527,7 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
     let plugin = cito_native::plugins::parse_manifest_dir(&dir, false).unwrap();
     let mut iterations = 0;
     let started = Instant::now();
-    let error = cito_native::plugins::plugin_request_with_progress(
+    let reply = cito_native::plugins::plugin_request_with_progress(
         &plugin,
         &json!({}),
         Duration::from_millis(600),
@@ -3528,8 +3536,13 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
             Ok(())
         },
     )
-    .unwrap_err();
-    assert!(error.contains("timed out"), "{error}");
+    .unwrap();
+    assert_eq!(reply, json!({}));
+    let grandchild: u32 = fs::read_to_string(f.dir.join("grandchild.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(|| !cito_native::support::alive(grandchild));
     assert!(started.elapsed() < Duration::from_millis(1100));
     assert!(
         iterations <= 12,
@@ -3677,8 +3690,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     count=1 if payload.get('limit')==1 else 2
     result=[{'update_id':41+i,'message':{'chat':{'id':1},'text':'x'*(1100000 if count==1 else 600000)}} for i in range(count)]
    else:
-    threading.Event().wait(.02)
-    result=[]
+    result=[{'message':{'text':'x'*1100000}}]
   else: result={'id':1,'username':'sample_bot'}
   raw=json.dumps({'ok':True,'result':result}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers()
@@ -3712,11 +3724,30 @@ server.serve_forever()
                 .is_some_and(|offset| offset >= 42)
         })
     });
+    wait(|| {
+        f.frames(plugin).iter().any(|row| {
+            row["op"] == "health"
+                && row["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("no parseable update_id"))
+        })
+    });
+    assert!(f
+        .frames(plugin)
+        .iter()
+        .filter(|row| row["op"] == "cursor_save")
+        .all(|row| row["cursor"]
+            .as_str()
+            .and_then(|cursor| cursor.parse::<u64>().ok())
+            .is_some_and(|cursor| cursor <= 42)));
     let polls: Vec<_> = f
         .frames(server)
         .into_iter()
         .filter(|row| row["method"] == "getUpdates")
         .collect();
+    assert!(polls.iter().all(|row| row["payload"]["offset"]
+        .as_u64()
+        .is_none_or(|offset| offset <= 42)));
     assert_eq!(polls[0]["payload"]["limit"], 25);
     assert_eq!(polls[1]["payload"]["limit"], 25);
     assert_eq!(polls[1]["payload"]["offset"], polls[0]["payload"]["offset"]);

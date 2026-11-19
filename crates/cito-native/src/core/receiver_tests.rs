@@ -163,6 +163,52 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn transient_probe_revocation_respects_dispatch_and_lease() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.seed("in-flight")?;
+    let mut row = f.row.clone();
+    row["consecutive_probe_failures"] = json!(2);
+    f.state.db.execute(
+        "UPDATE local_listeners SET lease_until_ms=?",
+        &[json!(now_ms() + 60_000)],
+    )?;
+    apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
+    assert_eq!(
+        f.state
+            .listener("local", string(&row, "listener_id"))?
+            .unwrap()["status"],
+        "ACTIVE"
+    );
+    f.state
+        .db
+        .execute("UPDATE local_listeners SET lease_until_ms=0", &[])?;
+    f.state
+        .db
+        .execute("UPDATE local_signals SET state='DISPATCHING'", &[])?;
+    apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
+    assert_eq!(
+        f.state
+            .listener("local", string(&row, "listener_id"))?
+            .unwrap()["status"],
+        "ACTIVE"
+    );
+    apply_probe(
+        &f.state,
+        &f.client,
+        &row,
+        &json!({"ok":true,"status":"closed_definitive"}),
+    )?;
+    assert_eq!(
+        f.state
+            .listener("local", string(&row, "listener_id"))?
+            .unwrap()["status"],
+        "UNLISTENED"
+    );
+    assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    Ok(())
+}
+
+#[test]
 fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), String> {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;

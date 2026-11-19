@@ -341,31 +341,65 @@ impl OidcVerifier {
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .ok_or("AUTHORIZATION_VIOLATION: missing subject")?;
-        let owner = claims["preferred_username"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                claims[crate::oidc_constants::OIDC_EMAIL_CLAIM]
-                    .as_str()
-                    .and_then(|s| s.split_once('@').map(|x| x.0))
-            })
-            .unwrap_or(sub);
-        let owner: String = owner
-            .trim()
-            .to_lowercase()
-            .chars()
-            .take(64)
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || "._-".contains(c) {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let owner = owner_user(&claims, sub);
         Ok(
             json!({"principal_id": format!("oidc:{}|{}", self.issuer, sub), "owner_user": owner, "sub": sub, "oidc": true, "token_expires_at":claims["exp"], "legacy_principal_id":format!("{}#{}",self.issuer,sub)}),
         )
+    }
+}
+
+fn owner_user(claims: &Value, sub: &str) -> String {
+    let owner = claims["preferred_username"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            claims[crate::oidc_constants::OIDC_EMAIL_CLAIM]
+                .as_str()
+                .and_then(|s| s.split_once('@').map(|x| x.0))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(sub);
+    let owner: String = owner
+        .trim()
+        .to_lowercase()
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    owner
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    #[test]
+    fn blank_username_and_email_fall_back_to_nonempty_subject() {
+        assert_eq!(
+            owner_user(
+                &json!({"preferred_username":"  ","email":" @example.com"}),
+                " Subject "
+            ),
+            "subject"
+        );
+        assert_eq!(
+            owner_user(
+                &json!({"preferred_username":"  ","email":" Alice @example.com"}),
+                "subject"
+            ),
+            "alice"
+        );
+        assert_eq!(
+            owner_user(&json!({"preferred_username":" Bob "}), "subject"),
+            "bob"
+        );
     }
 }
 

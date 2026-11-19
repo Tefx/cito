@@ -256,6 +256,11 @@ fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
         None,
     );
     client.cache_human(&json!({"record":{"listener_id":"human"}}));
+    assert!(
+        !client.observation_current(),
+        "Single-node observations cannot establish directory freshness"
+    );
+    *client.directory_observed_at.lock().unwrap() = Some(Instant::now());
     client
         .parse_rpc_response(200, br#"{"ok":true}"#, &None)
         .unwrap();
@@ -275,7 +280,9 @@ fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
     assert_eq!(client.capabilities()["rpc_status"], "disconnected");
     assert_ne!(client.connection_status(), "connected");
     client.stream_live.store(true, Ordering::SeqCst);
-    *client.observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+    *client.directory_observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+    client.cache_human(&json!({"record":{"listener_id":"human","title":"Updated"}}));
+    assert!(client.human_observed_at.lock().unwrap().unwrap().elapsed() < Duration::from_secs(1));
     assert!(!client.observation_current());
     assert_eq!(client.connection_status(), "connected");
 }

@@ -14,7 +14,7 @@ use crate::core::{
 use crate::plugins::now_ms;
 use crate::setup::inspect_launch_at_login;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 const SESSION_FIELDS: &[&str] = &[
@@ -188,7 +188,7 @@ impl DaemonService {
         });
         let projection = self.project_human(
             record.as_ref(),
-            capabilities["observation_current"] == true,
+            slot.human_observation_current(),
             capabilities["auth_valid"] == true && slot.config["url"] != "local://",
         );
         if let (Some(out), Some(fields)) = (hub.as_object_mut(), projection.as_object()) {
@@ -296,10 +296,19 @@ impl DaemonService {
             .map(|server| u64::from(server.port()))
             .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
         for item in &mut hubs {
-            item["error"] = json!(self
-                .last_hub_errors
-                .get(string(item, "name"))
-                .map(|(error, _)| error));
+            if item.get("capabilities").is_none() {
+                item["error"] = json!(self
+                    .last_hub_errors
+                    .get(string(item, "name"))
+                    .map(|(error, _)| error));
+                item["is_builtin"] = json!(item["url"] == "local://");
+                item["supports_workspace_scope"] = json!(item["url"] != "local://");
+                item["can_login"] = json!(
+                    item["enabled"] != false
+                        && item["auth_mode"] == "oidc"
+                        && item["status"] != "connected"
+                );
+            }
             let cfg = self
                 .slots
                 .get(string(item, "name"))
@@ -318,13 +327,7 @@ impl DaemonService {
                     item.extend(fields.clone());
                 }
             }
-            item["is_builtin"] = json!(item["url"] == "local://");
-            item["supports_workspace_scope"] = json!(item["url"] != "local://");
-            item["can_login"] = json!(
-                item["enabled"] != false
-                    && item["auth_mode"] == "oidc"
-                    && item["status"] != "connected"
-            );
+
             item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
         }
         let token = string(host, "token");
@@ -369,7 +372,15 @@ impl DaemonService {
         crate::core::identity::display_address(hub, &self.config.default_hub, row, &peers)
     }
 
+    fn address_book(&self) -> HashMap<&str, Vec<Value>> {
+        self.slots
+            .iter()
+            .map(|(name, slot)| (name.as_str(), address_peers(&self.state, slot)))
+            .collect()
+    }
+
     pub(super) fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
+        let addresses = self.address_book();
         rows.into_iter()
             .map(|mut row| {
                 let target = self
@@ -386,7 +397,15 @@ impl DaemonService {
                 row["target_display_address"] = if target.is_null() {
                     Value::Null
                 } else {
-                    json!(self.display_address(string(&row, "hub"), &target))
+                    json!(crate::core::identity::display_address(
+                        string(&row, "hub"),
+                        &self.config.default_hub,
+                        &target,
+                        addresses
+                            .get(string(&row, "hub"))
+                            .map(Vec::as_slice)
+                            .unwrap_or_default()
+                    ))
                 };
                 let source = row["from_listener_id"]
                     .as_str()
@@ -405,10 +424,9 @@ impl DaemonService {
                             Value::Null
                         }
                     });
-                let peers = self
-                    .slots
+                let peers = addresses
                     .get(string(&row, "hub"))
-                    .map(|slot| address_peers(&self.state, slot))
+                    .map(Vec::as_slice)
                     .unwrap_or_default();
                 row["from_display_address"] = json!(sender_display_address(
                     string(&row, "hub"),
@@ -416,7 +434,7 @@ impl DaemonService {
                     source.as_deref(),
                     string(&row, "from_user"),
                     string(&row, "from_harness"),
-                    &peers
+                    peers
                 ));
                 row["message_truncated"] = json!(string(&row, "message").len() > 512);
                 row["for_me"] = json!(target["harness"] == "human");
@@ -590,7 +608,7 @@ impl DaemonService {
             let current = self
                 .slots
                 .get(hub)
-                .is_some_and(|slot| slot.observation_current());
+                .is_some_and(|slot| slot.human_observation_current());
             let human = self.project_human(Some(row), current, result["can_set_scope"] == true);
             if let (Some(out), Some(fields)) = (result.as_object_mut(), human.as_object()) {
                 out.extend(fields.clone());
@@ -631,7 +649,7 @@ impl DaemonService {
                     )
             })
         });
-        let current = slot.is_some_and(|slot| slot.observation_current());
+        let current = slot.is_some_and(|slot| slot.human_observation_current());
         let mut projection = self.project_human(
             record.as_ref(),
             current,

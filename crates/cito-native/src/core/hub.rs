@@ -7,8 +7,10 @@ use super::lease::evaluate_node_lease;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+mod http;
+#[cfg(test)]
+use http::sse_wait;
+pub use http::HubServer;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -384,6 +386,7 @@ impl HubEngine {
             for stmt in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()){c.execute(stmt,&[])?;}
             for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","initial_human_scope","TEXT NOT NULL DEFAULT 'self'"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_pairing_codes","pairing_url","TEXT"),("hub_pairing_codes","bot_username","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
             for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
+            c.execute("CREATE INDEX IF NOT EXISTS idx_hub_kv_principal ON hub_kv(principal_id)", &[])?;
             c.execute("INSERT OR IGNORE INTO hub_meta(key,int_val) VALUES('kv_seq',0)",&[])?;
             // Existing single-message deliveries retain reply and acknowledgment mappings.
             c.execute("INSERT OR IGNORE INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) SELECT plugin_id,principal_id,external_msg_id,signal_id,COALESCE(from_listener_id,'') FROM hub_channel_deliveries WHERE external_msg_id IS NOT NULL",&[])?;
@@ -901,6 +904,9 @@ impl HubEngine {
                     &data,
                 )?;
                 events.push(json!({"type":"kv","key":key,"revision":revision,"created_ms":now,"value_b64":B64.encode(&raw),"operation":if op=="kv_delete"{"DEL"}else{"PUT"},"principal_id":owner,"scope":if op=="kv_delete"{existing.as_ref().map(|r|r["scope"].clone()).unwrap_or(Value::Null)}else{data["scope"].clone()}}));
+                if previous["scope"] == "workspace" && data["scope"] == "self" {
+                    events.push(json!({"type":"kv"}));
+                }
                 Ok(if op == "kv_delete" {
                     json!({"deleted":true})
                 } else {
@@ -1108,7 +1114,7 @@ impl HubEngine {
                         cfg[key] = json!(value);
                     }
                 }
-                save_service(c, &plugin.id, &cfg)?;
+                save_channel_service(c, &plugin, &cfg)?;
             }
             Ok(())
         })
@@ -1313,7 +1319,7 @@ impl HubEngine {
                 else if let Some(patch) = p.get("hub_config") {
                     merge_channel_config(&plugin, "hub", &mut cfg, patch, clear_secret);
                 }
-                if changed { save_service(c, id, &cfg)?; }
+                if changed { save_channel_service(c, &plugin, &cfg)?; }
                 if reset_hub {
                     c.execute("UPDATE hub_plugin_services SET service_state_json='{}' WHERE plugin_id=?", &[json!(id)])?;
                     c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE plugin_id=? AND consumed_ms IS NULL", &[json!(now_ms()), json!(id)])?;
@@ -1377,6 +1383,7 @@ impl HubEngine {
                 audit(c,s(caller,"principal_id"),"channel_configure",id,&json!({"enabled":p["enabled"]}))?;
                 Ok(())
             })?;
+            self.emit(json!({"type":"kv"}));
             let mut result = json!({"ok":true,"committed":true});
             let maintenance = (|| {
                 let process = self
@@ -1443,7 +1450,7 @@ impl HubEngine {
         }
         let instruction = required(&result, "instruction")?;
         self.inner.db.transaction(|c| {
-            if changed { save_service(c, id, &cfg)?; }
+            if changed { save_channel_service(c, &plugin, &cfg)?; }
             cancel_pair(c,id,caller)?;
             c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username,initial_human_scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(initial_human_scope(caller, self.inner.default_human_scope))])?;
@@ -1604,7 +1611,7 @@ impl HubEngine {
         send_error.map_or(Ok(()), Err)
     }
     fn reserve_deliveries(&self, plugin: &ChannelPlugin) -> Result<Vec<Value>, String> {
-        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;let reserved_ms=now_ms();c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(reserved_ms),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","claim_until_ms":reserved_ms+60_000,"already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
+        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();let in_flight=one(c,"SELECT COUNT(*) AS count FROM hub_channel_deliveries WHERE plugin_id=? AND status='in_flight' AND delivered_ms>?",&[json!(plugin.id),json!(now_ms()-60_000)])?.map(|row|n(&row,"count")).unwrap_or(0);let capacity=32usize.saturating_sub(in_flight.max(0) as usize);for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{if sends.len() >= capacity { break; }let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;let reserved_ms=now_ms();c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(reserved_ms),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","claim_until_ms":reserved_ms+60_000,"already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
@@ -1658,6 +1665,12 @@ impl HubEngine {
                 c.execute("UPDATE hub_channel_deliveries SET delivered_ms=? WHERE plugin_id=? AND reservation_id=? AND status=\'in_flight\'", &[json!(now_ms()),json!(id),json!(token)])?;
                 return Ok(Value::Null);
             }
+            if f["effect_unknown"] != true && f["retryable"] == true
+                && matches!(s(f, "error"), "Outbound queue is full" | "Delivery reservation expired before send")
+            {
+                c.execute("UPDATE hub_channel_deliveries SET status='failed',next_retry_ms=?,last_error=?,reservation_id=NULL WHERE plugin_id=? AND reservation_id=?", &[json!(now_ms()+2000),f["error"].clone(),json!(id),json!(token)])?;
+                return Ok(Value::Null);
+            }
             let attempts = n(&row, "attempts").max(0);
             let (status, retry_at) = delivery_transition(f, attempts, now_ms());
             c.execute("UPDATE hub_channel_deliveries SET status=?,external_msg_id=?,delivered_ms=?,attempts=attempts+1,next_retry_ms=?,last_error=? WHERE plugin_id=? AND reservation_id=?",
@@ -1697,6 +1710,7 @@ impl HubEngine {
             attach(c, &binding, active, s(&row, "initial_human_scope"), Some(&plugin))?;
             Ok(json!({"op":"pair_ack","code":code,"ok":true,"owner_user":row["owner_user"],"error":null}))
         })?;
+        self.emit(json!({"type":"kv"}));
         // The callback runs on the child's reader thread; configure is a one-way write.
         let process = self
             .inner
@@ -2337,7 +2351,52 @@ fn service(c: &Connection, id: &str) -> Result<(Value, Value), String> {
         .map(|r| (parse(r, "config_json"), parse(r, "service_state_json")))
         .unwrap_or((json!({}), json!({}))))
 }
+fn service_identity(plugin: &ChannelPlugin, cfg: &Value) -> Value {
+    let identity = &plugin.manifest["serviceIdentity"];
+    let Some(field) = identity["field"].as_str() else {
+        return cfg.clone();
+    };
+    let value = s(cfg, field);
+    json!(identity["separator"]
+        .as_str()
+        .filter(|separator| !separator.is_empty())
+        .and_then(|separator| value.split_once(separator).map(|(prefix, _)| prefix))
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or(value))
+}
+fn save_channel_service(
+    c: &Connection,
+    plugin: &ChannelPlugin,
+    cfg: &Value,
+) -> Result<bool, String> {
+    if plugin.manifest["serviceIdentity"]["field"]
+        .as_str()
+        .is_none()
+    {
+        return save_service(c, &plugin.id, cfg);
+    }
+    let (old, _) = service(c, &plugin.id)?;
+    let change = if service_identity(plugin, &old) != service_identity(plugin, cfg) {
+        ServiceChange::Identity
+    } else {
+        ServiceChange::SameIdentity
+    };
+    save_service_state(c, &plugin.id, cfg, change)
+}
 fn save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String> {
+    save_service_state(c, id, cfg, ServiceChange::Configuration)
+}
+enum ServiceChange {
+    Configuration,
+    SameIdentity,
+    Identity,
+}
+fn save_service_state(
+    c: &Connection,
+    id: &str,
+    cfg: &Value,
+    change: ServiceChange,
+) -> Result<bool, String> {
     let (old, _) = service(c, id)?;
     let changed = old != *cfg;
     if !changed
@@ -2350,13 +2409,20 @@ fn save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES(?,?,'{}',?) ON CONFLICT(plugin_id) DO UPDATE SET config_json=excluded.config_json,service_state_json=CASE WHEN ? THEN '{}' ELSE service_state_json END,updated_ms=excluded.updated_ms", &[json!(id),json!(cfg.to_string()),json!(now_ms()),json!(changed)])?;
-    if changed {
+    c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES(?,?,'{}',?) ON CONFLICT(plugin_id) DO UPDATE SET config_json=excluded.config_json,service_state_json=CASE WHEN ? THEN '{}' ELSE service_state_json END,updated_ms=excluded.updated_ms", &[json!(id),json!(cfg.to_string()),json!(now_ms()),json!(!matches!(change, ServiceChange::SameIdentity))])?;
+    if matches!(change, ServiceChange::Identity) {
+        c.execute(
+            "DELETE FROM hub_channel_delivery_msgs WHERE plugin_id=?",
+            &[json!(id)],
+        )?;
+        c.execute("UPDATE hub_channel_deliveries SET external_msg_id=NULL,from_listener_id=NULL,reservation_id=NULL,status=CASE WHEN status='in_flight' THEN 'effect_unknown' ELSE status END,last_error=CASE WHEN status='in_flight' THEN 'Service identity replaced during delivery; check the previous account' ELSE last_error END WHERE plugin_id=?", &[json!(id)])?;
+    }
+    if !matches!(change, ServiceChange::SameIdentity) {
         c.execute(
             "DELETE FROM hub_processed_replies WHERE plugin_id=?",
             &[json!(id)],
         )?;
-        // Credential edits retain confirmed chunk IDs and terminal unknown effects.
+        // Generic configuration edits retain confirmed chunks; identity replacement fences them.
         c.execute(
             "UPDATE hub_pairing_codes SET consumed_ms=? WHERE plugin_id=? AND consumed_ms IS NULL",
             &[json!(now_ms()), json!(id)],
@@ -2473,6 +2539,9 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
         )
     }
 }
+
+#[cfg(test)]
+mod regression_tests;
 
 #[cfg(test)]
 mod resilience_tests {
@@ -3088,6 +3157,7 @@ fn human_operation(
         reg["human_control_revision"] = json!(1);
     }
     let now = now_ms();
+    let previous_scope = reg["scope"].clone();
     super::lease::reconcile_registration_state(&mut reg, now.max(0) as u64);
     if op == "human_inbox_update" {
         let revision = reg["human_control_revision"]
@@ -3165,6 +3235,9 @@ fn human_operation(
         }
     }
     events.push(save_human(c, &id, &mut reg)?);
+    if previous_scope == "workspace" && reg["scope"] == "self" {
+        events.push(json!({"type":"kv"}));
+    }
     audit(
         c,
         pid,
@@ -3176,7 +3249,36 @@ fn human_operation(
 }
 
 fn find_human(c: &Connection, principal: &Value) -> Result<Option<String>, String> {
-    for row in c.query(&format!("{KV_SELECT} ORDER BY revision DESC"), &[])? {
+    let mut principals = Vec::new();
+    for key in [
+        "principal_id",
+        "legacy_principal_id",
+        "canonical_principal_id",
+    ] {
+        let value = s(principal, key);
+        if value.is_empty() {
+            continue;
+        }
+        principals.push(json!(value));
+        if let Some((issuer, sub)) = value
+            .strip_prefix("oidc:")
+            .and_then(|value| value.split_once('|'))
+        {
+            principals.push(json!(format!("{issuer}#{sub}")));
+        } else if value.starts_with("https://") {
+            if let Some((issuer, sub)) = value.split_once('#') {
+                principals.push(json!(format!("oidc:{issuer}|{sub}")));
+            }
+        }
+    }
+    if principals.is_empty() {
+        return Ok(None);
+    }
+    let placeholders = vec!["?"; principals.len()].join(",");
+    for row in c.query(
+        &format!("{KV_SELECT} WHERE principal_id IN ({placeholders}) ORDER BY revision DESC"),
+        &principals,
+    )? {
         if !principal_matches(s(&row, "principal_id"), principal) {
             continue;
         }
@@ -3228,369 +3330,6 @@ fn attach(
     Ok(())
 }
 
-/// Stopping the listener never closes its shared engine. The daemon closes the engine last.
-pub struct HubServer {
-    pub address: SocketAddr,
-    pub(super) auth: Arc<HubAuth>,
-    stop: Arc<AtomicBool>,
-    wake: Arc<crate::support::WakePipe>,
-    sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
-    thread: Mutex<Option<JoinHandle<()>>>,
-}
-impl HubServer {
-    pub fn shutdown(&self) {
-        if self.stop.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        self.wake.notify();
-        if let Ok(sockets) = self.sockets.lock() {
-            for socket in sockets.values() {
-                let _ = socket.shutdown(Shutdown::Both);
-            }
-        }
-        if let Ok(mut thread) = self.thread.lock() {
-            if let Some(thread) = thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
-    pub fn port(&self) -> u16 {
-        self.address.port()
-    }
-}
-impl Drop for HubServer {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-impl HubEngine {
-    pub fn start_server(
-        &self,
-        bind: &str,
-        port: u16,
-        auth: impl Into<Arc<HubAuth>>,
-    ) -> Result<HubServer, String> {
-        let listener = TcpListener::bind((bind, port)).map_err(|e| e.to_string())?;
-        let address = listener.local_addr().map_err(|e| e.to_string())?;
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let wake = Arc::new(crate::support::WakePipe::new()?);
-        let worker_wake = wake.clone();
-        let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
-        let auth = auth.into();
-        let (engine, st, ss, worker_auth) =
-            (self.clone(), stop.clone(), sockets.clone(), auth.clone());
-        let handle = thread::spawn(move || {
-            let mut workers: Vec<JoinHandle<()>> = Vec::new();
-            let mut next_socket = 0u64;
-            while !st.load(Ordering::SeqCst) {
-                use std::os::fd::AsRawFd;
-                let mut ready = [
-                    libc::pollfd {
-                        fd: listener.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: worker_wake.read_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                ];
-                if crate::support::poll_until(&mut ready, None).is_err()
-                    || st.load(Ordering::SeqCst)
-                {
-                    break;
-                }
-                for i in (0..workers.len()).rev() {
-                    if workers[i].is_finished() {
-                        let _ = workers.swap_remove(i).join();
-                    }
-                }
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        if st.load(Ordering::SeqCst) {
-                            let _ = stream.shutdown(Shutdown::Both);
-                            break;
-                        }
-                        if workers.len() >= 256 {
-                            let mut stream = stream;
-                            let _ = http_json(
-                                &mut stream,
-                                503,
-                                &json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Too many connections"}}),
-                            );
-                            continue;
-                        }
-                        next_socket += 1;
-                        let socket_id = next_socket;
-                        if let Ok(clone) = stream.try_clone() {
-                            if let Ok(mut list) = ss.lock() {
-                                list.insert(socket_id, clone);
-                            }
-                        }
-                        let (e, a, s, connections) =
-                            (engine.clone(), worker_auth.clone(), st.clone(), ss.clone());
-                        let shutdown_wake = worker_wake.clone();
-                        workers.push(thread::spawn(move || {
-                            handle_http(stream, e, a, s, address, shutdown_wake);
-                            if let Ok(mut list) = connections.lock() {
-                                list.remove(&socket_id);
-                            }
-                        }));
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(e) => {
-                        eprintln!("cito hub: accept: {e}");
-                        break;
-                    }
-                }
-            }
-            if let Ok(sockets) = ss.lock() {
-                for socket in sockets.values() {
-                    let _ = socket.shutdown(Shutdown::Both);
-                }
-            }
-            for worker in workers {
-                let _ = worker.join();
-            }
-        });
-        Ok(HubServer {
-            address,
-            auth,
-            stop,
-            wake,
-            sockets,
-            thread: Mutex::new(Some(handle)),
-        })
-    }
-}
-fn http_json(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {
-    let bytes = body.to_string();
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        409 => "Conflict",
-        413 => "Payload Too Large",
-        415 => "Unsupported Media Type",
-        _ => "Service Unavailable",
-    };
-    write!(stream,"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",bytes.len(),bytes)?;
-    stream.flush()
-}
-fn http_error(stream: &mut TcpStream, err: &str) {
-    let code = err.split(':').next().unwrap_or("INTERNAL_ERROR");
-    let status = match code {
-        "FORBIDDEN" | "PERMISSIONS_VIOLATION" | "FORBIDDEN_TARGET_SCOPE" => 403,
-        "AUTHORIZATION_VIOLATION" => 401,
-        "10037" | "10059" | "NOT_FOUND" | "LISTENER_NOT_FOUND" => 404,
-        "10071" => 409,
-        "AUTH_UNAVAILABLE" | "UNAVAILABLE" => 503,
-        _ => 400,
-    };
-    let mut error = json!({"code":code,"message":err});
-    if let Ok(number) = code.parse::<u64>() {
-        error["api_error"] = json!({"err_code":number});
-    }
-    let _ = http_json(stream, status, &json!({"ok":false,"error":error}));
-}
-fn sse_wait(expires_at: Option<f64>, now: i64) -> Duration {
-    let seconds = expires_at
-        .map(|expires| (expires - now.max(0) as f64 / 1000.0).clamp(0.0, 30.0))
-        .unwrap_or(30.0);
-    Duration::from_secs_f64(seconds)
-}
-fn handle_http(
-    mut stream: TcpStream,
-    engine: HubEngine,
-    auth: Arc<HubAuth>,
-    stop: Arc<AtomicBool>,
-    bound: SocketAddr,
-    shutdown_wake: Arc<crate::support::WakePipe>,
-) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let result = (|| -> Result<(), String> {
-        // Darwin accept() inherits the listener's O_NONBLOCK. Client workers use
-        // blocking reads with timeouts, including between fragmented headers.
-        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-        let mut line = String::new();
-        reader
-            .by_ref()
-            .take(8193)
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        if line.len() > 8192 {
-            return Err("INVALID_INPUT: request line too long".into());
-        }
-        let parts: Vec<_> = line.split_whitespace().collect();
-        if parts.len() != 3 {
-            return Err("INVALID_INPUT: malformed HTTP request".into());
-        }
-        let method = parts[0].to_owned();
-        let path = parts[1].split('?').next().unwrap_or("/").to_owned();
-        let mut headers = HashMap::new();
-        let mut size = 0;
-        loop {
-            let mut line = String::new();
-            let bytes = reader
-                .by_ref()
-                .take(65537)
-                .read_line(&mut line)
-                .map_err(|e| e.to_string())?;
-            size += bytes;
-            if bytes == 0 || size > 65536 {
-                return Err("INVALID_INPUT: truncated or oversized HTTP headers".into());
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-            let (k, v) = line
-                .split_once(':')
-                .ok_or("INVALID_INPUT: malformed HTTP header")?;
-            let key = k.trim().to_ascii_lowercase();
-            if headers.insert(key, v.trim().to_owned()).is_some() {
-                return Err("INVALID_INPUT: duplicate header".into());
-            }
-        }
-        if let Err((status, message)) = crate::core::http_boundary::validate_hub(
-            bound,
-            &method,
-            headers.get("host").map(String::as_str),
-            headers.get("origin").map(String::as_str),
-            headers.get("content-type").map(String::as_str),
-            matches!(auth.mode.as_str(), "token" | "oidc"),
-        ) {
-            http_json(
-                &mut stream,
-                status,
-                &json!({"ok":false,"error":{"message":message}}),
-            )
-            .map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-        if path == "/" && method == "GET" {
-            let body = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Cito Hub</title><style>body{background:#12151c;color:#f3f4f6;font:18px system-ui;max-width:42rem;margin:12vh auto;padding:2rem}h1{color:#7dd3fc}code{color:#7dd3fc}</style><body><h1>Cito Hub</h1><p>This Hub is running. On another Mac, open Cito → Settings… → Hubs &amp; Network → Join from Clipboard to connect using a copied invite.</p><p>Your shared inbox connects all attached Macs and channels. Incoming messages appear in the menu bar unread badge and Activity, where you can reply in one line.</p></body></html>";
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
-                .map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-        if path == "/health" && method == "GET" {
-            http_json(&mut stream, 200, &auth.health()).map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-        let principal = auth.authenticate(&headers)?;
-        if path == "/v1/events" && method == "GET" {
-            let expires_at = principal["token_expires_at"].as_f64();
-            let events = engine.subscribe(Some(principal))?;
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n\r\n:ok\n\n").map_err(|e|e.to_string())?;
-            while !stop.load(Ordering::SeqCst)
-                && !engine.inner.closed.load(Ordering::SeqCst)
-                && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
-            {
-                use std::os::fd::AsRawFd;
-                let wait = sse_wait(expires_at, now_ms());
-                let mut fds = [
-                    libc::pollfd {
-                        fd: events.wake.read_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: stream.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: shutdown_wake.read_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                ];
-                let event = match events.try_recv() {
-                    Ok(frame) => Ok(frame),
-                    Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
-                    Err(mpsc::TryRecvError::Empty) => {
-                        events.wake.drain();
-                        // Recheck after draining so a concurrent commit cannot lose its wake byte.
-                        match events.try_recv() {
-                            Ok(frame) => Ok(frame),
-                            Err(mpsc::TryRecvError::Disconnected) => {
-                                Err(mpsc::TryRecvError::Disconnected)
-                            }
-                            Err(mpsc::TryRecvError::Empty) => {
-                                crate::support::poll_until(
-                                    &mut fds,
-                                    Some(std::time::Instant::now() + wait),
-                                )?;
-                                if fds[1].revents != 0 || stop.load(Ordering::SeqCst) {
-                                    break;
-                                }
-                                events.try_recv()
-                            }
-                        }
-                    }
-                }
-                .map_err(|error| match error {
-                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
-                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
-                });
-                if expires_at.is_some_and(|exp| now_ms().max(0) as f64 / 1000.0 >= exp) {
-                    break;
-                }
-                match event {
-                    Ok(frame) => {
-                        write!(stream, "data: {frame}\n\n").map_err(|e| e.to_string())?;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        stream
-                            .write_all(b":keepalive\n\n")
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Err(_) => break,
-                }
-                stream.flush().map_err(|e| e.to_string())?;
-            }
-            return Ok(());
-        }
-        if path != "/v1/rpc" || method != "POST" {
-            return Err("NOT_FOUND: Not found".into());
-        }
-        if headers.contains_key("transfer-encoding") {
-            return Err("INVALID_INPUT: transfer-encoding is unsupported".into());
-        }
-        let length = headers
-            .get("content-length")
-            .map(|s| s.parse::<usize>())
-            .transpose()
-            .map_err(|_| "INVALID_INPUT: invalid content-length")?
-            .unwrap_or(0);
-        if length > 8 * 1024 * 1024 {
-            return Err("INVALID_INPUT: RPC body exceeds 8 MiB".into());
-        }
-        let mut body = vec![0u8; length];
-        reader
-            .read_exact(&mut body)
-            .map_err(|e| format!("INVALID_INPUT: incomplete body: {e}"))?;
-        let body: Value =
-            serde_json::from_slice(&body).map_err(|_| "INVALID_INPUT: Invalid JSON body")?;
-        let op = required(&body, "op")?;
-        let params = body.get("params").unwrap_or(&body);
-        let result = engine.rpc(op, params, Some(&principal))?;
-        http_json(&mut stream, 200, &json!({"ok":true,"result":result}))
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    })();
-    if let Err(err) = result {
-        http_error(&mut stream, &err);
-    }
-    let _ = stream.shutdown(Shutdown::Both);
-}
-
 #[cfg(test)]
 #[path = "../../tests/hub/cases.rs"]
 mod tests;
@@ -3625,10 +3364,7 @@ fn cli_options(args: &[String]) -> Result<HashMap<String, String>, String> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        let (key, inline) = arg
-            .split_once('=')
-            .map(|(k, v)| (k, Some(v)))
-            .unwrap_or((arg.as_str(), None));
+        let key = arg.split_once('=').map(|(key, _)| key).unwrap_or(arg);
         if ![
             "--port",
             "--bind",
@@ -3647,15 +3383,9 @@ fn cli_options(args: &[String]) -> Result<HashMap<String, String>, String> {
                 format!("Unexpected argument: {arg}")
             });
         }
-        let value = if let Some(v) = inline {
-            v.to_owned()
-        } else {
-            i += 1;
-            args.get(i)
-                .filter(|s| !s.starts_with('-'))
-                .cloned()
-                .ok_or_else(|| format!("Missing value for {key} ({})", cli_setting(key)))?
-        };
+        let value = super::cli_value::read(args, &mut i, key, true)
+            .map_err(|_| format!("Missing value for {key} ({})", cli_setting(key)))?
+            .to_owned();
         if value.trim().is_empty() {
             return Err(format!("{key} ({}) must not be empty", cli_setting(key)));
         }

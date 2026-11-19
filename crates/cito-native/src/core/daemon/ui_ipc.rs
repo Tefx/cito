@@ -31,7 +31,17 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
         Value::String(s) => {
             if matches!(
                 key,
-                "request_id" | "url" | "issuer" | "client_id" | "clientId" | "value" | "cwd"
+                "request_id"
+                    | "url"
+                    | "issuer"
+                    | "client_id"
+                    | "clientId"
+                    | "value"
+                    | "cwd"
+                    | "token"
+                    | "invite_command"
+                    | "tailscale_invite_command"
+                    | "lan_invite_command"
             ) {
                 return;
             }

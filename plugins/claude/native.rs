@@ -1094,8 +1094,10 @@ impl SidecarCleanup {
                 return;
             }
             guard.0 = true;
-            for path in guard.1.keys() {
-                let _ = fs::remove_file(path);
+            for (path, inode) in &guard.1 {
+                if fs::symlink_metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == *inode) {
+                    let _ = fs::remove_file(path);
+                }
             }
             guard.1.clear();
             if fs::metadata(&self.path)
@@ -1190,7 +1192,7 @@ fn latest_transcript(req: &Value, cwd: &str) -> Option<(String, u64)> {
                 .to_str()?
                 .strip_suffix(".jsonl")?
                 .to_string();
-            if name.len() != 36 || !name.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            if !crate::is_valid_transcript_uuid(&name) {
                 return None;
             }
             let time = entry
@@ -1243,14 +1245,10 @@ fn sidecar(req: Value) -> Result<()> {
     });
     let explicit = metadata_session(&req)?;
     // An unhooked process cannot attribute a workspace transcript to itself.
-    let initial: Option<(String, u64)> = None;
     let fallback = format!("claude-{p}");
-    let mut alias_active = explicit.is_none() && initial.is_none();
+    let mut alias_active = explicit.is_none();
     let mut first_transcript: Option<String> = None;
-    let mut current = explicit
-        .clone()
-        .or_else(|| initial.as_ref().map(|r| r.0.clone()))
-        .unwrap_or_else(|| fallback.clone());
+    let mut current = explicit.clone().unwrap_or_else(|| fallback.clone());
     let mut last_active = now_ms();
     let mut delivered = std::collections::VecDeque::<String>::new();
     sidecar_watchdog(cleanup.clone());

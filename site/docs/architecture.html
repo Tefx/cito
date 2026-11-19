@@ -205,6 +205,7 @@ cito unlisten [--all] [--hub &lt;hub&gt;] [--harness &lt;id&gt; [--session &lt;s
 cito find [--hub &lt;hub&gt;] [--user|-u &lt;user&gt;] [--host &lt;host&gt;] [--repo &lt;repo&gt;] [--query|-q &lt;query&gt;] [--harness &lt;id&gt;|--pi|--codex|--claude] [--limit &lt;1..50&gt;] [--json] [query...]
 cito send --to &lt;target&gt; --message|-m &lt;text&gt; [--hub &lt;hub&gt;] [--reply-to|--in-reply-to &lt;signal_id&gt;] [--idempotency-key &lt;key&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito inbox pause|resume [--hub &lt;hub&gt;] [--scope &lt;self|workspace&gt;] [--team] [--about &lt;text&gt;]
+cito inbox [--hub &lt;hub&gt;] [--scope &lt;self|workspace&gt;] [--team] [--about &lt;text&gt;]
 cito inbox [--hub &lt;hub&gt;] [--unread|--peek|--no-ack] [--ack-all] [--ack &lt;id&gt;]... [--limit &lt;1..1000&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--pi[=&lt;id&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito daemon
 cito mcp-stdio

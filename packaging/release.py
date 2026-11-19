@@ -527,7 +527,7 @@ def tap_ssh(root):
         run(["ssh-add", "-"], input=key + "\n", env=env)
         yield env
     finally:
-        run(["ssh-agent", "-k"], env=env)
+        cleanup_steps(lambda: run(["ssh-agent", "-k"], env=env))
 
 
 def tap_allows_update(current, desired, expected):

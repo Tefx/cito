@@ -38,7 +38,14 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":claude_pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {}",
+            f.output(sidecar, true)
+        );
+        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
+    });
     let foreign = f.plugin(
         CODEX,
         json!({"op":"resolve_caller","cwd":"/repo",
@@ -117,10 +124,12 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let seeded = f.tool("cito_status", json!({}),
         json!({"expected_harness":"codex","threadId":"thread-a","_stdio":{"endpoint_pid":claude_pid},"cwd":"/repo"}));
     assert_eq!(seeded["ok"], true, "{seeded}");
+    assert_eq!(seeded["registered"], false, "{seeded}");
     source.execute("DELETE FROM threads", &[]).unwrap();
     let routed = f.tool("cito_status", json!({}),
         json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
     assert_eq!(routed["ok"], true, "{routed}");
+    assert_eq!(routed["registered"], true, "{routed}");
     // A stale command must reject the cache before checking conflicting metadata.
     for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
         let cached =
@@ -729,7 +738,14 @@ sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {}",
+            f.output(sidecar, true)
+        );
+        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
+    });
     f.daemon(&[]);
     let seeded = f.tool(
         "cito_status",
@@ -921,7 +937,7 @@ fn pending_business_ack_requires_original_url_and_principal() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let meta = f.provider("delivered");
-    f.daemon(&[]);
+    let daemon = f.daemon(&[]);
     let human = f
         .rows("SELECT * FROM local_listeners WHERE hub='local' AND harness='human'")
         .remove(0);
@@ -957,6 +973,26 @@ fn pending_business_ack_requires_original_url_and_principal() {
             .unwrap()
             .is_empty()
     });
+    // Freeze the competing authority reconciler while injecting a synthetic local
+    // authority. Keep the real acknowledge path and restore/resume before RPCs.
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            // SAFETY: this fixture owns the stopped, unreaped child throughout the guard.
+            unsafe {
+                libc::kill(self.0 as i32, libc::SIGCONT);
+            }
+        }
+    }
+    let resume = Resume(f.pid(daemon));
+    f.signal(daemon, libc::SIGSTOP);
+    let mut status = 0;
+    // SAFETY: waitpid observes our owned child's stop event without reaping it.
+    assert_eq!(
+        unsafe { libc::waitpid(f.pid(daemon) as i32, &mut status, libc::WUNTRACED) },
+        f.pid(daemon) as i32
+    );
+    assert!(libc::WIFSTOPPED(status));
     state.execute("UPDATE local_listeners SET hub_url=\'https://replacement.example.com\',principal_id=\'none#bob\' WHERE listener_id=?", std::slice::from_ref(&human["listener_id"])).unwrap();
     let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
     local
@@ -1004,6 +1040,7 @@ fn pending_business_ack_requires_original_url_and_principal() {
         .remove(0);
     assert_eq!(ack["hub_url"], "local://");
     assert_eq!(ack["principal_id"], human["principal_id"]);
+    drop(resume);
     f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
     assert!(state
         .query(
@@ -1859,6 +1896,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         f.tool("cito_find", json!({"harness":"1agent"}), json!({}))["listeners"],
         json!([])
     );
+    let expected_listeners = f.tool("cito_find", json!({}), json!({}))["listeners"].clone();
     for v in [
         json!([]),
         json!(42),
@@ -1870,7 +1908,9 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
             assert_eq!(http(f.port, path, Some(&v)).0, 400);
         }
         assert_eq!(f.mcp("tools/call", v.clone())["isError"], true);
-        assert_ne!(f.tool_result("cito_find", json!({}), v)["isError"], true);
+        let result = f.tool("cito_find", json!({}), v);
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["listeners"], expected_listeners, "{result}");
     }
     assert_eq!(f.mcp("ping", json!({})), json!({}));
 }

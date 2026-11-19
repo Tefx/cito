@@ -1,0 +1,278 @@
+//! Application bundle assembly with symlink-preserving resource copying.
+use super::*;
+
+pub(super) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&path).map_err(|e| e.to_string())?, &target)
+                .map_err(|e| e.to_string())?;
+        } else if metadata.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            fs::copy(&path, &target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn same_tree(source: &Path, target: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (fs::symlink_metadata(source), fs::symlink_metadata(target)) else {
+        return false;
+    };
+    if left.file_type() != right.file_type() {
+        return false;
+    }
+    if left.file_type().is_symlink() {
+        return fs::read_link(source).ok() == fs::read_link(target).ok();
+    }
+    if left.is_dir() {
+        let names = |path: &Path| -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
+            fs::read_dir(path)
+                .ok()?
+                .map(|entry| entry.ok().map(|entry| entry.file_name()))
+                .collect()
+        };
+        let Some(names) = names(source).filter(|left| Some(left.clone()) == names(target)) else {
+            return false;
+        };
+        return names
+            .into_iter()
+            .all(|name| same_tree(&source.join(&name), &target.join(&name)));
+    }
+    if left.len() != right.len() || left.permissions().mode() != right.permissions().mode() {
+        return false;
+    }
+    use std::io::Read;
+    let (Ok(mut left), Ok(mut right)) = (fs::File::open(source), fs::File::open(target)) else {
+        return false;
+    };
+    let (mut a, mut b) = ([0u8; 65536], [0u8; 65536]);
+    loop {
+        let Ok(count) = left.read(&mut a) else {
+            return false;
+        };
+        if right.read_exact(&mut b[..count]).is_err() || a[..count] != b[..count] {
+            return false;
+        }
+        if count == 0 {
+            return true;
+        }
+    }
+}
+
+fn dir_bytes(path: &Path) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    let Ok(rd) = fs::read_dir(path) else { return 0 };
+    rd.flatten().map(|e| dir_bytes(&e.path())).sum()
+}
+
+pub fn build_mac_app_bundle_native(
+    dest_dir: Option<&str>,
+    state_dir: &Path,
+    plugins: &LoadedPlugins,
+) -> Result<(PathBuf, u64), String> {
+    build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
+}
+
+pub(super) fn resolve_app_bundle_path(
+    dest_dir: Option<&str>,
+    state_dir: &Path,
+) -> Result<PathBuf, String> {
+    let base_dest = match dest_dir {
+        Some(dest) => expand_home_dir(dest, "destDir", None)?,
+        None => state_dir.join("Applications"),
+    };
+    Ok(if base_dest.to_string_lossy().ends_with(".app") {
+        base_dest
+    } else {
+        base_dest.join("Cito.app")
+    })
+}
+
+pub(super) fn build_mac_app_bundle_from_root(
+    dest_dir: Option<&str>,
+    state_dir: &Path,
+    plugins: &LoadedPlugins,
+    pkg_root: &Path,
+) -> Result<(PathBuf, u64), String> {
+    let destination = resolve_app_bundle_path(dest_dir, state_dir)?;
+    let app_path =
+        destination.with_file_name(format!(".Cito-{}.app", crate::plugins::random_hex(8)));
+    struct Candidate(PathBuf);
+    impl Drop for Candidate {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _candidate = Candidate(app_path.clone());
+    let contents_dir = app_path.join("Contents");
+    let macos_dir = contents_dir.join("MacOS");
+    let helpers_dir = contents_dir.join("Helpers");
+    let resources_dir = contents_dir.join("Resources");
+
+    let _ = fs::remove_dir_all(&app_path);
+    fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&helpers_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
+
+    let info_plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+           <key>CFBundleIdentifier</key>\n\
+           <string>one.tefx.cito</string>\n\
+           <key>CFBundleName</key>\n\
+           <string>Cito</string>\n\
+           <key>CFBundleDisplayName</key>\n\
+           <string>Cito</string>\n\
+           <key>CFBundleExecutable</key>\n\
+           <string>Cito</string>\n\
+           <key>CFBundleIconFile</key>\n\
+           <string>AppIcon</string>\n\
+           <key>CFBundleIconName</key>\n\
+           <string>AppIcon</string>\n\
+           <key>CFBundleShortVersionString</key>\n\
+           <string>{CITO_VERSION}</string>\n\
+           <key>CFBundleVersion</key>\n\
+           <string>{CITO_VERSION}</string>\n\
+           <key>CFBundlePackageType</key>\n\
+           <string>APPL</string>\n\
+           <key>LSUIElement</key>\n\
+           <true/>\n\
+           <key>LSMinimumSystemVersion</key>\n\
+           <string>13.0</string>\n\
+         </dict>\n\
+         </plist>\n"
+    );
+    fs::write(contents_dir.join("Info.plist"), info_plist).map_err(|e| e.to_string())?;
+
+    let launcher = r#"#!/bin/sh
+set -e
+INVOKED_AS="$(basename "$0")"
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$DIR/$TARGET" ;;
+  esac
+done
+APP_CONTENTS="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}"
+if [ "$INVOKED_AS" = "cito-mcp" ]; then
+  export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
+  if [ "$#" -eq 0 ]; then
+    exec "$APP_CONTENTS/Helpers/cito-native" mcp-stdio
+  fi
+  exec "$APP_CONTENTS/Helpers/cito-native" "$@"
+fi
+if [ "$#" -eq 0 ]; then
+  exec "$APP_CONTENTS/Helpers/cito-native" daemon
+fi
+case "$1" in
+  -psn_*)
+    shift
+    exec "$APP_CONTENTS/Helpers/cito-native" daemon "$@"
+    ;;
+esac
+exec "$APP_CONTENTS/Helpers/cito-native" "$@"
+"#;
+    let launcher_path = macos_dir.join("Cito");
+    fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
+    let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));
+
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let helper_native = helpers_dir.join("cito-native");
+    fs::copy(&exe, &helper_native).map_err(|e| e.to_string())?;
+    let _ = fs::set_permissions(&helper_native, fs::Permissions::from_mode(0o755));
+
+    for ui_cand in [
+        pkg_root.join("bin/cito-ui-darwin-arm64"),
+        pkg_root.join("Helpers/cito-ui"),
+    ] {
+        if ui_cand.is_file() {
+            let helper_ui = helpers_dir.join("cito-ui");
+            fs::copy(&ui_cand, &helper_ui).map_err(|e| e.to_string())?;
+            fs::set_permissions(&helper_ui, fs::Permissions::from_mode(0o755))
+                .map_err(|e| e.to_string())?;
+            break;
+        }
+    }
+
+    if !helpers_dir.join("cito-ui").is_file() {
+        return Err("App bundle requires cito-ui".into());
+    }
+
+    for icon_cand in [
+        pkg_root.join("bin/AppIcon.icns"),
+        pkg_root.join("Resources/AppIcon.icns"),
+    ] {
+        if icon_cand.is_file() {
+            fs::copy(&icon_cand, resources_dir.join("AppIcon.icns")).map_err(|e| e.to_string())?;
+            break;
+        }
+    }
+
+    if !resources_dir.join("AppIcon.icns").is_file() {
+        return Err("App bundle requires AppIcon.icns".into());
+    }
+
+    if let Some(mut plugins_src) = resolve_builtin_plugins_dir() {
+        if is_staged_plugins_root(&plugins_src, state_dir) {
+            // Runtime staging may omit overridden IDs; keep their bundled fallback in the App.
+            plugins_src = resolve_bundled_plugins_root().unwrap_or(plugins_src);
+        }
+        copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"))?;
+    }
+
+    ensure_cli_shims_native(state_dir, plugins)?;
+    let _ = Command::new("/usr/bin/xattr")
+        .args(["-cr", &app_path.to_string_lossy()])
+        .status();
+
+    let sign_id = env::var("CITO_CODESIGN_IDENTITY")
+        .or_else(|_| env::var("APPLE_SIGNING_IDENTITY"))
+        .unwrap_or_default();
+    let status = if !sign_id.trim().is_empty() {
+        Command::new("/usr/bin/codesign")
+            .args([
+                "--force",
+                "--options",
+                "runtime",
+                "--timestamp",
+                "--deep",
+                "--sign",
+                sign_id.trim(),
+                &app_path.to_string_lossy(),
+            ])
+            .status()
+    } else {
+        Command::new("/usr/bin/codesign")
+            .args(["-s", "-", "--force", "--deep", &app_path.to_string_lossy()])
+            .status()
+    }
+    .map_err(|e| format!("Cannot run codesign for {}: {e}", app_path.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "codesign failed for {}: {status}",
+            app_path.display()
+        ));
+    }
+
+    let bytes = dir_bytes(&app_path);
+    publish_directory(&app_path, &destination)?;
+    // The candidate guard removes the exchanged previous generation non-fatally.
+    Ok((destination, bytes))
+}

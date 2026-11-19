@@ -91,16 +91,7 @@ struct SetupInspection {
     worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
 }
 
-struct SetupFinished(Arc<AtomicBool>, Arc<(Mutex<u64>, std::sync::Condvar)>);
-impl Drop for SetupFinished {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-        let mut revision = self.1 .0.lock().unwrap_or_else(|e| e.into_inner());
-        *revision = revision.wrapping_add(1);
-        self.1 .1.notify_all();
-        wake_daemon();
-    }
-}
+use super::session_activity::CompletionNotice;
 
 enum HostHubError {
     Reload(String),
@@ -521,7 +512,10 @@ impl DaemonService {
         if entry.worker.is_none() {
             if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
                 entry.done.store(false, Ordering::SeqCst);
-                let notice = SetupFinished(entry.done.clone(), self.setup_completion.clone());
+                let notice = CompletionNotice {
+                    done: entry.done.clone(),
+                    completion: self.setup_completion.clone(),
+                };
                 entry.worker = Some((
                     entry.generation,
                     thread::spawn(move || {
@@ -556,7 +550,10 @@ impl DaemonService {
             if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
                 let generation = entry.generation;
                 entry.done.store(false, Ordering::SeqCst);
-                let notice = SetupFinished(entry.done.clone(), self.setup_completion.clone());
+                let notice = CompletionNotice {
+                    done: entry.done.clone(),
+                    completion: self.setup_completion.clone(),
+                };
                 entry.worker = Some((
                     generation,
                     thread::spawn(move || {
@@ -1249,7 +1246,10 @@ impl DaemonService {
                         return;
                     }
                     }
-                } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
+                } else {
+                    let Ok(registration) = state.registration_lock(&slot.name) else { return; };
+                    let Ok(_guard) = registration.lock() else { return; };
+                    if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
                     if !super::registration::remote_matches_listener(&remote,&row,&channel) || remote["channels"][&channel]["state"] != "ACTIVE" {let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
                     let mut changed = remote["listen_mode"] != row["listen_mode"];
@@ -1264,6 +1264,7 @@ impl DaemonService {
                         if slot.server_now().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(slot.server_now())); changed=true; }
                     }
                     if changed { let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision)); }
+                    }
                 }
                 if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |_| {}) {
                     if !slot.closed.load(Ordering::SeqCst) { eprintln!("cito receiver {}: {error}",slot.name); }
@@ -1581,6 +1582,15 @@ impl DaemonService {
                     .as_ref()
                     .is_some_and(|r| r["status"] == "ACTIVE" || r["user_stopped"] == 1)
                 {
+                    continue;
+                }
+                if prior.as_ref().is_some_and(|r| {
+                    r["retirement_reason"] == "idle"
+                        && !qualifying_activity(&candidate).is_some_and(|(revision, _)| {
+                            activity_revision(r, "retired_activity_revision")
+                                .is_none_or(|old| revision > old)
+                        })
+                }) {
                     continue;
                 }
                 let restoring = prior.as_ref().is_some_and(|r| {

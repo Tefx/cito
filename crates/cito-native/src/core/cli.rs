@@ -3,18 +3,7 @@ use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 fn read_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
-    if let Some((_, value)) = args[*i].split_once('=') {
-        if value.is_empty() || value.starts_with('-') {
-            return Err(format!("Missing value for {flag}"));
-        }
-        return Ok(value.into());
-    }
-    *i += 1;
-    let value = args
-        .get(*i)
-        .filter(|s| !s.is_empty() && !s.starts_with('-'))
-        .ok_or_else(|| format!("Missing value for {flag}"))?;
-    Ok(value.clone())
+    super::cli_value::read(args, i, flag, false).map(str::to_owned)
 }
 pub fn parse_cli(
     cmd: &str,
@@ -29,11 +18,19 @@ pub fn parse_cli(
     while i < args.len() {
         let raw = &args[i];
         let flag = raw.split('=').next().unwrap_or(raw);
-        if let Some(plugin) = plugins
-            .agent_plugins()
-            .into_iter()
-            .find(|p| p.cli_flag && flag == format!("--{}", p.id))
+        if raw.contains('=')
+            && matches!(
+                flag,
+                "--team" | "--all" | "--unread" | "--peek" | "--no-ack" | "--ack-all" | "--json"
+            )
         {
+            return Err(format!("{flag} does not accept a value"));
+        }
+        if let Some(plugin) = plugins.agent_plugins().into_iter().find(|p| {
+            p.cli_flag
+                && !super::plugins::reserved_cli_flag(flag.trim_start_matches('-'))
+                && flag == format!("--{}", p.id)
+        }) {
             if let Some(old) = meta.get("expected_harness") {
                 if old != &plugin.id {
                     return Err("INVALID_INPUT: Conflicting harness flags".into());
@@ -232,6 +229,15 @@ pub fn parse_cli(
         input.insert("title".into(), json!(title));
     } else if !positionals.is_empty() {
         return Err(format!("Unexpected argument: {}", positionals[0]));
+    }
+    if cmd == "inbox"
+        && inbox_policy(&Value::Object(input.clone()))
+        && (!meta.is_empty()
+            || input
+                .keys()
+                .any(|key| !matches!(key.as_str(), "hub" | "scope" | "about" | "paused")))
+    {
+        return Err("Inbox policy commands accept only --hub, --scope, --team and --about".into());
     }
     if let Some(title) = input.get("title").and_then(Value::as_str) {
         super::registration::validate_title(title)?;
@@ -538,11 +544,17 @@ pub fn control_request(config: &NativeConfig, action: &Value) -> Result<Value, S
     Ok(value)
 }
 
+fn inbox_policy(input: &Value) -> bool {
+    ["paused", "scope", "about"]
+        .iter()
+        .any(|key| input.get(*key).is_some())
+}
+
 pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugins: &LoadedPlugins) {
     let result = (|| -> Result<(), String> {
         let (input, meta) = parse_cli(cmd, args, plugins)?;
         ensure_daemon(config)?;
-        let payload = if cmd == "inbox" && input["paused"].is_boolean() {
+        let payload = if cmd == "inbox" && inbox_policy(&input) {
             let mut action = input.clone();
             action["op"] = json!("human_inbox_update");
             control_request(config, &action)?
@@ -713,6 +725,62 @@ mod tests {
             assert_eq!(presentation_error(&input), expected, "{input}");
         }
     }
+    #[test]
+    fn inbox_policy_and_boolean_flags_are_unambiguous() {
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        for policy in [
+            vec!["--team"],
+            vec!["--scope", "self"],
+            vec!["--about", "Review"],
+            vec!["pause"],
+            vec!["resume"],
+        ] {
+            let args = policy
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            let (input, _) = parse_cli("inbox", &args, &plugins).unwrap();
+            assert!(inbox_policy(&input));
+            for read in [
+                vec!["--ack", "signal"],
+                vec!["--ack-all"],
+                vec!["--unread"],
+                vec!["--peek"],
+                vec!["--no-ack"],
+                vec!["--limit", "1"],
+                vec!["--harness", "human"],
+            ] {
+                let args = policy
+                    .iter()
+                    .chain(read.iter())
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>();
+                assert!(parse_cli("inbox", &args, &plugins).is_err(), "{args:?}");
+            }
+        }
+        for (cmd, flag) in [
+            ("inbox", "--team"),
+            ("unlisten", "--all"),
+            ("inbox", "--unread"),
+            ("inbox", "--peek"),
+            ("inbox", "--no-ack"),
+            ("inbox", "--ack-all"),
+            ("status", "--json"),
+        ] {
+            assert!(parse_cli(cmd, &[format!("{flag}=false")], &plugins).is_err());
+        }
+        let (input, _) = parse_cli(
+            "send",
+            &["--to=alice".into(), "--message=-value".into()],
+            &plugins,
+        )
+        .unwrap();
+        assert_eq!(input["message"], "-value");
+    }
+
     #[test]
     fn flag_errors_precede_effects() {
         let p = LoadedPlugins {

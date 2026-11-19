@@ -1,4 +1,29 @@
 use super::*;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+
+struct TestEngine {
+    engine: HubEngine,
+    directory: PathBuf,
+}
+impl std::ops::Deref for TestEngine {
+    type Target = HubEngine;
+    fn deref(&self) -> &Self::Target {
+        &self.engine
+    }
+}
+impl Drop for TestEngine {
+    fn drop(&mut self) {
+        self.engine.shutdown();
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+fn test_engine(directory: &Path) -> TestEngine {
+    TestEngine {
+        engine: HubEngine::open(directory).unwrap(),
+        directory: directory.to_path_buf(),
+    }
+}
 
 #[test]
 fn human_mutations_fence_expired_devices_without_prior_reads() {
@@ -8,7 +33,7 @@ fn human_mutations_fence_expired_devices_without_prior_reads() {
         "human_device_detach",
     ] {
         let dir = temp();
-        let e = HubEngine::open(&dir).unwrap();
+        let e = test_engine(&dir);
         e.pause_worker();
         let owner = local_principal("alice");
         let request = json!({"channel_id":"device:human","host_id":"device","binding_generation":3,"owner_token":"old"});
@@ -44,7 +69,7 @@ fn human_mutations_fence_expired_devices_without_prior_reads() {
 #[test]
 fn current_reply_keys_reject_conflicts_and_registration_keys_preserve_tuple_boundaries() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.pause_worker();
     let owner = local_principal("alice");
     put(&e, "target", "none#bob", "workspace");
@@ -88,7 +113,7 @@ fn current_reply_keys_reject_conflicts_and_registration_keys_preserve_tuple_boun
 #[test]
 fn consumer_ack_proves_sequence_filter_and_target_ownership_before_receipts() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.pause_worker();
     let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice","oidc":true});
     let bob =
@@ -148,7 +173,7 @@ fn temp() -> PathBuf {
 #[test]
 fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
     let dir = temp();
-    let engine = HubEngine::open(&dir).unwrap();
+    let engine = test_engine(&dir);
     engine.pause_worker();
     let owner = local_principal("alice");
     put(&engine, "target", "none#bob", "workspace");
@@ -224,7 +249,7 @@ fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
 #[test]
 fn human_legacy_retry_survives_username_change_and_rejects_payload_conflicts() {
     let dir = temp();
-    let engine = HubEngine::open(&dir).unwrap();
+    let engine = test_engine(&dir);
     engine.pause_worker();
     // Model verified OIDC identities: issuer/sub stay fixed as preferred_username changes.
     let owner = json!({"principal_id":"oidc:https://id.example.com|subject","sub":"subject","owner_user":"alice","oidc":true});
@@ -293,7 +318,7 @@ fn human_legacy_retry_survives_username_change_and_rejects_payload_conflicts() {
 #[test]
 fn committed_ack_and_human_reply_survive_notification_failure() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.pause_worker();
     let owner = local_principal("alice");
     let human = e.rpc("human_device_attach", &json!({"channel_id":"host:human","host_id":"host","host_name":"Host","binding_generation":1,"owner_token":"owner"}), Some(&owner)).unwrap()["record"]["listener_id"].as_str().unwrap().to_owned();
@@ -340,7 +365,7 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
 #[test]
 fn failed_initial_configuration_evicts_process_before_retry() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.pause_worker();
     let root = fixture(&dir);
     let plugin = hub_plugins::discover(&[(root, false)], None)
@@ -367,7 +392,7 @@ fn failed_initial_configuration_evicts_process_before_retry() {
 #[test]
 fn processed_reply_pruning_uses_a_monotonic_replay_floor_and_resets_with_credentials() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     e.inner
         .db
@@ -442,7 +467,7 @@ fn processed_reply_pruning_uses_a_monotonic_replay_floor_and_resets_with_credent
 #[test]
 fn pruned_device_cannot_reattach_a_superseded_generation() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let mut old = json!({"channel_id":"old:human","host_id":"old","host_name":"Laptop","binding_generation":5,"owner_token":"old-owner"});
@@ -471,7 +496,7 @@ fn pruned_device_cannot_reattach_a_superseded_generation() {
 #[test]
 fn human_device_fencing_inbox_cas_and_publish_pause_are_atomic() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let id = listener_id("none#alice", "human", "default");
@@ -565,6 +590,10 @@ fn fresh_device_adopts_retained_human_identity_and_verified_alias() {
     for alias in [false, true] {
         let dir = temp();
         let e = Arc::new(HubEngine::open(&dir.join("hub")).unwrap());
+        let _cleanup = TestEngine {
+            engine: (*e).clone(),
+            directory: dir.clone(),
+        };
         e.set_plugin_roots(&[]).unwrap();
         let mut client = super::super::transport::HubClient::new(
             "local".into(),
@@ -619,7 +648,10 @@ fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
     for (mode, expected) in [("none", "workspace"), ("token", "self"), ("oidc", "self")] {
         for device_first in [true, false] {
             let dir = temp();
-            let e = HubEngine::open_with_auth_mode(&dir, mode).unwrap();
+            let e = TestEngine {
+                engine: HubEngine::open_with_auth_mode(&dir, mode).unwrap(),
+                directory: dir.clone(),
+            };
             e.set_plugin_roots(&[]).unwrap();
             let owner = json!({"principal_id":"none#alice","owner_user":"alice","auth_mode":mode});
             let device = json!({"host_id":"mac","channel_id":"mac:human","binding_generation":1,"owner_token":"owner"});
@@ -658,7 +690,7 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
     use super::super::transport::HubClient;
     let dir = temp();
     let root = fixture(&dir);
-    let e = Arc::new(HubEngine::open(&dir).unwrap());
+    let e = Arc::new(test_engine(&dir));
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let server = e
         .start_server(
@@ -709,7 +741,7 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
     server.shutdown();
     e.shutdown();
     // Pending codes retain the requesting boundary even when restored by a trusted engine.
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     assert_eq!(e.redeem("fixture", &json!({"code":pair["code"],"is_private_chat":true,"external_chat_id":"paired-chat","external_user_id":"paired-user","user_config_patch":{"address":"paired-room"}})).unwrap()["ok"], true);
     let owner = json!({"principal_id":"none#paired","owner_user":"paired","auth_mode":"token"});
@@ -736,7 +768,7 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
         .unwrap();
     e.redeem("fixture", &json!({"code":pair["code"],"is_private_chat":true,"external_chat_id":"paired-chat","external_user_id":"paired-user","user_config_patch":{"address":"paired-room"}})).unwrap();
     e.shutdown();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[root]).unwrap();
     e.restore_attachments().unwrap();
     for (user, scope) in [
@@ -764,7 +796,7 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
 #[test]
 fn idle_and_policy_only_hubs_prune_expired_audit_rows_without_channels() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let device = json!({"host_id":"mac","channel_id":"mac:human","binding_generation":1,"owner_token":"owner"});
@@ -829,7 +861,7 @@ fn idle_and_policy_only_hubs_prune_expired_audit_rows_without_channels() {
 #[test]
 fn hub_stamps_changed_agent_leases_and_prunes_audit_history() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     for skew in [-120_000, 120_000] {
         let id = format!("agent_{}", if skew < 0 { "behind" } else { "ahead" });
@@ -896,7 +928,7 @@ fn send(e: &HubEngine, id: &str, sig: &str) {
 #[test]
 fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_unknown_effects() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     let plugin = ChannelPlugin {
         is_builtin: false,
@@ -952,7 +984,7 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
     let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     manifest["pairing"]["privateIdentityField"] = json!("address");
     std::fs::write(path, manifest.to_string()).unwrap();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let configure = |patch: Value| {
@@ -1041,7 +1073,7 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
 #[test]
 fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     e.inner.plugins.lock().unwrap().push(ChannelPlugin{is_builtin:false,id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
     e.pause_worker();
@@ -1111,7 +1143,7 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
 #[test]
 fn unthreaded_reply_requires_one_recent_sender_and_threaded_reply_disambiguates_legacy_bindings() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     put(&e, "sender-a", "none#alice", "workspace");
     put(&e, "sender-b", "none#alice", "workspace");
@@ -1215,7 +1247,7 @@ fn stopped_channel_process_waits_for_its_reader_callback() {
 fn pairing_preparation_quiesces_old_credential_frames_before_commit() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.pause_worker();
     let script = r#"
 import json, os, pathlib, sys, time
@@ -1351,7 +1383,7 @@ fn oidc_admin_can_edit_redacted_service_fields() {
     }
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[root]).unwrap();
     let admin = json!({"principal_id":"oidc:https://id.example.com|admin","owner_user":"lifecycle-admin","sub":"admin","oidc":true});
     e.rpc(
@@ -1383,7 +1415,7 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
         .unwrap()
         .push(json!({"key":"user_credential","scope":"user","type":"secret","required":false}));
     std::fs::write(manifest_path, manifest.to_string()).unwrap();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[root]).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let list = || {
@@ -1579,7 +1611,7 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
 fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_service() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":false,"hub_config":{"credential":"saved"},"user_config":{"address":"saved-room"}}),Some(&owner)).unwrap();
@@ -1627,7 +1659,10 @@ fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_serv
 #[test]
 fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<(), String> {
     let dir = temp();
-    let e = HubEngine::open(&dir)?;
+    let e = TestEngine {
+        engine: HubEngine::open(&dir)?,
+        directory: dir.clone(),
+    };
     let result = (|| {
         let pid = "none#alice";
         let id = listener_id(pid, "human", "default");
@@ -1667,7 +1702,7 @@ fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<()
 #[test]
 fn consumer_next_crosses_byte_pages_without_transport_acknowledgments() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     put(&e, "target", "p", "workspace");
     let mut sequences = Vec::new();
     for i in 0..4 {
@@ -1748,7 +1783,7 @@ fn consumer_next_crosses_byte_pages_without_transport_acknowledgments() {
 #[test]
 fn atomic_batch_claims_and_business_ack_are_distinct() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     put(&e, "target", "p", "workspace");
     send(&e, "target", "s1");
     send(&e, "target", "s2");
@@ -1792,7 +1827,7 @@ fn atomic_batch_claims_and_business_ack_are_distinct() {
     .unwrap();
     assert_eq!(claim(json!(["s1", "s2"]), "b")["acked_ids"], json!(["s1"]));
     e.shutdown();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     assert!(e
         .rpc("kv_get", &json!({"key":"target"}), None)
         .unwrap()
@@ -1811,7 +1846,7 @@ fn atomic_batch_claims_and_business_ack_are_distinct() {
 #[test]
 fn oidc_read_and_ack_events_are_private() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let owner = json!({"principal_id":"oidc:https://id.example.com|owner","owner_user":"alice","oidc":true});
     let stranger = json!({"principal_id":"oidc:https://id.example.com|stranger","owner_user":"bob","oidc":true});
     put(&e, "target", s(&owner, "principal_id"), "self");
@@ -1850,7 +1885,7 @@ fn oidc_read_and_ack_events_are_private() {
 #[test]
 fn workspace_directory_does_not_grant_message_or_ack_content() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let recipient = json!({"principal_id":"oidc:https://id.example.com|owner","owner_user":"alice","oidc":true});
     let sender =
         json!({"principal_id":"oidc:https://id.example.com|sender","owner_user":"bob","oidc":true});
@@ -1938,7 +1973,7 @@ fn pair_token_encodes_exactly_six_bytes_as_uppercase_base32() {
 #[test]
 fn account_info_counts_only_persisted_stream_configuration() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     assert_eq!(
         e.rpc("account_info", &json!({}), None).unwrap()["streams"],
         0
@@ -1971,7 +2006,7 @@ fn account_info_counts_only_persisted_stream_configuration() {
         2
     );
     e.shutdown();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     assert_eq!(
         e.rpc("account_info", &json!({}), None).unwrap()["streams"],
         2
@@ -2002,7 +2037,7 @@ fn wait_for(mut f: impl FnMut() -> bool) {
 fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Drive exactly one tick; a background retry must not satisfy this test.
         e.pause_worker();
@@ -2081,7 +2116,10 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
 fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open_with_auth_mode(&dir, "token").unwrap();
+    let e = TestEngine {
+        engine: HubEngine::open_with_auth_mode(&dir, "token").unwrap(),
+        directory: dir.clone(),
+    };
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice.smith","owner_user":"alice.smith"});
     e.rpc(
@@ -2107,7 +2145,10 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
         .unwrap()
         .contains("fixture-account"));
     e.shutdown();
-    let e = HubEngine::open_with_auth_mode(&dir, "token").unwrap();
+    let e = TestEngine {
+        engine: HubEngine::open_with_auth_mode(&dir, "token").unwrap(),
+        directory: dir.clone(),
+    };
     e.set_plugin_roots(&[root]).unwrap();
     let list = e
         .rpc("human_channels_list", &json!({}), Some(&owner))
@@ -2171,7 +2212,7 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
 fn human_public_id_uses_canonical_slug_normalization() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[root]).unwrap();
     let caller = json!({"principal_id":"none#slug-fixture","owner_user":"İ"});
     e.rpc(
@@ -2211,7 +2252,7 @@ fn cli_option_diagnostics_name_configuration_knobs() {
 fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     e.rpc(
@@ -2263,7 +2304,7 @@ fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
 #[test]
 fn subscriptions_unregister_on_drop_without_waiting_for_an_event() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     for _ in 0..20 {
         let subscription = e.subscribe(None).unwrap();
         assert_eq!(e.inner.subscribers.lock().unwrap().len(), 1);
@@ -2304,7 +2345,7 @@ fn channel_shutdown_kills_descendants_holding_stdout_open() {
 fn reservations_retry_holes_and_record_all_chunks() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let node = listener_id("none#alice", "human", "default");
@@ -2382,7 +2423,7 @@ fn reservations_retry_holes_and_record_all_chunks() {
 fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
         e.rpc(
@@ -2497,7 +2538,7 @@ fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
 fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
         e.rpc(
@@ -2572,7 +2613,7 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
 #[test]
 fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let sender = local_principal("alice");
     let human = listener_id("none#alice", "human", "default");
     put(&e, "target", "none#bob", "workspace");
@@ -2653,7 +2694,7 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
 #[test]
 fn reply_mappings_outlive_payloads_for_seven_days_and_ack_missing_sources() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     put(&e, "sender", "none#bob", "workspace");
     let pid = "none#alice";
     e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,'fixture','alice',?)",&[json!(pid),json!(json!({"_external_chat_id":"room","_external_user_id":"user"}).to_string())]).unwrap();
@@ -2694,7 +2735,7 @@ fn reply_mappings_outlive_payloads_for_seven_days_and_ack_missing_sources() {
 #[test]
 fn reply_dedup_target_validation_and_ack_commit_together() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     put(&e, "sender", "none#bob", "workspace");
     let pid = "none#alice";
     let node = listener_id(pid, "human", "default");
@@ -2873,7 +2914,7 @@ fn non_destructive_upgrade_preserves_legacy_payloads() {
     db.execute("CREATE TABLE hub_channel_deliveries(plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,signal_id TEXT NOT NULL,seq INTEGER NOT NULL,status TEXT NOT NULL,external_msg_id TEXT,from_listener_id TEXT,from_user TEXT,from_title TEXT,delivered_ms INTEGER NOT NULL,PRIMARY KEY(plugin_id,principal_id,signal_id))",&[]).unwrap();
     db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,external_msg_id,from_listener_id,delivered_ms) VALUES('fixture','p','original',1,'delivered','42','sender',?)",&[json!(now_ms())]).unwrap();
     drop(db);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let signals = e
         .inner
         .db
@@ -2907,7 +2948,7 @@ fn non_destructive_upgrade_preserves_legacy_payloads() {
 #[test]
 fn accepted_http_connections_wait_for_fragmented_headers() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let server = e
         .start_server(
             "127.0.0.1",
@@ -2934,7 +2975,7 @@ fn accepted_http_connections_wait_for_fragmented_headers() {
 fn http_browser_boundary_and_idle_sse_shutdown() {
     for bind in ["127.0.0.1", "0.0.0.0"] {
         let dir = temp();
-        let engine = HubEngine::open(&dir).unwrap();
+        let engine = test_engine(&dir);
         engine.set_plugin_roots(&[]).unwrap();
         let server = engine
             .start_server(bind, 0, HubAuth::new("none", None, None, None).unwrap())
@@ -3024,7 +3065,7 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
 #[test]
 fn http_wire_and_stoppable_shared_engine() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let server = e
         .start_server(
             "127.0.0.1",
@@ -3064,7 +3105,10 @@ fn http_wire_and_stoppable_shared_engine() {
 fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open_with_auth_mode(&dir, "oidc").unwrap();
+    let e = TestEngine {
+        engine: HubEngine::open_with_auth_mode(&dir, "oidc").unwrap(),
+        directory: dir.clone(),
+    };
     e.set_plugin_roots(&[root]).unwrap();
     let legacy = "https://id.example.com#subject";
     let caller = json!({"principal_id":"oidc:https://id.example.com|subject","legacy_principal_id":legacy,"sub":"subject","owner_user":"alice","oidc":true});
@@ -3111,7 +3155,7 @@ fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
 fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
     for limit in [2, 1024] {
         let dir = temp();
-        let e = HubEngine::open(&dir).unwrap();
+        let e = test_engine(&dir);
         for index in 0..7 {
             let id = format!("human-{index}");
             let reg = json!({"listener_id":id,"harness":"human","scope":"workspace",
@@ -3175,7 +3219,7 @@ fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
 #[test]
 fn binary_payloads_survive_kv_stream_consumers_and_restart() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let payloads = [
         Vec::new(),
         b"message".to_vec(),
@@ -3232,7 +3276,7 @@ fn binary_payloads_survive_kv_stream_consumers_and_restart() {
         payloads.len()
     );
     e.shutdown();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     for (i, raw) in payloads.iter().enumerate() {
         assert_eq!(
             e.rpc("kv_get", &json!({"key":format!("blob-{i}")}), None)
@@ -3255,7 +3299,7 @@ fn binary_payloads_survive_kv_stream_consumers_and_restart() {
 #[test]
 fn raw_nc_variants_preserve_ack_bytes_and_publish_signals_durably() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let events = e.subscribe(None).unwrap();
     for (args, expected) in [
         (json!({"data":"raw"}), b"raw".to_vec()),
@@ -3305,7 +3349,7 @@ fn raw_nc_variants_preserve_ack_bytes_and_publish_signals_durably() {
 #[test]
 fn opaque_oidc_payloads_keep_ownership_and_validate_available_metadata() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let a =
         json!({"principal_id":"oidc:https://id.example.com|a","owner_user":"alice","oidc":true});
     let b = json!({"principal_id":"oidc:https://id.example.com|b","owner_user":"bob","oidc":true});
@@ -3371,7 +3415,7 @@ fn opaque_oidc_payloads_keep_ownership_and_validate_available_metadata() {
 #[test]
 fn rpc_preserves_payload_bytes() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     let registration="{ \"principal_id\" : \"none#alice\", \"scope\" : \"workspace\", \"harness\":\"fixture\", \"session_id\":\"s1\" }\n";
     let b64 = B64.encode(registration);
     e.rpc("kv_put", &json!({"key":"target","data_b64":b64}), None)
@@ -3403,7 +3447,7 @@ fn rpc_preserves_payload_bytes() {
 #[test]
 fn concurrent_claim_has_one_winner() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     send(&e, "target", "s1");
     send(&e, "target", "s2");
     let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -3462,7 +3506,7 @@ fn pending_request_fails_on_child_exit() {
 fn delivered_unread_history_does_not_starve_later_notifications() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let pid = "none#alice";
     let node = listener_id(pid, "human", "default");
@@ -3487,7 +3531,7 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
 fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":true,"hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}),Some(&json!({"principal_id":"none#alice","owner_user":"alice"}))).unwrap();
     let node = listener_id("none#alice", "human", "default");
@@ -3617,7 +3661,7 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
 #[test]
 fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
     let plugin = ChannelPlugin {
         is_builtin: false,
@@ -3852,7 +3896,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
 #[test]
 fn retention_and_dedup_expire() {
     let dir = temp();
-    let e = HubEngine::open(&dir).unwrap();
+    let e = test_engine(&dir);
     e.rpc(
         "stream_update",
         &json!({"stream":SIGNALS,"patch":{"max_age":50_000_000,"duplicate_window":50_000_000}}),

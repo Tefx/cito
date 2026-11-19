@@ -83,6 +83,35 @@ pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
         .unwrap_or_else(|_| panic!("{url}: {text}"));
     (status, value)
 }
+// Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
+pub fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
+    let mut command = vec!["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp(sys.argv[1],sys.argv[1:])", bin];
+    command.extend_from_slice(args);
+    f.spawn("python3", &command, extra)
+}
+
+pub fn ui_frames(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.home.join("ui-frames"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+pub fn install_builtin_override(f: &Fixture, id: &str, manifest: Value) -> PathBuf {
+    let path = f.state.join("plugins").join(id);
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("plugin.json"), manifest.to_string()).unwrap();
+    path
+}
+pub fn channel_provider(f: &Fixture, id: &str, fields: Value) -> PathBuf {
+    install_builtin_override(
+        f,
+        id,
+        json!({"id":id,"kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"fields":fields}),
+    )
+}
+
 struct Process {
     child: Child,
     stdout: Arc<Mutex<String>>,
@@ -91,24 +120,37 @@ struct Process {
 }
 impl Process {
     fn stop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
+        let panicking = std::thread::panicking();
+        let running = |child: &mut Child| match child.try_wait() {
+            Ok(status) => status.is_none(),
+            Err(error) => {
+                assert!(panicking, "Cannot inspect child: {error}");
+                true
+            }
+        };
+        if running(&mut self.child) {
             // SAFETY: each owned child leads its own process group. Reap before its ID can be reused.
             unsafe {
                 libc::kill(-(self.child.id() as i32), libc::SIGTERM);
             }
             let until = Instant::now() + Duration::from_secs(2);
-            while self.child.try_wait().unwrap().is_none() && Instant::now() < until {
+            while running(&mut self.child) && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            if self.child.try_wait().unwrap().is_none() {
+            if running(&mut self.child) {
                 unsafe {
                     libc::kill(-(self.child.id() as i32), libc::SIGKILL);
                 }
             }
         }
-        self.child.wait().unwrap();
+        let waited = self.child.wait();
+        assert!(panicking || waited.is_ok(), "Cannot reap child: {waited:?}");
         for reader in self.readers.drain(..) {
-            reader.join().unwrap();
+            let joined = reader.join();
+            assert!(
+                panicking || joined.is_ok(),
+                "Process output reader panicked"
+            );
         }
     }
 }
@@ -390,12 +432,17 @@ impl Drop for Fixture {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     assert!(
-                        TcpStream::connect(("127.0.0.1", self.port)).is_err(),
+                        std::thread::panicking()
+                            || TcpStream::connect(("127.0.0.1", self.port)).is_err(),
                         "detached daemon did not stop"
                     );
                 }
             }
         }
-        fs::remove_dir_all(&self.dir).unwrap();
+        let removed = fs::remove_dir_all(&self.dir);
+        assert!(
+            std::thread::panicking() || removed.is_ok(),
+            "Cannot remove fixture: {removed:?}"
+        );
     }
 }

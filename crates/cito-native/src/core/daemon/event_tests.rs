@@ -17,7 +17,7 @@ with (root / 'calls.jsonl').open('a') as output:
     output.write(json.dumps(dict(harness=harness, request=request)) + '\n')
 if request['op'] in ('discover_sessions', 'resolve_caller') and (root/'delay').exists():
     import time
-    time.sleep(float((root/'delay').read_text()))
+    time.sleep(json.loads((root/'delay').read_text())[request['op']])
 result = dict(ok=True)
 if request['op'] == 'setup_inspect': result.update(installed=True, configured=harness=='agent', paths=[])
 elif request['op'] == 'discover_sessions':
@@ -439,8 +439,13 @@ fn contention_iterations_back_off_after_the_poll_deadline_expires() -> Result<()
 #[test]
 fn status_refresh_and_caller_share_one_deadline() -> Result<(), String> {
     let mut f = Fixture::new()?;
-    // Either operation alone fits; their sum exceeds the request budget.
-    fs::write(f.root.join("delay"), "1.2").map_err(|e| e.to_string())?;
+    // Each provider delay fits the request budget; their sum exceeds it. Leave
+    // enough first-stage slack for process startup before asserting both calls.
+    fs::write(
+        f.root.join("delay"),
+        json!({"discover_sessions":0.2,"resolve_caller":1.4}).to_string(),
+    )
+    .map_err(|e| e.to_string())?;
     let started = Instant::now();
     assert!(f
         .service

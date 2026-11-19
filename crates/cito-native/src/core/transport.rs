@@ -109,7 +109,8 @@ pub struct HubClient {
     event_revision: Arc<AtomicU64>,
     event_wait: Arc<(Mutex<()>, std::sync::Condvar)>,
     local_event_wake: Arc<Mutex<Option<Arc<crate::support::WakePipe>>>>,
-    observed_at: Arc<Mutex<Option<Instant>>>,
+    directory_observed_at: Arc<Mutex<Option<Instant>>>,
+    human_observed_at: Arc<Mutex<Option<Instant>>>,
     event_credentials: Arc<Mutex<Option<String>>>,
     pub closed: Arc<AtomicBool>,
     pub registration: Arc<Mutex<()>>,
@@ -143,7 +144,8 @@ impl HubClient {
             event_revision: Arc::new(AtomicU64::new(1)),
             event_wait: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
             local_event_wake: Arc::new(Mutex::new(None)),
-            observed_at: Arc::new(Mutex::new(None)),
+            directory_observed_at: Arc::new(Mutex::new(None)),
+            human_observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             registration: Arc::new(Mutex::new(())),
             agent: ureq::AgentBuilder::new()
@@ -322,7 +324,8 @@ impl HubClient {
         self.event_wait = old.event_wait.clone();
         self.local_event_wake = old.local_event_wake.clone();
         self.rejected_bearer = old.rejected_bearer.clone();
-        self.observed_at = old.observed_at.clone();
+        self.directory_observed_at = old.directory_observed_at.clone();
+        self.human_observed_at = old.human_observed_at.clone();
         self.closed = old.closed.clone();
         self.event_credentials = old.event_credentials.clone();
         if let Ok(mut token) = self.event_credentials.lock() {
@@ -339,12 +342,20 @@ impl HubClient {
     fn observation_recent(&self) -> bool {
         self.local.is_some()
             || self
-                .observed_at
+                .directory_observed_at
                 .lock()
                 .is_ok_and(|at| at.is_some_and(|at| at.elapsed() < Duration::from_secs(60)))
     }
     pub fn observation_current(&self) -> bool {
         self.auth_valid() && self.observation_recent()
+    }
+    pub(super) fn human_observation_current(&self) -> bool {
+        self.auth_valid()
+            && (self.local.is_some()
+                || self
+                    .human_observed_at
+                    .lock()
+                    .is_ok_and(|at| at.is_some_and(|at| at.elapsed() < Duration::from_secs(60))))
     }
     fn auth_valid(&self) -> bool {
         (self.config["authMode"] != "oidc"
@@ -668,7 +679,7 @@ impl HubClient {
     }
     fn cache_human(&self, result: &Value) {
         self.observe_server_clock(result);
-        if let Ok(mut observed) = self.observed_at.lock() {
+        if let Ok(mut observed) = self.human_observed_at.lock() {
             *observed = Some(Instant::now());
         }
         if result["record"].is_object() {
@@ -753,8 +764,12 @@ impl HubClient {
                 self.directory_revision.fetch_add(1, Ordering::Release);
             }
         }
-        if let Ok(mut observed) = self.observed_at.lock() {
-            *observed = Some(Instant::now());
+        let now = Instant::now();
+        if let Ok(mut observed) = self.directory_observed_at.lock() {
+            *observed = Some(now);
+        }
+        if let Ok(mut observed) = self.human_observed_at.lock() {
+            *observed = Some(now);
         }
         Ok(rows)
     }

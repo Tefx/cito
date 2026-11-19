@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -37,13 +36,54 @@ pub fn env_value(req: &Value, key: &str) -> Option<String> {
 pub fn home(req: &Value) -> PathBuf {
     PathBuf::from(env_value(req, "HOME").unwrap_or_else(|| "/tmp".into()))
 }
-pub fn expand(req: &Value, value: &str) -> PathBuf {
+pub fn random_uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        let t = now_ms().to_le_bytes();
+        let p = std::process::id().to_le_bytes();
+        bytes[0..8].copy_from_slice(&t);
+        bytes[8..12].copy_from_slice(&p);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+/// Generates cryptographic tokens without masking an entropy-source failure.
+pub fn try_random_hex(bytes_len: usize) -> Result<String> {
+    let mut bytes = vec![0u8; bytes_len];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Best-effort identifiers for temporary paths; use try_random_hex for secrets.
+pub fn random_hex(bytes_len: usize) -> String {
+    try_random_hex(bytes_len).unwrap_or_else(|_| {
+        (0..bytes_len)
+            .map(|i| format!("{:02x}", ((now_ms() as usize).wrapping_add(i * 31)) as u8))
+            .collect()
+    })
+}
+
+pub fn expand_home_path(value: &str, home: &Path) -> PathBuf {
     if value == "~" {
-        home(req)
-    } else if let Some(s) = value.strip_prefix("~/") {
-        home(req).join(s)
+        home.to_path_buf()
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        home.join(rest)
     } else {
-        let p = PathBuf::from(value);
+        PathBuf::from(value)
+    }
+}
+pub fn expand(req: &Value, value: &str) -> PathBuf {
+    {
+        let p = expand_home_path(value, &home(req));
         if p.is_absolute() {
             p
         } else {
@@ -1225,170 +1265,12 @@ impl WakePipe {
     }
 }
 
-/// Observe an owned, unreaped child without releasing its PID before cleanup.
-pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd;
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: kqueue returns a new descriptor and kevent borrows initialized data.
-        let fd = unsafe { libc::kqueue() };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-        let change = libc::kevent {
-            ident: pid as _,
-            filter: libc::EVFILT_PROC,
-            flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(owned)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: pidfd_open observes a child whose PID remains reserved until wait.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
-    }
-}
+#[path = "support/subprocess.rs"]
+mod subprocess;
+pub use subprocess::{
+    child_exit_fd, poll_until, run_command_with_timeout, run_piped_command, wait_child_exit,
+};
 
-/// Block for descriptor readiness, preserving the absolute deadline across signals.
-pub fn poll_until(fds: &mut [libc::pollfd], deadline: Option<std::time::Instant>) -> Result<bool> {
-    loop {
-        let timeout = deadline
-            .map(|at| {
-                at.saturating_duration_since(std::time::Instant::now())
-                    .as_millis()
-                    .saturating_add(1)
-                    .min(i32::MAX as u128) as i32
-            })
-            .unwrap_or(-1);
-        // SAFETY: poll borrows a live initialized slice for the duration of the call.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
-        if n >= 0 {
-            return Ok(n > 0);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error.to_string());
-        }
-        if deadline.is_some_and(|at| at <= std::time::Instant::now()) {
-            return Ok(false);
-        }
-    }
-}
-
-pub fn wait_child_exit(child: &std::process::Child, timeout: Duration) -> Result<bool> {
-    use std::os::fd::AsRawFd;
-    let fd = child_exit_fd(child.id())?;
-    poll_until(
-        &mut [libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        }],
-        Some(std::time::Instant::now() + timeout),
-    )
-}
-
-pub fn run_command_with_timeout(
-    mut command: std::process::Command,
-    timeout: Duration,
-) -> Result<Option<std::process::Output>> {
-    use std::io::Read;
-    use std::os::fd::{AsRawFd, OwnedFd};
-    use std::os::unix::process::CommandExt;
-    let deadline = std::time::Instant::now() + timeout;
-    let mut child = command
-        .process_group(0)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let result = (|| -> Result<Option<[Vec<u8>; 2]>> {
-        let mut pipes = [
-            child.stdout.take().map(|p| File::from(OwnedFd::from(p))),
-            child.stderr.take().map(|p| File::from(OwnedFd::from(p))),
-        ];
-        for pipe in pipes.iter().flatten() {
-            // SAFETY: each pipe remains owned until the drain completes or times out.
-            unsafe {
-                let flags = libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL);
-                if flags < 0
-                    || libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
-                {
-                    return Err(std::io::Error::last_os_error().to_string());
-                }
-            }
-        }
-        let exited = child_exit_fd(child.id())?;
-        let mut child_exited = false;
-        let mut output = [Vec::new(), Vec::new()];
-        loop {
-            if std::time::Instant::now() >= deadline {
-                return Ok(None);
-            }
-            for (pipe, buffer) in pipes.iter_mut().zip(&mut output) {
-                if let Some(reader) = pipe {
-                    let mut bytes = [0u8; 8192];
-                    match reader.read(&mut bytes) {
-                        Ok(0) => *pipe = None,
-                        Ok(n) => buffer.extend_from_slice(&bytes[..n]),
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Err(e) => return Err(e.to_string()),
-                    }
-                }
-            }
-            if child_exited && pipes.iter().all(Option::is_none) {
-                return Ok(Some(output));
-            }
-            let mut fds = [
-                libc::pollfd {
-                    fd: pipes[0].as_ref().map_or(-1, AsRawFd::as_raw_fd),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: pipes[1].as_ref().map_or(-1, AsRawFd::as_raw_fd),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: if child_exited { -1 } else { exited.as_raw_fd() },
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            poll_until(&mut fds, Some(deadline))?;
-            child_exited |= fds[2].revents != 0;
-        }
-    })();
-    if !matches!(result, Ok(Some(_))) {
-        // SAFETY: the unreaped child reserves this owned process-group ID until wait.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-    }
-    let status = child.wait().map_err(|e| e.to_string());
-    let Some([stdout, stderr]) = result? else {
-        return Ok(None);
-    };
-    Ok(Some(std::process::Output {
-        status: status?,
-        stdout,
-        stderr,
-    }))
-}
 fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut command = Command::new("git");

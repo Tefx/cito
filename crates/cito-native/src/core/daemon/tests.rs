@@ -9,6 +9,52 @@ use super::{
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
+struct TestDirectory(std::path::PathBuf);
+impl std::ops::Deref for TestDirectory {
+    type Target = std::path::PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl AsRef<std::path::Path> for TestDirectory {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct TestService(Option<DaemonService>);
+impl TestService {
+    fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
+        DaemonService::open(config, plugins).map(|service| Self(Some(service)))
+    }
+    fn into_inner(mut self) -> DaemonService {
+        self.0.take().unwrap()
+    }
+}
+impl std::ops::Deref for TestService {
+    type Target = DaemonService;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
+}
+impl std::ops::DerefMut for TestService {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().unwrap()
+    }
+}
+impl Drop for TestService {
+    fn drop(&mut self) {
+        if let Some(service) = self.0.as_mut() {
+            service.shutdown();
+        }
+    }
+}
+
 struct ServiceCleanup {
     service: Arc<Mutex<DaemonService>>,
     directory: std::path::PathBuf,
@@ -29,6 +75,17 @@ fn ui_frame_bounds_preserve_cwd_receipt_authority_and_mailbox_liveness() {
     let bytes = bounded_frame(json!({"op":"state","available":[{"cwd":cwd}]})).unwrap();
     let frame: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(frame["available"][0]["cwd"], cwd);
+    for key in [
+        "token",
+        "invite_command",
+        "tailscale_invite_command",
+        "lan_invite_command",
+    ] {
+        let value = "x".repeat(8192);
+        let frame: Value =
+            serde_json::from_slice(&bounded_frame(json!({key:value})).unwrap()).unwrap();
+        assert_eq!(frame[key], value);
+    }
     let authority = json!({"hub":"work","generation":7});
     let bytes=bounded_frame(json!({"op":"settings","ok":true,"committed":true,"request_id":"save","receipt_authority":authority,"warning":"Saved under the original Hub authority","settings":{"cwd":"x".repeat(FRAME_LIMIT)}})).unwrap();
     let receipt: Value = serde_json::from_slice(&bytes).unwrap();
@@ -43,7 +100,7 @@ fn ui_frame_bounds_preserve_cwd_receipt_authority_and_mailbox_liveness() {
 
 #[test]
 fn composer_prearm_failures_settle_once_and_config_producers_share_lock() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-prearm-{}", random_uuid_v4()));
+    let dir = TestDirectory(std::env::temp_dir().join(format!("cito-prearm-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -139,7 +196,9 @@ fn composer_prearm_failures_settle_once_and_config_producers_share_lock() -> Res
 
 #[test]
 fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-frame-settlement-{}", random_uuid_v4()));
+    let dir = TestDirectory(
+        std::env::temp_dir().join(format!("cito-frame-settlement-{}", random_uuid_v4())),
+    );
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -257,7 +316,8 @@ fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(),
 
 #[test]
 fn credential_save_restricts_existing_external_config_mode() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-config-mode-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-config-mode-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("external")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -271,7 +331,7 @@ fn credential_save_restricts_existing_external_config_mode() -> Result<(), Strin
         fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
         fs::set_permissions(&config.config_path, fs::Permissions::from_mode(0o644))
             .map_err(|e| e.to_string())?;
-        let mut service = DaemonService::open(
+        let mut service = TestService::open(
             &config,
             &LoadedPlugins {
                 plugins: vec![],
@@ -305,7 +365,9 @@ fn credential_save_restricts_existing_external_config_mode() -> Result<(), Strin
 
 #[test]
 fn authoritative_commits_survive_secondary_local_projection_failures() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-commit-projection-{}", random_uuid_v4()));
+    let dir = TestDirectory(
+        std::env::temp_dir().join(format!("cito-commit-projection-{}", random_uuid_v4())),
+    );
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -316,7 +378,7 @@ fn authoritative_commits_survive_secondary_local_projection_failures() -> Result
         default_hub: "local".into(),
     };
     fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
-    let mut service = DaemonService::open(
+    let mut service = TestService::open(
         &config,
         &LoadedPlugins {
             plugins: vec![],
@@ -454,7 +516,8 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::mpsc;
-    let dir = std::env::temp_dir().join(format!("cito-discovery-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-discovery-{}", random_uuid_v4())));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -584,7 +647,8 @@ fn settle_setup_inspections(service: &mut DaemonService) {
 #[test]
 fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profiles(
 ) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-removed-hub-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-removed-hub-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -603,7 +667,7 @@ fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profi
         plugins: vec![],
         rejected_ids: HashSet::new(),
     };
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     let result = (|| -> Result<(), String> {
         for hub in ["local", "work"] {
             service
@@ -651,7 +715,8 @@ fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profi
 #[test]
 fn targeted_probe_restores_manual_badge_with_closed_surfaces_and_no_auto_listen(
 ) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-probe-badge-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-probe-badge-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -709,14 +774,14 @@ print(json.dumps(result))
         plugins: vec![plugin],
         rejected_ids: HashSet::new(),
     };
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     service.local.set_plugin_roots(&[])?;
     let result = (|| -> Result<(), String> {
         settle_setup_inspections(&mut service);
         service.listen(
             "local",
             &json!({"about":"Manual"}),
-            &json!({"harness":"fixture","session_id":"session","title":"Work","cwd":dir}),
+            &json!({"harness":"fixture","session_id":"session","title":"Work","cwd":*dir}),
         )?;
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
@@ -769,7 +834,8 @@ print(json.dumps(result))
 
 #[test]
 fn activity_auto_listen_pin_stop_idle_and_reopen_follow_orthogonal_intent() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-lifecycle-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-lifecycle-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -835,7 +901,7 @@ print(json.dumps(v))
     };
     save(&candidates)?;
     fs::write(dir.join("probe.txt"), "alive").map_err(|e| e.to_string())?;
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     service.local.set_plugin_roots(&[])?;
     let result = (|| {
         settle_setup_inspections(&mut service);
@@ -1138,7 +1204,8 @@ print(json.dumps(v))
 #[test]
 fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacement(
 ) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-renewal-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-renewal-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -1149,7 +1216,7 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
         default_hub: "local".into(),
     };
     fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
-    let mut service = DaemonService::open(
+    let mut service = TestService::open(
         &config,
         &LoadedPlugins {
             plugins: vec![],
@@ -1288,7 +1355,8 @@ fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), Str
 
 #[test]
 fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-daemon-unit-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-daemon-unit-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -1303,7 +1371,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         plugins: vec![],
         rejected_ids: HashSet::new(),
     };
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     service.local.set_plugin_roots(&[])?;
     let result = (|| {
         // Pause can precede local enrollment, even when the Hub already knows this Node.
@@ -1367,6 +1435,23 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             .ok_or("Missing agent")?;
         let args =
             json!({"to":target["listener_id"],"message":"Review ready","idempotency_key":"same"});
+        service.state.db.execute("CREATE TRIGGER reject_sent_maintenance BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'maintenance unavailable'); END", &[])?;
+        let committed_args = json!({"to":target["listener_id"],"message":"Committed despite local maintenance","idempotency_key":"maintenance"});
+        let committed = service.send("local", &committed_args, &json!({}))?;
+        assert_eq!(committed["ok"], true);
+        assert!(committed["seq"].as_u64().is_some_and(|seq| seq > 0));
+        assert!(committed["maintenance_warning"]
+            .as_str()
+            .unwrap()
+            .contains("local sent history"));
+        service
+            .state
+            .db
+            .execute("DROP TRIGGER reject_sent_maintenance", &[])?;
+        let recovered = service.send("local", &committed_args, &json!({}))?;
+        assert_eq!(recovered["signal_id"], committed["signal_id"]);
+        assert_eq!(recovered["seq"], committed["seq"]);
+        assert!(recovered["maintenance_warning"].is_null());
         let first = service.send("local", &args, &json!({}))?;
         assert_eq!(
             service.send("local", &args, &json!({}))?["signal_id"],
@@ -1387,7 +1472,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
                 .db
                 .query("SELECT * FROM local_sent_idempotency", &[])?
                 .len(),
-            2
+            3
         );
         service
             .slots
@@ -1408,19 +1493,12 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         let remaining = service.state.active()?;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["harness"], "human");
-        assert_eq!(
-            service
-                .slot("local")?
-                .kv_get(string(&remaining[0], "listener_id"))?
-                .ok_or("Missing personal registration")?
-                .0["human_paused"],
-            false
-        );
         let remote = service
             .slot("local")?
             .kv_get(string(&remaining[0], "listener_id"))?
-            .unwrap()
+            .ok_or("Missing personal registration")?
             .0;
+        assert_eq!(remote["human_paused"], false);
         assert_eq!(
             remote["channels"][format!("{}:human", service.host_id)]["state"],
             "ACTIVE"
@@ -1728,7 +1806,8 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
             );
         }
     }
-    let dir = std::env::temp_dir().join(format!("cito-addresses-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-addresses-{}", random_uuid_v4())));
     let config = NativeConfig {
         state_dir: dir.join("state"),
         config_path: dir.join("config.json"),
@@ -1741,7 +1820,7 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
         plugins: vec![],
         rejected_ids: Default::default(),
     };
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     let result = (|| {
         // Model a post-RPC completion delayed across a real reconnect and a
         // replacement owner's failed revocation, without production hooks.
@@ -2580,7 +2659,8 @@ fn default_hub_repair_handles_missing_defaults_and_all_disabled_hubs() {
 }
 #[test]
 fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-config-shape-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-config-shape-{}", random_uuid_v4())));
     let result = (|| {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let config = NativeConfig {
@@ -2595,7 +2675,7 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
             plugins: vec![],
             rejected_ids: Default::default(),
         };
-        let mut service = DaemonService::open(&config, &plugins)?;
+        let mut service = TestService::open(&config, &plugins)?;
         let result = (|| {
             for raw in ["[]", "42", "true", "\"config\"", "null"] {
                 fs::write(&config.config_path, raw).map_err(|e| e.to_string())?;
@@ -2749,7 +2829,8 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
 }
 #[test]
 fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-ack-scope-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-ack-scope-{}", random_uuid_v4())));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -2769,7 +2850,7 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         plugins: vec![],
         rejected_ids: Default::default(),
     };
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     let result = (|| {
         for hub in ["local", "work"] {
             service.state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,hub_url,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,'node','none#alice','local://','alice','host','host','fixture','s','','Target','','self','ACTIVE')", &[json!(hub)])?;
@@ -2926,7 +3007,9 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
         }
     }
     assert_eq!(advertised_hub_host("127.0.0.1"), "127.0.0.1");
-    let dir = std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4()));
+    let dir = TestDirectory(
+        std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4())),
+    );
     let result = (|| {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let config = NativeConfig {
@@ -2941,7 +3024,7 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             plugins: vec![],
             rejected_ids: Default::default(),
         };
-        let mut service = DaemonService::open(&config, &plugins)?;
+        let mut service = TestService::open(&config, &plugins)?;
         let result = (|| {
             let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"token","token":"previous-token"});
             let mut committed = json!({"host_hub":host,"other":7}).to_string();
@@ -3093,7 +3176,8 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
 }
 #[test]
 fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-ui-layout-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-ui-layout-{}", random_uuid_v4())));
     let root = dir.join("Cito.app/Contents");
     let result = (|| {
         fs::create_dir_all(root.join("Helpers")).map_err(|e| e.to_string())?;
@@ -3113,9 +3197,10 @@ fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
 }
 #[test]
 fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::{TcpListener, TcpStream};
-    let dir = std::env::temp_dir().join(format!("cito-boundary-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-boundary-{}", random_uuid_v4())));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let target = dir.join("managed.json");
     fs::write(&target, "{}").map_err(|e| e.to_string())?;
@@ -3132,7 +3217,7 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         plugins: vec![],
         rejected_ids: Default::default(),
     };
-    let mut service = DaemonService::open(&config, &plugins)?;
+    let mut service = TestService::open(&config, &plugins)?;
     let result = (|| -> Result<(), String> {
         // Publication must follow a dangling symlink instead of replacing it.
         fs::remove_file(&target).map_err(|e| e.to_string())?;
@@ -3260,7 +3345,7 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         service.state.db.execute("CREATE TABLE wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id))", &[])?;
         Ok(())
     })();
-    let shared = Arc::new(Mutex::new(service));
+    let shared = Arc::new(Mutex::new(service.into_inner()));
     let _cleanup = ServiceCleanup {
         service: shared.clone(),
         directory: dir.clone(),
@@ -3309,15 +3394,12 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
                 "{method} HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()
             )
             .map_err(|e| e.to_string())?;
-            let mut response = String::new();
-            client
-                .read_to_string(&mut response)
-                .map_err(|e| e.to_string())?;
+            // Read the declared frame, not transport EOF: early request rejection
+            // may close unread request bytes after delivering its complete response.
+            let response = crate::plugins::read_http_response(&mut client)?;
             worker.join().map_err(|_| "HTTP worker panicked")?;
-            assert!(
-                response.starts_with(&format!("HTTP/1.1 {status}")),
-                "{response}"
-            );
+            assert_eq!(response.status, status, "{}", response.body);
+            let _: Value = serde_json::from_str(&response.body).map_err(|e|e.to_string())?;
         }
         let mut committed =
             json!({"ok":true,"signal_id":"missing:sig_committed","seq":1,"status":"wake_accepted"});
@@ -3365,10 +3447,10 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
 }
 #[test]
 fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = TestDirectory(std::env::temp_dir().join(format!(
         "cito-projection-{}",
         crate::plugins::random_uuid_v4()
-    ));
+    )));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = NativeConfig {
         state_dir: dir.join("state"),
@@ -3379,7 +3461,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         default_hub: "local".into(),
     };
     fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
-    let mut service = DaemonService::open(
+    let mut service = TestService::open(
         &config,
         &LoadedPlugins {
             plugins: vec![],
@@ -3544,7 +3626,8 @@ fn channel_inventory_diagnostic_survives_collection_shedding() -> Result<(), Str
 
 #[test]
 fn explicit_nested_pids_preserve_endpoint_errors_and_provider_fallback() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-explicit-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-explicit-{}", random_uuid_v4())));
     let config = NativeConfig {
         state_dir: dir.join("state"),
         config_path: dir.join("config.json"),
@@ -3572,7 +3655,7 @@ print(json.dumps(result))
 "#).unwrap();
         plugins.push(crate::plugins::parse_manifest_dir(&path, false)?);
     }
-    let mut service = DaemonService::open(
+    let mut service = TestService::open(
         &config,
         &LoadedPlugins {
             plugins,
@@ -3633,7 +3716,8 @@ fn canonical_editable_values_survive_ui_projection() -> Result<(), String> {
 
 #[test]
 fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("cito-authority-{}", random_uuid_v4()));
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-authority-{}", random_uuid_v4())));
     let config = NativeConfig {
         state_dir: dir.join("state"),
         config_path: dir.join("config.json"),
@@ -3642,7 +3726,7 @@ fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
         user: "alice".into(),
         default_hub: "local".into(),
     };
-    let mut service = DaemonService::open(
+    let mut service = TestService::open(
         &config,
         &LoadedPlugins {
             plugins: vec![],

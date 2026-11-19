@@ -603,7 +603,21 @@ mod remediation_tests {
             let body = if request["op"] == "human_device_attach" {
                 json!({"ok":false,"error":{"code":"FORBIDDEN","message":"Inbox not enrolled in this channel fixture"}})
             } else { json!({"ok":true,"result":result}) }.to_string();
-            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            let sent = write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+            if let Err(error) = sent {
+                // Revoking authority deliberately closes its in-flight refresh socket.
+                // The mutation receipt predates this refresh and must still settle.
+                assert!(
+                    last && replace_authority
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::NotConnected
+                        ),
+                    "Unexpected authority response failure: {error}"
+                );
+            }
             if last {
                 break;
             }

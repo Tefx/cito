@@ -143,7 +143,12 @@ fn api_with_timeout(
                         .collect::<String>()
                 })
                 .and_then(|id| id.parse::<u64>().ok())
-                .unwrap_or_else(|| body["offset"].as_u64().unwrap_or(0));
+                .ok_or_else(|| ApiFailure {
+                    message: "Telegram getUpdates response has no parseable update_id".into(),
+                    retryable: true,
+                    effect_unknown: false,
+                    retry_after: None,
+                })?;
             eprintln!(
                 "Telegram getUpdates: skipping oversized or malformed single update {update}"
             );
@@ -564,9 +569,18 @@ impl Runtime {
         match str_at(&r, "op").unwrap_or("") {
             "shutdown" => return false,
             "configure" => {
-                let old_token = str_at(&self.config, "botToken").unwrap_or("");
-                let token_changed = !old_token.is_empty()
-                    && Some(old_token) != str_at(&r["hub_config"], "botToken");
+                let identity = |config: &Value| {
+                    str_at(config, "botToken").map(|token| {
+                        token
+                            .split_once(':')
+                            .map(|(id, _)| id)
+                            .unwrap_or(token)
+                            .to_owned()
+                    })
+                };
+                let old_identity = identity(&self.config);
+                let token_changed =
+                    old_identity.is_some() && old_identity != identity(&r["hub_config"]);
                 self.config = r["hub_config"].clone();
                 if token_changed {
                     self.cursor = 0;

@@ -106,6 +106,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   catch { /* session_start retries and surfaces any persistent failure. */ }
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
+  let commandGen = 0;
   let activeBadge: string | undefined;
   let lastActiveMs = Date.now();
   let context: BridgeContext | undefined;
@@ -130,7 +131,11 @@ export default function citoBridge(pi: BridgeAPI): void {
     const configPath = rawConfig === "~" ? homedir() : rawConfig.startsWith("~/")
       ? join(homedir(), rawConfig.slice(2)) : resolve(rawConfig);
     try { configuredPort = (JSON.parse(readFileSync(configPath, "utf8")) as { daemonPort?: unknown }).daemonPort; }
-    catch {} // A missing config falls back to the environment and default port.
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`Cannot read Cito config.json: ${error instanceof SyntaxError ? "Invalid JSON" : "Read failed"}`);
+      }
+    } // Only a missing config falls back to the environment and default port.
     const envPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
     const candidatePorts = [
       /^\+?\d+$/.test(envPort) ? Number(envPort) : undefined,
@@ -179,6 +184,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   function setSession(nextSessionId: string | undefined): void {
     if (nextSessionId !== sessionId) {
       activeBadge = undefined;
+      commandGen++;
       lastActiveMs = Date.now();
     }
     sessionId = nextSessionId;
@@ -450,9 +456,10 @@ export default function citoBridge(pi: BridgeAPI): void {
         }
       }
       const commandSessionId = sessionId;
+      const generation = ++commandGen;
       try {
         const payload = await callMcpTool(tool, toolArgs, commandSessionId);
-        if (sessionId !== commandSessionId) return;
+        if (sessionId !== commandSessionId || generation !== commandGen) return;
         if (tool === "cito_listen") {
           const publicId = String(payload.listener_id ?? "cito").trim().split(":").at(-1)!;
           const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
@@ -466,7 +473,7 @@ export default function citoBridge(pi: BridgeAPI): void {
           ctx.ui.notify?.("Cito stopped listening", "info");
         }
       } catch (error) {
-        if (sessionId !== commandSessionId) return;
+        if (sessionId !== commandSessionId || generation !== commandGen) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
       renderBadge(ctx);

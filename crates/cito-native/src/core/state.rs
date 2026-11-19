@@ -15,6 +15,8 @@ use std::{
     },
 };
 
+mod activity;
+
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod tests;

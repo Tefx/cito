@@ -1194,7 +1194,25 @@ impl DaemonService {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(random_uuid_v4);
-        let dedup =
+        let dedup = hash(
+            &json!([
+                string(&slot.identity, "principal_id"),
+                self.host_id,
+                caller
+                    .as_ref()
+                    .map(|c| string(c, "harness"))
+                    .unwrap_or("unbound"),
+                caller
+                    .as_ref()
+                    .map(|c| string(c, "session_id"))
+                    .unwrap_or("default"),
+                string(&slot.config, "url"),
+                canonical,
+                key
+            ])
+            .to_string(),
+        );
+        let endpoint_dedup =
             hash(&json!([endpoint, string(&slot.config, "url"), canonical, key]).to_string());
         let request_hash = hash(&json!([message, reply_to]).to_string());
         let legacy_dedup = hash(&format!(
@@ -1228,6 +1246,12 @@ impl DaemonService {
         let reservation=self.state.db.transaction(|c|{
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
             if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
+            if !ambiguous_legacy {
+                if let Some(old) = c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?", &[json!(hub), json!(endpoint_dedup)])?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
+                    if old["request_hash"] != request_hash { return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into()); }
+                    return Ok(old);
+                }
+            }
             if let Some(old) = c.query(
                 "SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",
                 &[json!(hub), json!(legacy_dedup)],
@@ -1247,6 +1271,7 @@ impl DaemonService {
         let dedup = string(&reservation, "dedup_id");
         let mut signal_id = string(&reservation, "signal_id").to_owned();
         let mut seq = reservation["seq"].as_u64().unwrap_or(0);
+        let mut maintenance_warning = None;
         if reservation["status"] == "PENDING_PUBLISH" {
             let human = caller.as_ref().is_some_and(|c| c["harness"] == "human");
             let published = if human {
@@ -1282,9 +1307,8 @@ impl DaemonService {
                     .ok_or("Published reply ID missing")?
                     .to_owned();
             }
-            // Commit local read state with the sent reservation. If this fails after
-            // the Hub commits, retry the RPC with the same key and committed signal ID.
-            self.state.db.transaction(|c| {
+            // Publication is committed. Local maintenance must not invite duplicate retries.
+            if self.state.db.transaction(|c| {
                 if human && reply_to.is_string() {
                     let rows = c.query("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status FROM local_signals s JOIN local_listeners l ON s.hub=l.hub AND s.listener_id=l.listener_id WHERE s.hub=? AND s.listener_id=? AND s.signal_id=?", &[json!(hub),json!(from_id),reply_to.clone()])?;
                     if rows.first().is_some_and(super::super::state::joined_signal_is_current) {
@@ -1294,10 +1318,12 @@ impl DaemonService {
                 }
                 c.execute("UPDATE local_sent_idempotency SET signal_id=?,seq=?,status='wake_accepted' WHERE hub=? AND dedup_id=?",&[json!(signal_id),json!(seq),json!(hub),json!(dedup)])?;
                 Ok(())
-            })?;
+            }).is_err() {
+                maintenance_warning = Some("Message sent; local sent history could not be refreshed");
+            }
         }
         Ok(
-            json!({"ok":true,"signal_id":self.scoped(hub,&signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"]}),
+            json!({"ok":true,"signal_id":self.scoped(hub,&signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"],"maintenance_warning":maintenance_warning}),
         )
     }
     fn inbox(&self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {

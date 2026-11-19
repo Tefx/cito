@@ -1745,17 +1745,27 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
     fs::write(legacy.join("plugin.json"), &manifest).unwrap();
     fs::write(legacy.join("keep"), "legacy payload").unwrap();
     let before = fs::read(&f.config).unwrap();
-    for args in [
-        vec!["setup", "--bogus"],
-        vec!["setup", "--enable", "missing"],
-        vec!["setup", "--hub", "work", "--url", "invalid"],
-        vec!["setup", "--enable-hub", "missing"],
-        vec!["setup", "--share-port", "invalid"],
-        vec!["setup", "--invite"],
-        vec!["setup", "--invite", "invalid", "--disconnect-all"],
+    for (args, reason) in [
+        (vec!["setup", "--bogus"], "Unknown flag"),
+        (vec!["setup", "--enable", "missing"], "Unknown harness"),
+        (
+            vec!["setup", "--hub", "work", "--url", "invalid"],
+            "Enter a Hub URL using HTTP or HTTPS",
+        ),
+        (vec!["setup", "--enable-hub", "missing"], "Unknown hub"),
+        (
+            vec!["setup", "--share-port", "invalid"],
+            "port must be an integer",
+        ),
+        (vec!["setup", "--invite"], "Missing value"),
+        (
+            vec!["setup", "--invite", "invalid", "--disconnect-all"],
+            "must be used separately",
+        ),
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(!ok, "{args:?}: {out} {err}");
+        assert!(err.contains(reason), "{args:?}: {err}");
         assert_eq!(
             fs::read_to_string(legacy.join("plugin.json")).unwrap(),
             manifest
@@ -1832,10 +1842,16 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         .trim(),
         format!("cito v{}", env!("CARGO_PKG_VERSION"))
     );
-    for args in [
-        vec!["listen", "--session", "orphan"],
-        vec!["listen", "--harness", "missing"],
+    let before_invalid = fs::read(&f.config).unwrap();
+    for (args, reason) in [
+        (
+            vec!["listen", "--session", "orphan"],
+            "--session requires --harness",
+        ),
+        (vec!["listen", "--harness", "missing"], "Unknown harness"),
     ] {
-        assert!(!f.command(NATIVE, &args, "").0);
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(!ok && err.contains(reason), "{args:?}: {out} {err}");
+        assert_eq!(fs::read(&f.config).unwrap(), before_invalid);
     }
 }

@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
@@ -109,43 +109,7 @@ impl NativeConfig {
 
 pub use crate::support::now_ms;
 
-pub fn random_uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        let t = now_ms().to_le_bytes();
-        let p = std::process::id().to_le_bytes();
-        bytes[0..8].copy_from_slice(&t);
-        bytes[8..12].copy_from_slice(&p);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
-}
-
-/// Generates cryptographic tokens without masking an entropy-source failure.
-pub fn try_random_hex(bytes_len: usize) -> Result<String, String> {
-    let mut bytes = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// Best-effort identifiers for temporary paths; use try_random_hex for secrets.
-pub fn random_hex(bytes_len: usize) -> String {
-    try_random_hex(bytes_len).unwrap_or_else(|_| {
-        (0..bytes_len)
-            .map(|i| format!("{:02x}", ((now_ms() as usize).wrapping_add(i * 31)) as u8))
-            .collect()
-    })
-}
+pub use crate::support::{random_hex, random_uuid_v4, try_random_hex};
 
 pub fn system_home_dir() -> String {
     if let Ok(h) = env::var("HOME") {
@@ -179,13 +143,7 @@ pub fn expand_home_dir(
         Some(h) => h.to_string(),
         None => system_home_dir(),
     };
-    let expanded = if value == "~" {
-        PathBuf::from(&home)
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        PathBuf::from(&home).join(rest)
-    } else {
-        PathBuf::from(value)
-    };
+    let expanded = crate::support::expand_home_path(value, Path::new(&home));
     if expanded.is_absolute() {
         Ok(expanded)
     } else {
@@ -292,6 +250,14 @@ pub fn resolve_builtin_plugins_dir() -> Option<PathBuf> {
         .into_iter()
         .find(|path| path.is_dir())
 }
+pub(super) fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
+    [
+        root.join("Resources/plugins"),
+        root.join("plugins"),
+        root.join("share/cito/plugins"),
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
+    ]
+}
 fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(dir) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
@@ -307,13 +273,7 @@ fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> 
         roots.push(staged_plugins_dir(state_dir));
     }
     if let Some(dir) = executable.and_then(Path::parent) {
-        for relative in [
-            "../Resources/plugins",
-            "../plugins",
-            "../share/cito/plugins",
-        ] {
-            roots.push(dir.join(relative));
-        }
+        roots.extend(bundled_plugin_roots(&dir.join("..")).into_iter().take(3));
     }
     roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
     roots
@@ -325,6 +285,41 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         dir,
         is_builtin,
         &serde_json::from_str(&raw).map_err(|e| e.to_string())?,
+    )
+}
+
+pub(super) fn reserved_cli_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "hub"
+            | "team"
+            | "scope"
+            | "tag"
+            | "title"
+            | "all"
+            | "json"
+            | "harness"
+            | "session"
+            | "help"
+            | "version"
+            | "setup"
+            | "to"
+            | "message"
+            | "reply-to"
+            | "in-reply-to"
+            | "idempotency-key"
+            | "wake"
+            | "user"
+            | "host"
+            | "repo"
+            | "query"
+            | "limit"
+            | "unread"
+            | "peek"
+            | "no-ack"
+            | "ack-all"
+            | "ack"
+            | "about"
     )
 }
 
@@ -397,15 +392,11 @@ pub(super) fn parse_manifest(
         .and_then(|v| v.as_str())
         .unwrap_or("indigo")
         .to_string();
-    let reserved_flags = [
-        "hub", "team", "scope", "tag", "title", "all", "json", "harness", "session", "help",
-        "version", "setup",
-    ];
     let mut cli_flag = map
         .get("cliFlag")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if cli_flag && reserved_flags.contains(&id.as_str()) {
+    if cli_flag && reserved_cli_flag(&id) {
         cli_flag = false;
     }
     let command = match map.get("command") {
@@ -975,169 +966,38 @@ pub fn plugin_request_with_progress(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
-        let result = (|| {
-            let mut stdin = child.stdin.take();
-            let mut stdout = child.stdout.take().ok_or("Missing plugin stdout")?;
-            let mut stderr = child.stderr.take().ok_or("Missing plugin stderr")?;
-            for fd in [
-                stdin.as_ref().ok_or("Missing plugin stdin")?.as_raw_fd(),
-                stdout.as_raw_fd(),
-                stderr.as_raw_fd(),
-            ] {
-                // SAFETY: each fd is an owned pipe that remains open for this request.
-                unsafe {
-                    let flags = libc::fcntl(fd, libc::F_GETFL);
-                    if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                        return Err(std::io::Error::last_os_error().to_string());
-                    }
-                }
-            }
-            let exited = crate::support::child_exit_fd(child.id())?;
-            let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-            input.push(b'\n');
-            let mut written = 0;
-            let mut output = Vec::new();
-            let mut errors = Vec::new();
-            let mut out_eof = false;
-            let mut err_eof = false;
-            let mut child_exited = None;
-            let started = Instant::now();
-            let deadline = started + timeout;
-            loop {
-                if Instant::now() >= deadline {
-                    return Err("Plugin timed out".to_string());
-                }
-                progress(started.elapsed())?;
-                if let Some(pipe) = stdin.as_mut() {
-                    match pipe.write(&input[written..]) {
-                        Ok(0) => {
-                            return Err("Plugin closed stdin before request completed".to_string())
-                        }
-                        Ok(n) => written += n,
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Err(e) => return Err(e.to_string()),
-                    }
-                    if written == input.len() {
-                        stdin.take();
-                    }
-                }
-                for (pipe, buffer, eof, limit) in [
-                    (
-                        &mut stdout as &mut dyn Read,
-                        &mut output,
-                        &mut out_eof,
-                        1_048_576usize,
-                    ),
-                    (
-                        &mut stderr as &mut dyn Read,
-                        &mut errors,
-                        &mut err_eof,
-                        65_536usize,
-                    ),
-                ] {
-                    let mut bytes = [0u8; 8192];
-                    loop {
-                        match pipe.read(&mut bytes) {
-                            Ok(0) => {
-                                *eof = true;
-                                break;
-                            }
-                            Ok(n) => {
-                                if buffer.len() + n > limit {
-                                    return Err("Plugin output exceeds limit".to_string());
-                                }
-                                buffer.extend_from_slice(&bytes[..n]);
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                            Err(e) => return Err(e.to_string()),
-                        }
-                    }
-                }
-                if child_exited.is_none() {
-                    child_exited = peek_plugin_exit(child.id())?;
-                }
-                if let Some((success, code)) = child_exited {
-                    if out_eof && err_eof {
-                        if !success {
-                            return Err(format!(
-                                "Plugin exited {code}: {}",
-                                crate::support::bounded_diagnostic(
-                                    &String::from_utf8_lossy(&errors),
-                                    "Plugin process failed"
-                                )
-                            ));
-                        }
-                        let output = std::str::from_utf8(&output).map_err(|e| e.to_string())?;
-                        let mut lines = output.lines();
-                        let line = lines.next().ok_or("Plugin produced no response")?;
-                        if lines.any(|line| !line.trim().is_empty()) {
-                            return Err("Plugin produced more than one response line".to_string());
-                        }
-                        let response: Value = serde_json::from_str(line)
-                            .map_err(|e| format!("Invalid plugin JSON: {e}"))?;
-                        if !response.is_object() {
-                            return Err("Plugin response must be a JSON object".to_string());
-                        }
-                        return Ok(response);
-                    }
-                }
-                let mut fds = [
-                    libc::pollfd {
-                        fd: stdin.as_ref().map(|p| p.as_raw_fd()).unwrap_or(-1),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: if out_eof { -1 } else { stdout.as_raw_fd() },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: if err_eof { -1 } else { stderr.as_raw_fd() },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: if child_exited.is_some() {
-                            -1
-                        } else {
-                            exited.as_raw_fd()
-                        },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                ];
-                // Progress checks enforce generation fencing and dispatch lease renewal.
-                crate::support::poll_until(
-                    &mut fds,
-                    Some(deadline.min(Instant::now() + Duration::from_millis(250))),
-                )?;
-            }
-        })();
-        if result.is_err() {
-            // SAFETY: WNOWAIT keeps the child PID reserved until the final wait below.
-            // Its process-group ID therefore cannot be reused during graceful cleanup.
-            let group = -(child.id() as i32);
-            unsafe {
-                libc::kill(group, libc::SIGTERM);
-            }
-            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(50));
-            // SAFETY: the child remains unreaped, preserving group ownership on escalation.
-            unsafe {
-                libc::kill(group, libc::SIGKILL);
-            }
+        let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        input.push(b'\n');
+        let output = crate::support::run_piped_command(
+            command,
+            Some(&input),
+            timeout,
+            [1_048_576, 65_536],
+            Some(&mut progress),
+        )?
+        .ok_or("Plugin timed out")?;
+        if !output.status.success() {
+            return Err(format!(
+                "Plugin exited {}: {}",
+                output.status.code().unwrap_or(-1),
+                crate::support::bounded_diagnostic(
+                    &String::from_utf8_lossy(&output.stderr),
+                    "Plugin process failed"
+                )
+            ));
         }
-        let waited = child.wait().map_err(|error| error.to_string());
-        match result {
-            Ok(value) => waited.map(|_| value),
-            Err(error) => Err(error),
+        let output = std::str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+        let mut lines = output.lines();
+        let line = lines.next().ok_or("Plugin produced no response")?;
+        if lines.any(|line| !line.trim().is_empty()) {
+            return Err("Plugin produced more than one response line".into());
         }
+        let response: Value =
+            serde_json::from_str(line).map_err(|_| "Invalid plugin JSON".to_owned())?;
+        if !response.is_object() {
+            return Err("Plugin response must be a JSON object".into());
+        }
+        Ok(response)
     };
     execute().map_err(|e| format!("PLUGIN_EXEC_FAILED: {}: {e}", plugin.id))
 }
@@ -1463,6 +1323,45 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn builtin_cli_flags_cannot_be_claimed_by_plugin_manifests() {
+        for id in [
+            "hub",
+            "team",
+            "scope",
+            "tag",
+            "title",
+            "all",
+            "json",
+            "harness",
+            "session",
+            "help",
+            "version",
+            "setup",
+            "to",
+            "message",
+            "reply-to",
+            "in-reply-to",
+            "idempotency-key",
+            "wake",
+            "user",
+            "host",
+            "repo",
+            "query",
+            "limit",
+            "unread",
+            "peek",
+            "no-ack",
+            "ack-all",
+            "ack",
+            "about",
+            "fixture",
+        ] {
+            let manifest = serde_json::json!({"id":id,"kind":"agent","displayName":"Fixture","cliFlag":true,"command":["fixture"]});
+            let plugin = super::parse_manifest(std::path::Path::new(id), false, &manifest).unwrap();
+            assert_eq!(plugin.cli_flag, id == "fixture", "{id}");
+        }
+    }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 

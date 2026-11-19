@@ -80,14 +80,7 @@ pub fn resolve_bundled_plugin_dir(id: &str) -> PathBuf {
     bundled_plugin_dir(&resolve_package_root(), id)
 }
 
-fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
-    [
-        root.join("Resources/plugins"),
-        root.join("plugins"),
-        root.join("share/cito/plugins"),
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
-    ]
-}
+use super::plugins::bundled_plugin_roots;
 
 pub(super) fn resolve_bundled_plugins_root() -> Option<PathBuf> {
     bundled_plugin_roots(&resolve_package_root())
@@ -213,6 +206,9 @@ fn ensure_plugins_staged<'a>(
             // No packaged or staged source remains to reconstruct this plugin.
             continue;
         };
+        if app_bundle::same_tree(source, &target) && is_staged_plugin_intact(state_dir, plugin) {
+            continue;
+        }
         if !target.exists()
             || !is_staged_plugin_intact(state_dir, plugin)
             || fs::canonicalize(source).ok() != fs::canonicalize(&target).ok()
@@ -265,7 +261,9 @@ fn ensure_plugins_staged<'a>(
     for (staged, target) in publications {
         publish_directory(&staged, &target)?;
     }
-    publish_directory(&bin_dir, &state_dir.join("bin"))?;
+    if !app_bundle::same_tree(&bin_dir, &state_dir.join("bin")) {
+        publish_directory(&bin_dir, &state_dir.join("bin"))?;
+    }
     Ok(written)
 }
 
@@ -641,239 +639,17 @@ pub fn inspect_setup_json(
 
 use crate::plugins::try_normalize_existing_config;
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let target = dst.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive(&path, &target)?;
-        } else {
-            fs::copy(&path, &target).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
+mod app_bundle;
+#[cfg(test)]
+use app_bundle::build_mac_app_bundle_from_root;
+pub use app_bundle::build_mac_app_bundle_native;
+use app_bundle::{copy_dir_recursive, resolve_app_bundle_path};
 
-fn dir_bytes(path: &Path) -> u64 {
-    let Ok(meta) = fs::metadata(path) else {
-        return 0;
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    let Ok(rd) = fs::read_dir(path) else { return 0 };
-    rd.flatten().map(|e| dir_bytes(&e.path())).sum()
-}
-
-pub fn build_mac_app_bundle_native(
-    dest_dir: Option<&str>,
-    state_dir: &Path,
-    plugins: &LoadedPlugins,
-) -> Result<(PathBuf, u64), String> {
-    build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
-}
-
-fn resolve_app_bundle_path(dest_dir: Option<&str>, state_dir: &Path) -> Result<PathBuf, String> {
-    let base_dest = match dest_dir {
-        Some(dest) => expand_home_dir(dest, "destDir", None)?,
-        None => state_dir.join("Applications"),
-    };
-    Ok(if base_dest.to_string_lossy().ends_with(".app") {
-        base_dest
-    } else {
-        base_dest.join("Cito.app")
-    })
-}
-
-fn build_mac_app_bundle_from_root(
-    dest_dir: Option<&str>,
-    state_dir: &Path,
-    plugins: &LoadedPlugins,
-    pkg_root: &Path,
-) -> Result<(PathBuf, u64), String> {
-    let destination = resolve_app_bundle_path(dest_dir, state_dir)?;
-    let app_path =
-        destination.with_file_name(format!(".Cito-{}.app", crate::plugins::random_hex(8)));
-    struct Candidate(PathBuf);
-    impl Drop for Candidate {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _candidate = Candidate(app_path.clone());
-    let contents_dir = app_path.join("Contents");
-    let macos_dir = contents_dir.join("MacOS");
-    let helpers_dir = contents_dir.join("Helpers");
-    let resources_dir = contents_dir.join("Resources");
-
-    let _ = fs::remove_dir_all(&app_path);
-    fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&helpers_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
-
-    let info_plist = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-           <key>CFBundleIdentifier</key>\n\
-           <string>one.tefx.cito</string>\n\
-           <key>CFBundleName</key>\n\
-           <string>Cito</string>\n\
-           <key>CFBundleDisplayName</key>\n\
-           <string>Cito</string>\n\
-           <key>CFBundleExecutable</key>\n\
-           <string>Cito</string>\n\
-           <key>CFBundleIconFile</key>\n\
-           <string>AppIcon</string>\n\
-           <key>CFBundleIconName</key>\n\
-           <string>AppIcon</string>\n\
-           <key>CFBundleShortVersionString</key>\n\
-           <string>{CITO_VERSION}</string>\n\
-           <key>CFBundleVersion</key>\n\
-           <string>{CITO_VERSION}</string>\n\
-           <key>CFBundlePackageType</key>\n\
-           <string>APPL</string>\n\
-           <key>LSUIElement</key>\n\
-           <true/>\n\
-           <key>LSMinimumSystemVersion</key>\n\
-           <string>13.0</string>\n\
-         </dict>\n\
-         </plist>\n"
-    );
-    fs::write(contents_dir.join("Info.plist"), info_plist).map_err(|e| e.to_string())?;
-
-    let launcher = r#"#!/bin/sh
-set -e
-INVOKED_AS="$(basename "$0")"
-SOURCE="$0"
-while [ -L "$SOURCE" ]; do
-  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-  TARGET="$(readlink "$SOURCE")"
-  case "$TARGET" in
-    /*) SOURCE="$TARGET" ;;
-    *) SOURCE="$DIR/$TARGET" ;;
-  esac
-done
-APP_CONTENTS="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}"
-if [ "$INVOKED_AS" = "cito-mcp" ]; then
-  export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
-  if [ "$#" -eq 0 ]; then
-    exec "$APP_CONTENTS/Helpers/cito-native" mcp-stdio
-  fi
-  exec "$APP_CONTENTS/Helpers/cito-native" "$@"
-fi
-if [ "$#" -eq 0 ]; then
-  exec "$APP_CONTENTS/Helpers/cito-native" daemon
-fi
-case "$1" in
-  -psn_*)
-    shift
-    exec "$APP_CONTENTS/Helpers/cito-native" daemon "$@"
-    ;;
-esac
-exec "$APP_CONTENTS/Helpers/cito-native" "$@"
-"#;
-    let launcher_path = macos_dir.join("Cito");
-    fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));
-
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let helper_native = helpers_dir.join("cito-native");
-    fs::copy(&exe, &helper_native).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&helper_native, fs::Permissions::from_mode(0o755));
-
-    for ui_cand in [
-        pkg_root.join("bin/cito-ui-darwin-arm64"),
-        pkg_root.join("Helpers/cito-ui"),
-    ] {
-        if ui_cand.is_file() {
-            let helper_ui = helpers_dir.join("cito-ui");
-            fs::copy(&ui_cand, &helper_ui).map_err(|e| e.to_string())?;
-            fs::set_permissions(&helper_ui, fs::Permissions::from_mode(0o755))
-                .map_err(|e| e.to_string())?;
-            break;
-        }
-    }
-
-    for icon_cand in [
-        pkg_root.join("bin/AppIcon.icns"),
-        pkg_root.join("Resources/AppIcon.icns"),
-    ] {
-        if icon_cand.is_file() {
-            let _ = fs::copy(&icon_cand, resources_dir.join("AppIcon.icns"));
-            break;
-        }
-    }
-
-    if let Some(mut plugins_src) = resolve_builtin_plugins_dir() {
-        if is_staged_plugins_root(&plugins_src, state_dir) {
-            // Runtime staging may omit overridden IDs; keep their bundled fallback in the App.
-            plugins_src = resolve_bundled_plugins_root().unwrap_or(plugins_src);
-        }
-        copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"))?;
-    }
-
-    let _ = ensure_cli_shims_native(state_dir, plugins);
-    let _ = Command::new("/usr/bin/xattr")
-        .args(["-cr", &app_path.to_string_lossy()])
-        .status();
-
-    let sign_id = env::var("CITO_CODESIGN_IDENTITY")
-        .or_else(|_| env::var("APPLE_SIGNING_IDENTITY"))
-        .unwrap_or_default();
-    let status = if !sign_id.trim().is_empty() {
-        Command::new("/usr/bin/codesign")
-            .args([
-                "--force",
-                "--options",
-                "runtime",
-                "--timestamp",
-                "--deep",
-                "--sign",
-                sign_id.trim(),
-                &app_path.to_string_lossy(),
-            ])
-            .status()
-    } else {
-        Command::new("/usr/bin/codesign")
-            .args(["-s", "-", "--force", "--deep", &app_path.to_string_lossy()])
-            .status()
-    }
-    .map_err(|e| format!("Cannot run codesign for {}: {e}", app_path.display()))?;
-    if !status.success() {
-        return Err(format!(
-            "codesign failed for {}: {status}",
-            app_path.display()
-        ));
-    }
-
-    let bytes = dir_bytes(&app_path);
-    publish_directory(&app_path, &destination)?;
-    // The candidate guard removes the exchanged previous generation non-fatally.
-    Ok((destination, bytes))
-}
-
-pub fn uninstall_setup_native(
+fn daemon_control_config(
     state_dir: &Path,
     config_path: &Path,
     home_dir: &Path,
-    plugins: &LoadedPlugins,
-    purge_data: bool,
-) -> Result<(String, Vec<SetupAction>), String> {
-    uninstall_setup_with_owner(state_dir, config_path, home_dir, plugins, purge_data, None)
-}
-pub(crate) fn uninstall_setup_with_owner(
-    state_dir: &Path,
-    config_path: &Path,
-    home_dir: &Path,
-    plugins: &LoadedPlugins,
-    purge_data: bool,
-    owner: Option<&fs::File>,
-) -> Result<(String, Vec<SetupAction>), String> {
+) -> Result<crate::plugins::NativeConfig, String> {
     let raw = crate::plugins::read_config_text(config_path)?;
     let (default_hub, _, rest) = try_normalize_existing_config(raw.as_deref())?;
     let daemon_port = match env::var("CITO_DAEMON_PORT") {
@@ -895,14 +671,36 @@ pub(crate) fn uninstall_setup_with_owner(
             .transpose()?
             .unwrap_or(4290),
     };
-    let config = crate::plugins::NativeConfig {
+    Ok(crate::plugins::NativeConfig {
         state_dir: state_dir.to_path_buf(),
         config_path: config_path.to_path_buf(),
         home_dir: home_dir.to_path_buf(),
         daemon_port,
         user: String::new(),
-        default_hub: default_hub.clone(),
-    };
+        default_hub,
+    })
+}
+
+pub fn uninstall_setup_native(
+    state_dir: &Path,
+    config_path: &Path,
+    home_dir: &Path,
+    plugins: &LoadedPlugins,
+    purge_data: bool,
+) -> Result<(String, Vec<SetupAction>), String> {
+    uninstall_setup_with_owner(state_dir, config_path, home_dir, plugins, purge_data, None)
+}
+pub(crate) fn uninstall_setup_with_owner(
+    state_dir: &Path,
+    config_path: &Path,
+    home_dir: &Path,
+    plugins: &LoadedPlugins,
+    purge_data: bool,
+    owner: Option<&fs::File>,
+) -> Result<(String, Vec<SetupAction>), String> {
+    let config = daemon_control_config(state_dir, config_path, home_dir)?;
+    let daemon_port = config.daemon_port;
+    let default_hub = config.default_hub.clone();
     if let Some(health) = owner
         .is_none()
         .then(|| crate::plugins::probe_daemon_health(&config))
@@ -1124,6 +922,7 @@ pub fn run_setup_cli(args: &[String]) {
         let mut hub_name: Option<String> = None;
         let mut hub_url: Option<String> = None;
         let mut hub_auth: Option<String> = None;
+        let mut hub_user: Option<String> = None;
         let mut hub_token: Option<String> = None;
         let mut hub_issuer: Option<String> = None;
         let mut hub_client_id: Option<String> = None;
@@ -1135,24 +934,18 @@ pub fn run_setup_cli(args: &[String]) {
         let mut disable_harnesses: Vec<String> = Vec::new();
 
         let read_val = |arg: &str, idx: usize, flag: &str| -> Result<(String, usize), String> {
-            if let Some(rest) = arg.strip_prefix(&format!("{flag}=")) {
-                let v = if flag == "--client-id" {
-                    rest
-                } else {
-                    rest.trim()
-                };
-                if v.is_empty() && !matches!(flag, "--issuer" | "--client-id" | "--redirect-port") {
-                    return Err(format!("Missing value for {flag}"));
-                }
-                return Ok((v.to_string(), idx));
-            }
-            let next = args
-                .get(idx + 1)
-                .ok_or_else(|| format!("Missing value for {flag}"))?;
-            if next.starts_with('-') {
+            let mut next = idx;
+            let allow_empty = matches!(flag, "--issuer" | "--client-id" | "--redirect-port");
+            let value = super::cli_value::read(args, &mut next, flag, allow_empty)?;
+            let value = if arg.contains('=') && flag != "--client-id" {
+                value.trim()
+            } else {
+                value
+            };
+            if value.is_empty() && !allow_empty {
                 return Err(format!("Missing value for {flag}"));
             }
-            Ok((next.clone(), idx + 1))
+            Ok((value.to_owned(), next))
         };
 
         let mut i = 0;
@@ -1212,6 +1005,13 @@ pub fn run_setup_cli(args: &[String]) {
                 let (v, next_i) = read_val(arg, i, "--url")?;
                 hub_url = Some(v);
                 i = next_i;
+            } else if arg == "--user" || arg.starts_with("--user=") {
+                let (v, next_i) = read_val(arg, i, "--user")?;
+                if !crate::plugins::validate_user(&v) {
+                    return Err("INVALID_INPUT: Invalid user".into());
+                }
+                hub_user = Some(v);
+                i = next_i;
             } else if arg == "--auth" || arg.starts_with("--auth=") {
                 let (v, next_i) = read_val(arg, i, "--auth")?;
                 hub_auth = Some(crate::plugins::canonical_auth_mode(&v)?);
@@ -1266,6 +1066,9 @@ pub fn run_setup_cli(args: &[String]) {
             i += 1;
         }
 
+        if hub_user.is_some() && hub_name.is_none() {
+            return Err("--user requires --hub and --url".into());
+        }
         if hub_name.is_some() != hub_url.is_some() {
             return Err("--hub and --url must be specified together".to_string());
         }
@@ -1480,6 +1283,9 @@ pub fn run_setup_cli(args: &[String]) {
                 return Err(format!("Invalid hub name: {name}"));
             }
             let url = validate_nats_url(url_raw)?;
+            if name == "local" && url != "local://" {
+                return Err("INVALID_INPUT: The local hub must use local://".into());
+            }
             let (_, existing_hubs, _) = try_normalize_existing_config(raw_config.as_deref())?;
             let base = existing_hubs.get(name).unwrap_or(&Value::Null);
             let def_scope = if url == "local://" {
@@ -1489,7 +1295,9 @@ pub fn run_setup_cli(args: &[String]) {
             };
             let mut entry = Map::new();
             entry.insert("url".to_string(), json!(url));
-            entry.insert("natsUrl".to_string(), json!(url));
+            if let Some(ref user) = hub_user {
+                entry.insert("user".into(), json!(user));
+            }
             if let Some(ref auth) = hub_auth {
                 entry.insert("authMode".into(), json!(auth));
             } else if hub_issuer.as_deref().is_some_and(|value| !value.is_empty())
@@ -1645,6 +1453,27 @@ pub fn run_setup_cli(args: &[String]) {
                 )),
             }
         })?;
+
+        if !dry_run
+            && (hub_name.is_some()
+                || !enable_hubs.is_empty()
+                || !disable_hubs.is_empty()
+                || share_hub.is_some()
+                || share_port.is_some())
+        {
+            let config = daemon_control_config(&state_dir, &config_path, &home_dir)?;
+            if crate::plugins::probe_daemon_health(&config).is_some() {
+                let result = super::cli::control_request(&config, &json!({"op":"set_host_hub"}))?;
+                if let Some(warning) = result["warning"]
+                    .as_str()
+                    .or_else(|| result["maintenance_warning"].as_str())
+                {
+                    return Err(format!(
+                        "Configuration saved; daemon reload incomplete: {warning}"
+                    ));
+                }
+            }
+        }
 
         if !dry_run && !remove_hubs.is_empty() {
             let (config, _) = crate::plugins::load_native_config()?;

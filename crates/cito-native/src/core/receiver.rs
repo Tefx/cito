@@ -359,10 +359,11 @@ pub(super) fn apply_probe(
     } else {
         row["consecutive_probe_failures"].as_u64().unwrap_or(0) + 1
     };
-    let revoke = matches!(
+    let definitive = matches!(
         status,
         "switched" | "closed_definitive" | "session_switched"
-    ) || failures >= 3;
+    );
+    let revoke = definitive || failures >= 3;
     // Never hold the local database mutex while waiting for registration authority.
     let registration = local.registration_lock(&client.name)?;
     let _registration = if revoke {
@@ -377,7 +378,7 @@ pub(super) fn apply_probe(
     let revoked = local.db.transaction(|c| {
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
-            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND binding_generation=?4 AND owner_token=?5 AND status='ACTIVE' AND (?6 OR (lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND s.state='DISPATCHING' AND s.acknowledged_at_ms IS NULL)))", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone(),json!(definitive)])?;
             if changed > 0 {
                 c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[row["hub"].clone(),row["listener_id"].clone()])?;
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
