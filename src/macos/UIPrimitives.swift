@@ -82,7 +82,7 @@ func makePillTrack(_ frame: NSRect, radius: CGFloat, bordered: Bool = true) -> S
 enum PillAlignment { case leading, trailing }
 @discardableResult
 func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,
-                    spacing: CGFloat = 4, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
+                    spacing: CGFloat = 4, trackRadius: CGFloat? = nil, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
     let visible = pills.filter { !$0.isHidden }
     let totalWidth = visible.isEmpty ? 0 : visible.enumerated().reduce(CGFloat(4)) {
         $0 + $1.element.frame.width + ($1.offset > 0 ? spacing : 0)
@@ -94,6 +94,13 @@ func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: 
     scroll.identifier = NSUserInterfaceItemIdentifier(id)
     scroll.scrollerStyle = .overlay; scroll.drawsBackground = false
     scroll.hasHorizontalScroller = false; scroll.hasVerticalScroller = false
+    if let radius = trackRadius {
+        scroll.wantsLayer = true
+        scroll.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
+        scroll.drawsBackground = true
+        scroll.layer?.cornerRadius = radius
+        scroll.layer?.masksToBounds = true
+    }
     let doc = NSView(frame: NSRect(x: 0, y: 0, width: max(trackWidth, totalWidth), height: frame.height))
     var cursorX: CGFloat = 2
     for pill in visible {
@@ -239,6 +246,26 @@ func panelShortcutKey(_ event: NSEvent) -> String? {
           flags == [.command] || (flags == [.command, .shift] && character == "z"),
           ["v", "c", "x", "a", "z", "w", ","].contains(character) else { return nil }
     return (flags.contains(.shift) ? "shift-command-" : "command-") + (character == "," ? "comma" : character)
+}
+
+func makeFloatingKeyPanel(width: CGFloat, height: CGFloat, appearance: NSAppearance?) -> KeyPanel {
+    let panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                         styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+    panel.titleVisibility = .hidden
+    panel.titlebarAppearsTransparent = true
+    for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+        panel.standardWindowButton(button)?.isHidden = true
+    }
+    panel.appearance = appearance
+    panel.level = .floating
+    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    panel.isFloatingPanel = true
+    panel.hidesOnDeactivate = false
+    panel.isOpaque = false
+    panel.backgroundColor = .clear
+    panel.hasShadow = true
+    panel.isMovableByWindowBackground = true
+    return panel
 }
 
 final class KeyPanel: NSPanel {

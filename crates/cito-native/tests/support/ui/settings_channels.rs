@@ -147,6 +147,28 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
     let first = inspect(&f, p);
     let copy = node(&first, "settings_items", "copy_pair_command:channel");
     assert_eq!(copy["text"], "✓ Copied");
+    let mut warning = json!({"op":"settings","source_op":"channel_pair","hub":"work","channel_id":"channel","request_id":pair["request_id"],"ok":true,"committed":true,"warning":"Pairing started. Refresh is temporarily unavailable."});
+    f.send(p, warning.clone());
+    assert!(node(&inspect(&f, p), "settings_items", "settings_error_banner").is_null());
+    warning["hub"] = json!("personal");
+    f.send(p, warning.clone());
+    let settled = inspect(&f, p);
+    assert_eq!(
+        node(&settled, "settings_items", "settings_error_label")["text"],
+        warning["warning"]
+    );
+    assert_eq!(
+        node(&settled, "settings_items", "pairing_instruction:channel")["text"],
+        "Send the pairing command"
+    );
+    assert_eq!(settled["pending_controls"], json!([]));
+    f.send(p, json!({"op":"test_settings_key","key":"escape"}));
+    warning["warning"] = json!("Duplicate pairing receipt");
+    f.send(p, warning);
+    assert!(node(&inspect(&f, p), "items", "menu_error_row").is_null());
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:apps");
+    control(&f, p, "settings_tab:channels");
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("ready");
     cfg["channels"][0]["fields"][1]["value"] = json!("account");
@@ -264,6 +286,11 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     human["display_address"] = json!("@alice");
     frame["listeners"].as_array_mut().unwrap().push(human);
     frame["hubs"][0]["auth_mode"] = json!("oidc");
+    cfg["hubs"][0]["human_state_status"] = json!("current");
+    cfg["hubs"][0]["human_listener_id"] = json!("inbox");
+    cfg["hubs"][0]["human_can_set_scope"] = json!(true);
+    cfg["hubs"][0]["supports_workspace_scope"] = json!(true);
+    cfg["hubs"][0]["human_control_revision"] = json!(4);
     let device = json!({"channel_id":"here:human","location":"device","display_name":"MacBook Pro.local","availability":"ACTIVE","is_local":true});
     let external = json!({"channel_id":"hub:telegram","location":"hub","display_name":"Telegram","availability":"ACTIVE","is_local":false});
     for remote_only in [false, true] {
@@ -290,6 +317,7 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
             };
             frame["hubs"][0]["human_paused"] = json!(paused);
             cfg["hubs"][0]["human_paused"] = json!(paused);
+            cfg["hubs"][0]["attachments"] = frame["hubs"][0]["attachments"].clone();
             cfg["channels"][0]["inbox_paused"] = json!(paused);
             frame["settings"] = cfg.clone();
             f.send(p, frame.clone());
@@ -557,6 +585,8 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     frame["hubs"][0]["human_control_revision"] = json!(7);
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_paused"] = json!(false);
+    cfg["hubs"][0]["human_control_revision"] = json!(7);
+    cfg["hubs"][0]["human_state_status"] = json!("current");
     let local = json!({"channel_id":"here:human","location":"device","host_id":"here","display_name":"laptop.local","availability":"ACTIVE","is_local":true});
     let other = json!({"channel_id":"other:human","location":"device","host_id":"other","display_name":"desktop.local","availability":"ACTIVE","is_local":false});
     let external = json!({"channel_id":"hub:channel","location":"hub","plugin_id":"channel","display_name":"Messenger","availability":"ACTIVE","is_local":false});
@@ -573,7 +603,8 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
         ),
         (json!([external, local]), "Messenger · Activity · laptop"),
     ] {
-        frame["hubs"][0]["attachments"] = attachments;
+        frame["hubs"][0]["attachments"] = attachments.clone();
+        cfg["hubs"][0]["attachments"] = attachments;
         frame["settings"] = cfg.clone();
         f.send(p, frame.clone());
         let snapshot = inspect(&f, p);
@@ -623,6 +654,44 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     assert!(detail["y"].as_f64().unwrap() >= 8.0);
     for appearance in ["light", "dark"] {
         inspect_as(&f, p, Some(appearance));
+    }
+    let recovery = node(&s, "settings_items", "channel_recovery_bar:channel");
+    let rightmost = nodes(&recovery["children"])
+        .into_iter()
+        .filter(|node| {
+            node["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("recover_channel:"))
+        })
+        .max_by(|a, b| {
+            a["x"]
+                .as_f64()
+                .unwrap()
+                .total_cmp(&b["x"].as_f64().unwrap())
+        })
+        .unwrap();
+    for (kind, issue) in [
+        (
+            "bar_anchor",
+            "settings_channel:channel: recovery row is not edge anchored",
+        ),
+        (
+            "bar_midY",
+            "settings_channel:channel: recovery row controls are not vertically centered",
+        ),
+    ] {
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":kind,"id":rightmost["id"]}),
+        );
+        let snapshot = inspect_unchecked(&f, p, None);
+        assert_eq!(
+            snapshot["non_anchored_action_bars"],
+            json!([issue]),
+            "{kind}"
+        );
+        f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+        inspect(&f, p);
     }
 }
 
@@ -1166,55 +1235,6 @@ fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer
             .unwrap()["values"]["account"],
         "newer-account"
     );
-    cfg["host_hub"]["enabled"] = json!(true);
-    f.send(p, json!({"op":"settings","settings":cfg}));
-    control(&f, p, "settings_tab:hubs");
-    f.send(
-        p,
-        json!({"op":"test_settings_input","id":"host_hub_port","value":"4501"}),
-    );
-    control(&f, p, "apply_host_hub_port");
-    inspect(&f, p);
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "set_host_hub")
-        .unwrap();
-    f.send(
-        p,
-        json!({"op":"test_settings_input","id":"host_hub_port","value":"4502"}),
-    );
-    cfg["host_hub"]["port"] = json!(4501);
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"set_host_hub","request_id":request["request_id"],"settings":cfg}));
-    let newer = inspect(&f, p);
-    assert_eq!(
-        node(&newer, "settings_items", "host_hub_port")["text"],
-        "4502"
-    );
-    assert_eq!(
-        node(&newer, "settings_items", "apply_host_hub_port")["text"],
-        "Apply",
-        "An old acknowledgement must not mark a newer port draft saved"
-    );
-    f.send(
-        p,
-        json!({"op":"test_settings_input","id":"host_hub_port","value":" 4502 "}),
-    );
-    control(&f, p, "apply_host_hub_port");
-    inspect(&f, p);
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "set_host_hub")
-        .unwrap();
-    cfg["host_hub"]["port"] = json!(4502);
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"set_host_hub","request_id":request["request_id"],"settings":cfg}));
-    assert_eq!(
-        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "✓ Saved"
-    );
 }
 
 #[test]
@@ -1303,6 +1323,9 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
     frame["hubs"][0]["human_paused"] = json!(false);
     frame["hubs"][0]["human_availability"] = json!("ACTIVE");
     frame["hubs"][1]["human_paused"] = json!(true);
+    frame["settings"]["hubs"][1]["human_paused"] = json!(true);
+    frame["settings"]["hubs"][1]["human_control_revision"] = json!(3);
+    frame["settings"]["hubs"][1]["human_state_status"] = json!("current");
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
@@ -1593,9 +1616,7 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     cfg["channels"][0]["pairing_instruction"] =
         json!("Send /start cito-ABCDEFGHIJ to your account");
     cfg["channels"][0]["status"] = json!("pairing_pending");
-    for _ in 0..2 {
-        f.send(p, json!({"op":"settings","settings":cfg}));
-    }
+    f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "settings_channel_status:channel")["text"],

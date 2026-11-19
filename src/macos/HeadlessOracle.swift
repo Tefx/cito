@@ -139,7 +139,10 @@ extension Companion {
                     if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
                 }
                 if kind == "bar_anchor", let c = control(object["id"] as? String ?? "quit") { c.frame.origin.x -= 24 }
-                if kind == "bar_midY", let c = control("toggle_inbox") { c.frame.origin.y -= 4 }
+                if kind == "bar_midY", let c = control(object["id"] as? String ?? "toggle_inbox") { c.frame.origin.y -= 4 }
+                if kind == "candidate_hint_jargon", let id = object["id"] as? String {
+                    roots.lazy.compactMap { self.findTextField(in:$0,id:id) }.first?.stringValue = "Human receiver"
+                }
                 if kind == "footer_midY", let c = control("open_uninstall_confirm") { c.frame.origin.y -= 10 }
                 if let bar = control("toggle_inbox")?.superview {
                     if kind == "borderless_padding" { bar.subviews.first { $0.identifier?.rawValue == "inbox_control_title" }?.frame.origin.x = 2 }
@@ -178,12 +181,17 @@ extension Companion {
                 }
                 let hitTarget: NSView?
                 switch kind {
-                case "hit_test": hitTarget = control("open_settings")
+                case "hit_test", "partial_hit_test": hitTarget = control("open_settings")
                 case "editable_hit_test": hitTarget = (object["id"] as? String).flatMap { settingsFieldControls[$0] }
                 default: hitTarget = nil
                 }
                 if let target = hitTarget, let parent = target.superview {
-                    let blocker = NSView(frame:target.frame)
+                    var frame = target.frame
+                    if kind == "partial_hit_test" {
+                        frame.size.width *= 0.25
+                        if object["edge"] as? String == "right" { frame.origin.x = target.frame.maxX - frame.width }
+                    }
+                    let blocker = NSView(frame:frame)
                     blocker.identifier = NSUserInterfaceItemIdentifier("hit_test_probe")
                     parent.addSubview(blocker)
                 }
@@ -510,7 +518,7 @@ extension Companion {
             var ancestor: NSView? = view
             while let current = ancestor {
                 let id = current.identifier?.rawValue ?? ""
-                if id.hasPrefix("act_held:") { return false }
+                if id.hasPrefix("act_held:") || id.hasPrefix("candidate_hint:") { return false }
                 if id == "host_hub_endpoint" || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || current is DirectoryPeerCellView { return true }
                 ancestor = current.superview
             }
@@ -710,6 +718,18 @@ extension Companion {
                     if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - trailingInset - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
                 }
                 let stratum = ["stratum_hub:","stratum_user:"].contains(where: { id.hasPrefix($0) })
+                if id.hasPrefix("channel_recovery_bar:") {
+                    let recovery = edgeItems.filter { name($0).hasPrefix("recover_channel:") }
+                    if let right = recovery.map({ view.convert($0.frame,to:view.superview).maxX }).max(),
+                       let card = view.superview, abs(right - (card.bounds.maxX - 12)) > 1.5 {
+                        let issue = name(card) + ": recovery row is not edge anchored"
+                        nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                    }
+                    if recovery.contains(where: { abs($0.frame.midY-parentBounds.midY) > 1.5 }) {
+                        let issue = (view.superview.map(name) ?? id) + ": recovery row controls are not vertically centered"
+                        nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                    }
+                }
                 if ["inbox_control_bar","footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_channel:","settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
                     let barItems = edgeItems.filter { item in
                         if id == "inbox_control_bar" { return item is MenuControl }
@@ -848,12 +868,15 @@ extension Companion {
                 // Sample the visible interior in the root's superview coordinates.
                 let bounds = control.bounds.intersection(control.visibleRect)
                 if !bounds.isEmpty {
-                    let point = control.convert(NSPoint(x:bounds.midX,y:bounds.midY),to:root.superview)
-                    let hit = root.hitTest(point)
                     let editor = field?.currentEditor()
-                    // AppKit may host the search field's editable region in a native subview.
-                    let nativeSearchHit = control is NSSearchField && hit?.isDescendant(of: control) == true
-                    if hit !== control && (editor == nil || hit !== editor) && !nativeSearchHit {
+                    let occluded = [0.15, 0.5, 0.85].contains { fraction in
+                        let point = control.convert(NSPoint(x:bounds.minX+bounds.width*fraction,y:bounds.midY),to:root.superview)
+                        let hit = root.hitTest(point)
+                        // AppKit may host the search field's editable region in a native subview.
+                        let nativeSearchHit = control is NSSearchField && hit?.isDescendant(of: control) == true
+                        return hit !== control && (editor == nil || hit !== editor) && !nativeSearchHit
+                    }
+                    if occluded {
                         overlappingSiblings.append("\(surface) > \(name(control)): occluded in hitTest")
                     }
                 }
@@ -950,10 +973,10 @@ extension Companion {
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
             "pending_hub_save": hubForm.pendingSave?.requestId ?? "",
             "hub_invite_pending": hubInvitePending, "host_hub_port_pending": hostPort.pending,
-            "pending_app_checks": Array(pendingAppChecks.keys).sorted(),
+            "pending_app_checks": pendingControls.filter { $0.value.appCheck }.keys.sorted(),
             "pending_channel_saves": Array(pendingChannelValues.keys).sorted(),
             "pending_channel_resets": Array(pendingChannelResets.keys).sorted(),
-            "pending_controls": Array(pendingControls.keys).sorted(),
+            "pending_controls": pendingControls.filter { !$0.value.awaitingPairSettings }.keys.sorted(),
             "settings_rebuild_deferred": settingsRebuildDeferred,
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,

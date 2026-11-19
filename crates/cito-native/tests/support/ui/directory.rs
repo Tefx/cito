@@ -82,6 +82,11 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     frame["hubs"][0]["human_listener_id"] = json!("inbox");
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_scope"] = json!("workspace");
+    frame["settings"]["hubs"][0]["human_scope"] = json!("workspace");
+    frame["settings"]["hubs"][0]["human_state_status"] = json!("current");
+    frame["settings"]["hubs"][0]["human_listener_id"] = json!("inbox");
+    frame["settings"]["hubs"][0]["human_can_set_scope"] = json!(true);
+    frame["settings"]["hubs"][0]["supports_workspace_scope"] = json!(true);
     let mut human = listener();
     human["harness"] = json!("human");
     human["listener_id"] = json!("inbox");
@@ -214,6 +219,14 @@ fn v39_reload_hint_retains_full_tooltip_and_activity_reset_requeries() {
     assert_eq!(hint["text"], hint["tooltip"]);
     assert_eq!(hint["width"], 244);
     assert_eq!(hint["x"], 46);
+    let id = "candidate_hint:fixture:reload";
+    f.send(
+        p,
+        json!({"op":"test_oracle_calibration","kind":"candidate_hint_jargon","id":id}),
+    );
+    assert_eq!(inspect_unchecked(&f, p, None)["jargon_leaks"], json!([id]));
+    f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+    inspect(&f, p);
     control(&f, p, "open_activity");
     f.send(p, json!({"op":"test_directory_query","query":"missing"}));
     assert!(!node(&inspect(&f, p), "directory_items", "act_reset_search").is_null());

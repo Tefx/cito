@@ -264,7 +264,13 @@ struct HubConfigItem: Decodable, Equatable {
     let client_id: String?
     var human_paused: Bool? = nil
     var human_about: String? = nil
+    var human_listener_id: String? = nil
+    var human_can_set_scope: Bool? = nil
+    var human_control_revision: Int? = nil
+    var human_scope: String? = nil
+    var human_availability: String? = nil
     var human_state_status: String? = nil
+    var attachments: [ChannelAttachment]? = nil
     var capabilities: HubCapabilities? = nil
     var is_builtin: Bool? = nil
     var supports_workspace_scope: Bool? = nil

@@ -157,9 +157,10 @@ extension Companion {
         return reconciledHub || channelUiStates != previousUi
     }
 
-    func updateInbox(paused: Bool? = nil, hub: String, scope: String? = nil) {
-        let current=hubs.first { $0.name==hub }
-        var action: [String:Any]=["op":"human_inbox_update","hub":hub,"expected_control_revision":current?.human_control_revision ?? 1,"request_id":UUID().uuidString]
+    private func updateInbox(paused: Bool? = nil, scope: String? = nil, hub: String, revision: Int) {
+        guard !isPending("human_inbox_update",hub:hub,target:"paused"),
+              !isPending("human_inbox_update",hub:hub,target:"scope") else { return }
+        var action: [String:Any]=["op":"human_inbox_update","hub":hub,"expected_control_revision":revision]
         if let paused=paused { action["paused"]=paused }
         if let scope=scope { action["scope"]=scope }
         emit(action)
@@ -170,22 +171,7 @@ extension Companion {
     func ensureSettingsPanel() {
         ensureEditMainMenu()
         if settingsPanel == nil {
-            let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
-                                  styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                window.standardWindowButton(button)?.isHidden = true
-            }
-            window.appearance = testAppearance
-            window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.isFloatingPanel = true
-            window.hidesOnDeactivate = false
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = true
-            window.isMovableByWindowBackground = true
+            let window = makeFloatingKeyPanel(width: 520, height: 460, appearance: testAppearance)
             window.onKey = { [weak self] key in self?.handleSettingsKey(key) }
             let root = SurfaceView(frame:NSRect(x:0,y:0,width:520,height:460),radius:14,color:.clear,border:.labelColor.withAppearanceAlpha(0.15))
             root.identifier=NSUserInterfaceItemIdentifier("settings_panel"); root.layer?.masksToBounds=true
@@ -283,8 +269,7 @@ extension Companion {
 
     func handlePasteHubInvite() {
         guard !hubInvitePending else { return }
-        let systemText = appPasteboard.string(forType:.string) ?? ""
-        let raw = (systemText.isEmpty && headless ? clipboardString : systemText).trimmingCharacters(in:.whitespacesAndNewlines)
+        let raw = readPasteboardString().trimmingCharacters(in:.whitespacesAndNewlines)
         let isURL = (raw.hasPrefix("http://") || raw.hasPrefix("https://")) && URL(string:raw)?.host != nil
         let isCLI = raw.hasPrefix("cito setup ") && raw.contains("--url")
         let invite = raw.data(using:.utf8).flatMap { try? JSONSerialization.jsonObject(with:$0) } as? [String:Any]
@@ -296,7 +281,7 @@ extension Companion {
         }
         // One authoritative parser in the daemon handles every invite format.
         // Clipboard text is data, never a shell command to execute.
-        settingsBannerError=nil; hubInvitePending=true; hubInvitePastedUntil = .distantPast
+        settingsBannerError=nil; hubInvitePastedUntil = .distantPast
         hubInviteRequest = UUID().uuidString
         emit(["op":"paste_hub_invite","invite":raw,"request_id":hubInviteRequest])
         rebuildSettingsPanel()
@@ -577,12 +562,7 @@ extension Companion {
             btn.isEnabled = !appPending
             pendingLabel(btn,isPending("setup_apply",target:app.id),actionTitle == "Check & Repair" ? "Checking…" : "Setting Up…")
             btn.pressed = { [weak self] in
-                let request = UUID().uuidString
-                if app.isConfigured, let self = self {
-                    self.pendingAppChecks = self.pendingAppChecks.filter { $0.value != app.id }
-                    self.pendingAppChecks[request] = app.id
-                }
-                self?.emit(["op":"setup_apply","harness":app.id,"request_id":request])
+                self?.emit(["op":"setup_apply","harness":app.id], appCheck: app.isConfigured)
             }
             card.addSubview(btn)
             var trailing: [NSView] = [btn]
@@ -612,11 +592,19 @@ extension Companion {
         channelsView.isHidden = settingsActiveTab != "channels"
 
         let inboxHub = effectiveChannelHub
-        let inbox = hubs.first { $0.name == inboxHub }
         let inboxConfig = settings?.hubs.first { $0.name == inboxHub }
+        let inbox = inboxConfig == nil ? hubs.first { $0.name == inboxHub } : nil
         let inboxPaused = inboxConfig?.human_paused ?? inbox?.human_paused ?? false
-        let inboxUser = inbox?.user ?? inboxConfig?.user ?? "local"
-        let inboxAttachments = displayAttachments(inbox?.attachments ?? [])
+        let inboxUser = inboxConfig?.user ?? inbox?.user ?? "local"
+        let inboxAttachments = displayAttachments(inboxConfig?.attachments ?? inbox?.attachments ?? [])
+        let inboxCurrent = (inboxConfig?.status ?? inbox?.status) == "connected" &&
+            (inboxConfig?.human_state_status ?? inbox?.human_state_status) == "current"
+        let scopeValue = inboxConfig?.human_scope ?? inbox?.human_scope ?? "self"
+        let revision = inboxConfig?.human_control_revision ?? inbox?.human_control_revision ?? 1
+        let pausePending = isPending("human_inbox_update",hub:inboxHub,target:"paused")
+        let scopePending = isPending("human_inbox_update",hub:inboxHub,target:"scope")
+        // Both actions share a revision; only the submitted action shows progress.
+        let inboxEnabled = inboxCurrent && !pausePending && !scopePending
         let externalNames = inboxAttachments.filter { $0.location == "hub" }.map { cleanHostDisplay($0.display_name) }
         let deliveryNames = externalNames + ["Activity"] + inboxAttachments.filter { $0.location == "device" }.map { cleanHostDisplay($0.display_name) }
         let inboxSummary = inboxPaused ? (externalNames.isEmpty ? "Inbox alerts paused" : "Inbox paused · Activity & " + externalNames.joined(separator:" · ") + " paused") : deliveryNames.joined(separator:" · ")
@@ -631,15 +619,19 @@ extension Companion {
         inboxBar.addSubview(inboxTitle); inboxBar.addSubview(inboxDetail)
         let inboxToggle = MenuControl(inboxPaused ? "Resume Inbox" : "Pause Inbox",frame:NSRect(x:0,y:22,width:MenuControl.intrinsicWidth("Resume Inbox"),height:22))
         inboxToggle.identifier = NSUserInterfaceItemIdentifier("toggle_inbox")
-        inboxToggle.isEnabled = (inbox?.status ?? inboxConfig?.status) == "connected" && (inboxConfig == nil || inboxConfig?.status == "connected") && (inboxConfig?.human_state_status ?? inbox?.human_state_status) == "current"
+        inboxToggle.isEnabled = inboxEnabled
         inboxToggle.toolTip = inboxPaused ? "Resume your shared inbox on \(inboxHub), preserving descriptions and channel bindings" : "Pause inbox alerts on \(inboxHub) across all devices and external channels"
-        inboxToggle.pressed = { [weak self] in self?.updateInbox(paused:!inboxPaused,hub:inboxHub) }
-        pendingLabel(inboxToggle,isPending("human_inbox_update",hub:inboxHub),inboxPaused ? "Resuming…" : "Pausing…")
+        inboxToggle.pressed = { [weak self] in self?.updateInbox(paused:!inboxPaused,hub:inboxHub,revision:revision) }
+        pendingLabel(inboxToggle,pausePending,inboxPaused ? "Resuming…" : "Pausing…")
         inboxBar.addSubview(inboxToggle)
         var inboxActions: [NSView] = []
-        if let id = inbox?.human_listener_id, let scope = scopeToggle(hub:inboxHub,user:inboxUser,scope:inbox?.human_scope ?? "self",id:id,y:22) {
-            scope.isEnabled = inboxToggle.isEnabled
-            scope.pressed = { [weak self] in self?.updateInbox(hub:inboxHub,scope:inbox?.human_scope == "workspace" ? "self" : "workspace") }
+        if let id = inboxConfig?.human_listener_id ?? inbox?.human_listener_id,
+           (inboxConfig?.supports_workspace_scope ?? inbox?.supports_workspace_scope) == true,
+           (inboxConfig?.human_can_set_scope ?? inbox?.human_can_set_scope) == true {
+            let scope = makeScopeControl(hub:inboxHub,user:inboxUser,scope:scopeValue,id:id,y:22)
+            scope.isEnabled = inboxEnabled
+            pendingLabel(scope,scopePending,"Updating…")
+            scope.pressed = { [weak self] in self?.updateInbox(scope:scopeValue == "workspace" ? "self" : "workspace",hub:inboxHub,revision:revision) }
             inboxBar.addSubview(scope); inboxActions.append(scope)
         }
         inboxActions.append(inboxToggle)
@@ -672,15 +664,10 @@ extension Companion {
             channelPills.append(pill)
         }
         if channelHubs.count > 1 {
-            let strip = mountPillStrip(in: channelsView, frame: NSRect(x: 102, y: cursorY-26, width: 398, height: 26),
-                           id: "channel_hub_strip", spacing: 6, pills: channelPills) {
+            mountPillStrip(in: channelsView, frame: NSRect(x: 102, y: cursorY-26, width: 398, height: 26),
+                           id: "channel_hub_strip", spacing: 6, trackRadius: 13, pills: channelPills) {
                 $0.identifier?.rawValue == "channel_hub_selector:\(effectiveChannelHub)"
             }
-            strip.wantsLayer = true
-            strip.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
-            strip.drawsBackground = true
-            strip.layer?.cornerRadius = 13
-            strip.layer?.masksToBounds = true
             cursorY -= 36
         }
 
@@ -794,6 +781,8 @@ extension Companion {
             }
 
             if ch.status == "error" {
+                let recoveryBar = NSView(frame:NSRect(x:0,y:unavailable ? 8 : cardHeight-headerHeight-28,width:chCard.bounds.width,height:22))
+                recoveryBar.identifier = NSUserInterfaceItemIdentifier("channel_recovery_bar:\(ch.id)")
                 var recovery:[NSView]=[]
                 let actions = [("Retry","retry",true),("Change Token…","change",ch.can_configure_hub == true),("Clear Token","clear",ch.can_clear_hub == true),("Send Test","test",ch.can_test == true && ch.configured),("Unpair","unpair",ch.can_unpair == true)]
                 for (title,id,allowed) in actions where allowed {
@@ -809,9 +798,10 @@ extension Companion {
                     case "unpair": self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_user":true])
                     default: self.channelUiStates[channelKey,default:ChannelUiState()].editingGateway = id == "change"; self.emit(["op":"open_settings","hub":self.effectiveChannelHub])
                     } }
-                    chCard.addSubview(button); recovery.append(button)
+                    recoveryBar.addSubview(button); recovery.append(button)
                 }
-                layoutBar(in:chCard,insetLeft:12,insetRight:12,y:unavailable ? 8 : cardHeight-headerHeight-28,height:22,spacing:4,trailing:recovery)
+                layoutBar(in:recoveryBar,insetLeft:12,insetRight:12,y:0,height:22,spacing:4,trailing:recovery)
+                chCard.addSubview(recoveryBar)
                 if unavailable {
                     channelsView.addSubview(chCard)
                     chCursorY -= 10
@@ -1063,17 +1053,23 @@ extension Companion {
         let hostExpanded = hostHub.enabled || hostPort.pending || hostPort.draft != nil || hostError != nil
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
         let hostNotice = hostError ?? (!hostHub.enabled && hostExpanded ? "Choose Start Sharing to accept connections" : nil)
-        let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 160 : 120) + (hostNotice == nil ? 0 : 28) : 46
+        let hostNoticeText = hostNotice.map(presentationError)
+        let noticeHeight = hostNoticeText.map {
+            max(18, ceil(($0 as NSString).boundingRect(with:NSSize(width:452,height:CGFloat.greatestFiniteMagnitude),
+                options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:11)]).height) + 2)
+        } ?? 0
+        let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 160 : 120) + (noticeHeight == 0 ? 0 : noticeHeight + 10) : 46
         let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 356 - hostHeight, width: 480, height: hostHeight), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
         let hostTitle=textLabel(hostHub.enabled && !hostHub.running && hostError == nil ? "Share This Mac as a Hub · Starting…" : "Share This Mac as a Hub", NSRect(x:14,y:0,width:280,height:17),size:13,weight:.semibold)
         hostTitle.identifier = NSUserInterfaceItemIdentifier("host_hub_title")
         hostCard.addSubview(hostTitle)
-        if hostExpanded, let error = hostNotice {
-            let subtitle = textLabel(presentationError(error), NSRect(x:14,y:hostHeight-52,width:452,height:18), size:11, color:hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
+        if hostExpanded, let notice = hostNoticeText {
+            let subtitle = textLabel(notice, NSRect(x:14,y:hostHeight-34-noticeHeight,width:452,height:noticeHeight), size:11, color:hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
             subtitle.identifier = NSUserInterfaceItemIdentifier("host_hub_error")
-            subtitle.toolTip = presentationError(error)
+            subtitle.maximumNumberOfLines = 0; subtitle.lineBreakMode = .byWordWrapping; subtitle.cell?.wraps = true
+            subtitle.toolTip = notice
             hostCard.addSubview(subtitle)
         }
 

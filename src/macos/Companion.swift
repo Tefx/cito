@@ -69,6 +69,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         appPasteboard.setString(text, forType: .string)
         control?.copied(feedback)
     }
+    func readPasteboardString() -> String {
+        // The pasteboard remains authoritative after a copy in another application.
+        let systemText = appPasteboard.string(forType: .string) ?? ""
+        return systemText.isEmpty && headless ? clipboardString : systemText
+    }
     var directoryOnlineCount = 0
     var directoryMatchedCount = 0
     var unreadCount = 0
@@ -198,20 +203,22 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var hostPort = HostHubPortState()
     var settingsBannerError: String?
     var menuBannerError: String?
-    var hubInvitePending = false
+    var hubInvitePending: Bool { !hubInviteRequest.isEmpty }
     var hubInviteRequest = ""
     var hubInvitePastedUntil = Date.distantPast
     var settingsFieldControls: [String: NSTextField] = [:]
     var channelUiStates: [String: ChannelUiState] = [:]
     var appCheckedUntil: [String: Date] = [:]
-    var pendingAppChecks: [String: String] = [:]
     struct PendingControl {
         let op: String, hub: String, target: String
+        let appCheck: Bool
+        // Pairing instructions complete the button action; settings settles its projection.
+        var awaitingPairSettings = false
     }
     var pendingControls: [String: PendingControl] = [:]
     var pendingChannelResets: [String: (all: Bool, submitted: ChannelUiState)] = [:]
     func isPending(_ op: String, hub: String = "", target: String = "") -> Bool {
-        pendingControls.values.contains { $0.op == op && $0.hub == hub && $0.target == target }
+        pendingControls.values.contains { $0.op == op && $0.hub == hub && $0.target == target && !$0.awaitingPairSettings }
     }
     var hostHubAddress = "tailscale"
     var pendingChannelValues: [String: (hub: String, channelId: String, scope: String, values: [String: String])] = [:]
@@ -274,9 +281,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         switch key.lowercased() {
         case "command-v":
-            // The pasteboard remains authoritative after a copy in another application.
-            let systemText = appPasteboard.string(forType: .string) ?? ""
-            let text = systemText.isEmpty && headless ? clipboardString : systemText
+            let text = readPasteboardString()
             clipboardString = text
             changeText { editor.insertText(text, replacementRange: editor.selectedRange()) }
         case "command-a": editor.selectAll(nil); return true
@@ -435,7 +440,6 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if operation == "channel_pair", channelUiStates[key]?.pendingPairRequest == request {
             channelUiStates[key]?.pendingPairRequest = nil
         }
-        if operation != "channel_test", let warning = frame.warning, !warning.isEmpty { settingsBannerError = warning }
         return true
     }
 
@@ -457,12 +461,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             settled = true
         }
         if !hubInviteRequest.isEmpty && request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "save_hub", "paste_hub_invite"].contains(operation)) {
-            hubInvitePending = false; settled = true
+            hubInviteRequest = ""; settled = true
         }
         if request == hostPort.requestId && (operation.isEmpty || operation == "set_host_hub") {
             hostPort.pending = false; hostPort.requestId = ""; settled = true
         }
-        if (operation.isEmpty || operation == "setup_apply"), pendingAppChecks.removeValue(forKey: request) != nil { settled = true }
         if let pending = pendingControls[request], pending.op == operation || operation.isEmpty,
            frame.hub == nil || frame.hub == pending.hub,
            frame.channel_id == nil || frame.channel_id == pending.target,
@@ -471,7 +474,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             pendingChannelResets.removeValue(forKey: request)
             settled = true
         }
-        if settled && !routedToForm && operation != "channel_test", let message = message, !message.isEmpty { settingsBannerError = message }
+        if settled && !routedToForm && operation != "channel_test", let message = message, !message.isEmpty {
+            if settingsVisible { settingsBannerError = message } else { menuBannerError = message }
+        }
         return settled
     }
 
@@ -496,7 +501,6 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
            (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
             let settled = settleReceiptOnly(frame)
             if settled {
-                if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test", !settingsVisible { menuBannerError = warning }
                 rebuild()
                 refreshDirectoryViews()
                 if settingsVisible { rebuildSettingsPanel() }
@@ -515,10 +519,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             refreshDirectoryViews()
             return
         }
-        let receiptHub = frame.hub ?? frame.request_id.flatMap { pendingControls[$0]?.hub }
+        let pendingReceipt = frame.request_id.flatMap { pendingControls[$0] }
+        let receiptHub = frame.hub ?? pendingReceipt?.hub
         var settledControl = frame.op == "pair_code" ? false : settleChannelReceipt(frame)
         if let request = frame.request_id, let pending = pendingControls[request],
            frame.op != "pair_code" && frame.op != "channel_test_result",
+           pending.op != "channel_pair" || (frame.hub == nil || frame.hub == pending.hub) &&
+               (frame.channel_id == nil || frame.channel_id == pending.target) &&
+               (frame.channel == nil || frame.channel == pending.target),
            frame.source_op == pending.op || frame.op == "error" ||
            (frame.op == "settings" && frame.source_op == nil && pending.op == "set_host_hub" && request == hostPort.requestId) {
             pendingControls.removeValue(forKey: request)
@@ -581,14 +589,13 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             acceptSettings(value, hub: frame.hub, savedRequest: frame.request_id, sourceOp: frame.source_op)
         }
         if frame.op == "error" || (frame.ok == false && frame.op != "channel_test_result") {
-            if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
             if sourceOp == "paste_hub_invite", let request = frame.request_id {
                 guard (!hubForm.parseRequest.isEmpty && request == hubForm.parseRequest) ||
                       (!hubInviteRequest.isEmpty && request == hubInviteRequest) ||
                       (hubForm.pendingSave != nil && request == hubForm.pendingSave?.requestId) else { return }
                 if !hubForm.parseRequest.isEmpty && request == hubForm.parseRequest { hubForm.parseRequest=""; return }
-                if !hubInviteRequest.isEmpty && request == hubInviteRequest { hubInvitePending = false }
+                if hubInvitePending && request == hubInviteRequest { hubInviteRequest = "" }
             }
             // A command may emit both its result and a trailing generic error.
             // Neither can settle a retry or overwrite its feedback.
@@ -615,7 +622,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 hostPort.requestId = ""
             }
             if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || (sourceOp.isEmpty && (frame.request_id == nil || (!hubInviteRequest.isEmpty && frame.request_id == hubInviteRequest))) {
-                hubInvitePending=false; hubInvitePastedUntil = .distantPast
+                hubInviteRequest=""; hubInvitePastedUntil = .distantPast
             }
             if isAddHubError { hubForm.pendingSave = nil }
             let isComposerError = ["send_signal", "send_reply_from_human", ""].contains(sourceOp) &&
@@ -656,13 +663,13 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let target = value.settings_hub ?? value.channel_hub ?? frame.hub ?? effectiveChannelHub
             let changed = value != settings || (value.channels.map { channelSettingsByHub[target] != $0 } ?? false)
             let receipt = settledControl || frame.request_id != nil || frame.source_op != nil
-            if let request = frame.request_id, let app = pendingAppChecks.removeValue(forKey: request),
+            if settledControl, let pending = pendingReceipt, pending.appCheck,
                frame.ok == true && frame.source_op == "setup_apply" {
-                appCheckedUntil[app] = Date().addingTimeInterval(1.5)
+                appCheckedUntil[pending.target] = Date().addingTimeInterval(1.5)
                 rebuildFeedbackAfter(1.5)
             }
-            if hubInvitePending && !hubInviteRequest.isEmpty && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? "") {
-                hubInvitePending=false; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
+            if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? "") {
+                hubInviteRequest=""; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
             let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil
             let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? ""))
@@ -674,8 +681,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if frame.op == "pair_code", frame.authority_changed != true, let id = frame.channel_id {
             let hub = receiptHub ?? effectiveChannelHub
             let key="\(hub)|\(id)"
-            guard let request = frame.request_id, var ui = channelUiStates[key], ui.pendingPairRequest == request else { return }
-            pendingControls.removeValue(forKey: request)
+            guard let request = frame.request_id, let pending = pendingReceipt,
+                  pending.op == "channel_pair", pending.hub == hub, pending.target == id,
+                  var ui = channelUiStates[key], ui.pendingPairRequest == request else { return }
+            pendingControls[request]?.awaitingPairSettings = true
             ui.pendingPairRequest = nil
             ui.pairingInstruction = frame.instruction ?? frame.code ?? ""
             ui.pairingCommand = frame.pairing_command ?? frame.instruction
@@ -793,7 +802,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
     }
 
-    func emit(_ action: [String: Any], userInitiated: Bool = true) {
+    func emit(_ action: [String: Any], userInitiated: Bool = true, appCheck: Bool = false) {
         let operation = action["op"] as? String ?? ""
         let passive = ["query_directory", "refresh_available"].contains(operation)
         if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild() }
@@ -806,7 +815,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let message = "This action is too large to send. Shorten the input and try again."
             if operation == "setup_save_hub" { hubForm.pendingSave = nil; hubForm.error = message }
             else if operation == "set_host_hub" { hostPort.pending = false; hostPort.error = message }
-            else if operation == "paste_hub_invite" { hubInvitePending = false; hubForm.parseRequest = ""; settingsBannerError = message }
+            else if operation == "paste_hub_invite" { hubInviteRequest = ""; hubForm.parseRequest = ""; settingsBannerError = message }
             else if ["send_signal", "send_reply_from_human"].contains(operation) { pendingComposer = nil; setComposerStatus(message) }
             else { settingsBannerError = message; menuBannerError = message }
             rebuild(); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
@@ -817,8 +826,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let hub = outgoing["hub"] as? String ?? (channel == nil ? "" : effectiveChannelHub)
             let session = (outgoing["session_id"] as? String).map { "\(outgoing["harness"] as? String ?? ""):\($0)" }
             let hostTarget = action["auth_mode"] != nil ? "access" : (request == hostPort.requestId ? "port" : "sharing")
-            let target = channel ?? session ?? outgoing["harness"] as? String ?? (operation == "set_host_hub" ? hostTarget : "")
-            pendingControls[request] = PendingControl(op: operation, hub: hub, target: target)
+            let inboxTarget = action["paused"] != nil ? "paused" : "scope"
+            let controlTarget = operation == "set_host_hub" ? hostTarget : (operation == "human_inbox_update" ? inboxTarget : "")
+            let target = channel ?? session ?? outgoing["harness"] as? String ?? controlTarget
+            pendingControls[request] = PendingControl(op: operation, hub: hub, target: target, appCheck: appCheck)
         }
         if directoryActionOps.contains(operation), let request = outgoing["request_id"] as? String {
             // Full-message copy already owns this ID through its multipart buffer.

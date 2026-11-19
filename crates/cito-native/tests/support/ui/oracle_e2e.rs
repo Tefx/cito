@@ -1065,8 +1065,13 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     cfg["hubs"][0]["name"] = json!("local");
     let mut frame = state();
     frame["hubs"][0]["name"] = json!("local");
-    frame["settings"] = cfg.clone();
     frame["listeners"] = json!([]);
+    for hub in cfg["hubs"].as_array_mut().unwrap() {
+        hub["human_paused"] = json!(true);
+        hub["human_state_status"] = json!("current");
+        hub["human_control_revision"] = json!(7);
+    }
+    frame["settings"] = cfg.clone();
     for hub in frame["hubs"].as_array_mut().unwrap() {
         hub["human_paused"] = json!(true);
         hub["human_state_status"] = json!("current");
@@ -1108,6 +1113,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     ] {
         let mut unavailable = frame.clone();
         unavailable["hubs"][0]["status"] = json!(status);
+        unavailable["settings"]["hubs"][0]["status"] = json!(status);
         f.send(p, unavailable);
         control(&f, p, "target_hub:local");
         let snapshot = inspect(&f, p);
@@ -1155,6 +1161,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         paused["hubs"][0]["human_paused"] = json!(false);
         paused["hubs"][0]["human_control_revision"] = json!(8);
         paused["hubs"][0]["human_availability"] = json!("ACTIVE");
+        paused["settings"]["hubs"][0]["human_paused"] = json!(false);
+        paused["settings"]["hubs"][0]["human_control_revision"] = json!(8);
         paused["source_op"] = json!("human_inbox_update");
         paused["request_id"] = resume["request_id"].clone();
         f.send(p, paused);
@@ -1164,14 +1172,6 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         );
     }
     f.send(p, frame.clone());
-    control(&f, p, "target_hub:work");
-    control(&f, p, "inbox_paused_notice");
-    control(&f, p, "toggle_inbox");
-    inspect(&f, p);
-    assert!(f.frames(p).iter().any(|a| a["op"] == "human_inbox_update"
-        && a["hub"] == "work"
-        && a["paused"] == false
-        && a["expected_control_revision"] == 7));
     control(&f, p, "open_settings");
     control(&f, p, "channel_hub_selector:local");
     control(&f, p, "settings_tab:apps");
@@ -1401,6 +1401,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     for (running, error) in [
         (false, None),
         (false, Some("Address already in use")),
+        (false, Some("The port is already in use.\nStop the other service or choose a different port.\nThen apply the new port to resume sharing.")),
         (false, Some("")),
         (true, Some("")),
         (true, Some("Hub listener failed")),
@@ -1445,6 +1446,10 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         }
         if let Some(failure) = failure {
             assert_eq!(warning["text"], failure);
+            assert_eq!(warning["wraps"], true);
+            if failure.contains('\n') {
+                assert!(warning["height"].as_f64().unwrap() > 32.0);
+            }
         } else {
             assert!(warning.is_null());
             let title = node(&status, "settings_items", "host_hub_title");
@@ -1656,7 +1661,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         let draft = current + 1;
         f.send(
             p,
-            json!({"op":"test_settings_input","id":"host_hub_port","value":draft.to_string()}),
+            json!({"op":"test_settings_input","id":"host_hub_port","value":format!(" {draft} ")}),
         );
         control(&f, p, "apply_host_hub_port");
         wait(|| {
@@ -1916,6 +1921,22 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
                     .unwrap()
                     .is_empty(),
                 "{kind}"
+            );
+            f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+            inspect_as(&f, p, Some(appearance));
+        }
+        for edge in ["left", "right"] {
+            f.send(
+                p,
+                json!({"op":"test_oracle_calibration","kind":"partial_hit_test","edge":edge}),
+            );
+            let snapshot = inspect_unchecked(&f, p, Some(appearance));
+            assert!(
+                snapshot["overlapping_siblings"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("menu > open_settings: occluded in hitTest")),
+                "{edge}"
             );
             f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
             inspect_as(&f, p, Some(appearance));

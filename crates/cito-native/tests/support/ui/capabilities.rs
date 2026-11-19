@@ -416,6 +416,11 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("ready");
     cfg["channels"][0]["fields"][1]["value"] = json!("room");
+    cfg["hubs"][0]["human_state_status"] = json!("current");
+    cfg["hubs"][0]["human_listener_id"] = json!("inbox");
+    cfg["hubs"][0]["human_can_set_scope"] = json!(true);
+    cfg["hubs"][0]["supports_workspace_scope"] = json!(true);
+    cfg["hubs"][0]["attachments"] = frame["hubs"][0]["attachments"].clone();
     frame["settings"] = cfg.clone();
     for paused in [false, true] {
         frame["hubs"][0]["human_paused"] = json!(paused);
@@ -475,14 +480,61 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
                 < 368.0
         );
     }
-    control(&f, ui, "scope:inbox");
-    inspect(&f, ui);
-    assert!(f
+    // An open-settings receipt can observe a different inbox than the last state.
+    cfg["hubs"][0]["user"] = json!("bob");
+    cfg["hubs"][0]["human_listener_id"] = json!("new-inbox");
+    cfg["hubs"][0]["human_scope"] = json!("workspace");
+    cfg["hubs"][0]["human_control_revision"] = json!(9);
+    cfg["hubs"][0]["human_availability"] = json!("ACTIVE");
+    cfg["hubs"][0]["attachments"] = json!([{"channel_id":"hub:alerts","location":"hub","display_name":"Alerts","availability":"ACTIVE","is_local":false}]);
+    f.send(
+        ui,
+        json!({"op":"settings","source_op":"open_settings","settings":cfg}),
+    );
+    let refreshed = inspect(&f, ui);
+    assert_eq!(
+        node(&refreshed, "settings_items", "inbox_control_title")["text"],
+        "You (@bob)"
+    );
+    assert_eq!(
+        node(&refreshed, "settings_items", "inbox_control_summary")["text"],
+        "Alerts · Activity"
+    );
+    assert_eq!(
+        node(&refreshed, "settings_items", "scope:new-inbox")["text"],
+        "Team"
+    );
+    assert!(node(&refreshed, "settings_items", "scope:inbox").is_null());
+    control(&f, ui, "scope:new-inbox");
+    let pending = inspect(&f, ui);
+    let scope = node(&pending, "settings_items", "scope:new-inbox");
+    assert_eq!(scope["text"], "Updating…");
+    assert_eq!(scope["enabled"], false);
+    assert_eq!(
+        node(&pending, "settings_items", "toggle_inbox")["text"],
+        "Pause Inbox"
+    );
+    let action = f
         .frames(ui)
-        .iter()
-        .any(|action| action["op"] == "human_inbox_update"
-            && action["hub"] == "personal"
-            && action["scope"] == "workspace"));
+        .into_iter()
+        .rev()
+        .find(|action| action["op"] == "human_inbox_update")
+        .unwrap();
+    assert_eq!(action["hub"], "personal");
+    assert_eq!(action["scope"], "self");
+    assert_eq!(action["expected_control_revision"], 9);
+    assert!(action.get("paused").is_none());
+    cfg["hubs"][0]["human_scope"] = json!("self");
+    f.send(ui, json!({"op":"settings","source_op":"human_inbox_update","request_id":action["request_id"],"ok":true,"settings":cfg}));
+    let settled = inspect(&f, ui);
+    assert_eq!(
+        node(&settled, "settings_items", "scope:new-inbox")["text"],
+        "Self"
+    );
+    assert_eq!(
+        node(&settled, "settings_items", "scope:new-inbox")["enabled"],
+        true
+    );
     control(&f, ui, "edit_user_channel:channel");
     let s = inspect(&f, ui);
     let band = node(&s, "settings_items", "stratum_user:channel");
@@ -518,6 +570,20 @@ fn v48_reply_authority_separates_activity_ownership_from_send_permission() {
         let after = inspect(&f, ui);
         assert_eq!(after["composer_open"], allowed);
     }
+    f.send(ui, json!({"op":"test_directory_key","key":"escape"}));
+    let mut blocked = item.clone();
+    blocked["signal_id"] = json!("blocked");
+    blocked["can_reply"] = json!(false);
+    blocked["created_at"] = json!("2029-01-01T00:00:00Z");
+    frame["activity"] = json!([item, blocked]);
+    f.send(ui, frame);
+    let shortcuts =
+        || node(&inspect(&f, ui), "directory_items", "directory_shortcuts")["text"].clone();
+    assert_eq!(shortcuts(), "↵ Reply    ⎋ Close");
+    f.send(ui, json!({"op":"test_directory_key","key":"down"}));
+    assert_eq!(shortcuts(), "⎋ Close");
+    f.send(ui, json!({"op":"test_directory_key","key":"up"}));
+    assert_eq!(shortcuts(), "↵ Reply    ⎋ Close");
 }
 
 #[test]

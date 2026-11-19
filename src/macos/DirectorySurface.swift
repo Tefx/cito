@@ -72,22 +72,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func ensureDirectoryPanel() {
         ensureEditMainMenu()
         if directoryPanel != nil { return }
-        let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
-                              styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(button)?.isHidden = true
-        }
-        window.appearance = testAppearance
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.isFloatingPanel = true
-        window.hidesOnDeactivate = false
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.isMovableByWindowBackground = true
+        let window = makeFloatingKeyPanel(width: 560, height: 440, appearance: testAppearance)
 
         let root = SurfaceView(frame: NSRect(x: 0, y: 0, width: 560, height: 440), radius: 14,
             color: .clear, border: .labelColor.withAppearanceAlpha(0.15))
@@ -518,14 +503,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             harnessPills.append(pill); directoryFacetControls[id] = pill
         }
         let strip = mountPillStrip(in: facetBar, frame: NSRect(x: 157, y: 3, width: 387, height: 26),
-                                  id: "directory_harness_scroll", pills: harnessPills) {
+                                  id: "directory_harness_scroll", trackRadius: 13, pills: harnessPills) {
             $0.identifier?.rawValue == "dir_harness:\(directoryHarnessFilter)"
         }
-        strip.wantsLayer = true
-        strip.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
-        strip.drawsBackground = true
-        strip.layer?.cornerRadius = 13
-        strip.layer?.masksToBounds = true
         directoryDynamicHarnessViews.append(strip)
         updateDirectoryFacetStyles()
     }
@@ -799,6 +779,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
             directoryTableView?.scrollRowToVisible(directorySelectedIndex)
             directoryTableView?.layoutSubtreeIfNeeded()
+            updateDirectoryShortcuts()
         case "up":
             let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
             guard count > 0 else { return }
@@ -807,6 +788,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
             directoryTableView?.scrollRowToVisible(directorySelectedIndex)
             directoryTableView?.layoutSubtreeIfNeeded()
+            updateDirectoryShortcuts()
         case "return":
             if !(directoryComposerBar?.isHidden ?? true) {
                 if composerInputField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true { setComposerStatus("Enter a message to send.") }

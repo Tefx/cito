@@ -489,6 +489,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         human["display_address"] = json!(format!("@{user}"));
         frame["listeners"] = json!([human.clone()]);
         frame["hubs"][0]["user"] = json!(user);
+        frame["settings"]["hubs"][0]["user"] = json!(user);
         frame["hubs"][0]["human_paused"] = json!(false);
         frame["hubs"][0]["human_availability"] = json!("ACTIVE");
         frame["hubs"][0]["human_state_status"] = json!("current");
@@ -638,7 +639,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         let label = &row["children"][0];
         assert_eq!(label["text"], "Connection unavailable");
         assert_eq!(label["wraps"], true);
-        assert_eq!(label["maximum_lines"], 2);
+        assert_eq!(label["maximum_lines"], 0);
         assert_eq!(
             s["low_contrast_labels"],
             json!([]),
@@ -793,6 +794,67 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         );
         tooltip(&s, "directory_items", &clean_error);
     }
+}
+
+#[test]
+fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let names = ["personal-working-group", "workspace-working-group"];
+    let mut frame = state();
+    let mut cfg = settings();
+    for (index, name) in names.iter().enumerate() {
+        frame["hubs"][index]["name"] = json!(name);
+        cfg["hubs"][index]["name"] = json!(name);
+    }
+    frame["listeners"][0]["hub"] = json!(names[0]);
+    frame["settings"] = cfg;
+    f.send(p, frame);
+    for name in names {
+        control(&f, p, &format!("hub:{name}"));
+        let snapshot = inspect_unchecked(&f, p, None);
+        assert_eq!(snapshot["clipped_views"], json!([]));
+        assert_eq!(snapshot["overlapping_siblings"], json!([]));
+        let strip = node(&snapshot, "items", "header_hub_strip");
+        assert_eq!(strip["content_x"], 0);
+        for name in names {
+            let pill = node(&snapshot, "items", &format!("hub:{name}"));
+            assert!(pill["x"].as_f64().unwrap() >= 2.0);
+            assert!(
+                pill["x"].as_f64().unwrap() + pill["width"].as_f64().unwrap()
+                    <= strip["width"].as_f64().unwrap() - 2.0
+            );
+            assert!(pill["accessibility_label"].as_str().unwrap().contains(name));
+        }
+    }
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "pair_channel:channel");
+    inspect(&f, p);
+    let pair = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|action| action["op"] == "channel_pair")
+        .unwrap();
+    f.send(p, json!({"op":"pair_code","hub":pair["hub"],"channel_id":"channel","request_id":pair["request_id"],"instruction":"Send the pairing command"}));
+    control(&f, p, "close_settings");
+    let warning = "Pairing started.\nThe provider accepted the pairing request.\nSettings could not refresh.\nOpen Settings again to see the latest status.";
+    f.send(p, json!({"op":"settings","source_op":"channel_pair","hub":pair["hub"],"channel_id":"channel","request_id":pair["request_id"],"ok":true,"committed":true,"warning":warning}));
+    let snapshot = inspect(&f, p);
+    assert_eq!(snapshot["settings_open"], false);
+    assert!(node(&snapshot, "settings_items", "settings_error_banner").is_null());
+    let row = node(&snapshot, "items", "menu_error_row");
+    let label = nodes(&row["children"])
+        .into_iter()
+        .find(|child| child["text"] == warning)
+        .unwrap();
+    assert_eq!(label["wraps"], true);
+    assert!(row["height"].as_f64().unwrap() > 36.0);
 }
 
 #[test]
