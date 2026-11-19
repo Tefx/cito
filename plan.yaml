@@ -17153,7 +17153,7 @@ phases:
   - id: v52.fix_worker_wait
     name: 'V52 Worker Wait & Shutdown Wake Repair: Preserve Shutdown/Work Wakeups
       Across Failed Channel Ticks (PATH-DELTA-1 / GATE-D1)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n  blocked_paths:\n    - plan.yaml\n\
       \    - src/macos/**\n    - site/**\n    - README.md\n    - docs/**\n    - deploy/**\n\
@@ -17210,3 +17210,5 @@ phases:
     depends_on:
     - v52.fix_review
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-19T05:56:20.795721Z'
