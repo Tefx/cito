@@ -314,6 +314,8 @@ struct Inner {
     worker: Mutex<Option<JoinHandle<()>>>,
     changed: Arc<(Mutex<u64>, std::sync::Condvar)>,
     lifecycle: Mutex<()>,
+    #[cfg(test)]
+    worker_ticks: std::sync::atomic::AtomicUsize,
     default_human_scope: &'static str,
 }
 #[derive(Clone)]
@@ -401,6 +403,8 @@ impl HubEngine {
                 worker: Mutex::new(None),
                 changed: Arc::new((Mutex::new(0), std::sync::Condvar::new())),
                 lifecycle: Mutex::new(()),
+                #[cfg(test)]
+                worker_ticks: std::sync::atomic::AtomicUsize::new(0),
                 default_human_scope: if auth_mode == "none" {
                     "workspace"
                 } else {
@@ -437,6 +441,8 @@ impl HubEngine {
             let delay = e.worker_delay().unwrap_or(Duration::from_secs(5));
             drop(e);
             let Ok(version) = changed.0.lock() else { break };
+            // Diagnostic commits made by a failed tick must not bypass its retry wait.
+            let observed = if failed { *version } else { observed };
             let _ = changed.1.wait_timeout_while(
                 version,
                 if failed {
@@ -809,9 +815,11 @@ impl HubEngine {
                         if ["principal_id", "harness", "session_id"]
                             .iter()
                             .all(|key| !s(&previous, key).is_empty())
-                            && ["principal_id", "harness", "session_id"]
-                                .iter()
-                                .any(|key| previous[*key] != data[*key])
+                            && (!principal_ids_equal(
+                                s(&previous, "principal_id"),
+                                s(&data, "principal_id"),
+                            ) || previous["harness"] != data["harness"]
+                                || previous["session_id"] != data["session_id"])
                         {
                             return Err("PERMISSIONS_VIOLATION: listener_id tuple collision".into());
                         }
@@ -1187,15 +1195,19 @@ impl HubEngine {
         self.inner.db.transaction(|c| {
             let (cfg, mut state) = service(c, id)?;
             save_service(c, id, &cfg)?;
+            let previous = state.to_string();
             if let Some(error) = error {
                 state["poll_error"] = json!(error);
             } else if let Some(state) = state.as_object_mut() {
                 state.remove("poll_error");
             }
-            c.execute(
-                "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
-                &[json!(state.to_string()), json!(id)],
-            )?;
+            let serialized = state.to_string();
+            if serialized != previous {
+                c.execute(
+                    "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
+                    &[json!(serialized), json!(id)],
+                )?;
+            }
             Ok(())
         })
     }
@@ -1527,6 +1539,8 @@ impl HubEngine {
         })
     }
     fn tick(&self) -> Result<(), String> {
+        #[cfg(test)]
+        self.inner.worker_ticks.fetch_add(1, Ordering::SeqCst);
         let _lifecycle = self
             .inner
             .lifecycle
@@ -2311,6 +2325,16 @@ fn service(c: &Connection, id: &str) -> Result<(Value, Value), String> {
 fn save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String> {
     let (old, _) = service(c, id)?;
     let changed = old != *cfg;
+    if !changed
+        && one(
+            c,
+            "SELECT 1 FROM hub_plugin_services WHERE plugin_id=?",
+            &[json!(id)],
+        )?
+        .is_some()
+    {
+        return Ok(false);
+    }
     c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES(?,?,'{}',?) ON CONFLICT(plugin_id) DO UPDATE SET config_json=excluded.config_json,service_state_json=CASE WHEN ? THEN '{}' ELSE service_state_json END,updated_ms=excluded.updated_ms", &[json!(id),json!(cfg.to_string()),json!(now_ms()),json!(changed)])?;
     if changed {
         c.execute(
@@ -2438,6 +2462,149 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
+    #[test]
+    fn legacy_oidc_agent_reenrollment_preserves_tuple_boundaries() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-legacy-agent-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = Arc::new(HubEngine::open(&dir)?);
+        let result = (|| {
+            use crate::core::{
+                registration::register_listener, state::LocalState, transport::HubClient,
+            };
+            let first = LocalState::open(&dir.join("first"))?;
+            let second = LocalState::open(&dir.join("second"))?;
+            let mut client = HubClient::new(
+                "work".into(),
+                json!({"url":"local://","authMode":"oidc"}),
+                "alice",
+                Some(hub.clone()),
+            );
+            client.identity = json!({"principal_id":"https://id.example.com#alice","owner_user":"alice","oidc":true});
+            let agent = json!({"harness":"fixture","session_id":"opaque|session ","title":"Agent"});
+            let args = json!({"about":"Review changes"});
+            let enrolled = register_listener(&first, &client, "first-host", &args, &agent)?;
+            let id = s(&enrolled, "canonical_listener_id");
+            assert_eq!(
+                client.kv_get(id)?.unwrap().0["principal_id"],
+                "https://id.example.com#alice"
+            );
+            client.identity = json!({"principal_id":"oidc:https://id.example.com|alice","legacy_principal_id":"https://id.example.com#alice","owner_user":"alice","oidc":true});
+            for (state, host) in [(&first, "first-host"), (&second, "second-host")] {
+                assert_eq!(
+                    register_listener(state, &client, host, &args, &agent)?
+                        ["canonical_listener_id"],
+                    id
+                );
+            }
+            let remote = client.kv_get(id)?.unwrap().0;
+            assert_eq!(remote["channels"]["first-host:fixture"]["state"], "ACTIVE");
+            assert_eq!(remote["channels"]["second-host:fixture"]["state"], "ACTIVE");
+            assert_eq!(remote["session_id"], "opaque|session ");
+            let mut row = json!({"principal_id":"https://id.example.com#alice","harness":"fixture|agent","session_id":"session","channels":{}});
+            hub.rpc(
+                "kv_create",
+                &json!({"key":"agent","data":row.to_string()}),
+                None,
+            )?;
+            row["principal_id"] = json!("oidc:https://id.example.com|alice");
+            let caller = json!({"principal_id":row["principal_id"],"legacy_principal_id":"https://id.example.com#alice","oidc":true});
+            for device in ["first", "second"] {
+                row["channels"][device] = json!({"state":"ACTIVE"});
+                hub.rpc(
+                    "kv_put",
+                    &json!({"key":"agent","data":row.to_string()}),
+                    Some(&caller),
+                )?;
+            }
+            for patch in [
+                json!({"principal_id":"oidc:https://id.example.com|bob"}),
+                json!({"harness":"fixture","session_id":"agent|session"}),
+            ] {
+                let mut collision = row.clone();
+                merge(&mut collision, &patch);
+                assert_eq!(
+                    hub.rpc(
+                        "kv_put",
+                        &json!({"key":"agent","data":collision.to_string()}),
+                        None
+                    )
+                    .unwrap_err(),
+                    "PERMISSIONS_VIOLATION: listener_id tuple collision"
+                );
+            }
+            Ok(())
+        })();
+        hub.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
+    #[test]
+    fn live_failed_worker_keeps_retry_wait_and_healthy_sibling_progress() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-live-retry-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir)?;
+        let result = (|| {
+            let guard = hub.inner.lifecycle.lock().map_err(|e| e.to_string())?;
+            *hub.inner.plugins.lock().map_err(|e| e.to_string())? = [
+                ("missing", vec![dir.join("unavailable").to_string_lossy().into_owned()]),
+                ("healthy", vec!["/bin/sh".into(), "-c".into(), "while IFS= read -r line; do case \"$line\" in *configure*) printf '%s\\n' '{\"op\":\"cursor_save\",\"cursor\":7}';; esac; done".into()]),
+            ].into_iter().map(|(id, command)| ChannelPlugin { is_builtin:false, id:id.into(), dir:dir.join(id), command, manifest:json!({"kind":"human-channel","fields":[]}) }).collect();
+            for id in ["missing", "healthy"] {
+                std::fs::create_dir_all(dir.join(id)).map_err(|e| e.to_string())?;
+            }
+            hub.inner.db.transaction(|c| {
+                for id in ["missing", "healthy"] {
+                    save_service(c, id, &json!({"enabled":true}))?;
+                }
+                Ok(())
+            })?;
+            drop(guard);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let (_, healthy) = hub.inner.db.transaction(|c| service(c, "healthy"))?;
+                if healthy["cursor"] == 7 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Healthy sibling did not progress"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            let before = hub.inner.worker_ticks.load(Ordering::SeqCst);
+            let writes = hub.inner.db.query("SELECT total_changes() AS n", &[])?;
+            for _ in 0..5 {
+                hub.set_poll_error("missing", Some("Persistent failure"))?;
+            }
+            let settled = hub.inner.db.query("SELECT total_changes() AS n", &[])?;
+            hub.set_poll_error("missing", Some("Persistent failure"))?;
+            assert_eq!(
+                hub.inner.db.query("SELECT total_changes() AS n", &[])?,
+                settled
+            );
+            assert_ne!(writes, settled);
+            thread::sleep(Duration::from_millis(350));
+            assert!(
+                hub.inner.worker_ticks.load(Ordering::SeqCst) - before < 8,
+                "Worker spun on diagnostic commits"
+            );
+            let channel = &hub
+                .channel_list(&json!({"principal_id":"none#alice","owner_user":"alice"}))?
+                ["channels"][0];
+            assert_eq!(channel["warning"], true);
+            assert_eq!(channel["error_origin"], "hub");
+            Ok(())
+        })();
+        hub.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
     #[test]
     fn channel_inventory_projects_caller_authority_and_error_origin() {
         let dir = std::env::temp_dir().join(format!(

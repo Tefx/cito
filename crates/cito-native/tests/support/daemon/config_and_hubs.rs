@@ -1,6 +1,74 @@
 use super::*;
 
 #[test]
+fn sigterm_wakes_an_active_oidc_callback_after_browser_exit() {
+    use std::io::Write;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let provider = f.spawn("python3", &["-u", "-c", r#"import http.server,json
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def do_GET(self):
+  issuer='http://127.0.0.1:'+str(self.server.server_port)
+  raw=json.dumps({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','scopes_supported':['openid']}).encode()
+  self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+s=http.server.HTTPServer(('127.0.0.1',0),Handler)
+print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
+"#], &[]);
+    wait(|| !f.frames(provider).is_empty());
+    let issuer = format!("http://127.0.0.1:{}", f.frames(provider)[0]["port"]);
+    fs::write(&f.config, json!({"default_hub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":issuer,"clientId":"client","redirectPort":0}}}).to_string()).unwrap();
+    // The opener records its URL and exits successfully without sending a callback.
+    let opener = f.dir.join("browser");
+    script(
+        &opener,
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$HOME/callback-url\"\n",
+    );
+    let daemon = f.daemon(&[("CITO_BROWSER_BIN", opener.to_str().unwrap())]);
+    let port = f.port;
+    let login = std::thread::spawn(move || {
+        http(port, "/ui", Some(&json!({"op":"login_hub","hub":"work"})))
+    });
+    wait(|| f.home.join("callback-url").exists());
+    let url = url::Url::parse(&fs::read_to_string(f.home.join("callback-url")).unwrap()).unwrap();
+    let callback = url
+        .query_pairs()
+        .find(|(key, _)| key == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback = url::Url::parse(&callback).unwrap();
+    // A bad callback proves the login worker is inside the callback accept loop.
+    let mut probe = std::net::TcpStream::connect(("127.0.0.1", callback.port().unwrap())).unwrap();
+    probe
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    writeln!(probe, "GET /callback?state=invalid HTTP/1.1\r").unwrap();
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut probe, &mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let start = std::time::Instant::now();
+    f.signal(daemon, libc::SIGTERM);
+    let until = start + std::time::Duration::from_secs(2);
+    wait(|| {
+        assert!(
+            std::time::Instant::now() < until,
+            "Daemon stalled during callback cancellation"
+        );
+        f.exited(daemon)
+    });
+    let result = login.join().unwrap();
+    assert_eq!(result.0, 400, "{result:?}");
+    assert!(result.1["error"].as_str().unwrap().contains("cancelled"));
+    assert!(!f.state.join("oidc-token-work.json").exists());
+    assert!(
+        f.rows("SELECT * FROM daemon_owner").is_empty(),
+        "Graceful shutdown clears ownership"
+    );
+}
+
+#[test]
 fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
     use std::{
         io::Write,

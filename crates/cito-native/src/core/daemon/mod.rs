@@ -355,6 +355,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     // Set closing before draining calls, then close the final host server after drain.
     if let Ok(mut s) = service.lock() {
         s.closing = true;
+        s.cancel_logins();
     }
     for call in calls {
         let _ = call.join();
@@ -1780,13 +1781,11 @@ impl DaemonService {
             Ok(())
         })
     }
-    fn shutdown(&mut self) {
-        // The caller sets closing while holding the service mutex after all calls drain.
-        self.closing = true;
-        for entry in self.setup_inspections.values_mut() {
-            if let Some((_, worker)) = entry.worker.take() {
-                let _ = worker.join();
-            }
+    fn cancel_logins(&self) {
+        // Wake callback and lock waits before joining workers. Do not acquire
+        // publication locks here: login workers release them before re-entering service.
+        for attempt in self.logins.values() {
+            attempt.cancelled.store(true, Ordering::SeqCst);
         }
         for pending in self
             .oidc_recoveries
@@ -1794,6 +1793,16 @@ impl DaemonService {
             .chain(self.retired_auth.iter())
         {
             pending.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.closing = true;
+        self.cancel_logins();
+        for entry in self.setup_inspections.values_mut() {
+            if let Some((_, worker)) = entry.worker.take() {
+                let _ = worker.join();
+            }
         }
         for pending in self
             .oidc_recoveries

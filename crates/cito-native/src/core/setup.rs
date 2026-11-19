@@ -401,7 +401,7 @@ pub fn set_launch_at_login(
     Ok(plist_path)
 }
 
-fn mutate_file<F>(
+pub(crate) fn mutate_file<F>(
     target: &str,
     path: &Path,
     dry_run: bool,
@@ -415,22 +415,27 @@ where
     crate::plugins::read_config_text(path)?;
     let mut detail = String::new();
     let mut conflict = false;
-    let action = crate::support::mutate_with_mode(
-        &json!({"op":"setup_apply","dry_run":dry_run}),
-        target,
-        path,
-        mode,
-        |old| {
-            let (status, next, description) = transform(old)?;
-            detail = description;
-            conflict = status == "conflict";
-            Ok(if status == "unchanged" || conflict {
-                old.map(str::to_owned)
-            } else {
-                next
-            })
-        },
-    )?;
+    let canonical = crate::support::publication_target(path)?;
+    // Share the daemon's canonical .lock while retaining plugin mutation's
+    // private backups and .cito.lock protocol inside this exclusion boundary.
+    let action = crate::plugins::with_config_lock_mode(&canonical, dry_run, || {
+        crate::support::mutate_with_mode(
+            &json!({"op":"setup_apply","dry_run":dry_run}),
+            target,
+            &canonical,
+            mode,
+            |old| {
+                let (status, next, description) = transform(old)?;
+                detail = description;
+                conflict = status == "conflict";
+                Ok(if status == "unchanged" || conflict {
+                    old.map(str::to_owned)
+                } else {
+                    next
+                })
+            },
+        )
+    })?;
     Ok(SetupAction {
         target: target.into(),
         path: action["path"].as_str().unwrap_or("").into(),

@@ -42,6 +42,102 @@ fn ui_frame_bounds_preserve_cwd_receipt_authority_and_mailbox_liveness() {
 }
 
 #[test]
+fn composer_prearm_failures_settle_once_and_config_producers_share_lock() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-prearm-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, "{}").unwrap();
+    let service = Arc::new(Mutex::new(DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: HashSet::new(),
+        },
+    )?));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+        directory: dir.clone(),
+    };
+    for generation in [None, Some(u64::MAX)] {
+        fs::write(&config.config_path, "{").unwrap();
+        for op in ["send_signal", "send_reply_from_human"] {
+            let mailbox = Arc::new(UiMailbox::default());
+            service.lock().unwrap().ui = Some(mailbox.clone());
+            assert!(http_actions::dispatch_action(
+                &service,
+                &json!({"op":op,"request_id":"composer"}),
+                generation
+            )
+            .is_err());
+            let mut count = 0;
+            while !mailbox.pending.lock().unwrap().is_empty() {
+                let frame: Value = serde_json::from_slice(&mailbox.next().unwrap()).unwrap();
+                assert_ne!(frame["op"], "error", "{frame}");
+                if frame["op"] == "composer_result" {
+                    count += 1;
+                    assert_eq!(frame["ok"], false);
+                    assert_eq!(frame["request_id"], "composer");
+                    assert!(frame["error"].is_string());
+                }
+            }
+            assert_eq!(count, 1);
+        }
+    }
+    fs::write(&config.config_path, "{\"count\":0}").unwrap();
+    let alias = dir.join("alias.json");
+    std::os::unix::fs::symlink(&config.config_path, &alias).unwrap();
+    // Hold setup inside its transform. Daemon must not enter until setup commits.
+    for path in [&config.config_path, &alias] {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (daemon_tx, daemon_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let setup = scope.spawn(move || {
+                crate::setup::mutate_file("cito", path, false, Some(0o600), |old| {
+                    let mut raw: Value = serde_json::from_str(old.unwrap()).unwrap();
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    raw["count"] = json!(raw["count"].as_u64().unwrap() + 1);
+                    Ok((
+                        "updated".into(),
+                        Some(raw.to_string()),
+                        "Updated counter".into(),
+                    ))
+                })
+            });
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let service = service.clone();
+            let daemon = scope.spawn(move || {
+                service.lock().unwrap().mutate_config(|raw| {
+                    daemon_tx.send(()).unwrap();
+                    raw["count"] = json!(raw["count"].as_u64().unwrap() + 1);
+                    Ok(())
+                })
+            });
+            assert!(
+                daemon_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "Daemon bypassed setup lock"
+            );
+            release_tx.send(()).unwrap();
+            setup.join().unwrap().unwrap();
+            daemon.join().unwrap().unwrap();
+            daemon_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+    }
+    let raw: Value = serde_json::from_slice(&fs::read(&config.config_path).unwrap()).unwrap();
+    assert_eq!(raw["count"], 4);
+    assert!(alias.is_symlink());
+    Ok(())
+}
+
+#[test]
 fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("cito-frame-settlement-{}", random_uuid_v4()));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;

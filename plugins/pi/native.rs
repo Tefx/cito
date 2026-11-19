@@ -389,6 +389,12 @@ fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
     }
     result
 }
+fn endpoint_identity_changed(req: &Value, cached: &Value, current: &Value) -> bool {
+    !matches_process(str_at(current, "command").unwrap_or(""))
+        || (cached["identity"].is_object() && cached["identity"] != *current)
+        || (req["process_identity"].is_object() && req["process_identity"] != *current)
+}
+
 pub fn handle(input: &Value) -> Result<Value> {
     let req = input;
     let op = str_at(req, "op").unwrap_or("");
@@ -404,10 +410,7 @@ pub fn handle(input: &Value) -> Result<Value> {
         if let Some(p) = pid(req) {
             if let Ok(current) = process_identity(p) {
                 let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
-                if !matches_process(str_at(&current, "command").unwrap_or(""))
-                    || (cached["identity"].is_object() && cached["identity"] != current)
-                    || (req["process_identity"].is_object() && req["process_identity"] != current)
-                {
+                if endpoint_identity_changed(req, &cached, &current) {
                     return Ok(
                         json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
                     );
@@ -511,14 +514,8 @@ pub fn handle(input: &Value) -> Result<Value> {
             }
             if let Some(p) = pid(req) {
                 if let Ok(current) = process_identity(p) {
-                    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json"))).ok();
-                    if !matches_process(str_at(&current, "command").unwrap_or(""))
-                        || cached.as_ref().is_some_and(|cached| {
-                            cached["identity"].is_object() && cached["identity"] != current
-                        })
-                        || (req["process_identity"].is_object()
-                            && req["process_identity"] != current)
-                    {
+                    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
+                    if endpoint_identity_changed(req, &cached, &current) {
                         return Ok(
                             json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
                         );

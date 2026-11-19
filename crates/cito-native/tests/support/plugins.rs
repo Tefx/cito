@@ -236,6 +236,88 @@ process.on('SIGTERM',()=>{child.kill();process.exit()});
 }
 
 #[test]
+fn two_unhooked_claude_endpoints_never_adopt_a_shared_workspace_transcript() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready');setInterval(()=>{},1000)").unwrap();
+    let owners = [
+        spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]),
+        spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]),
+    ];
+    for owner in owners {
+        wait(|| f.output(owner, false).contains("ready"));
+    }
+    let cwd = fs::canonicalize(&f.dir).unwrap();
+    let slug: String = cwd
+        .to_str()
+        .unwrap()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let transcripts = f.home.join(".claude/projects").join(slug);
+    fs::create_dir_all(&transcripts).unwrap();
+    let first = "11111111-1111-4111-8111-111111111111";
+    fs::write(transcripts.join(format!("{first}.jsonl")), "{}\n").unwrap();
+    let sidecars: Vec<_> = owners.iter().map(|owner| {
+        let sidecar = f.spawn(CLAUDE, &[], &[]);
+        f.send(sidecar, json!({"op":"stdio_sidecar","endpoint_pid":f.pid(*owner),"cwd":cwd,"state_dir":f.state,"env":f.env}));
+        wait(|| {
+            assert!(!f.exited(sidecar), "Sidecar rejected endpoint: {}", f.output(sidecar, true));
+            f.frames(sidecar).iter().any(|frame| frame["op"] == "ready")
+        });
+        sidecar
+    }).collect();
+    for transcript in [first, "22222222-2222-4222-8222-222222222222"] {
+        fs::write(transcripts.join(format!("{transcript}.jsonl")), "{}\n").unwrap();
+        for owner in owners {
+            let pid = f.pid(owner);
+            let fallback = format!("claude-{pid}");
+            let identified = socket(
+                &f.state.join(format!("sockets/claude-pid-{pid}.sock")),
+                json!({"op":"identify"}),
+            );
+            assert_eq!(identified["session_id"], fallback, "{identified}");
+            let resolved = f.plugin(
+                CLAUDE,
+                json!({"op":"resolve_caller","endpoint_pid":pid,"cwd":cwd}),
+            );
+            assert_eq!(resolved["caller"]["session_id"], fallback, "{resolved}");
+            assert_eq!(
+                f.plugin(
+                    CLAUDE,
+                    json!({"op":"probe","endpoint_pid":pid,"session_id":fallback,"cwd":cwd})
+                )["status"],
+                "alive"
+            );
+            let binding: Value = serde_json::from_slice(
+                &fs::read(f.state.join(format!("claude/endpoints/{pid}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(binding["session_id"], fallback);
+            assert_eq!(binding["source"], "channel");
+        }
+        assert!(!f.state.join("claude/aliases").join(transcript).exists());
+    }
+    let sessions = f.plugin(CLAUDE, json!({"op":"discover_sessions"}));
+    for owner in owners {
+        assert!(
+            sessions["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["endpoint_pid"] == f.pid(owner)
+                    && row["session_id"] == format!("claude-{}", f.pid(owner))),
+            "{sessions}"
+        );
+    }
+    for sidecar in sidecars {
+        f.eof(sidecar);
+        wait(|| f.exited(sidecar));
+    }
+}
+
+#[test]
 fn claude_fallback_hook_handoff_and_descendant_session_fence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

@@ -140,10 +140,18 @@ pub(super) fn dispatch_action(
     let mut s = loop {
         let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-        s.validate_ui_generation(ui_generation)?;
         if !refresh_setup {
+            // Composer actions settle under their original guard, including
+            // preflight errors. Do not replace that receipt after re-entry.
+            if !matches!(
+                string(action, "op"),
+                "send_signal" | "send_reply_from_human"
+            ) {
+                s.validate_ui_generation(ui_generation)?;
+            }
             break s;
         }
+        s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
             result = result.map(|value| {
                 committed_projection(value, Err("Shutting down before local refresh".into()))
@@ -254,6 +262,24 @@ fn dispatch_action_inner(
     }
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        if matches!(
+            string(action, "op"),
+            "send_signal" | "send_reply_from_human"
+        ) {
+            let preflight = s.validate_ui_generation(ui_generation).and_then(|()| {
+                if s.closing || shutdown_requested() {
+                    Err("Shutting down".into())
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = preflight {
+                let result = Err(error);
+                s.emit_composer_result(action, &result);
+                return result;
+            }
+            return s.action(action);
+        }
         s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
             return Err("Shutting down".into());
@@ -712,6 +738,12 @@ impl DaemonService {
                 }
                 value
             });
+        if matches!(
+            string(action, "op"),
+            "send_signal" | "send_reply_from_human"
+        ) {
+            self.emit_composer_result(action, &result);
+        }
         self.record_hub_result(action, &result, resolved_hub.as_deref());
         if action["op"] == "set_host_hub" {
             if let Err(error) = &result {
@@ -747,6 +779,13 @@ impl DaemonService {
             self.push_ui();
         }
         result
+    }
+
+    fn emit_composer_result(&self, action: &Value, result: &Result<Value, String>) {
+        self.emit(match result {
+            Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
+            Err(error) => json!({"op":"composer_result","ok":false,"error":error,"request_id":action["request_id"]}),
+        });
     }
 
     fn record_hub_result(
@@ -1488,10 +1527,6 @@ impl DaemonService {
                 }
                 let result = validate_tool_input("cito_send", &send_args)
                     .and_then(|()| self.send_from(&hub, &send_args, Some(caller)));
-                self.emit(match &result {
-                    Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
-                    Err(e) => json!({"op":"composer_result","ok":false,"error":e,"request_id":action["request_id"]}),
-                });
                 return result.map(|result| {
                     if op == "send_reply_from_human" {
                         // Keep the reply action's response shape while sharing the atomic Human RPC.
