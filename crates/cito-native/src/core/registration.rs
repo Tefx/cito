@@ -280,13 +280,19 @@ fn register_locked(
     if harness == "human" {
         return register_human_device(state, client, host_id, caller);
     }
-    if let Some(title) = args.get("title") {
-        let title = title
-            .as_str()
-            .ok_or("INVALID_INPUT: title must be a string")?;
-        state.set_custom_title(harness, session, title)?;
-    }
-    let custom_title = state.custom_title(harness, session)?;
+    let requested_title = args
+        .get("title")
+        .map(|title| {
+            let title = title
+                .as_str()
+                .ok_or("INVALID_INPUT: title must be a string")?;
+            validate_title(title)?;
+            Ok::<_, String>(title)
+        })
+        .transpose()?;
+    let custom_title = requested_title
+        .map(str::to_owned)
+        .or(state.custom_title(harness, session)?);
     let title = custom_title
         .as_deref()
         .unwrap_or_else(|| string(caller, "title"));
@@ -537,9 +543,16 @@ fn register_locked(
                 }
             }
         }
-        return Ok(
-            json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
-        );
+        let mut result = json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60});
+        if let Some(title) = requested_title {
+            if state.set_custom_title(harness, session, title).is_err() {
+                let warning = "Listening committed; session title maintenance is incomplete";
+                result["committed"] = json!(true);
+                result["warning"] = json!(warning);
+                result["maintenance_warning"] = json!(warning);
+            }
+        }
+        return Ok(result);
     }
     Err("STALE_GENERATION: Listener CAS retries exhausted".into())
 }

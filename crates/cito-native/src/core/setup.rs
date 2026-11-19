@@ -252,6 +252,12 @@ fn ensure_plugins_staged<'a>(
             shell_quote(&plugins_dir.to_string_lossy()),
             shell_quote(&exe_str)
         );
+        // Generated shims replace copied entries; resource symlinks stay untouched.
+        match fs::symlink_metadata(&shim_path) {
+            Ok(_) => fs::remove_file(&shim_path).map_err(|e| e.to_string())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
         fs::write(&shim_path, script).map_err(|e| e.to_string())?;
         fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
@@ -1709,6 +1715,67 @@ mod tests {
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")));
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn generated_shims_replace_symlinks_without_mutating_active_targets() {
+        use std::os::unix::fs::symlink;
+        let (root, mut plugins) = fixture();
+        plugins.plugins[0].is_builtin = true;
+        let source = &plugins.plugins[0].plugin_dir;
+        fs::write(source.join("resource"), "resource bytes").unwrap();
+        symlink("resource", source.join("resource-link")).unwrap();
+        let state = root.join("installed");
+        fs::create_dir_all(state.join("bin/cito-mcp")).unwrap();
+        let external = root.join("external-shim");
+        fs::write(&external, "external bytes").unwrap();
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&external, state.join("bin/cito")).unwrap();
+        fs::write(state.join("relative-shim"), "relative bytes").unwrap();
+        fs::set_permissions(
+            state.join("relative-shim"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let snapshot = |path: &Path| {
+            (
+                fs::read(path).unwrap(),
+                fs::metadata(path).unwrap().permissions().mode(),
+            )
+        };
+        let before = snapshot(&external);
+        // The second shim is a directory: fail after preparing the first shim.
+        assert!(ensure_cli_shims_native(&state, &plugins).is_err());
+        assert_eq!(snapshot(&external), before);
+        assert_eq!(snapshot(&state.join("bin/cito")), before);
+        assert_eq!(fs::read_link(state.join("bin/cito")).unwrap(), external);
+        assert!(state.join("bin/cito-mcp").is_dir());
+        fs::remove_dir(state.join("bin/cito-mcp")).unwrap();
+        symlink("../relative-shim", state.join("bin/cito-mcp")).unwrap();
+        symlink("../relative-shim", state.join("bin/resource-link")).unwrap();
+        let relative_before = snapshot(&state.join("relative-shim"));
+        ensure_cli_shims_native(&state, &plugins).unwrap();
+        assert_eq!(snapshot(&external), before);
+        assert_eq!(snapshot(&state.join("relative-shim")), relative_before);
+        for name in ["cito", "cito-mcp"] {
+            let path = state.join("bin").join(name);
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(metadata.is_file());
+            assert!(!metadata.file_type().is_symlink());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
+            // The generated shim executes this test binary with a harmless listing flag.
+            let output = Command::new(path).arg("--list").output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+        assert_eq!(
+            fs::read_link(state.join("bin/resource-link")).unwrap(),
+            Path::new("../relative-shim")
+        );
+        assert_eq!(
+            fs::read_link(staged_plugins_dir(&state).join("sample/resource-link")).unwrap(),
+            Path::new("resource")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn bundled_plugin_resolution_covers_distribution_layouts() {
         let (root, _) = fixture();

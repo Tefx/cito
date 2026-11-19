@@ -1395,32 +1395,12 @@ impl DaemonService {
                 if let Some(tag) = action.get("tag") {
                     args["tag"] = tag.clone();
                 }
-                let mut result = self.listen(&hub, &args, &caller)?;
                 if caller["harness"] != "human" {
-                    if let Some(title) = action["title"].as_str() {
-                        let renamed = self.rename_session(
-                            string(&caller, "harness"),
-                            string(&caller, "session_id"),
-                            title,
-                        );
-                        let incomplete = match renamed {
-                            Ok(value) => value["warning"].is_string(),
-                            Err(_) => true,
-                        };
-                        if incomplete {
-                            let warning =
-                                "Listening committed; session title maintenance is incomplete";
-                            let combined = result["warning"]
-                                .as_str()
-                                .map(|previous| format!("{previous}; {warning}"))
-                                .unwrap_or_else(|| warning.to_owned());
-                            result["committed"] = json!(true);
-                            result["warning"] = json!(combined);
-                            result["maintenance_warning"] = json!(warning);
-                        }
+                    if let Some(title) = action.get("title") {
+                        args["title"] = title.clone();
                     }
                 }
-                return Ok(result);
+                return self.listen(&hub, &args, &caller);
             }
             "unlisten" => {
                 if !action["hub"].is_null() {

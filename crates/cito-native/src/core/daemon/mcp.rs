@@ -368,6 +368,15 @@ impl DaemonService {
             return Err("INVALID_INPUT: An agent session is required".into());
         }
         self.state.set_custom_title(harness, session, title)?;
+        self.propagate_session_title(harness, session, title)
+    }
+
+    fn propagate_session_title(
+        &self,
+        harness: &str,
+        session: &str,
+        title: &str,
+    ) -> Result<Value, String> {
         let mut warnings = Vec::new();
         for row in self
             .state
@@ -445,7 +454,28 @@ impl DaemonService {
                 warnings.push(error);
             }
         }
+        if caller["harness"] != "human" && result["maintenance_warning"].is_null() {
+            if let Some(title) = args["title"].as_str() {
+                let propagated = self.propagate_session_title(
+                    string(caller, "harness"),
+                    string(caller, "session_id"),
+                    title,
+                );
+                if propagated
+                    .as_ref()
+                    .ok()
+                    .is_none_or(|value| value["warning"].is_string())
+                {
+                    let warning = "Listening committed; session title maintenance is incomplete";
+                    result["maintenance_warning"] = json!(warning);
+                    warnings.push(warning.to_owned());
+                }
+            }
+        }
         if !warnings.is_empty() {
+            if let Some(previous) = result["warning"].as_str() {
+                warnings.insert(0, previous.to_owned());
+            }
             result["committed"] = json!(true);
             result["warning"] = json!(warnings.join("; "));
             result["warnings"] = json!(warnings);
@@ -824,15 +854,7 @@ impl DaemonService {
                 {
                     args["title"] = json!(about);
                 }
-                let result = self.listen(&hub, &args, &caller)?;
-                if let Some(title) = args["title"].as_str() {
-                    self.rename_session(
-                        string(&caller, "harness"),
-                        string(&caller, "session_id"),
-                        title,
-                    )?;
-                }
-                Ok(result)
+                self.listen(&hub, &args, &caller)
             }
             "cito_status" => {
                 let deadline = Instant::now() + Duration::from_millis(1500);

@@ -57,6 +57,10 @@ pub fn script(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
+    try_http(port, path, body).unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_http(port: u16, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
     let url = format!("http://127.0.0.1:{port}{path}");
     let a = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(10))
@@ -68,10 +72,12 @@ pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
     let response = match result {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
-        Err(e) => panic!("{url}: {e}"),
+        Err(e) => return Err(format!("{url}: {e}")),
     };
     let status = response.status();
-    let text = response.into_string().unwrap();
+    let text = response
+        .into_string()
+        .map_err(|error| format!("{url}: {error}"))?;
     let value = serde_json::from_str(&text)
         .or_else(|_| {
             serde_json::from_str(
@@ -80,8 +86,8 @@ pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
                     .unwrap_or(""),
             )
         })
-        .unwrap_or_else(|_| panic!("{url}: {text}"));
-    (status, value)
+        .map_err(|_| format!("{url}: {text}"))?;
+    Ok((status, value))
 }
 // Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
 pub fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
@@ -412,14 +418,104 @@ impl Fixture {
         json!({"expected_harness":"fixture","expected_session_id":"session-1"})
     }
 }
+#[test]
+#[ignore = "subprocess worker for teardown regression"]
+fn fixture_teardown_failure_worker() {
+    let mode = std::env::var("CITO_TEARDOWN_CASE").unwrap();
+    let fixture = Fixture::new(json!({}));
+    fs::write(
+        std::env::var("CITO_TEARDOWN_PATH").unwrap(),
+        fixture.dir.to_str().unwrap(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", fixture.port)).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            if mode.contains("malformed") {
+                let mut reader = BufReader::new(&mut stream);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if line == "\r\n" => {
+                            let _ = reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ninvalid");
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            }
+            // Closing immediately also covers a successful TCP preflight followed by EOF.
+        }
+    });
+    if std::env::var("CITO_TEARDOWN_CASE")
+        .unwrap()
+        .starts_with("panic")
+    {
+        panic!("primary assertion failure");
+    }
+    drop(fixture);
+}
+
+#[test]
+fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
+    use std::os::unix::process::ExitStatusExt;
+    let _lock = serial();
+    let parent = Fixture::new(json!({}));
+    let marker = parent.dir.join("child-directory");
+    for mode in [
+        "panic-closed",
+        "panic-malformed",
+        "ordinary-closed",
+        "ordinary-malformed",
+    ] {
+        let output = parent
+            .command_builder(
+                std::env::current_exe().unwrap().to_str().unwrap(),
+                &[
+                    "--exact",
+                    "support::fixture_teardown_failure_worker",
+                    "--ignored",
+                    "--nocapture",
+                ],
+            )
+            .env("CITO_TEARDOWN_CASE", mode)
+            .env("CITO_TEARDOWN_PATH", &marker)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), None, "{mode}: {output:?}");
+        assert_eq!(output.status.code(), Some(101), "{mode}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(if mode.starts_with("panic") {
+                "primary assertion failure"
+            } else {
+                "Fixture teardown failed"
+            }),
+            "{stderr}"
+        );
+        let child_dir = fs::read_to_string(&marker).unwrap();
+        assert!(
+            !Path::new(&child_dir).exists(),
+            "Fixture directory survived: {child_dir}"
+        );
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         for p in self.children.get_mut().iter_mut().rev() {
             p.stop();
         }
+        let mut failure = None;
         // CLI auto-starts a detached daemon. Only stop a health-verified sandbox owner.
         if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-            let (_, h) = http(self.port, "/health", None);
+            let health = try_http(self.port, "/health", None);
+            if let Err(error) = &health {
+                failure = Some(error.clone());
+            }
+            let h = health.map(|(_, value)| value).unwrap_or(Value::Null);
             if h["stateDir"] == json!(self.state) {
                 if let Some(pid) = h["pid"].as_i64().filter(|p| *p > 1) {
                     unsafe {
@@ -431,18 +527,16 @@ impl Drop for Fixture {
                     {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    assert!(
-                        std::thread::panicking()
-                            || TcpStream::connect(("127.0.0.1", self.port)).is_err(),
-                        "detached daemon did not stop"
-                    );
+                    if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+                        failure = Some("detached daemon did not stop".into());
+                    }
                 }
             }
         }
         let removed = fs::remove_dir_all(&self.dir);
         assert!(
-            std::thread::panicking() || removed.is_ok(),
-            "Cannot remove fixture: {removed:?}"
+            std::thread::panicking() || (removed.is_ok() && failure.is_none()),
+            "Fixture teardown failed: health={failure:?}, removal={removed:?}"
         );
     }
 }
