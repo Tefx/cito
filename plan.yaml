@@ -17634,7 +17634,7 @@ phases:
     name: 'V53 macOS Swift UI, HeadlessOracle & UI Tests: Two-Frame Pair Warning Settlement,
       Activity Key Shortcuts, Inbox Control Bar Sync, Dynamic Error Heights & UI Consolidations
       (#18, #27, #29-ui)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n\
@@ -17708,6 +17708,59 @@ phases:
     agent: frontend-engineer
     claimed_by: frontend-engineer
     claimed_at: '2026-11-19T13:05:51.794458Z'
+    done_at: '2026-11-19T13:31:22.666458+00:00'
+    evidence: 'Artifact:
+
+      - Integrated commit: d7ce31eb461cea92dcbeea8effbc67f17c004149 (fast-forwarded
+      from f8abbf388415e6173e31a696944de0ab90e72a1b; retained ref refs/vectl/candidates/v53.ui).
+      Worktree /Users/tefx/Projects/cito/.vectl/worktrees/v53.ui removed cleanly (+9Gi
+      reclaimed, 425Gi free).
+
+      - Product version unchanged at 0.21.3 (no SemVer bump, no git tag). Rebuilt
+      staged binary bin/cito-ui-darwin-arm64 included.
+
+
+      Closure summary (#18, #27, #29-ui):
+
+      - #18: Preserved two-frame `channel_pair` correlation in `Companion.swift` (`awaitingPairSettings`)
+      so `settleReceiptOnly` surfaces `frame.warning`; called `updateDirectoryShortcuts()`
+      on `up`/`down` navigation in `DirectorySurface.swift`; decoded `human_listener_id`,
+      `human_can_set_scope`, `human_scope`, `human_availability`, `human_control_revision`,
+      and `attachments` on `HubConfigItem` and split `human_inbox_update` pending
+      targets (`paused` vs `scope`) in `SettingsSurface.swift`/`Models.swift`/`Companion.swift`;
+      added dynamic `boundingRect` sizing for `host_hub_error` and `menu_error_row`;
+      clamped 2-hub long-name pill widths in `MenuSurface.swift`; tightened `HeadlessOracle.swift`
+      (`candidate_hint:*` jargon check, `channel_recovery_bar:*` edge-anchoring/midY
+      checks, and 3-point `checkHitTests`). Added discriminating UI/HeadlessOracle
+      regression tests across `capabilities.rs`, `directory.rs`, `menu.rs`, `oracle_e2e.rs`,
+      and `settings_channels.rs`.
+
+      - #27: Extracted `makeFloatingKeyPanel` and `mountPillStrip(..., trackRadius:)`
+      in `UIPrimitives.swift`, `makeScopeControl` and `makeAddressCopyControl` in
+      `MenuSurface.swift`, derived `hubInvitePending` from `!hubInviteRequest.isEmpty`,
+      unified `pendingAppChecks` with `pendingControls` (`appCheck`), and shared `readPasteboardString()`.
+
+      - #29-ui: Removed duplicate host-port / offline-inbox / pairing-poll sequences
+      between `settings_channels.rs` and `oracle_e2e.rs` while preserving full assertion
+      coverage.
+
+
+      Verification (run by frontend-engineer in isolated worktree):
+
+      - `cargo fmt --all -- --check && git diff --check`: exit 0
+
+      - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0 (0
+      warnings)
+
+      - `cargo test -p cito-native --test native ui:: -- --test-threads=1`: 113 passed,
+      0 failed
+
+      - `node crates/cito-native/tests/support/site-clipboard.mjs`: exit 0
+
+
+      Spec link:
+
+      - docs/DESIGN.md §5.2; plan.yaml phase v53 step v53.ui'
   - id: v53.review
     name: 'V53 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
