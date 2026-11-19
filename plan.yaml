@@ -16998,7 +16998,7 @@ phases:
     name: 'V52 Review Repair: Legacy OIDC Tuple Alias Guard, Bounded Channel Poll-Error
       Retry, Shutdown Login Wake, Pre-Arm Composer Settlement, Unified Config Lock
       & Unhooked Claude/Pi Hygiene (GATE-1..5, V52-14, W1..W2)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
       \    - plan.yaml\n    - src/macos/**\n    - site/**\n    - README.md\n    -\
@@ -17110,3 +17110,41 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-19T05:02:47.387680Z'
+    done_at: '2026-11-19T05:25:46.682115+00:00'
+    evidence: 'Artifact:
+
+      - Commit: bc0921064d30310519f816e3e50e874efd0f9397 (integrated onto main via
+      fast-forward; worktree .vectl/worktrees/v52-fix-review removed, reclaiming 1490
+      MB)
+
+
+      Coverage:
+
+      - Closed GATE-1..GATE-5, V52-14 UNPROVEN regression gap, and structural W1..W2
+      across crates/cito-native/** and plugins/** at version 0.21.3.
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> Passed
+
+      - Run: git diff --check -> Passed
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> Passed
+      (0 warnings)
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 312 passed, 0
+      failed, 4 ignored
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      -> 77 passed, 0 failed (reparented outside Pi ancestry via fork -> setsid ->
+      fork)
+
+      - Run: cargo test -p cito-native --test native plugins:: -- --test-threads=2
+      -> 50 passed, 0 failed (reparented outside Pi ancestry via fork -> setsid ->
+      fork)
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1-6), plan.yaml v52.fix_review'
