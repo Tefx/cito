@@ -1004,7 +1004,7 @@ fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
                     json!(fs::canonicalize(&dirs[index]).unwrap())
                 );
                 assert_eq!(
-                    cito_native::setup::inspect_plugin_setup(plugin),
+                    cito_native::setup::try_inspect_plugin_setup(plugin).unwrap(),
                     (true, true, vec![dirs[index].display().to_string()])
                 );
                 assert!(!config.state_dir.join("runtime/plugins/pi").exists());
@@ -1378,7 +1378,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         assert_eq!(response["cwd"], json!(cwd));
         assert_eq!(response["executable"], json!(custom_dir.join("./run.sh")));
         assert_eq!(
-            cito_native::setup::inspect_plugin_setup(custom),
+            cito_native::setup::try_inspect_plugin_setup(custom).unwrap(),
             (true, true, vec![cwd.display().to_string()])
         );
         assert!(plugins.find_by_id("pi").unwrap().is_builtin);

@@ -804,6 +804,18 @@ impl HubEngine {
                     );
                 }
                 if op != "kv_delete" {
+                    if let Some(existing) = &existing {
+                        let previous = parse(existing, "value");
+                        if ["principal_id", "harness", "session_id"]
+                            .iter()
+                            .all(|key| !s(&previous, key).is_empty())
+                            && ["principal_id", "harness", "session_id"]
+                                .iter()
+                                .any(|key| previous[*key] != data[*key])
+                        {
+                            return Err("PERMISSIONS_VIOLATION: listener_id tuple collision".into());
+                        }
+                    }
                     if s(&data, "harness") == "human" && s(&data, "session_id") != "default" {
                         return Err("INVALID_INPUT: Human node session_id must be 'default'".into());
                     }
@@ -977,12 +989,27 @@ impl HubEngine {
             }
             "consumer_ack" | "consumer_delete" => {
                 let name = required(p, "name")?;
-                consumer(c, name, caller)?;
+                let row = consumer(c, name, caller)?;
                 if op == "consumer_delete" {
                     c.execute("DELETE FROM hub_consumers WHERE name=?", &[json!(name)])?;
                     c.execute("DELETE FROM hub_consumer_acks WHERE name=?", &[json!(name)])?;
                     Ok(json!({"deleted":true}))
                 } else {
+                    let sig = one(
+                        c,
+                        &format!("{SIGNAL_SELECT} WHERE seq=?"),
+                        &[p["seq"].clone()],
+                    )?
+                    .ok_or("NOT_FOUND: signal not found")?;
+                    if !matches(s(&sig, "subject"), s(&row, "filter_subject"))
+                        || !can_consume(
+                            c,
+                            subject_target(s(&sig, "subject")).unwrap_or(""),
+                            caller,
+                        )?
+                    {
+                        return Err("FORBIDDEN: signal outside consumer authority".into());
+                    }
                     let inserted = c.execute(
                         "INSERT OR IGNORE INTO hub_consumer_acks(name,seq) VALUES(?,?)",
                         &[json!(name), p["seq"].clone()],
@@ -1130,7 +1157,10 @@ impl HubEngine {
             let engine = HubEngine { inner };
             engine.plugin_frame(&id, &frame)
         });
-        let process = Arc::new(ChannelProcess::spawn(plugin, callback)?);
+        let process = Arc::new(
+            ChannelProcess::spawn(plugin, callback)
+                .map_err(|error| self.process_error(&plugin.id, error))?,
+        );
         processes.insert(plugin.id.clone(), process.clone());
         drop(processes);
         if let Err(error) = self.configure_process(&plugin.id, &process) {
@@ -1143,13 +1173,36 @@ impl HubEngine {
                 }
             }
             process.shutdown();
-            return Err(error);
+            return Err(self.process_error(&plugin.id, error));
         }
         Ok(process)
     }
+    fn process_error(&self, id: &str, error: String) -> String {
+        match self.set_poll_error(id, Some(&error)) {
+            Ok(()) => error,
+            Err(_) => format!("{error}; channel health persistence failed"),
+        }
+    }
+    fn set_poll_error(&self, id: &str, error: Option<&str>) -> Result<(), String> {
+        self.inner.db.transaction(|c| {
+            let (cfg, mut state) = service(c, id)?;
+            save_service(c, id, &cfg)?;
+            if let Some(error) = error {
+                state["poll_error"] = json!(error);
+            } else if let Some(state) = state.as_object_mut() {
+                state.remove("poll_error");
+            }
+            c.execute(
+                "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
+                &[json!(state.to_string()), json!(id)],
+            )?;
+            Ok(())
+        })
+    }
     fn configure_process(&self, id: &str, process: &ChannelProcess) -> Result<(), String> {
         let frame=self.inner.db.transaction(|c|{let(cfg,state)=service(c,id)?;let bindings=c.query("SELECT principal_id,owner_user,user_config_json FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?.iter().map(|b|json!({"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(b,"user_config_json")})).collect::<Vec<_>>();Ok(json!({"op":"configure","hub_config":cfg,"bindings":bindings,"cursor":state["cursor"]}))})?;
-        process.send(&frame)
+        process.send(&frame)?;
+        self.set_poll_error(id, None)
     }
     fn human_rpc(&self, op: &str, p: &Value, caller: Option<&Value>) -> Result<Value, String> {
         if !p.is_object() {
@@ -1503,6 +1556,7 @@ impl HubEngine {
                 .ensure_process(&plugin)
                 .and_then(|process| self.replay(&plugin, &process))
             {
+                self.set_poll_error(&plugin.id, Some(&error))?;
                 first_error.get_or_insert(error);
             }
         }
@@ -1785,14 +1839,16 @@ fn publish_human_reply(
                 / 1_000_000;
             // Prefer the unambiguous key; retain live pre-upgrade publications.
             let cutoff = now_ms() - window.max(0);
-            if one(
+            if let Some(row) = one(
                 c,
-                "SELECT seq FROM hub_signals WHERE msg_id=? AND created_ms>=?",
+                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE msg_id=? AND created_ms>=?",
                 &[json!(current), json!(cutoff)],
-            )?
-            .is_none()
-            {
-                if let Some(row) = one(
+            )? {
+                let stored = parse(&row, "data");
+                if stored["message"] != text || stored["in_reply_to"] != json!(in_reply_to) {
+                    return Err("IDEMPOTENCY_CONFLICT: reply payload differs".into());
+                }
+            } else if let Some(row) = one(
                     c,
                     "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE msg_id=? AND created_ms>=?",
                     &[json!(legacy), json!(cutoff)],
@@ -1814,7 +1870,6 @@ fn publish_human_reply(
                         }
                         return Ok(legacy);
                     }
-                }
             }
             Ok::<_, String>(current)
         })
@@ -2392,6 +2447,7 @@ mod resilience_tests {
         let hub = HubEngine::open(&dir).unwrap();
         hub.pause_worker();
         let plugin = ChannelPlugin {
+            is_builtin: false,
             id: "sample".into(),
             dir: dir.clone(),
             command: vec![],
@@ -2510,6 +2566,7 @@ mod resilience_tests {
         let result = (|| {
             hub.inner.db.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES('cito.signal.node','old',?,CAST('{}' AS BLOB))", &[json!(now_ms()-2_000_000)])?;
             let plugin = ChannelPlugin {
+                is_builtin: false,
                 id: "fixture".into(),
                 dir: dir.clone(),
                 manifest: json!({}),
@@ -2596,6 +2653,7 @@ mod resilience_tests {
         ));
         let hub = HubEngine::open(&dir)?;
         *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
+            is_builtin: false,
             id: "messenger".into(),
             manifest: json!({"displayName":"Messenger","fields":[{"key":"destination","scope":"user","type":"text","required":true}]}),
             dir: dir.clone(),
@@ -2612,6 +2670,10 @@ mod resilience_tests {
         assert!(result["maintenance_warning"].is_string(), "{result}");
         let inventory = hub.rpc("human_channels_list", &json!({}), Some(&caller))?;
         assert_eq!(inventory["channels"][0]["enabled"], true);
+        assert_eq!(inventory["channels"][0]["warning"], true);
+        assert_eq!(inventory["channels"][0]["error_origin"], "hub");
+        let health = hub.inner.db.transaction(|c| service(c, "messenger"))?.1;
+        assert!(health["poll_error"].is_string());
         let stored = hub
             .inner
             .db
@@ -2632,6 +2694,7 @@ mod resilience_tests {
         // Serialize the manually driven channel transitions against the mutation-woken worker.
         let lifecycle = hub.inner.lifecycle.lock().map_err(|e| e.to_string())?;
         *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
+            is_builtin: false,
             id: "messenger".into(),
             manifest: json!({"displayName":"Messenger","fields":[]}),
             dir: dir.clone(),
@@ -2736,6 +2799,7 @@ fn human_operation(
         reg["human_control_revision"] = json!(1);
     }
     let now = now_ms();
+    super::lease::reconcile_registration_state(&mut reg, now.max(0) as u64);
     if op == "human_inbox_update" {
         let revision = reg["human_control_revision"]
             .as_u64()

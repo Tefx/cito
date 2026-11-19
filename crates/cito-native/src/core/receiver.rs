@@ -699,16 +699,23 @@ pub fn detach_channel_expected(
 }
 
 fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
-    let path = std::env::var("CITO_CONFIG_PATH")
-        .ok()
-        .and_then(|raw| {
-            crate::plugins::expand_home_dir(
-                &raw,
-                "CITO_CONFIG_PATH",
-                std::env::var("HOME").ok().as_deref(),
-            )
-            .ok()
-        })
+    qualify_reply_ids_with_options(
+        state_dir,
+        hub,
+        std::env::var("CITO_CONFIG_PATH").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("CITO_HUB").ok().as_deref(),
+    )
+}
+fn qualify_reply_ids_with_options(
+    state_dir: &std::path::Path,
+    hub: &str,
+    config_path: Option<&str>,
+    home: Option<&str>,
+    default: Option<&str>,
+) -> bool {
+    let path = config_path
+        .and_then(|raw| crate::plugins::expand_home_dir(raw, "CITO_CONFIG_PATH", home).ok())
         .unwrap_or_else(|| state_dir.join("config.json"));
     let config = std::fs::read_to_string(path).ok();
     let Some((configured_default, hubs, _)) = config
@@ -719,10 +726,9 @@ fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
     };
     let enabled = hubs.values().filter(|h| h["enabled"] != false).count();
     let count = if enabled == 0 { hubs.len() } else { enabled };
-    let default = std::env::var("CITO_HUB")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let default = default.as_deref().unwrap_or(&configured_default);
+    let default = default
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&configured_default);
     count != 1 || !matches!(default, "local" | "default")
 }
 

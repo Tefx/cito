@@ -25,6 +25,12 @@ class BundleVerificationTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.app = Path(self.directory.name) / "Cito.app"
+        source = Path(self.directory.name) / "repo"
+        (source / "plugins/sample").mkdir(parents=True)
+        (source / "plugins/sample/plugin.json").write_text('{}')
+        root_patch = patch.object(release, "ROOT", source)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         for name in ("Contents/Helpers/cito-native", "Contents/Helpers/cito-ui", "Contents/Resources/AppIcon.icns"):
             path = self.app / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,8 +39,24 @@ class BundleVerificationTests(unittest.TestCase):
             plistlib.dump({"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3"}, stream)
         self.plugin = self.app / "Contents/Resources/plugins/sample"
         self.plugin.mkdir(parents=True)
-        (self.plugin / "plugin.json").write_text(json.dumps({"command": ["./driver"]}))
+        (self.plugin / "plugin.json").write_text(json.dumps({"version": "1.2.3", "command": ["./driver"]}))
         self.driver = self.plugin / "driver"
+
+    def test_all_builtin_plugins_must_be_present_at_the_expected_version(self):
+        self.driver.write_text("fixture")
+        self.driver.chmod(0o755)
+        missing = release.ROOT / "plugins/second/plugin.json"
+        missing.parent.mkdir()
+        missing.write_text('{}')
+        with patch.object(release, "run", side_effect=self.command):
+            with self.assertRaisesRegex(release.ReleaseError, "second"):
+                release.verify_bundle(self.app, "1.2.3")
+            missing.unlink()
+            value = json.loads((self.plugin / "plugin.json").read_text())
+            value["version"] = "1.2.2"
+            (self.plugin / "plugin.json").write_text(json.dumps(value))
+            with self.assertRaisesRegex(release.ReleaseError, "sample"):
+                release.verify_bundle(self.app, "1.2.3")
 
     def command(self, argv, **kwargs):
         output = "arm64" if str(argv[0]).endswith("lipo") else "cito v1.2.3"
@@ -61,6 +83,28 @@ class BundleVerificationTests(unittest.TestCase):
             return self.command(argv, **kwargs)
         with patch.object(release, "run", side_effect=wrong_arch), self.assertRaisesRegex(release.ReleaseError, "arm64"):
             release.verify_bundle(self.app, "1.2.3")
+
+
+class CleanupTests(unittest.TestCase):
+    def test_secondary_failure_does_not_skip_cleanup_or_mask_primary(self):
+        observed = []
+        def failed():
+            observed.append("first")
+            raise OSError("sensitive cleanup diagnostic")
+        def last():
+            observed.append("last")
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            with self.assertRaisesRegex(RuntimeError, "primary"):
+                try:
+                    raise RuntimeError("primary")
+                finally:
+                    release.cleanup_steps(failed, last)
+            self.assertEqual(observed, ["first", "last"])
+            self.assertNotIn("sensitive", output.getvalue())
+            observed.clear()
+            with self.assertRaises(release.ReleaseError):
+                release.cleanup_steps(failed, last)
+            self.assertEqual(observed, ["first", "last"])
 
 
 class MetadataTests(unittest.TestCase):
@@ -270,6 +314,12 @@ class ArtifactTests(unittest.TestCase):
             for path in (helper, app / "Contents/Helpers/cito-native", resources / "AppIcon.icns"):
                 path.write_bytes(b"component fixture")
 
+            for source in (release.ROOT / "plugins").glob("*/plugin.json"):
+                directory = resources / "plugins" / source.parent.name
+                directory.mkdir(parents=True)
+                (directory / "plugin.json").write_text(json.dumps({"version": "1.2.3", "command": ["./driver"]}))
+                (directory / "driver").write_bytes(b"executable fixture")
+                (directory / "driver").chmod(0o755)
             plugin = resources / "plugins/fixture/bin/channel"
             plugin.parent.mkdir(parents=True)
             plugin.write_bytes(b"executable fixture")

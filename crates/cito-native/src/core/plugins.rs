@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const CITO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -107,12 +107,7 @@ impl NativeConfig {
     }
 }
 
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+pub use crate::support::now_ms;
 
 pub fn random_uuid_v4() -> String {
     let mut bytes = [0u8; 16];
@@ -213,18 +208,7 @@ pub fn validate_harness_id(id: &str) -> bool {
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-pub fn validate_hub_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > 32 {
-        return false;
-    }
-    if !(bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit()) {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
+pub use validate_harness_id as validate_hub_name;
 
 pub fn validate_nats_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
@@ -304,36 +288,35 @@ fn is_checked_cito_env_key(key: &str) -> bool {
 }
 
 pub fn resolve_builtin_plugins_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
-        let p = expand_home_dir(
-            explicit.trim(),
+    builtin_plugin_roots(None, env::current_exe().ok().as_deref())
+        .into_iter()
+        .find(|path| path.is_dir())
+}
+fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(dir) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
+        if let Ok(path) = expand_home_dir(
+            dir.trim(),
             "CITO_BUILTIN_PLUGINS_DIR",
             env::var("HOME").ok().as_deref(),
-        )
-        .ok()?;
-        if p.is_dir() {
-            return Some(p);
+        ) {
+            roots.push(path);
         }
     }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for rel in [
-                "../Resources/plugins",
-                "../plugins",
-                "../share/cito/plugins",
-            ] {
-                let cand = exe_dir.join(rel);
-                if cand.is_dir() {
-                    return Some(cand);
-                }
-            }
+    if let Some(state_dir) = state_dir {
+        roots.push(staged_plugins_dir(state_dir));
+    }
+    if let Some(dir) = executable.and_then(Path::parent) {
+        for relative in [
+            "../Resources/plugins",
+            "../plugins",
+            "../share/cito/plugins",
+        ] {
+            roots.push(dir.join(relative));
         }
     }
-    let compile_fallback = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins"));
-    if compile_fallback.is_dir() {
-        return Some(compile_fallback);
-    }
-    None
+    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
+    roots
 }
 
 pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescriptor, String> {
@@ -638,29 +621,11 @@ pub fn plugin_roots_for_executable(
         roots.push((PathBuf::from(dir), false));
     }
     roots.push((state_dir.join("plugins"), false));
-    if let Ok(dir) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
-        if let Ok(path) = expand_home_dir(
-            &dir,
-            "CITO_BUILTIN_PLUGINS_DIR",
-            env::var("HOME").ok().as_deref(),
-        ) {
-            roots.push((path, true));
-        }
-    }
-    roots.push((staged_plugins_dir(state_dir), true));
-    if let Some(dir) = executable.and_then(Path::parent) {
-        for rel in [
-            "../Resources/plugins",
-            "../plugins",
-            "../share/cito/plugins",
-        ] {
-            roots.push((dir.join(rel), true));
-        }
-    }
-    roots.push((
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"),
-        true,
-    ));
+    roots.extend(
+        builtin_plugin_roots(Some(state_dir), executable)
+            .into_iter()
+            .map(|path| (path, true)),
+    );
     roots
 }
 
@@ -1209,13 +1174,6 @@ pub fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
     )))
 }
 
-#[cfg(test)]
-pub fn plugin_call(plugin: &PluginDescriptor, request: &Value) -> Value {
-    plugin_request(plugin, request).unwrap_or_else(
-        |message| json!({"ok":false,"error_code":"PLUGIN_EXEC_FAILED","message":message}),
-    )
-}
-
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,
@@ -1402,14 +1360,7 @@ fn pid_alive_rejects_non_process_ids() {
 }
 
 pub fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: signal zero checks existence without signaling the process.
-    unsafe {
-        libc::kill(pid, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
+    crate::support::alive(pid as u32)
 }
 
 pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), String> {
@@ -1475,32 +1426,39 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
-    let exited = crate::support::child_exit_fd(child.id())?;
-    let mut retry = crate::support::RetryBackoff::default();
-    let deadline = Instant::now() + Duration::from_millis(5000);
-    while Instant::now() < deadline {
-        if let Some(h) = probe_daemon_health(config) {
-            if h.version.as_deref() == Some(CITO_VERSION) {
-                return Ok(());
+    let result = (|| {
+        let exited = crate::support::child_exit_fd(child.id())?;
+        let mut retry = crate::support::RetryBackoff::default();
+        let deadline = Instant::now() + Duration::from_millis(5000);
+        while Instant::now() < deadline {
+            if let Some(h) = probe_daemon_health(config) {
+                if h.version.as_deref() == Some(CITO_VERSION) {
+                    return Ok(());
+                }
+            }
+            if crate::support::poll_until(
+                &mut [libc::pollfd {
+                    fd: exited.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                Some(deadline.min(Instant::now() + retry.failed())),
+            )? {
+                let _ = child.wait();
+                return Err("Daemon exited before becoming healthy".into());
             }
         }
-        if crate::support::poll_until(
-            &mut [libc::pollfd {
-                fd: exited.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            }],
-            Some(deadline.min(Instant::now() + retry.failed())),
-        )? {
-            let _ = child.wait();
-            return Err("Daemon exited before becoming healthy".into());
-        }
+        Err(format!(
+            "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
+            config.daemon_port,
+            config.state_dir.display()
+        ))
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    Err(format!(
-        "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
-        config.daemon_port,
-        config.state_dir.display()
-    ))
+    result
 }
 
 #[cfg(test)]
@@ -1708,9 +1666,7 @@ mod tests {
             "printf '{}\\n{}\\n'",
         ] {
             let (root, plugin) = fixture(script);
-            let result = plugin_call(&plugin, &json!({"op":"probe"}));
-            assert_eq!(result["ok"], false);
-            assert_eq!(result["error_code"], "PLUGIN_EXEC_FAILED");
+            assert!(plugin_request(&plugin, &json!({"op":"probe"})).is_err());
             fs::remove_dir_all(root).unwrap();
         }
         let (root, plugin) = fixture("printf '%06000d\\n' 1 >&2; exit 4");

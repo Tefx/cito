@@ -414,8 +414,9 @@ fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Resu
         Value::Null,
         malformed_channel,
     ] {
-        let revision = f.client.kv_get(id)?.ok_or("Missing registration")?.1;
-        f.client.kv_save(id, &remote, Some(revision))?;
+        // Seed each malformed historical value without replacing an existing tuple.
+        f.client.rpc("kv_delete", &json!({"key":id}))?;
+        f.client.kv_save(id, &remote, None)?;
         let error = detach_channel_expected(&f.client, id, "host:fixture", &f.row)
             .expect_err("Malformed registrations must reject detach");
         assert!(error.starts_with("INVALID_INPUT: Listener"));
@@ -1411,30 +1412,29 @@ fn remote_preflight_generation_mismatch_fences_captured_listener_before_spawn() 
 
 #[test]
 fn disabled_legacy_hubs_do_not_qualify_single_local_reply_ids() -> Result<(), String> {
-    if std::env::var_os("CITO_REPLY_IDS_WORKER").is_none() {
-        let output = std::process::Command::new(
-            std::env::current_exe().map_err(|e| e.to_string())?,
-        )
-        .args([
-            "--exact",
-            "core::receiver::tests::disabled_legacy_hubs_do_not_qualify_single_local_reply_ids",
-        ])
-        .env("CITO_REPLY_IDS_WORKER", "1")
-        .env_remove("CITO_CONFIG_PATH")
-        .output()
-        .map_err(|e| e.to_string())?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        return Ok(());
-    }
     let f = Fixture::new()?;
     std::fs::write(f.dir.join("config.json"), json!({"defaultHub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","disabled":true}}}).to_string()).map_err(|e| e.to_string())?;
-    assert!(!qualify_reply_ids(&f.dir, "local"));
+    assert!(!qualify_reply_ids_with_options(
+        &f.dir, "local", None, None, None
+    ));
+    assert!(!qualify_reply_ids_with_options(
+        std::path::Path::new("/unused"),
+        "local",
+        Some("~/config.json"),
+        f.dir.to_str(),
+        None
+    ));
+    assert!(qualify_reply_ids_with_options(
+        &f.dir,
+        "local",
+        None,
+        None,
+        Some("work")
+    ));
     std::fs::write(f.dir.join("config.json"), json!({"defaultHub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":true}}}).to_string()).map_err(|e| e.to_string())?;
-    assert!(qualify_reply_ids(&f.dir, "local"));
+    assert!(qualify_reply_ids_with_options(
+        &f.dir, "local", None, None, None
+    ));
     Ok(())
 }
 #[test]

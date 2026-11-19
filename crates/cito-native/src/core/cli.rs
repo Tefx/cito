@@ -24,6 +24,7 @@ pub fn parse_cli(
     let mut input = Map::new();
     let mut meta = Map::new();
     let mut positionals = Vec::new();
+    let mut team = false;
     let mut i = 0;
     while i < args.len() {
         let raw = &args[i];
@@ -79,12 +80,16 @@ pub fn parse_cli(
                 if !matches!(value.as_str(), "self" | "workspace") {
                     return Err("Invalid --scope".into());
                 }
+                if team && value == "self" {
+                    return Err("Conflicting --team and --scope self".into());
+                }
                 input.insert("scope".into(), json!(value));
             }
             "--team" if matches!(cmd, "listen" | "unlisten" | "inbox") => {
                 if input.get("scope") == Some(&json!("self")) {
                     return Err("Conflicting --team and --scope self".into());
                 }
+                team = true;
                 input.insert("scope".into(), json!("workspace"));
             }
             "--about" if cmd == "inbox" => {
@@ -720,6 +725,8 @@ mod tests {
             ("inbox", vec!["--unknown"]),
             ("listen", vec!["--session", "s"]),
             ("listen", vec!["--title", " "]),
+            ("listen", vec!["--team", "--scope", "self"]),
+            ("listen", vec!["--scope", "self", "--team"]),
             ("rename", vec![]),
             ("rename", vec![" "]),
         ] {

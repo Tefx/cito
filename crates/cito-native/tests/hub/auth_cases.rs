@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn oidc_network_errors_redact_discovery_paths_and_jwks_query_credentials() {
+    use std::io::{BufRead, BufReader, Write};
+    for jwks_failure in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let issuer = format!("http://{}/private-issuer", listener.local_addr().unwrap());
+        let discovery =
+            json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys?credential=private-query")})
+                .to_string();
+        let server = std::thread::spawn(move || {
+            for index in 0..if jwks_failure { 2 } else { 1 } {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                drop(reader);
+                let (status, body) = if jwks_failure && index == 0 {
+                    ("200 OK", discovery.as_str())
+                } else {
+                    ("403 Forbidden", "private diagnostic")
+                };
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let verifier = OidcVerifier::new(&issuer, "client").unwrap();
+        let error = verifier.refresh(None).unwrap_err();
+        server.join().unwrap();
+        assert!(error.starts_with("AUTH_UNAVAILABLE:"));
+        for secret in ["private-issuer", "private-query", "private diagnostic"] {
+            assert!(!error.contains(secret), "{error}");
+        }
+    }
+}
+
+#[test]
 fn health_exposes_only_oidc_discovery_metadata() {
     for (mode, token) in [("none", None), ("token", Some("secret".into()))] {
         let auth = HubAuth::new(mode, token, None, None).unwrap();

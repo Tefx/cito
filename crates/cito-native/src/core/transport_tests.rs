@@ -3,6 +3,54 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
 #[test]
+fn oversized_sse_hints_drain_without_reconnect_and_keep_following_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, released) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: ").unwrap();
+        // A maximum-codepoint signal expands beyond the bounded line buffer on the wire.
+        let chunk = "x".repeat(8191);
+        for _ in 0..40 {
+            socket.write_all(chunk.as_bytes()).unwrap();
+        }
+        socket.write_all(b"\n\ndata: following\n\n").unwrap();
+        socket.flush().unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(3));
+    });
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{address}")}),
+        "alice",
+        None,
+    );
+    let observed = client.event_revision();
+    let worker = client.start_events().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while client.event_revision() < observed + 2 {
+        assert!(
+            Instant::now() < deadline,
+            "Oversized and following hints must both invalidate"
+        );
+        thread::yield_now();
+    }
+    assert!(client.stream_live.load(Ordering::SeqCst));
+    client.close();
+    let _ = release.send(());
+    worker.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
 fn embedded_and_http_events_invalidate_after_commits_and_shutdown_cleanly() {
     for http in [false, true] {
         let dir =
@@ -63,7 +111,12 @@ fn embedded_and_http_events_invalidate_after_commits_and_shutdown_cleanly() {
 #[test]
 fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
     use std::os::fd::AsRawFd;
-    for status in [503, 401] {
+    for (status, token) in [
+        (503, Some("first")),
+        (401, Some("first")),
+        (403, Some("first")),
+        (401, None),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(crate::support::WakePipe::new().unwrap());
@@ -103,7 +156,7 @@ fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
             );
             sent.send(Instant::now()).unwrap();
         });
-        let config = json!({"url":format!("http://{address}"),"token":"first"});
+        let config = json!({"url":format!("http://{address}"),"token":token});
         let client = HubClient::new("work".into(), config.clone(), "alice", None);
         let worker = client.start_events().unwrap();
         let first = calls.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -112,10 +165,15 @@ fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
             let third = calls.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(second.duration_since(first) >= Duration::from_millis(200));
             assert!(third.duration_since(second) >= Duration::from_millis(450));
+            assert!(client.rejected_bearer.lock().unwrap().is_none());
         } else {
             assert!(
                 calls.recv_timeout(Duration::from_millis(600)).is_err(),
                 "Permanent rejection must suspend the stream"
+            );
+            assert_eq!(
+                client.rejected_bearer.lock().unwrap().is_some(),
+                status == 401 && token.is_some()
             );
             let mut replacement = HubClient::new("work".into(), config, "alice", None);
             replacement.bearer = Some("replacement".into());

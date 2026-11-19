@@ -124,7 +124,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   function defaultAbout(ctx: BridgeContext): string {
     return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
   }
-  async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>, expectedSessionId: string | undefined): Promise<Record<string, unknown>> {
     let configuredPort: unknown;
     const rawConfig = process.env.CITO_CONFIG_PATH ?? join(resolvedStateDir, "config.json");
     const configPath = rawConfig === "~" ? homedir() : rawConfig.startsWith("~/")
@@ -151,7 +151,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         params: {
           name,
           arguments: args,
-          _meta: { endpoint_pid: process.pid },
+          _meta: { endpoint_pid: process.pid, expected_session_id: expectedSessionId },
         },
       }),
     });
@@ -451,7 +451,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       }
       const commandSessionId = sessionId;
       try {
-        const payload = await callMcpTool(tool, toolArgs);
+        const payload = await callMcpTool(tool, toolArgs, commandSessionId);
         if (sessionId !== commandSessionId) return;
         if (tool === "cito_listen") {
           const publicId = String(payload.listener_id ?? "cito").trim().split(":").at(-1)!;

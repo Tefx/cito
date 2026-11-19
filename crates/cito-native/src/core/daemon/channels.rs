@@ -453,7 +453,7 @@ impl DaemonService {
         }
         if let Ok(value) = result {
             settlement["committed"] = json!(value["ok"] != false);
-            for key in ["committed", "maintenance_warning", "receipt_authority"] {
+            for key in ["maintenance_warning", "receipt_authority"] {
                 if let Some(value) = value.get(key) {
                     settlement[key] = value.clone();
                 }

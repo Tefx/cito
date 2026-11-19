@@ -67,7 +67,12 @@ fn disabled_hub_retirement_reaches_durable_agent_and_human_bindings() {
                 };
                 let (status, result) = f.action(action);
                 assert_eq!(status, 400, "{result}");
-                assert!(result.to_string().contains("DETACH_PENDING"), "{result}");
+                let expected = if route == "unlisten_session-hub" {
+                    "INVALID_INPUT: Unknown or disabled hub"
+                } else {
+                    "DETACH_PENDING"
+                };
+                assert!(result.to_string().contains(expected), "{result}");
                 assert_ne!(result["committed"], true);
             }
         }
@@ -75,14 +80,21 @@ fn disabled_hub_retirement_reaches_durable_agent_and_human_bindings() {
             "SELECT * FROM local_listeners WHERE hub='work' AND listener_id='{id}'"
         ))[0]
             .clone();
-        assert_eq!(after["status"], "UNLISTENED");
+        let denied = route == "unlisten_session-hub";
+        assert_eq!(
+            after["status"],
+            if denied { "ACTIVE" } else { "UNLISTENED" }
+        );
+        if denied {
+            assert_eq!(after["user_stopped"], before["user_stopped"]);
+        }
         assert_eq!(after["hub_url"], before["hub_url"]);
         assert_eq!(
             f.rows(&format!(
                 "SELECT * FROM pending_hub_detaches WHERE hub='work' AND listener_id='{id}'"
             ))
             .len(),
-            1
+            usize::from(!denied)
         );
         let remote = f
             .db("hub/hub.sqlite")

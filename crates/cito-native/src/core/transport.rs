@@ -531,7 +531,7 @@ impl HubClient {
                     request = request.set("Authorization", &format!("Bearer {token}"));
                 }
                 let response = request.call();
-                if matches!(&response, Err(ureq::Error::Status(401 | 403, _))) {
+                if bearer.is_some() && matches!(&response, Err(ureq::Error::Status(401, _))) {
                     client.reject_token(&bearer);
                 }
                 if matches!(&response, Err(ureq::Error::Status(401 | 403 | 409, _))) {
@@ -557,13 +557,56 @@ impl HubClient {
                     client.stream_live.store(true, Ordering::SeqCst);
                     let mut reader = BufReader::new(response.into_reader());
                     let connected = Instant::now();
-                    let mut line = String::new();
+                    let mut line = Vec::new();
                     loop {
                         let remaining = 65_536usize.saturating_sub(line.len());
                         if remaining == 0 {
-                            break;
+                            // The stream carries invalidation hints, not authoritative payloads.
+                            // Drain an oversized hint without growing memory or reconnecting.
+                            let mut chunk = [0u8; 8192];
+                            let drained = loop {
+                                if client.closed.load(Ordering::SeqCst) {
+                                    break false;
+                                }
+                                match reader.fill_buf() {
+                                    Ok([]) => break false,
+                                    Ok(bytes) => {
+                                        let count = bytes.len().min(chunk.len());
+                                        chunk[..count].copy_from_slice(&bytes[..count]);
+                                        let newline =
+                                            chunk[..count].iter().position(|b| *b == b'\n');
+                                        reader.consume(newline.map_or(count, |n| n + 1));
+                                        if newline.is_some() {
+                                            break true;
+                                        }
+                                    }
+                                    Err(error)
+                                        if matches!(
+                                            error.kind(),
+                                            io::ErrorKind::TimedOut
+                                                | io::ErrorKind::WouldBlock
+                                                | io::ErrorKind::Interrupted
+                                        ) =>
+                                    {
+                                        continue
+                                    }
+                                    Err(_) => break false,
+                                }
+                            };
+                            if !drained {
+                                break;
+                            }
+                            if line.starts_with(b"data:") {
+                                client.mutation();
+                                backoff.reset();
+                            }
+                            line.clear();
+                            continue;
                         }
-                        let result = reader.by_ref().take(remaining as u64).read_line(&mut line);
+                        let result = reader
+                            .by_ref()
+                            .take(remaining as u64)
+                            .read_until(b'\n', &mut line);
                         if client.closed.load(Ordering::SeqCst) {
                             break;
                         }
@@ -571,13 +614,16 @@ impl HubClient {
                         {
                             continue;
                         }
-                        if !matches!(result, Ok(n) if n > 0 && line.ends_with('\n')) {
+                        if matches!(result, Ok(n) if n > 0 && !line.ends_with(b"\n")) {
+                            continue;
+                        }
+                        if !matches!(result, Ok(n) if n > 0) {
                             break;
                         }
                         if connected.elapsed() >= Duration::from_secs(30) {
                             backoff.reset();
                         }
-                        if line.starts_with("data:") {
+                        if line.starts_with(b"data:") {
                             backoff.reset();
                             // Hints invalidate observations; only the durable consumer advances cursors.
                             client.mutation();

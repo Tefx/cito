@@ -358,9 +358,8 @@ impl DaemonService {
             .unwrap_or(&Value::Null);
         if self.applied_host_config.as_ref() == Some(host) {
             // Restoring the applied config resolves reload errors, not rejected UI actions.
-            if self.host_hub_reload_failed {
-                self.last_host_hub_error = None;
-                self.host_hub_reload_failed = false;
+            if matches!(self.host_hub_error, Some(super::HostHubError::Reload(_))) {
+                self.host_hub_error = None;
             }
             return Ok(());
         }
@@ -369,13 +368,11 @@ impl DaemonService {
         }) {
             Ok(()) => {
                 self.applied_host_config = Some(host.clone());
-                self.last_host_hub_error = None;
-                self.host_hub_reload_failed = false;
+                self.host_hub_error = None;
                 Ok(())
             }
             Err(error) => {
-                self.last_host_hub_error = Some(error.clone());
-                self.host_hub_reload_failed = true;
+                self.host_hub_error = Some(super::HostHubError::Reload(error.clone()));
                 Err(error)
             }
         }

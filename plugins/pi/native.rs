@@ -88,6 +88,11 @@ fn setup(req: &Value) -> Result<Value> {
     }
     actions.push(mutate(req, "pi", &legacy, |_| Ok(None))?);
     if remove && req["dry_run"] != true {
+        match fs::remove_dir_all(state(req).join("pi")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
         if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with("pi-pid-") {
@@ -256,12 +261,26 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     }
     Ok(())
 }
-fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
+fn socket_candidates(req: &Value, searched: Option<&[u32]>) -> Result<Vec<(u32, Value)>> {
     let request = req.clone();
+    let searched = searched.map(<[u32]>::to_vec);
     inspect_socket_endpoints(req, "pi-pid-", move |p, _| {
+        if searched.as_ref().is_some_and(|pids| !pids.contains(&p)) {
+            return None;
+        }
         let req = &request;
         let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
-        let response = match identify(req, p) {
+        let response = socket_response_or_cached(identify(req, p), p, || {
+            let cached = read_json(&cache_path)?;
+            let identity = process_identity(p)?;
+            if cached["identity"] != identity
+                || !matches_process(str_at(&identity, "command").unwrap_or(""))
+            {
+                return Err("Endpoint identity changed".into());
+            }
+            Ok(cached["session"].clone())
+        });
+        let response = match response {
             Ok(v) => {
                 if v["ok"] == true {
                     if let Ok(identity) = process_identity(p) {
@@ -272,19 +291,6 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
                     }
                 }
                 Ok(v)
-            }
-            Err(error) if error == "Socket request timed out" => {
-                let cached = read_json(&cache_path).ok();
-                match (cached, process_identity(p)) {
-                    (Some(cached), Ok(identity))
-                        if alive(p)
-                            && cached["identity"] == identity
-                            && matches_process(str_at(&identity, "command").unwrap_or("")) =>
-                    {
-                        Ok(cached["session"].clone())
-                    }
-                    _ => Err(error),
-                }
             }
             Err(error) => Err(error),
         };
@@ -307,39 +313,25 @@ fn candidates(req: &Value) -> Result<Candidates> {
         };
         let mut responded = false;
         let mut searched = Vec::new();
-        for mut p in roots {
-            for _ in 0..=if resolve { 5 } else { 0 } {
-                if process_command(p)
-                    .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
+        for p in endpoint_pid_walk(roots, if resolve { 5 } else { 0 }, matches_process) {
+            searched.push(p);
+            if let Ok(v) = identify(req, p) {
+                responded = true;
+                if v["ok"] != true {
+                    return Ok((
+                        vec![],
+                        true,
+                        Some(response_diagnostic(&v, "Pi bridge rejected identification")),
+                    ));
+                }
+                if v["ok"] == true
+                    && raw_str_at(&v, "session_id").is_some()
+                    && str_at(&v, "cwd").is_some()
+                    && v.get("pi_pid")
+                        .is_none_or(|id| id.as_u64() == Some(p as u64))
                 {
-                    break;
+                    return Ok((vec![(p, v)], true, None));
                 }
-                searched.push(p);
-                if let Ok(v) = identify(req, p) {
-                    responded = true;
-                    if v["ok"] != true {
-                        return Ok((
-                            vec![],
-                            true,
-                            Some(response_diagnostic(&v, "Pi bridge rejected identification")),
-                        ));
-                    }
-                    if v["ok"] == true
-                        && raw_str_at(&v, "session_id").is_some()
-                        && str_at(&v, "cwd").is_some()
-                        && v.get("pi_pid")
-                            .is_none_or(|id| id.as_u64() == Some(p as u64))
-                    {
-                        return Ok((vec![(p, v)], true, None));
-                    }
-                }
-                if process_command(p).is_ok_and(|command| matches_process(&command)) {
-                    break;
-                }
-                let Some(parent) = process_parent(p) else {
-                    break;
-                };
-                p = parent;
             }
         }
         if !resolve && req["op"] == "probe" {
@@ -366,8 +358,8 @@ fn candidates(req: &Value) -> Result<Candidates> {
         }
         // A responding bridge with no open session must not be bypassed.
         let mut live = vec![];
-        if !responded {
-            live = socket_candidates(req)?;
+        if !responded && !searched.is_empty() {
+            live = socket_candidates(req, Some(&searched))?;
             process_candidates(req, &mut live)?;
             // Prefer the nearest caller ancestor, just as socket resolution does.
             // An explicit endpoint must not become ambiguous with its host ancestors.
@@ -379,7 +371,7 @@ fn candidates(req: &Value) -> Result<Candidates> {
         }
         return Ok((live, responded, None));
     }
-    let mut out = socket_candidates(req)?;
+    let mut out = socket_candidates(req, None)?;
     process_candidates(req, &mut out)?;
     Ok((out, false, None))
 }
@@ -400,12 +392,35 @@ fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
 pub fn handle(input: &Value) -> Result<Value> {
     let req = input;
     let op = str_at(req, "op").unwrap_or("");
-    if op.starts_with("setup_") {
+    if matches!(op, "setup_inspect" | "setup_apply" | "setup_remove") {
         return setup(req);
     }
     if matches!(op, "resolve_caller" | "verify") {
         if let Err(e) = explicit_pid(req) {
             return Ok(error("INVALID_INPUT", e));
+        }
+    }
+    if op == "probe" {
+        if let Some(p) = pid(req) {
+            if let Ok(current) = process_identity(p) {
+                let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
+                if !matches_process(str_at(&current, "command").unwrap_or(""))
+                    || (cached["identity"].is_object() && cached["identity"] != current)
+                    || (req["process_identity"].is_object() && req["process_identity"] != current)
+                {
+                    return Ok(
+                        json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
+                    );
+                }
+                if cached["identity"] == current
+                    && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+                    && !allow_process_only(req)
+                {
+                    return Ok(
+                        json!({"ok":true,"status":"transient_error","reason":"Pi bridge is temporarily unavailable"}),
+                    );
+                }
+            }
         }
     }
     let (cs, endpoint_responded, rejection) = if matches!(
@@ -470,6 +485,11 @@ pub fn handle(input: &Value) -> Result<Value> {
             }
             let (p, v) = &cs[0];
             let c = as_caller(req, *p, v);
+            if !endpoint_responded
+                && has_generic_session_mismatch(req, raw_str_at(v, "session_id").unwrap_or(""))
+            {
+                return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
+            }
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }

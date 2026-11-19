@@ -23,13 +23,13 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(super) struct InteractiveLogin {
-    pub(super) cancelled: AtomicBool,
+    pub(super) cancelled: crate::core::login::Cancellation,
     serial: Mutex<()>,
 }
 
@@ -180,7 +180,10 @@ pub(super) fn dispatch_action(
     }
     if let Err(error) = &result {
         if channel_action_kind(action) != Some(super::channels::ChannelActionKind::Mutation)
-            && action["op"] != "set_host_hub"
+            && !matches!(
+                string(action, "op"),
+                "set_host_hub" | "send_signal" | "send_reply_from_human"
+            )
         {
             s.emit(
             json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
@@ -302,7 +305,10 @@ fn dispatch_action_inner(
             rejected,
             true,
             action["action"] == "switch_account" || action["force_interactive"] == true,
-            &|| shutdown_requested() || attempt.cancelled.load(Ordering::SeqCst),
+            (
+                &|| shutdown_requested() || attempt.cancelled.load(Ordering::SeqCst),
+                Some(attempt.cancelled.fd()?),
+            ),
         )
     };
     // Release per-Hub publication before re-entering the service mutex. Purge
@@ -564,6 +570,15 @@ pub(super) fn mutating_action(action: &Value) -> bool {
 }
 
 impl DaemonService {
+    fn validate_configured_hub(&self, hub: &str) -> Result<(), String> {
+        let (_, hubs, _) =
+            crate::plugins::try_normalize_existing_config(Some(&self.raw_config()?.to_string()))?;
+        if hubs.get(hub).is_some_and(|cfg| cfg["enabled"] != false) {
+            Ok(())
+        } else {
+            Err("INVALID_INPUT: Unknown or disabled hub".into())
+        }
+    }
     pub(super) fn purge_hub_state(&mut self, hub: &str) -> Result<(), String> {
         if let Some(attempt) = self.logins.remove(hub) {
             attempt.cancelled.store(true, Ordering::SeqCst);
@@ -801,6 +816,17 @@ impl DaemonService {
             return Err("INVALID_INPUT: Action must be an object".into());
         }
         let op = string(action, "op");
+        if matches!(op, "unlisten" | "unlisten_session" | "unlisten_all") {
+            if action
+                .get("hub")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+            {
+                return Err("INVALID_INPUT: hub must be a string".into());
+            }
+            if action["harness"] == "human" && action["session_id"] != "default" {
+                return Err("INVALID_INPUT: Human session must be default".into());
+            }
+        }
         let hub = action["hub"]
             .as_str()
             .unwrap_or(&self.config.default_hub)
@@ -866,7 +892,10 @@ impl DaemonService {
                     });
                 let mut params = action.clone();
                 params["node_id"] = json!(id);
-                if params.get("expected_control_revision").is_none() {
+                if params
+                    .get("expected_control_revision")
+                    .is_none_or(Value::is_null)
+                {
                     params["expected_control_revision"] = slot
                         .kv_get(&id)?
                         .map(|(row, _)| row["human_control_revision"].clone())
@@ -893,9 +922,17 @@ impl DaemonService {
                 );
             }
             "rename_session" => {
-                let row = self
-                    .state
-                    .active()?
+                let mut known = self.state.db.query(
+                    "SELECT * FROM local_listeners WHERE status!='FENCED_INACTIVE'",
+                    &[],
+                )?;
+                known.extend(
+                    self.session_activity
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|a| a.candidates()),
+                );
+                let row = known
                     .into_iter()
                     .find(|r| {
                         (action["harness"].is_null() || action["harness"] == r["harness"])
@@ -906,7 +943,7 @@ impl DaemonService {
                             && ((action["harness"].is_string() && action["session_id"].is_string())
                                 || action["listener_id"].is_string())
                     })
-                    .ok_or("LISTENER_NOT_FOUND: Session is not active")?;
+                    .ok_or("LISTENER_NOT_FOUND: Session is unknown")?;
                 return self.rename_session(
                     string(&row, "harness"),
                     string(&row, "session_id"),
@@ -914,6 +951,9 @@ impl DaemonService {
                 );
             }
             "unlisten_session" => {
+                if !action["hub"].is_null() {
+                    self.validate_configured_hub(&hub)?;
+                }
                 let mut detach_errors = Vec::new();
                 if action["harness"] != "human" {
                     let targets: Vec<String> = self
@@ -984,7 +1024,8 @@ impl DaemonService {
                 self.invalidate_setup(id);
                 result?;
                 self.last_app_action.insert(id.to_owned(), "setup".into());
-                self.refresh_available()?;
+                let projection = self.refresh_available();
+                return Ok(committed_projection(json!({"ok":true}), projection));
             }
             "setup_remove_app" => {
                 let id = action["harness"]
@@ -1463,9 +1504,10 @@ impl DaemonService {
             }
             "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
                 let ids = action["signal_ids"].as_array().cloned().unwrap_or_default();
+                let bulk = op == "mark_all_activity_read" || action["ack_all"] == true;
                 let rows = self.state.db.query(
                     "SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
-                    &[json!(action["filter"].as_str().unwrap_or(&self.activity_filter))],
+                    &[json!(if bulk { action["filter"].as_str().unwrap_or(&self.activity_filter) } else { "all" })],
                 )?;
                 for row in rows {
                     if !crate::core::state::joined_signal_is_current(&row) {
@@ -1475,7 +1517,6 @@ impl DaemonService {
                     if !requested_hub.is_empty() && row["hub"] != requested_hub {
                         continue;
                     }
-                    let bulk = op == "mark_all_activity_read" || action["ack_all"] == true;
                     if bulk
                         && !crate::core::state::matches_activity(
                             &row,
@@ -1503,7 +1544,7 @@ impl DaemonService {
                             string(&row, "hub"),
                             string(&row, "listener_id"),
                             &[row["signal_id"].clone()],
-                            &format!("{}:human", self.host_id),
+                            &format!("{}:{}", self.host_id, string(&row, "target_harness")),
                         )?;
                     }
                 }
@@ -1553,6 +1594,21 @@ impl DaemonService {
                 self.flush_acks();
             }
             "listen_session" => {
+                if let Some(title) = action.get("title") {
+                    crate::core::registration::validate_title(
+                        title
+                            .as_str()
+                            .ok_or("INVALID_INPUT: title must be a string")?,
+                    )?;
+                }
+                if let Some(tag) = action.get("tag") {
+                    if !tag
+                        .as_str()
+                        .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 64)
+                    {
+                        return Err("INVALID_INPUT: Invalid tag".into());
+                    }
+                }
                 let mut caller = action.clone();
                 if caller["session_id"].is_null() {
                     caller["session_id"] = json!("default");
@@ -1574,28 +1630,67 @@ impl DaemonService {
                         .caller(&meta, true)?
                         .ok_or("BINDING_REQUIRED: Session is not open")?;
                 }
+                if caller["harness"] == "human" && caller["session_id"] != "default" {
+                    return Err("INVALID_INPUT: Human session must be default".into());
+                }
+                if caller["harness"] != "human" {
+                    if let Some(title) = action["title"].as_str() {
+                        self.rename_session(
+                            string(&caller, "harness"),
+                            string(&caller, "session_id"),
+                            title,
+                        )?;
+                    }
+                }
                 if caller["harness"] == "human" && string(&caller, "title").trim().is_empty() {
                     caller["title"] = json!("Human");
                 }
                 let about = action["about"]
                     .as_str()
                     .filter(|about| caller["harness"] != "human" || !about.trim().is_empty())
-                    .unwrap_or(if caller["harness"] == "human" {
-                        "Human"
-                    } else {
-                        "Session"
+                    .unwrap_or_else(|| {
+                        action["title"]
+                            .as_str()
+                            .unwrap_or(if caller["harness"] == "human" {
+                                "Human"
+                            } else {
+                                "Session"
+                            })
                     });
-                return self.listen(
-                    &hub,
-                    &json!({"about":about,"scope":action["scope"]}),
-                    &caller,
-                );
+                let mut args = json!({"about":about,"scope":action["scope"]});
+                if let Some(tag) = action.get("tag") {
+                    args["tag"] = tag.clone();
+                }
+                return self.listen(&hub, &args, &caller);
             }
             "unlisten" => {
+                if !action["hub"].is_null() {
+                    self.validate_configured_hub(&hub)?;
+                }
                 let id = string(action, "listener_id");
+                if let Some(row) = self
+                    .state
+                    .listener(&hub, id)?
+                    .filter(|r| r["harness"] != "human")
+                {
+                    self.ensure_agent_stop_row(
+                        &hub,
+                        string(&row, "harness"),
+                        string(&row, "session_id"),
+                    )?;
+                } else if action["harness"].as_str().is_some_and(|h| h != "human") {
+                    self.ensure_agent_stop_row(
+                        &hub,
+                        string(action, "harness"),
+                        string(action, "session_id"),
+                    )?;
+                }
                 self.unlisten_id(&hub, id)?;
             }
             "unlisten_all" => {
+                if !action["hub"].is_null() {
+                    self.validate_configured_hub(&hub)?;
+                }
                 // Bulk stop owns Hub policy even when no listener is active.
                 let raw = self.raw_config()?;
                 let (_, configured, _) =
@@ -1623,6 +1718,7 @@ impl DaemonService {
                     }
                 }
                 for name in targets {
+                    self.state.db.execute("UPDATE local_listeners SET user_stopped=1,retirement_reason=NULL WHERE hub=? AND harness!='human' AND status!='FENCED_INACTIVE'", &[json!(name)])?;
                     // Bulk stop reports incomplete detaches across all targets.
                     if let Err(error) = self
                         .set_auto_listen(&name, false)
@@ -1730,7 +1826,6 @@ impl DaemonService {
                 }
                 validate_tool_input("cito_find", &args)?;
                 self.slot(&hub)?;
-                let _ = self.caller(&json!({}), false)?;
                 let harness = action["harness"]
                     .as_str()
                     .filter(|id| !id.is_empty() && *id != "all");
@@ -1863,7 +1958,6 @@ impl DaemonService {
                     Ok(())
                 };
                 self.host_server = server;
-                self.host_hub_reload_failed = false;
                 if let Err(error) = result {
                     let error = match rollback {
                         Ok(()) => error,
@@ -1871,12 +1965,12 @@ impl DaemonService {
                             format!("{error}; failed to restore host hub listener: {rollback}")
                         }
                     };
-                    self.last_host_hub_error = Some(error.clone());
+                    self.host_hub_error = Some(super::HostHubError::Action(error.clone()));
                     return Err(error);
                 }
                 self.applied_host_config =
                     self.raw_config().ok().map(|raw| raw["host_hub"].clone());
-                self.last_host_hub_error = None;
+                self.host_hub_error = None;
                 self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
             "set_launch_at_login" => {

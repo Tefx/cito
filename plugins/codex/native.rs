@@ -179,19 +179,39 @@ fn effect_path(req: &Value, sid: &str) -> PathBuf {
         .join("activity/codex")
         .join(format!("{:x}.json", Sha256::digest(sid.as_bytes())))
 }
-fn record_effect(req: &Value, sid: &str, text: &str, activity: Option<(u64, u64)>) -> Result<()> {
+fn record_effect(
+    req: &Value,
+    sid: &str,
+    text: Option<&str>,
+    activity: Option<(u64, u64)>,
+) -> Result<()> {
     use sha2::{Digest, Sha256};
     let path = effect_path(req, sid);
     std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
         .map_err(|_| "Cannot save activity attribution")?;
     let _lock = FileLock::acquire(&path.with_extension("lock"))?;
     let mut ledger = read_json(&path)?;
-    let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
-    let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
-    effects.push(hash);
-    ledger["effects"] = json!(effects);
+    if let Some(text) = text {
+        let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+        let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
+        effects.push(hash);
+        ledger["effects"] = json!(effects);
+    }
     if let Some((revision, at)) = activity {
         ledger["fallback"] = json!({"revision":revision,"at_ms":at});
+    }
+    atomic_write(&path, ledger.to_string().as_bytes())
+}
+fn abandon_effect(req: &Value, sid: &str, text: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let path = effect_path(req, sid);
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    let mut ledger = read_json(&path)?;
+    let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+    if let Some(effects) = ledger["effects"].as_array_mut() {
+        if let Some(index) = effects.iter().rposition(|value| value == &hash) {
+            effects.remove(index);
+        }
     }
     atomic_write(&path, ledger.to_string().as_bytes())
 }
@@ -268,6 +288,11 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                     None
                 };
                 let mut saw_effect = same_source && cached["saw_effect"] == true;
+                let mut carrier = if same_source {
+                    cached["carrier"].clone()
+                } else {
+                    Value::Null
+                };
                 file.seek(SeekFrom::Start(offset))
                     .map_err(|_| "Cannot read session activity")?;
                 let mut reader = BufReader::new(file);
@@ -287,6 +312,13 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                         continue;
                     };
                     let payload = &event["payload"];
+                    if matches!(
+                        payload["type"].as_str(),
+                        Some("task_started" | "turn_started" | "task_complete" | "turn_complete")
+                    ) || (payload["type"] == "message" && payload["role"] == "assistant")
+                    {
+                        carrier = Value::Null;
+                    }
                     let text = if payload["type"] == "user_message" {
                         payload["message"].as_str().map(str::to_owned)
                     } else if payload["type"] == "message" && payload["role"] == "user" {
@@ -303,6 +335,15 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                         continue;
                     };
                     let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+                    if carrier["hash"] == hash
+                        && carrier["kind"] != payload["type"]
+                        && carrier["turn_id"] == payload["turn_id"]
+                    {
+                        carrier = Value::Null;
+                        continue;
+                    }
+                    carrier =
+                        json!({"hash":hash,"kind":payload["type"],"turn_id":payload["turn_id"]});
                     let effect = ledger["effects"]
                         .as_array_mut()
                         .and_then(|effects| {
@@ -321,7 +362,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                 }
                 // The cursor bounds repeat work, not the activity revision. Revision
                 // remains the durable DB source integer across scans and restarts.
-                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision});
+                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision,"carrier":carrier});
                 if let Some(at) = latest {
                     scanned_activity =
                         Some(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
@@ -570,7 +611,7 @@ fn row_caller(req: &Value, r: &Value) -> Value {
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
-    if op.starts_with("setup_") {
+    if matches!(op, "setup_inspect" | "setup_apply" | "setup_remove") {
         return setup(req);
     }
     if matches!(op, "resolve_caller" | "verify") {
@@ -589,10 +630,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                         // One unreadable rollout must not discard unrelated threads.
                         // Unknown activity cannot enroll an idle activity-mode session.
                         c["activity"] = source_activity(req, r).unwrap_or(Value::Null);
-                        c["updated_at_ms"] = json!(str_at(r, "recency_at_ms")
-                            .or_else(|| str_at(r, "updated_at"))
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .map(|t| if t < 100_000_000_000 { t * 1000 } else { t }));
+                        c["updated_at_ms"] = json!(activity_at(r).map(|(_, at)| at));
                         Ok(c)
                     })
                     .collect::<Result<Vec<_>>>()?
@@ -786,6 +824,13 @@ pub fn handle(req: &Value) -> Result<Value> {
                         )
                     }
                 };
+                if let Err(error) =
+                    row_for_id(req, sid).and_then(|_| record_effect(req, sid, Some(text), None))
+                {
+                    return Ok(
+                        json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":error}),
+                    );
+                }
                 let mut attempt = 0;
                 loop {
                     let mut command = Command::new(&bin);
@@ -804,8 +849,13 @@ pub fn handle(req: &Value) -> Result<Value> {
                     };
                     attempt += 1;
                     if attempt >= 3 {
+                        let cleanup = abandon_effect(req, sid, text);
+                        let reason = match cleanup {
+                            Ok(()) => failure,
+                            Err(_) => format!("{failure}; Cannot clear failed wake attribution"),
+                        };
                         return Ok(
-                            json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":failure}),
+                            json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":reason}),
                         );
                     }
                     thread::sleep(Duration::from_secs(attempt));
@@ -813,10 +863,10 @@ pub fn handle(req: &Value) -> Result<Value> {
             };
             // Attribution failure must not erase a confirmed insertion checkpoint:
             // the host would otherwise retry a queue command that already committed.
-            let attribution_error = if !already_queued && queue_confirmed {
+            let attribution_error = if !already_queued {
                 row_for_id(req, sid)
                     .and_then(|row| {
-                        record_effect(req, sid, text, row.as_ref().and_then(activity_at))
+                        record_effect(req, sid, None, row.as_ref().and_then(activity_at))
                     })
                     .err()
             } else {
@@ -835,7 +885,15 @@ pub fn handle(req: &Value) -> Result<Value> {
                 let mut command = Command::new(
                     env_value(req, "CITO_OPEN_BIN").unwrap_or_else(|| "/usr/bin/open".into()),
                 );
-                command.args(["-g", &format!("codex://threads/wake/{sid}")]);
+                command.args([
+                    "-g",
+                    &format!(
+                        "codex://threads/wake/{}",
+                        url::form_urlencoded::byte_serialize(sid.as_bytes())
+                            .collect::<String>()
+                            .replace('+', "%20")
+                    ),
+                ]);
                 if matches!(run(command, Duration::from_secs(3)), Ok(Some(true))) {
                     opened = true;
                     break;

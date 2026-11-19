@@ -124,7 +124,7 @@ impl OidcVerifier {
             ))
             .timeout(Self::request_timeout(deadline)?)
             .call()
-            .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery: {e}"))?;
+            .map_err(|_| "AUTH_UNAVAILABLE: OIDC discovery request failed")?;
         if discovery_response.status() != 200 {
             return Err("AUTH_UNAVAILABLE: OIDC discovery did not return HTTP 200".into());
         }
@@ -136,7 +136,7 @@ impl OidcVerifier {
         .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
         let discovery: Value =
             serde_json::from_reader(discovery_response.into_reader().take(1_048_576))
-                .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery JSON: {e}"))?;
+                .map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC discovery JSON")?;
         if discovery
             .get("issuer")
             .is_some_and(|issuer| issuer.as_str() != Some(self.issuer.as_str()))
@@ -153,14 +153,14 @@ impl OidcVerifier {
             .get(uri)
             .timeout(Self::request_timeout(deadline)?)
             .call()
-            .map_err(|e| format!("AUTH_UNAVAILABLE: JWKS: {e}"))?;
+            .map_err(|_| "AUTH_UNAVAILABLE: JWKS request failed")?;
         if response.status() != 200 {
             return Err("AUTH_UNAVAILABLE: JWKS did not return HTTP 200".into());
         }
         validate_oidc_endpoint(response.get_url(), "OIDC JWKS response URL", false)
             .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
         let keys: JwkSet = serde_json::from_reader(response.into_reader().take(1_048_576))
-            .map_err(|e| format!("AUTH_UNAVAILABLE: JWKS JSON: {e}"))?;
+            .map_err(|_| "AUTH_UNAVAILABLE: Invalid JWKS JSON")?;
         Ok(keys)
     }
 

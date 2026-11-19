@@ -567,14 +567,13 @@ fn badge(req: &Value, sid: &str) -> Result<()> {
     }
 }
 fn bridge(req: &Value) -> Result<Value> {
-    let mut p = pid(req).ok_or("Endpoint PID is required")?;
-    let mut visited = HashSet::new();
-    while p > 1 && visited.insert(p) {
-        if process_command(p)
-            .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
-        {
-            break;
-        }
+    let p = pid(req).ok_or("Endpoint PID is required")?;
+    let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
+    for p in endpoint_pid_walk(
+        vec![p],
+        if resolve { usize::MAX } else { 0 },
+        matches_process,
+    ) {
         if let Ok(response) = socket_call(
             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
             &json!({"op":"identify"}),
@@ -584,22 +583,12 @@ fn bridge(req: &Value) -> Result<Value> {
             response["endpoint_pid"] = json!(p);
             return Ok(response);
         }
-        if process_command(p).is_ok_and(|command| matches_process(&command)) {
-            break;
-        }
-        if !matches!(str_at(req, "op"), Some("resolve_caller" | "verify")) {
-            break;
-        }
-        let Some(parent) = process_parent(p) else {
-            break;
-        };
-        p = parent;
     }
     Err("Endpoint bridge is unavailable".into())
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
-    if op.starts_with("setup_") {
+    if matches!(op, "setup_inspect" | "setup_apply" | "setup_remove") {
         return setup(req);
     }
     if matches!(op, "resolve_caller" | "verify") {
@@ -623,11 +612,8 @@ pub fn handle(req: &Value) -> Result<Value> {
                         return None;
                     }
                     response => response,
-                }
-                .or_else(|error| {
-                    if error != "Socket request timed out" || !alive(p) {
-                        return Err(error);
-                    }
+                };
+                let response = socket_response_or_cached(response, p, || {
                     let binding = read_json(&binding_path(&r, p))?;
                     let identity = process_identity(p)?;
                     if str_at(&binding, "start").is_none()
@@ -638,7 +624,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                         || raw_str_at(&binding, "session_id").is_none()
                         || str_at(&binding, "cwd").is_none()
                     {
-                        return Err(error);
+                        return Err("Endpoint identity changed".into());
                     }
                     let mut session = binding;
                     session["ok"] = json!(true);
@@ -836,7 +822,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                         }
                         let r = socket_call(
                             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
-                            &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false}),
+                            &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"signals":req["signals"]}),
                         );
                         match r {
                             Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
@@ -1045,11 +1031,14 @@ pub fn hook_main() {
                 }
                 let mut confirmed = true;
                 for (expected, ack) in acks {
-                    let response = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
-                        .timeout(Duration::from_millis(500))
-                        .send_json(ack)
-                        .ok()
-                        .and_then(|r| r.into_json::<Value>().ok());
+                    let response = crate::plugins::http_post_mcp(
+                        port,
+                        &ack.to_string(),
+                        Duration::from_millis(500),
+                    )
+                    .ok()
+                    .filter(|r| r.status == 200)
+                    .and_then(|r| serde_json::from_str::<Value>(&r.body).ok());
                     confirmed &= response
                         .as_ref()
                         .is_some_and(|r| hook_ack_confirmed(r, expected));
@@ -1105,13 +1094,8 @@ impl SidecarCleanup {
                 return;
             }
             guard.0 = true;
-            for (path, inode) in &guard.1 {
-                if fs::metadata(path)
-                    .map(|m| (m.dev(), m.ino()) == *inode)
-                    .unwrap_or(false)
-                {
-                    let _ = fs::remove_file(path);
-                }
+            for path in guard.1.keys() {
+                let _ = fs::remove_file(path);
             }
             guard.1.clear();
             if fs::metadata(&self.path)
@@ -1258,7 +1242,8 @@ fn sidecar(req: Value) -> Result<()> {
         badges: Mutex::new((false, std::collections::HashMap::new())),
     });
     let explicit = metadata_session(&req)?;
-    let initial = latest_transcript(&req, cwd);
+    // An unhooked process cannot attribute a workspace transcript to itself.
+    let initial: Option<(String, u64)> = None;
     let fallback = format!("claude-{p}");
     let mut alias_active = explicit.is_none() && initial.is_none();
     let mut first_transcript: Option<String> = None;
@@ -1335,15 +1320,14 @@ fn sidecar(req: Value) -> Result<()> {
                         if other == p {
                             return false;
                         }
-                        let Ok(binding) = read_json(&binding_path(&req, other)) else {
-                            return false;
-                        };
-                        binding["cwd"] == cwd
-                            && alive(other)
-                            && str_at(&binding, "start").map(str::to_owned) == process_start(other)
+                        alive(other)
+                            && process_command(other).is_ok_and(|command| matches_process(&command))
+                            && process_cwd(other).is_ok_and(|other_cwd| other_cwd == cwd)
                     });
                 if other_endpoint {
-                    next = Some(current.clone());
+                    next = Some(fallback.clone());
+                    alias_active = false;
+                    first_transcript = None;
                 } else if let Some((sid, _)) = &latest {
                     if alias_active {
                         if first_transcript
@@ -1452,6 +1436,7 @@ fn sidecar(req: Value) -> Result<()> {
                 wake["batch_id"] = v["batch_id"].clone();
                 wake["text"] = v["content"].clone();
                 wake["wake"] = v["wake"].clone();
+                wake["signals"] = v["signals"].clone();
                 append_wake(&wake, &current)?;
                 delivered.push_back(batch.into());
                 if delivered.len() > 200 {

@@ -867,9 +867,12 @@ fn live_bridge_rejections_survive_identification_and_wake() {
     let f = Fixture::new(json!({}));
     fs::create_dir_all(f.state.join("sockets")).unwrap();
     for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
-        let path = f
-            .state
-            .join(format!("sockets/{id}-pid-{}.sock", std::process::id()));
+        let script = f.dir.join(format!("{id}.mjs"));
+        fs::write(&script, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+        let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
+        wait(|| f.output(process, false).contains("ready"));
+        let endpoint = f.pid(process);
+        let path = f.state.join(format!("sockets/{id}-pid-{endpoint}.sock"));
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
@@ -901,32 +904,33 @@ fn live_bridge_rejections_survive_identification_and_wake() {
             }
             count
         });
-        let identify=f.plugin(bin,json!({"op":"verify","endpoint_pid":std::process::id(),"session_id":"session","cached_caller":{},"meta":{}}));
-        let wake=f.plugin(bin,json!({"op":"wake","endpoint_pid":std::process::id(),"session_id":"session","text":"hello"}));
+        let identify=f.plugin(bin,json!({"op":"verify","endpoint_pid":endpoint,"session_id":"session","cached_caller":{},"meta":{}}));
+        let wake = f.plugin(
+            bin,
+            json!({"op":"wake","endpoint_pid":endpoint,"session_id":"session","text":"hello"}),
+        );
         if id == "pi" {
             assert_eq!(
                 identify["error_code"], "PI_BRIDGE_UNAVAILABLE",
                 "{identify}"
             );
-            let resolve = f.plugin(
-                bin,
-                json!({"op":"resolve_caller","endpoint_pid":std::process::id()}),
-            );
+            let resolve = f.plugin(bin, json!({"op":"resolve_caller","endpoint_pid":endpoint}));
             assert_eq!(resolve["error_code"], "PI_BRIDGE_UNAVAILABLE", "{resolve}");
             assert!(resolve["message"]
                 .as_str()
                 .unwrap()
                 .contains("Session is unavailable"));
-            let probe = f.plugin(bin, json!({"op":"probe","endpoint_pid":std::process::id()}));
+            let probe = f.plugin(bin, json!({"op":"probe","endpoint_pid":endpoint}));
             assert_eq!(probe["status"], "transient_error", "{probe}");
             assert!(probe["reason"]
                 .as_str()
                 .unwrap()
                 .contains("Session is unavailable"));
-            let closed = f.plugin(bin, json!({"op":"probe","endpoint_pid":std::process::id()}));
+            let closed = f.plugin(bin, json!({"op":"probe","endpoint_pid":endpoint}));
             assert_eq!(closed["status"], "closed_definitive", "{closed}");
         }
         assert_eq!(server.join().unwrap(), if id == "pi" { 5 } else { 2 });
+        f.stop(process);
         fs::remove_file(path).unwrap();
         assert_eq!(identify["ok"], false, "{id}: {identify}");
         assert!(
@@ -1455,7 +1459,7 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
                 PI,
                 json!({"op":"probe","endpoint_pid":p,"session_id":row["session_id"]})
             )["status"],
-            "closed_definitive"
+            "transient_error"
         );
         assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":p,"session_id":row["session_id"],"badge":null}))["ok"],true);
     }
@@ -1881,10 +1885,18 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     let mut cached: Value =
         serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
     assert_eq!(cached["identity"], enrolled["caller"]["process_identity"]);
+    let mismatch=f.plugin(PI,json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir,"meta":{"expected_session_id":"different"}}));
+    assert_eq!(mismatch["error_code"], "BINDING_REQUIRED", "{mismatch}");
+    assert_eq!(f.plugin(PI,json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"]}))["status"],"alive");
+    f.env.remove("CITO_PI_PROCESS_DISCOVERY");
     let probe = || {
         f.plugin(PI, json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"]}))
     };
-    assert_eq!(probe()["status"], "alive");
+    assert_eq!(
+        probe()["status"],
+        "transient_error",
+        "A matching live invocation survives the absent reload socket"
+    );
     fs::create_dir_all(f.state.join("sockets")).unwrap();
     fs::write(
         f.state
@@ -2316,6 +2328,22 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
         json!({"op":"wake","session_id":"thread","text":"Wake","checkpoint_only":true}),
     );
     assert_eq!(sent["queue_confirmed"], true, "{sent}");
+    let repeated = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"Wake","checkpoint_only":true}),
+    );
+    assert_eq!(repeated["queue_confirmed"], true, "{repeated}");
+    let ledger = fs::read_dir(f.state.join("activity/codex"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    assert_eq!(
+        ledger["effects"].as_array().unwrap().len(),
+        2,
+        "Two distinct insertions with identical text retain two effects"
+    );
     let effect = activity(&f);
     assert_eq!(effect["kind"], "cito_effect");
     assert_eq!(activity(&f), effect, "Refresh cannot invent activity");
@@ -2359,12 +2387,13 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
 #[test]
 fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
     let _lock = serial();
-    for (with_rollout, prior_effect, deliver) in [
-        (false, false, true),
-        (false, true, true),
-        (true, false, true),
-        (false, false, false),
-        (true, false, false),
+    for (with_rollout, prior_effect, deliver, interrupted) in [
+        (false, false, true, false),
+        (false, true, true, false),
+        (true, false, true, false),
+        (false, false, false, false),
+        (true, false, false, false),
+        (true, false, true, true),
     ] {
         let mut f = Fixture::new(json!({}));
         let source =
@@ -2425,7 +2454,7 @@ fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|ext| ext == "json"))
             .unwrap();
-        let checkpoint = fs::read(&cursor).unwrap();
+        let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
         let marker = f.dir.join("published");
         let release = f.dir.join("release");
         script(
@@ -2439,12 +2468,14 @@ if os.environ["DELIVER"] == "1":
     if os.environ["WITH_ROLLOUT"] == "1":
         with (root / "rollout.jsonl").open("a") as file:
             file.write(json.dumps({"timestamp":"2026-01-01T00:01:00.000Z", "payload":{"type":"user_message", "message":sys.argv[-1]}}) + "\n")
+            file.write(json.dumps({"timestamp":"2026-01-01T00:01:00.001Z", "payload":{"type":"message", "role":"user", "content":[{"text":sys.argv[-1]}]}}) + "\n")
 (root / "published").touch()
 deadline = time.monotonic() + 8
 while not (root / "release").exists():
     if time.monotonic() >= deadline:
         sys.exit(2)
     time.sleep(0.01)
+(root / "finished").touch()
 sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
 "#,
         );
@@ -2469,16 +2500,37 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
             inflight["revision"],
             if deliver { now + 2 } else { now + 1 }
         );
+        let inflight_ledger: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
         assert_eq!(
-            fs::read(&cursor).unwrap(),
-            checkpoint,
+            inflight_ledger["cursor"], checkpoint["cursor"],
             "In-flight discovery must not checkpoint a queue record"
+        );
+        assert!(
+            inflight_ledger["effects"]
+                .as_array()
+                .is_some_and(|effects| !effects.is_empty()),
+            "Pending attribution must precede the queue effect"
         );
         assert!(
             !f.exited(wake),
             "Discovery must run before queue completion"
         );
         assert!(f.frames(wake).is_empty());
+        if interrupted {
+            // The queue has published both carriers, while its caller loses the insertion receipt.
+            f.signal(wake, libc::SIGKILL);
+            fs::write(&release, "").unwrap();
+            wait(|| f.exited(wake));
+            wait(|| f.dir.join("finished").exists());
+            assert!(f.frames(wake).is_empty());
+            let recovered = discover(&f);
+            assert_eq!(recovered["kind"], "user_turn");
+            assert_eq!(
+                recovered["at_ms"], before["at_ms"],
+                "An insertion with no receipt remains attributable to Cito across both carriers"
+            );
+            continue;
+        }
         fs::write(&release, "").unwrap();
         wait(|| f.exited(wake));
         let response = f.frames(wake).pop().unwrap();
@@ -2777,15 +2829,15 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
     );
     f.env
         .insert("CITO_CODEX_BIN".into(), queue.display().to_string());
-    let request = json!({"op":"wake","session_id":"thread-a","text":"a message with spaces"});
+    let request = json!({"op":"wake","session_id":"thread/a?# b","text":"a message with spaces"});
     assert_eq!(f.plugin(CODEX, request.clone())["outcome"], "delivered");
     assert_eq!(
         fs::read_to_string(f.home.join("queue-args")).unwrap(),
-        "queue\n--resume\n--thread\nthread-a\n--message\na message with spaces\n"
+        "queue\n--resume\n--thread\nthread/a?# b\n--message\na message with spaces\n"
     );
     assert!(fs::read_to_string(f.home.join("mock-calls"))
         .unwrap()
-        .contains("codex://threads/wake/thread-a"));
+        .contains("codex://threads/wake/thread%2Fa%3F%23%20b"));
     let mut retry = request;
     retry["queue_written"] = json!(true);
     let result = f.plugin(CODEX, retry.clone());
@@ -3221,9 +3273,29 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
         &path,
         json!({"op":"status","session_id":"session-a","badge":"badge"}),
     );
-    let frame = json!({"op":"deliver","session_id":"session-a","batch_id":"batch","content":"literal <card>","wake":true});
+    let frame = json!({"op":"deliver","session_id":"session-a","batch_id":"batch","content":"literal <card>","wake":true,"signals":[{"signal_id":"a"},{"signal_id":"b"}]});
     assert_eq!(socket(&path, frame.clone())["deduplicated"], false);
     assert_eq!(socket(&path, frame)["deduplicated"], true);
+    let queued: Value = serde_json::from_str(
+        fs::read_to_string(f.state.join("claude/wakes/session-a.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(queued["expected_ack_count"], 2);
+    let wake=f.plugin(CLAUDE,json!({"op":"wake","endpoint_pid":endpoint,"session_id":"session-a","batch_id":"host-batch","text":"Host batch","signals":[{"signal_id":"c"},{"signal_id":"d"},{"signal_id":"e"}]}));
+    assert_eq!(wake["outcome"], "delivered_unconfirmed", "{wake}");
+    let queued: Value = serde_json::from_str(
+        fs::read_to_string(f.state.join("claude/wakes/session-a.jsonl"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(queued["expected_ack_count"], 3);
     assert_eq!(
         socket(
             &path,
@@ -3236,12 +3308,16 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
             .unwrap()
             .lines()
             .count(),
-        1
+        2
     );
+    // Cleanup owns the badge key even if an atomic writer replaced its inode.
+    let badge = f.state.join("claude/badges/session-a");
+    fs::write(badge.with_extension("replacement"), "new badge").unwrap();
+    fs::rename(badge.with_extension("replacement"), &badge).unwrap();
     f.eof(p);
     wait(|| f.exited(p));
     assert!(!path.exists());
-    assert!(!f.state.join("claude/badges/session-a").exists());
+    assert!(!badge.exists());
     for signal in [libc::SIGINT, libc::SIGTERM] {
         let p = f.spawn(CLAUDE, &[], &[]);
         let mut env = f.env.clone();

@@ -31,7 +31,7 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
         Value::String(s) => {
             if matches!(
                 key,
-                "request_id" | "url" | "issuer" | "client_id" | "clientId" | "value"
+                "request_id" | "url" | "issuer" | "client_id" | "clientId" | "value" | "cwd"
             ) {
                 return;
             }
@@ -46,7 +46,7 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
             let cap = match key {
                 "message" => 512,
                 "about" | "from_about" => 256,
-                "cwd" | "summary" => 128,
+                "summary" => 128,
                 _ => 4096,
             };
             *s = cap_text(s, cap);
@@ -108,7 +108,8 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
                     "channel":frame["channel"],"channel_id":frame["channel_id"],
                     "action":frame["action"],"source_op":frame["source_op"],
                     "authority_changed":frame["authority_changed"],
-                    "warning":"Saved successfully; canonical settings exceed the UI frame budget"});
+                    "receipt_authority":frame["receipt_authority"],
+                    "warning":frame["warning"].as_str().unwrap_or("Saved successfully; canonical settings exceed the UI frame budget")});
                 continue;
             }
             if frame["op"] == "error" {
@@ -176,14 +177,17 @@ impl UiMailbox {
         } else {
             None
         };
+        let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
         match bounded_frame(frame) {
             Ok(mut bytes) => {
                 bytes.push(b'\n');
                 self.push(key, bytes);
             }
             Err(error) => {
-                eprintln!("cito-ui: {error}; closing the UI stream");
-                self.close();
+                eprintln!("cito-ui: {error}");
+                if correlated {
+                    self.close();
+                }
             }
         }
     }

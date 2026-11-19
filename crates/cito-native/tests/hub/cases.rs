@@ -1,5 +1,145 @@
 use super::*;
 
+#[test]
+fn human_mutations_fence_expired_devices_without_prior_reads() {
+    for op in [
+        "human_device_attach",
+        "human_device_heartbeat",
+        "human_device_detach",
+    ] {
+        let dir = temp();
+        let e = HubEngine::open(&dir).unwrap();
+        e.pause_worker();
+        let owner = local_principal("alice");
+        let request = json!({"channel_id":"device:human","host_id":"device","binding_generation":3,"owner_token":"old"});
+        let mut row = e
+            .rpc("human_device_attach", &request, Some(&owner))
+            .unwrap()["record"]
+            .clone();
+        row["channels"]["device:human"]["updated_at_ms"] = json!(1);
+        e.inner
+            .db
+            .execute(
+                "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+                &[json!(row.to_string()), row["listener_id"].clone()],
+            )
+            .unwrap();
+        assert!(
+            e.rpc(op, &request, Some(&owner))
+                .unwrap_err()
+                .starts_with("STALE_GENERATION:"),
+            "{op}"
+        );
+        let mut fresh = request.clone();
+        fresh["binding_generation"] = json!(4);
+        fresh["owner_token"] = json!("new");
+        let reg = e.rpc("human_device_attach", &fresh, Some(&owner)).unwrap()["record"].clone();
+        assert_eq!(reg["device_generation_fences"]["device:human"], 3);
+        assert_eq!(reg["channels"]["device:human"]["binding_generation"], 4);
+        e.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn current_reply_keys_reject_conflicts_and_registration_keys_preserve_tuple_boundaries() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.pause_worker();
+    let owner = local_principal("alice");
+    put(&e, "target", "none#bob", "workspace");
+    let req = json!({"to":"target","message":"Approved","in_reply_to":"source","msg_id":"once"});
+    let first = e.rpc("send_reply_from_human", &req, Some(&owner)).unwrap();
+    for (field, value) in [("message", "Rejected"), ("in_reply_to", "other")] {
+        let mut conflict = req.clone();
+        conflict[field] = json!(value);
+        assert_eq!(
+            e.rpc("send_reply_from_human", &conflict, Some(&owner))
+                .unwrap_err(),
+            "IDEMPOTENCY_CONFLICT: reply payload differs"
+        );
+    }
+    assert_eq!(
+        e.rpc("send_reply_from_human", &req, Some(&owner)).unwrap()["seq"],
+        first["seq"]
+    );
+    let tuples = [
+        ("none#alice|agent", "session", "tail"),
+        ("none#alice", "agent", "session|tail"),
+    ];
+    let key = listener_id(tuples[0].0, tuples[0].1, tuples[0].2);
+    assert_eq!(key, listener_id(tuples[1].0, tuples[1].1, tuples[1].2));
+    for (index, (principal, harness, session)) in tuples.into_iter().enumerate() {
+        let data = json!({"principal_id":principal,"harness":harness,"session_id":session,"scope":"workspace"});
+        let params = json!({"key":key,"data_b64":encoded(&data)});
+        if index == 0 {
+            e.rpc("kv_put", &params, None).unwrap();
+        } else {
+            assert_eq!(
+                e.rpc("kv_put", &params, None).unwrap_err(),
+                "PERMISSIONS_VIOLATION: listener_id tuple collision"
+            );
+        }
+    }
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn consumer_ack_proves_sequence_filter_and_target_ownership_before_receipts() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.pause_worker();
+    let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice","oidc":true});
+    let bob =
+        json!({"principal_id":"oidc:https://id.example.com|bob","owner_user":"bob","oidc":true});
+    put(&e, "alice-node", s(&alice, "principal_id"), "workspace");
+    put(&e, "bob-node", s(&bob, "principal_id"), "workspace");
+    send(&e, "alice-node", "a");
+    send(&e, "bob-node", "b");
+    e.rpc(
+        "consumer_add",
+        &json!({"config":{"durable_name":"one","filter_subject":"cito.signal.alice-node"}}),
+        Some(&alice),
+    )
+    .unwrap();
+    e.rpc(
+        "consumer_add",
+        &json!({"config":{"durable_name":"wide","filter_subject":"cito.signal.*"}}),
+        Some(&alice),
+    )
+    .unwrap();
+    let events = e.subscribe(None).unwrap();
+    for (name, seq) in [("one", 999), ("one", 2), ("wide", 2)] {
+        assert!(e
+            .rpc(
+                "consumer_ack",
+                &json!({"name":name,"seq":seq}),
+                Some(&alice)
+            )
+            .is_err());
+    }
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_consumer_acks", &[])
+        .unwrap()
+        .is_empty());
+    assert!(events.try_recv().is_err());
+    e.rpc("consumer_ack", &json!({"name":"one","seq":1}), Some(&alice))
+        .unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_consumer_acks", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn temp() -> PathBuf {
     let dir = std::env::temp_dir().join(random_id("cito-hub-test-").unwrap());
     std::fs::create_dir_all(&dir).unwrap();
@@ -759,6 +899,7 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[]).unwrap();
     let plugin = ChannelPlugin {
+        is_builtin: false,
         id: "fixture".into(),
         dir: dir.clone(),
         manifest: json!({}),
@@ -902,7 +1043,7 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[]).unwrap();
-    e.inner.plugins.lock().unwrap().push(ChannelPlugin{id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
+    e.inner.plugins.lock().unwrap().push(ChannelPlugin{is_builtin:false,id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
     e.pause_worker();
     let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice"});
     let bob = json!({"principal_id":"none#bob","owner_user":"bob"});
@@ -2667,7 +2808,7 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
     let mut retained = frame.clone();
     retained["update_id"] = json!("retained");
     let update_target = |state: &str, age: i64| {
-        e.rpc("kv_put",&json!({"key":"sender","data_b64":encoded(&json!({"principal_id":"none#bob","scope":"workspace","state":state,"updated_at_ms":now_ms()-age}))}),None).unwrap();
+        e.rpc("kv_put",&json!({"key":"sender","data_b64":encoded(&json!({"principal_id":"none#bob","harness":"fixture","session_id":"s1","scope":"workspace","state":state,"updated_at_ms":now_ms()-age}))}),None).unwrap();
     };
     update_target("ACTIVE", 61_000);
     assert_eq!(e.inbound_reply("fixture", &retained).unwrap()["ok"], true);
@@ -3293,8 +3434,10 @@ fn concurrent_claim_has_one_winner() {
 }
 #[test]
 fn pending_request_fails_on_child_exit() {
-    let dir = temp();
+    let dir = temp().join("fixture");
+    std::fs::create_dir_all(&dir).unwrap();
     let plugin = ChannelPlugin {
+        is_builtin: false,
         id: "fixture".into(),
         dir: dir.clone(),
         manifest: json!({}),
@@ -3477,6 +3620,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[]).unwrap();
     let plugin = ChannelPlugin {
+        is_builtin: false,
         id: "fixture".into(),
         dir: dir.clone(),
         manifest: json!({"fields":[{"key":"credential","scope":"hub","type":"secret"}]}),

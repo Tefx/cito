@@ -586,6 +586,21 @@ impl LocalState {
         let (rows, _, unread) = self.query_activity("all", "")?;
         Ok((rows, unread))
     }
+    /// Count visible current history without loading message payloads.
+    pub fn activity_counts(&self) -> Result<(u64, u64), String> {
+        let rows = self.db.query("SELECT s.principal_id AS source,l.principal_id AS target,count(*) AS total,sum(s.acknowledged_at_ms IS NULL) AS unread FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND l.status!='FENCED_INACTIVE' AND l.hub_url!='' AND s.hub_url=l.hub_url GROUP BY s.principal_id,l.principal_id", &[])?;
+        Ok(rows
+            .iter()
+            .filter(|row| {
+                super::auth::principal_ids_equal(string(row, "source"), string(row, "target"))
+            })
+            .fold((0, 0), |(total, unread), row| {
+                (
+                    total + row["total"].as_u64().unwrap_or(0),
+                    unread + row["unread"].as_u64().unwrap_or(0),
+                )
+            }))
+    }
     pub fn query_activity(
         &self,
         filter: &str,

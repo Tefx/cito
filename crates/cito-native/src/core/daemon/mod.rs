@@ -71,7 +71,7 @@ pub(crate) fn shutdown_requested() -> bool {
 struct OidcRecovery {
     config: Value,
     rejected: Option<String>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<super::login::Cancellation>,
     worker: thread::JoinHandle<Result<(String, Value), String>>,
 }
 
@@ -102,6 +102,18 @@ impl Drop for SetupFinished {
     }
 }
 
+enum HostHubError {
+    Reload(String),
+    Action(String),
+}
+impl HostHubError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Reload(s) | Self::Action(s) => s,
+        }
+    }
+}
+
 pub struct DaemonService {
     pub config: NativeConfig,
     pub plugins: LoadedPlugins,
@@ -123,7 +135,6 @@ pub struct DaemonService {
     host_id: String,
     host_server: Option<super::hub::HubServer>,
     applied_host_config: Option<Value>,
-    host_hub_reload_failed: bool,
     uninstall: Option<bool>,
     active_settings_hub: Option<String>,
     menu_open: bool,
@@ -137,7 +148,7 @@ pub struct DaemonService {
     last_app_action: HashMap<String, String>,
     setup_inspections: HashMap<String, SetupInspection>,
     setup_completion: Arc<(Mutex<u64>, std::sync::Condvar)>,
-    last_host_hub_error: Option<String>,
+    host_hub_error: Option<HostHubError>,
     last_hub_errors: HashMap<String, (String, bool)>,
     channel_inventories: HashMap<String, Arc<ChannelInventory>>,
     activity_filter: String,
@@ -447,7 +458,6 @@ impl DaemonService {
             host_id,
             host_server: None,
             applied_host_config: None,
-            host_hub_reload_failed: false,
             uninstall: None,
             active_settings_hub: None,
             menu_open: false,
@@ -461,7 +471,7 @@ impl DaemonService {
             last_app_action: HashMap::new(),
             setup_inspections: HashMap::new(),
             setup_completion: Arc::new((Mutex::new(0), std::sync::Condvar::new())),
-            last_host_hub_error: None,
+            host_hub_error: None,
             last_hub_errors: HashMap::new(),
             channel_inventories: HashMap::new(),
             activity_filter: "all".into(),
@@ -747,7 +757,7 @@ impl DaemonService {
                     let hub_name = name.clone();
                     let config = hub.clone();
                     let rejected = rejected_hash.clone();
-                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let cancelled = Arc::new(super::login::Cancellation::default());
                     let cancel = cancelled.clone();
                     let worker = thread::spawn(move || {
                         super::login::recover_cancellable(
@@ -757,6 +767,7 @@ impl DaemonService {
                             rejected.as_deref(),
                             false,
                             &|| cancel.load(Ordering::SeqCst) || shutdown_requested(),
+                            Some(cancel.fd()?),
                         )
                     });
                     self.oidc_recoveries.insert(
@@ -1171,7 +1182,14 @@ impl DaemonService {
             }
         }
         self.schedule_probes()?;
-        for row in self.state.active()? {
+        let active = self.state.active()?;
+        let keys: HashSet<String> = active
+            .iter()
+            .map(|row| format!("{}:{}", string(row, "hub"), string(row, "listener_id")))
+            .chain(self.slots.keys().map(|hub| format!("directory:{hub}")))
+            .collect();
+        self.observations.retain(|key, _| keys.contains(key));
+        for row in active {
             let hub = string(&row, "hub");
             let key = format!("{hub}:{}", string(&row, "listener_id"));
             if self.receivers.contains_key(&key) {

@@ -280,10 +280,24 @@ pub fn mutate(
     path: &Path,
     transform: impl FnOnce(Option<&str>) -> Result<Option<String>>,
 ) -> Result<Value> {
+    mutate_with_mode(req, id, path, None, transform)
+}
+pub fn mutate_with_mode(
+    req: &Value,
+    id: &str,
+    path: &Path,
+    mode: Option<u32>,
+    transform: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+) -> Result<Value> {
     let dry = req["dry_run"] == true;
     let remove = req["op"] == "setup_remove";
     let canonical = publication_target(path)?;
     let path = canonical.as_path();
+    if remove && !path.try_exists().map_err(|e| e.to_string())? {
+        return Ok(
+            json!({"target":id,"path":path,"status":"unchanged","backupPath":null,"detail":"Configuration checked"}),
+        );
+    }
     let lock_path = {
         let mut s = path.as_os_str().to_os_string();
         s.push(".cito.lock");
@@ -316,17 +330,34 @@ pub fn mutate(
         if changed && !dry {
             if !remove {
                 if let Some(ref content) = old {
-                    let mut backup_name = path.as_os_str().to_os_string();
-                    backup_name.push(format!(".bak.{}-{}", now_ms(), std::process::id()));
-                    let p = PathBuf::from(backup_name);
-                    fs::write(&p, content).map_err(|e| e.to_string())?;
-                    fs::set_permissions(&p, fs::Permissions::from_mode(0o600))
+                    let mut timestamp = now_ms();
+                    let (p, mut file) = loop {
+                        let mut backup_name = path.as_os_str().to_os_string();
+                        backup_name.push(format!(".bak.{timestamp}-{}", std::process::id()));
+                        let p = PathBuf::from(backup_name);
+                        match OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o600)
+                            .open(&p)
+                        {
+                            Ok(file) => break (p, file),
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                timestamp = timestamp
+                                    .checked_add(1)
+                                    .ok_or("Backup timestamp exhausted")?;
+                            }
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    };
+                    file.write_all(content.as_bytes())
                         .map_err(|e| e.to_string())?;
+                    file.sync_all().map_err(|e| e.to_string())?;
                     backup = Some(p);
                 }
             }
             match next {
-                Some(ref s) => atomic_write(path, s.as_bytes())?,
+                Some(ref s) => atomic_write_with_mode(path, s.as_bytes(), mode)?,
                 None => {
                     if path.exists() {
                         fs::remove_file(path).map_err(|e| e.to_string())?
@@ -505,6 +536,50 @@ pub fn inspect_socket_endpoints(
     }
     results.sort_by_key(|(pid, _)| *pid);
     Ok(results)
+}
+/// Walk only the caller's process lineage, stopping at either harness boundary.
+pub fn endpoint_pid_walk(
+    roots: Vec<u32>,
+    depth: usize,
+    matches: impl Fn(&str) -> bool,
+) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for mut pid in roots {
+        for _ in 0..=depth {
+            if pid <= 1 || !visited.insert(pid) {
+                break;
+            }
+            let command = process_command(pid).ok();
+            if command
+                .as_deref()
+                .is_some_and(|c| is_agent_harness(c) && !matches(c))
+            {
+                break;
+            }
+            found.push(pid);
+            if command.as_deref().is_some_and(&matches) {
+                break;
+            }
+            let Some(parent) = process_parent(pid) else {
+                break;
+            };
+            pid = parent;
+        }
+    }
+    found
+}
+
+/// Only a live, timed-out endpoint admits a caller-validated cached response.
+pub fn socket_response_or_cached(
+    response: Result<Value>,
+    pid: u32,
+    cached: impl FnOnce() -> Result<Value>,
+) -> Result<Value> {
+    match response {
+        Err(error) if error == "Socket request timed out" && alive(pid) => cached(),
+        other => other,
+    }
 }
 fn pid_key(key: &str) -> bool {
     key == "pid" || key.ends_with("_pid") || key.ends_with("Pid") || key.ends_with("PID")
@@ -1482,11 +1557,6 @@ pub fn alive(pid: u32) -> bool {
 }
 
 // Persistent plugins keep stdin independent of blocking network work. EOF kills all owned threads.
-pub fn stdin_watchdog() -> std::sync::mpsc::Receiver<Value> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    stdin_events(tx, |value| value);
-    rx
-}
 pub fn stdin_events<T: Send + 'static>(tx: std::sync::mpsc::Sender<T>, wrap: fn(Value) -> T) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -2189,7 +2259,7 @@ mod tests {
         fs::write(&target, "original").unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        mutate(&json!({"op":"setup_apply"}), "fixture", &link, |old| {
+        let mutation = mutate(&json!({"op":"setup_apply"}), "fixture", &link, |old| {
             assert_eq!(old, Some("original"));
             Ok(Some("updated".into()))
         })
@@ -2199,6 +2269,12 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+        let backup = PathBuf::from(mutation["backupPath"].as_str().unwrap());
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o640
@@ -2213,12 +2289,12 @@ mod tests {
             .is_symlink());
         assert!(!target.exists());
         assert!(!root.join("settings.cito.lock").exists());
-        let missing = root.join("missing");
+        let missing = root.join("missing/parent/settings");
         mutate(&json!({"op":"setup_remove"}), "fixture", &missing, |_| {
             Ok(None)
         })
         .unwrap();
-        assert!(!root.join("missing.cito.lock").exists());
+        assert!(!root.join("missing").exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let dangling = root.join("dangling");
         std::os::unix::fs::symlink("new/parent/settings", &dangling).unwrap();
@@ -2243,6 +2319,7 @@ mod tests {
             std::env::temp_dir().join(format!("cito-lock-{}-{}", std::process::id(), now_ms()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("settings");
+        fs::write(&path, "0").unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
         let workers: Vec<_> = (0..12)
             .map(|_| {

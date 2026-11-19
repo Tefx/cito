@@ -14,13 +14,44 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(45);
-const CANCELLATION_CHECK: Duration = Duration::from_millis(20);
+pub struct Cancellation {
+    flag: std::sync::atomic::AtomicBool,
+    wake: Result<crate::support::WakePipe, String>,
+}
+impl Default for Cancellation {
+    fn default() -> Self {
+        Self {
+            flag: std::sync::atomic::AtomicBool::new(false),
+            wake: crate::support::WakePipe::new(),
+        }
+    }
+}
+impl Cancellation {
+    pub fn store(&self, value: bool, order: std::sync::atomic::Ordering) {
+        self.flag.store(value, order);
+        if value {
+            if let Ok(wake) = &self.wake {
+                wake.notify();
+            }
+        }
+    }
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> bool {
+        self.flag.load(order)
+    }
+    pub fn fd(&self) -> Result<i32, String> {
+        self.wake
+            .as_ref()
+            .map(|w| w.read_fd())
+            .map_err(Clone::clone)
+    }
+}
 const MAX_JSON: u64 = 1024 * 1024;
 type LoginResult = (String, Value);
 
 struct Deadline<'a> {
     at: Instant,
     cancelled: &'a dyn Fn() -> bool,
+    cancellation_fd: Option<i32>,
 }
 impl Deadline<'_> {
     fn remaining(&self) -> Result<Duration, String> {
@@ -32,11 +63,16 @@ impl Deadline<'_> {
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| "OIDC_LOGIN_TIMEOUT: OIDC login deadline exceeded".into())
     }
-    fn pause(&self) -> Result<(), String> {
-        crate::support::poll_until(
-            &mut [],
-            Some(Instant::now() + self.remaining()?.min(CANCELLATION_CHECK)),
-        )?;
+    fn wait(&self, fds: &mut Vec<libc::pollfd>, until: Instant) -> Result<(), String> {
+        self.remaining()?;
+        if let Some(fd) = self.cancellation_fd {
+            fds.push(libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        crate::support::poll_until(fds, Some(until.min(self.at)))?;
         self.remaining().map(|_| ())
     }
     fn request(&self, request: ureq::Request) -> Result<ureq::Request, String> {
@@ -57,11 +93,11 @@ impl Deadline<'_> {
                     )
                 })
             {
-                return format!("OIDC_LOGIN_TIMEOUT: OIDC endpoint timed out: {error}");
+                return "OIDC_LOGIN_TIMEOUT: OIDC endpoint timed out".into();
             }
             cause = current.source();
         }
-        format!("AUTH_UNAVAILABLE: OIDC endpoint unavailable: {error}")
+        "AUTH_UNAVAILABLE: OIDC endpoint unavailable".into()
     }
 }
 
@@ -78,6 +114,7 @@ impl FileLock {
             .mode(0o600)
             .open(path)
             .map_err(|e| format!("AUTH_UNAVAILABLE: Cannot lock {}: {e}", path.display()))?;
+        let mut delay = Duration::from_millis(25);
         loop {
             deadline.remaining()?;
             // SAFETY: file owns a valid descriptor; flock neither transfers nor closes it.
@@ -92,7 +129,8 @@ impl FileLock {
             ) {
                 return Err(format!("AUTH_UNAVAILABLE: OIDC lock: {error}"));
             }
-            deadline.pause()?;
+            deadline.wait(&mut Vec::new(), Instant::now() + delay)?;
+            delay = (delay * 2).min(Duration::from_secs(1));
         }
     }
 }
@@ -361,7 +399,7 @@ fn response_json(response: ureq::Response, deadline: &Deadline<'_>) -> Result<Va
     if body.len() as u64 > MAX_JSON {
         return Err("AUTH_UNAVAILABLE: OIDC response too large".into());
     }
-    serde_json::from_slice(&body).map_err(|e| format!("AUTH_UNAVAILABLE: Invalid OIDC JSON: {e}"))
+    serde_json::from_slice(&body).map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC JSON".into())
 }
 fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), String> {
     deadline.remaining()?;
@@ -386,6 +424,7 @@ pub fn recover(
         rejected_hash,
         interactive,
         &super::daemon::shutdown_requested,
+        None,
     )
 }
 pub fn recover_cancellable(
@@ -395,6 +434,7 @@ pub fn recover_cancellable(
     rejected_hash: Option<&str>,
     interactive: bool,
     cancelled: &dyn Fn() -> bool,
+    cancellation_fd: Option<i32>,
 ) -> Result<LoginResult, String> {
     recover_cancellable_with_options(
         dir,
@@ -403,7 +443,7 @@ pub fn recover_cancellable(
         rejected_hash,
         interactive,
         false,
-        cancelled,
+        (cancelled, cancellation_fd),
     )
 }
 pub fn recover_cancellable_with_options(
@@ -413,11 +453,12 @@ pub fn recover_cancellable_with_options(
     rejected_hash: Option<&str>,
     interactive: bool,
     force_account_select: bool,
-    cancelled: &dyn Fn() -> bool,
+    (cancelled, cancellation_fd): (&dyn Fn() -> bool, Option<i32>),
 ) -> Result<LoginResult, String> {
     let deadline = Deadline {
         at: Instant::now() + LOGIN_TIMEOUT,
         cancelled,
+        cancellation_fd,
     };
     recover_inner(
         dir,
@@ -552,6 +593,7 @@ fn recover_inner(
                 .spawn()
                 .map_err(|e| format!("AUTH_UNAVAILABLE: Cannot open browser: {e}"))?,
         );
+        let mut browser_exit = crate::support::child_exit_fd(browser.0.id()).ok();
         let code = loop {
             deadline.remaining()?;
             browser.check()?;
@@ -562,15 +604,23 @@ fn recover_inner(
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    crate::support::poll_until(
-                        &mut [libc::pollfd {
-                            fd: listener.as_raw_fd(),
+                    let mut fds = vec![libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }];
+                    if let Some(exit) = &browser_exit {
+                        fds.push(libc::pollfd {
+                            fd: exit.as_raw_fd(),
                             events: libc::POLLIN,
                             revents: 0,
-                        }],
-                        Some(Instant::now() + deadline.remaining()?.min(CANCELLATION_CHECK)),
-                    )?;
-                    deadline.remaining()?;
+                        });
+                    }
+                    deadline.wait(&mut fds, deadline.at)?;
+                    if browser_exit.is_some() && fds[1].revents != 0 {
+                        browser.check()?;
+                        browser_exit = None;
+                    }
                 }
                 Err(error) => return Err(format!("AUTH_UNAVAILABLE: OIDC callback: {error}")),
             }

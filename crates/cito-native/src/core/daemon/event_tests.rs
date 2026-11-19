@@ -23,7 +23,11 @@ if request['op'] == 'setup_inspect': result.update(installed=True, configured=ha
 elif request['op'] == 'discover_sessions':
     result['sessions'] = [dict(harness=harness, session_id=(root/'session').read_text(), cwd='/workspace', title='Work')]
 elif request['op'] == 'resolve_caller': result['caller'] = dict(harness=harness, session_id='initial', cwd='/workspace')
-elif request['op'] == 'probe': result['status'] = 'closed_definitive' if request['session_id']=='closed' else 'alive'
+elif request['op'] == 'probe':
+    gate = root / ('probe-' + request['session_id'])
+    if gate.exists():
+        with gate.open('rb', buffering=0) as pending: pending.read(1)
+    result['status'] = 'closed_definitive' if request['session_id']=='closed' else 'alive'
 print(json.dumps(result))
 "#).map_err(|e| e.to_string())?;
         fs::write(root.join("session"), "initial").map_err(|e| e.to_string())?;
@@ -83,9 +87,68 @@ print(json.dumps(result))
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        for sid in ["shared", "closed"] {
+            if let Ok(mut gate) = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(self.root.join(format!("probe-{sid}")))
+            {
+                let _ = gate.write_all(b"x");
+            }
+        }
         self.service.shutdown();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn session_actions_validate_selectors_titles_and_retained_sessions() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    let mut raw = f.service.raw_config()?;
+    raw["hubs"]["disabled"] = json!({"url":"local://","enabled":false});
+    fs::write(&f.service.config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+    for op in ["unlisten", "unlisten_session", "unlisten_all"] {
+        for hub in [json!(17), json!("missing"), json!("disabled")] {
+            assert!(f
+                .service
+                .action(&json!({"op":op,"hub":hub,"harness":"agent","session_id":"initial"}))
+                .unwrap_err()
+                .starts_with("INVALID_INPUT:"));
+        }
+        assert!(f
+            .service
+            .action(&json!({"op":op,"harness":"human","session_id":"other"}))
+            .is_err());
+    }
+    assert!(f
+        .service
+        .action(
+            &json!({"op":"listen_session","harness":"agent","session_id":"initial","title":" "})
+        )
+        .is_err());
+    let listened=f.service.action(&json!({"op":"listen_session","harness":"agent","session_id":"initial","title":"Review","tag":"review"}))?;
+    let id = string(&listened, "canonical_listener_id");
+    let row = f.service.state.listener("local", id)?.unwrap();
+    assert_eq!(row["title"], "Review");
+    assert_eq!(row["about"], "Review");
+    assert_eq!(row["tag"], "review");
+    f.service.retire_id("local", id, "hard_exit")?;
+    f.service.action(
+        &json!({"op":"rename_session","harness":"agent","session_id":"initial","title":"Retained"}),
+    )?;
+    assert_eq!(
+        f.service.state.custom_title("agent", "initial")?,
+        Some("Retained".into())
+    );
+    f.service
+        .action(&json!({"op":"unlisten","hub":"local","listener_id":id}))?;
+    assert_eq!(
+        f.service.state.listener("local", id)?.unwrap()["user_stopped"],
+        1
+    );
+    Ok(())
 }
 
 #[test]
@@ -260,6 +323,16 @@ fn paused_discovery_skips_unconfigured_providers_and_refreshes_on_snapshot_and_m
 #[test]
 fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result<(), String> {
     let mut f = Fixture::new()?;
+    for sid in ["shared", "closed"] {
+        let path = std::ffi::CString::new(
+            f.root
+                .join(format!("probe-{sid}"))
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
     for hub in ["local", "work"] {
         for sid in ["shared", "closed"] {
             super::super::registration::register_listener(
@@ -273,6 +346,35 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
     }
     f.service.schedule_probes()?;
     let deadline = Instant::now() + Duration::from_secs(2);
+    while f.calls("probe").len() < 2 {
+        assert!(Instant::now() < deadline);
+        thread::yield_now();
+    }
+    let previous = f.service.state.db.query("SELECT * FROM local_listeners WHERE hub='work' AND harness='agent' AND session_id='closed'", &[])?[0].clone();
+    f.service
+        .retire_id("work", string(&previous, "listener_id"), "hard_exit")?;
+    super::super::registration::register_listener(
+        &f.service.state,
+        f.service.slot("work")?,
+        &f.service.host_id,
+        &json!({"about":"New binding"}),
+        &json!({"harness":"agent","session_id":"closed","endpoint_pid":std::process::id(),"cwd":"/workspace","title":"Work"}),
+    )?;
+    let current = f
+        .service
+        .state
+        .listener("work", string(&previous, "listener_id"))?
+        .unwrap();
+    assert!(current["binding_generation"].as_u64() > previous["binding_generation"].as_u64());
+    use std::io::Write;
+    for sid in ["shared", "closed"] {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(f.root.join(format!("probe-{sid}")))
+            .map_err(|e| e.to_string())?
+            .write_all(b"x")
+            .map_err(|e| e.to_string())?;
+    }
     while f.service.probes.values().any(|probe| {
         probe
             .worker
@@ -282,7 +384,6 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(1));
     }
-    f.service.schedule_probes()?;
     let calls = f.calls("probe");
     assert_eq!(
         calls.len(),
@@ -290,20 +391,24 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
         "Two Hub bindings share a probe, while different sessions keep separate observations"
     );
     let rows = f.service.state.db.query(
-        "SELECT session_id,status FROM local_listeners WHERE harness='agent'",
+        "SELECT hub,session_id,status FROM local_listeners WHERE harness='agent'",
         &[],
     )?;
     assert_eq!(rows.len(), 4);
     for row in rows {
         assert_eq!(
             row["status"],
-            if row["session_id"] == "closed" {
+            if row["session_id"] == "closed" && row["hub"] != "work" {
                 "UNLISTENED"
             } else {
                 "ACTIVE"
             }
         );
     }
+    for sid in ["shared", "closed"] {
+        fs::remove_file(f.root.join(format!("probe-{sid}"))).map_err(|e| e.to_string())?;
+    }
+    f.service.schedule_probes()?;
     assert!(f
         .service
         .probes

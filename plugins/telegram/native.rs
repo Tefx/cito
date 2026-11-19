@@ -628,6 +628,14 @@ impl Runtime {
         true
     }
 }
+const PERMANENT_POLL_ERRORS: [&str; 6] = [
+    "HTTP 401:",
+    "HTTP 403:",
+    "HTTP 409:",
+    "API 401:",
+    "API 403:",
+    "API 409:",
+];
 #[derive(Default)]
 struct PollBackoff {
     failures: u32,
@@ -635,16 +643,9 @@ struct PollBackoff {
 impl PollBackoff {
     fn failed(&mut self, error: &ApiFailure, jitter_ms: u64) -> (bool, Duration) {
         self.failures = self.failures.saturating_add(1);
-        let permanent = [
-            "HTTP 401:",
-            "HTTP 403:",
-            "HTTP 409:",
-            "API 401:",
-            "API 403:",
-            "API 409:",
-        ]
-        .iter()
-        .any(|code| error.message.contains(code));
+        let permanent = PERMANENT_POLL_ERRORS
+            .iter()
+            .any(|code| error.message.contains(code));
         let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
         (
             permanent || self.failures >= 3,
@@ -733,16 +734,9 @@ pub fn main() {
                                 &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
                             );
                         }
-                        paused = [
-                            "HTTP 401:",
-                            "HTTP 403:",
-                            "HTTP 409:",
-                            "API 401:",
-                            "API 403:",
-                            "API 409:",
-                        ]
-                        .iter()
-                        .any(|code| e.message.contains(code));
+                        paused = PERMANENT_POLL_ERRORS
+                            .iter()
+                            .any(|code| e.message.contains(code));
                         next_poll = std::time::Instant::now() + delay;
                     }
                 }

@@ -41,7 +41,6 @@ const SESSION_FIELDS: &[&str] = &[
     "scoped_id",
     "display_address",
     "channels",
-    "attachments",
 ];
 const ACTIVITY_FIELDS: &[&str] = &[
     "hub",
@@ -358,7 +357,7 @@ impl DaemonService {
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.host_hub_error.as_ref().map(super::HostHubError::message)},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
     }
 
     pub(super) fn display_address(&self, hub: &str, row: &Value) -> String {
@@ -698,7 +697,9 @@ impl DaemonService {
         Ok(json!([
             inventories,
             self.last_hub_errors,
-            self.last_host_hub_error,
+            self.host_hub_error
+                .as_ref()
+                .map(super::HostHubError::message),
             changes,
             external,
             hubs,
@@ -743,7 +744,7 @@ impl DaemonService {
             *row = project_fields(row, SESSION_FIELDS);
             self.project_session_controls(row);
         }
-        let (_, total, unread) = self.state.query_activity("all", "")?;
+        let (total, unread) = self.state.activity_counts()?;
         frame["unread_count"] = json!(unread);
         frame["activity_has_any"] = json!(total > 0);
         frame["activity_all_total"] = json!(total);

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -19,6 +19,7 @@ pub struct ChannelPlugin {
     pub dir: PathBuf,
     pub manifest: Value,
     pub command: Vec<String>,
+    pub is_builtin: bool,
 }
 
 pub fn discover(
@@ -53,15 +54,13 @@ pub fn discover(
         if descriptor.kind != "human-channel" || m["scope"] == "user" {
             continue;
         }
-        let mut command = descriptor.command;
-        if command[0].starts_with("./") || command[0].starts_with("../") {
-            command[0] = dir.join(&command[0]).to_string_lossy().into();
-        }
+        let command = descriptor.command;
         plugins.push(ChannelPlugin {
             id: descriptor.id,
             dir,
             command,
             manifest: m,
+            is_builtin: descriptor.is_builtin,
         });
     }
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
@@ -87,9 +86,12 @@ impl ChannelProcess {
         callback: Arc<dyn Fn(Value) -> Option<Value> + Send + Sync>,
     ) -> Result<Self, String> {
         let shutdown_wake = Arc::new(crate::support::WakePipe::new()?);
-        let mut child = Command::new(&plugin.command[0])
-            .args(&plugin.command[1..])
-            .current_dir(&plugin.dir)
+        let mut manifest = plugin.manifest.clone();
+        manifest["id"] = json!(plugin.id);
+        manifest["displayName"] = json!(plugin.id);
+        manifest["command"] = json!(plugin.command);
+        let descriptor = super::plugins::parse_manifest(&plugin.dir, plugin.is_builtin, &manifest)?;
+        let mut child = super::plugins::plugin_command(&descriptor)?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

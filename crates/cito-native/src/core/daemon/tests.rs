@@ -9,6 +9,38 @@ use super::{
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
+struct ServiceCleanup {
+    service: Arc<Mutex<DaemonService>>,
+    directory: std::path::PathBuf,
+}
+impl Drop for ServiceCleanup {
+    fn drop(&mut self) {
+        self.service
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .shutdown();
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[test]
+fn ui_frame_bounds_preserve_cwd_receipt_authority_and_mailbox_liveness() {
+    let cwd = format!("/workspace/{}", "segment/".repeat(80));
+    let bytes = bounded_frame(json!({"op":"state","available":[{"cwd":cwd}]})).unwrap();
+    let frame: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(frame["available"][0]["cwd"], cwd);
+    let authority = json!({"hub":"work","generation":7});
+    let bytes=bounded_frame(json!({"op":"settings","ok":true,"committed":true,"request_id":"save","receipt_authority":authority,"warning":"Saved under the original Hub authority","settings":{"cwd":"x".repeat(FRAME_LIMIT)}})).unwrap();
+    let receipt: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(receipt["receipt_authority"], authority);
+    assert_eq!(receipt["warning"], "Saved under the original Hub authority");
+    let mailbox = UiMailbox::default();
+    mailbox.emit(json!({"op":"settings","cwd":"x".repeat(FRAME_LIMIT)}));
+    assert!(!mailbox.closed.load(Ordering::SeqCst));
+    mailbox.emit(json!({"op":"state","status":"idle"}));
+    assert_eq!(mailbox.pending.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("cito-frame-settlement-{}", random_uuid_v4()));
@@ -29,6 +61,10 @@ fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(),
             rejected_ids: HashSet::new(),
         },
     )?));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+        directory: dir.clone(),
+    };
     let result = (|| {
         {
             let mut s = service.lock().unwrap();
@@ -120,8 +156,6 @@ fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(),
         }
         Ok(())
     })();
-    service.lock().unwrap().shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -342,6 +376,10 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
             rejected_ids: Default::default(),
         },
     )?));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+        directory: dir.clone(),
+    };
     let result = (|| -> Result<(), String> {
         for op in ["setup_save_hub", "save_hub", "paste_hub_invite"] {
             let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -414,11 +452,6 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
         }
         Ok(())
     })();
-    service
-        .lock()
-        .map_err(|_| "Daemon lock poisoned")?
-        .shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -1059,7 +1092,7 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
         OidcRecovery {
             config: hub.clone(),
             rejected: None,
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(super::super::login::Cancellation::default()),
             worker: thread::spawn(move || rx.recv().unwrap()),
         },
     );
@@ -1100,7 +1133,7 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
         .ok_or("Missing renewed slot")?;
     expired.expires_at = now_ms() / 1000 - 1;
     expired.auth_retry_at = now_ms() + 5000;
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(super::super::login::Cancellation::default());
     let cancel = cancelled.clone();
     service.oidc_recoveries.insert(
         "work".into(),
@@ -1265,7 +1298,17 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             .get_mut("local")
             .ok_or("Missing local slot")?
             .config["url"] = json!("local://");
+        service.listen(
+            "local",
+            &json!({"about":"Historical manual binding"}),
+            &json!({"harness":"fixture","session_id":"closed","title":"Closed"}),
+        )?;
+        let closed = service.session_node_id("local", "fixture", "closed")?;
+        service.retire_id("local", &closed, "hard_exit")?;
         service.action(&json!({"op":"unlisten_all"}))?;
+        let stopped = service.state.listener("local", &closed)?.unwrap();
+        assert_eq!(stopped["user_stopped"], 1);
+        assert!(stopped["retirement_reason"].is_null());
         let remaining = service.state.active()?;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["harness"], "human");
@@ -1276,6 +1319,15 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
                 .ok_or("Missing personal registration")?
                 .0["human_paused"],
             false
+        );
+        let remote = service
+            .slot("local")?
+            .kv_get(string(&remaining[0], "listener_id"))?
+            .unwrap()
+            .0;
+        assert_eq!(
+            remote["channels"][format!("{}:human", service.host_id)]["state"],
+            "ACTIVE"
         );
         let settings = service.settings_for_hub("local");
         let disabled = settings["hubs"]
@@ -2636,7 +2688,17 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
             )
         };
         assert_eq!(unread()?, vec![json!({"hub":"work"})]);
-        service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"]}))?;
+        service.activity_filter = "me".into();
+        service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"],"filter":"me","query":"not present"}))?;
+        let queued = state.db.query(
+            "SELECT channel_id FROM pending_hub_acks WHERE hub='work' AND signal_id='shared'",
+            &[],
+        )?;
+        assert_eq!(
+            queued[0]["channel_id"],
+            format!("{}:fixture", service.host_id)
+        );
+        service.activity_filter = "all".into();
         assert!(unread()?.is_empty());
         for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
             state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED','local://','none#alice')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
@@ -2649,9 +2711,16 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
             &[],
         )?;
         assert_eq!(remaining, vec![json!({"signal_id":"unmatched"})]);
-        service.action(&json!({"op":"ack_signals","signal_ids":["unmatched"],"query":"review"}))?;
+        service.action(
+            &json!({"op":"ack_signals","signal_ids":["unmatched"],"filter":"me","query":"review"}),
+        )?;
         assert!(unread()?.is_empty());
 
+        state.db.execute("UPDATE local_listeners SET principal_id='oidc:https://id.example.com|alice' WHERE listener_id='node'",&[])?;
+        state.db.execute("UPDATE local_signals SET principal_id='https://id.example.com#alice' WHERE listener_id='node'",&[])?;
+        let (_, total, unread) = state.query_activity("all", "")?;
+        assert_eq!(state.activity_counts()?, (total, unread));
+        assert!(total > 0);
         let client = service.slot("local")?.clone();
         let human = super::super::registration::local_node(&state, &client, "human", "default")?
             .ok_or("Missing Human")?;
@@ -3096,6 +3165,10 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         Ok(())
     })();
     let shared = Arc::new(Mutex::new(service));
+    let _cleanup = ServiceCleanup {
+        service: shared.clone(),
+        directory: dir.clone(),
+    };
     let http_result = (|| -> Result<(), String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
@@ -3158,8 +3231,6 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         assert_eq!(committed["receipt_status"], "unknown");
         Ok(())
     })();
-    shared.lock().map_err(|e| e.to_string())?.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result.and(http_result)
 }
 
