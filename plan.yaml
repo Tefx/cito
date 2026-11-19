@@ -16589,7 +16589,7 @@ phases:
     name: 'V52 Rust Core, Plugins & Packaging: Lease-Before-Renewal Ordering, Idempotency/Consumer-Ack
       Guards, SSE Large-Line Resilience, Stop-All Manual Retirement, Plugin Hygiene
       & Core Consolidations (#1–#16, #20a–b, #21–#27)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - packaging/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n    - site/**\n    -\
@@ -16769,6 +16769,50 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-19T02:17:41.730183Z'
+    done_at: '2026-11-19T03:46:10.319086+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 7045f55c98df8af8115e4abb1e7eeada547834a1 (integrated onto main via
+      fast-forward; worktree .vectl/worktrees/v52-core removed, reclaiming 1925 MB)
+
+
+      Coverage:
+
+      - Closed all assigned v52.core findings (#1-#16, #20a-#20b, #21-#25, #26b, #27b)
+      across crates/cito-native/** (excluding tests/support/ui/**), plugins/**, and
+      packaging/** while preserving product version 0.21.3.
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> Passed
+
+      - Run: git diff --check -> Passed
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> Passed
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 309 passed, 4
+      ignored (includes Hub unit/resilience/auth/login/transport/receiver tests)
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      -> 76 passed
+
+      - Run: cargo test -p cito-native --test native plugins:: -- --test-threads=2
+      -> 49 passed (includes real node --experimental-strip-types Pi bridge contract
+      test)
+
+      - Run: /Users/tefx/.local/bin/python3.12 -m unittest discover -s packaging -p
+      ''test_*.py'' -v -> 19 passed (system python3 is 3.9 without tomllib)
+
+      - Qualifications: native integration runners were reparented outside live Pi
+      ancestry so the unchanged Claude nested-harness guard test exercises real fixture
+      endpoints cleanly.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1-6), plan.yaml v52.core Admitted Finding Ledger (#1-#16,
+      #20a-#20b, #21-#27)'
   - id: v52.ui
     name: 'V52 macOS Swift UI & HeadlessOracle: Modal Focus Guard, 2-Line Word Wrapping,
       Channel State Conservation, Hit-Test/Tooltip Oracle Calibration & UI Hygiene
