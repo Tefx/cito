@@ -17311,7 +17311,7 @@ phases:
 - id: v53
   name: 'V53 CLI/Inbox Routing, Hub Event & Bot Isolation, Probe/Scope Lease Guards,
     UI Settlement & 30-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: in_progress
   gate: 'All 30 admitted findings (#1–#30) are closed with discriminating regression
     coverage; 3-way incremental [REQUIRES_SKILL: contract-and-simplicity] audit convergence
     (uiux-auditor, pathway-auditor, structural-auditor) on the v53 delta reaches ZERO_NEW_ISSUES
@@ -17336,7 +17336,7 @@ phases:
     name: 'V53 Rust Core, Hub, Daemon, Plugins, Docs & Test Hygiene: CLI/Inbox Routing,
       Hub Invalidation & Bot Isolation, Scope/Probe Locks, Post-Commit Send Preservation
       & Core Consolidations (#1–#17, #19–#26, #28–#30)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - packaging/**\n\
       \    - docs/DESIGN.md\n    - README.md\n    - site/docs/architecture.html\n\
@@ -17546,6 +17546,8 @@ phases:
     - README.md
     - site/docs/architecture.html
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-19T11:16:30.696448Z'
   - id: v53.ui
     name: 'V53 macOS Swift UI, HeadlessOracle & UI Tests: Two-Frame Pair Warning Settlement,
       Activity Key Shortcuts, Inbox Control Bar Sync, Dynamic Error Heights & UI Consolidations
