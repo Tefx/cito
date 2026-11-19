@@ -17634,7 +17634,7 @@ phases:
     name: 'V53 macOS Swift UI, HeadlessOracle & UI Tests: Two-Frame Pair Warning Settlement,
       Activity Key Shortcuts, Inbox Control Bar Sync, Dynamic Error Heights & UI Consolidations
       (#18, #27, #29-ui)'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n\
@@ -17706,6 +17706,8 @@ phases:
     depends_on:
     - v53.core
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-19T13:05:51.794458Z'
   - id: v53.review
     name: 'V53 3-Way Incremental Audit Convergence, Independent FULL Gate & Full Workspace
       Regression [REQUIRES_SKILL: contract-and-simplicity]'
