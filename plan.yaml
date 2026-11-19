@@ -17153,7 +17153,7 @@ phases:
   - id: v52.fix_worker_wait
     name: 'V52 Worker Wait & Shutdown Wake Repair: Preserve Shutdown/Work Wakeups
       Across Failed Channel Ticks (PATH-DELTA-1 / GATE-D1)'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n  blocked_paths:\n    - plan.yaml\n\
       \    - src/macos/**\n    - site/**\n    - README.md\n    - docs/**\n    - deploy/**\n\
@@ -17212,3 +17212,40 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-19T05:56:20.795721Z'
+    done_at: '2026-11-19T06:10:18.012447+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 46ac119b8b4d33b2b283fdd0fa87cd1365b9b00d (integrated onto main via
+      fast-forward; worktree .vectl/worktrees/v52-fix-worker-wait removed, reclaiming
+      1321 MB)
+
+
+      Coverage:
+
+      - Closed PATH-DELTA-1 / GATE-D1 (V52-05) in crates/cito-native/src/core/database.rs
+      and crates/cito-native/src/core/hub.rs at version 0.21.3: added Database::diagnostic_transaction
+      for set_poll_error so diagnostic commits never self-wake HubEngine''s worker,
+      removed failed-tick observed-version rebase, and checked closed before waiting
+      and inside wait_timeout_while. Added 3 discriminating regression tests (shutdown_at_failed_tick_wait_boundary_is_prompt,
+      work_committed_at_failed_tick_wait_boundary_is_not_lost, persistent_failed_tick_waits_five_seconds_without_health_writes).
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> Passed
+
+      - Run: git diff --check -> Passed
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> Passed
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> 315 passed, 0
+      failed, 4 ignored
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      -> 77 passed, 0 failed (reparented outside Pi ancestry via fork -> setsid ->
+      fork)
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1-6), plan.yaml v52.fix_worker_wait'
