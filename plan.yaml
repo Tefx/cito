@@ -16942,23 +16942,25 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v52` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the integrated outcomes\
-      \ of `v52.core` and `v52.ui`:\n  1. Load `[REQUIRES_SKILL: contract-and-simplicity]`\
-      \ and verify all 27 admitted findings (`#1`–`#27`) are closed with discriminating\
-      \ regression coverage.\n  2. Run 3-way incremental audit convergence (`uiux-auditor`,\
-      \ `pathway-auditor`, `structural-auditor`) on the `v52` delta to `ZERO_NEW_ISSUES`\
-      \ alongside the independent `FULL` gate.\n  3. Run full post-convergence workspace\
-      \ verification at version `0.21.3` (NO SemVer bump, NO git tag):\n     - `cargo\
-      \ fmt --all -- --check`\n     - `git diff --check`\n     - `cargo clippy --workspace\
-      \ --all-targets --locked -- -D warnings`\n     - `cargo test --workspace --locked\
-      \ -- --test-threads=2`\n     - `cargo build --release --locked`\n     - `python3\
-      \ packaging/release.py check`\n     - `python3 -m unittest discover -s packaging\
-      \ -p 'test_*.py' -v`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
-      \     - `/usr/bin/ruby -c packaging/homebrew/cito.rb`\n\nBoundary:\n- Owner:\
-      \ `gate-reviewer` (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal\
-      \ gate (`repo_change_policy: no_repo_change`, `verification_scope: FULL`) bound\
-      \ to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\nAdmit:\n-\
-      \ Depends on `v52.core` and `v52.ui`.\n- Consumed evidence: integrated commits\
-      \ from `v52.core` and `v52.ui`, 3-way incremental audit convergence (`uiux-auditor`,\
+      \ of `v52.core`, `v52.ui`, and `v52.fix_review`:\n  1. Load `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` and verify all 27 admitted findings (`#1`–`#27`)\
+      \ plus the `v52.fix_review` repairs (`GATE-1`..`GATE-5`, `V52-14`, `structural\
+      \ W1`..`W2`) are closed with discriminating regression coverage.\n  2. Run 3-way\
+      \ incremental audit convergence (`uiux-auditor`, `pathway-auditor`, `structural-auditor`)\
+      \ on the `v52` delta to `ZERO_NEW_ISSUES` alongside the independent `FULL` gate.\n\
+      \  3. Run full post-convergence workspace verification at version `0.21.3` (NO\
+      \ SemVer bump, NO git tag):\n     - `cargo fmt --all -- --check`\n     - `git\
+      \ diff --check`\n     - `cargo clippy --workspace --all-targets --locked --\
+      \ -D warnings`\n     - `cargo test --workspace --locked -- --test-threads=2`\n\
+      \     - `cargo build --release --locked`\n     - `python3 packaging/release.py\
+      \ check`\n     - `python3 -m unittest discover -s packaging -p 'test_*.py' -v`\n\
+      \     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n     - `/usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb`\n\nBoundary:\n- Owner: `gate-reviewer` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Read-only terminal gate (`repo_change_policy:\
+      \ no_repo_change`, `verification_scope: FULL`) bound to the integrated Git `HEAD`\
+      \ of `/Users/tefx/Projects/cito`.\n\nAdmit:\n- Depends on `v52.core`, `v52.ui`,\
+      \ and `v52.fix_review`.\n- Consumed evidence: integrated commits from `v52.core`,\
+      \ `v52.ui`, and `v52.fix_review`, 3-way incremental audit convergence (`uiux-auditor`,\
       \ `pathway-auditor`, `structural-auditor` to `ZERO_NEW_ISSUES`), independent\
       \ `FULL` gate report, and full post-convergence workspace regression outputs.\n\
       \nRecovery:\n- If any audit finding, test failure, clippy/compiler warning,\
@@ -16981,7 +16983,128 @@ phases:
     - packaging/release.py
     - packaging/homebrew/cito.rb
     - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/claude/native.rs
+    - plugins/pi/native.rs
+    - crates/cito-native/tests/support/plugins.rs
     depends_on:
     - v52.core
     - v52.ui
+    - v52.fix_review
     agent: gate-reviewer
+  - id: v52.fix_review
+    name: 'V52 Review Repair: Legacy OIDC Tuple Alias Guard, Bounded Channel Poll-Error
+      Retry, Shutdown Login Wake, Pre-Arm Composer Settlement, Unified Config Lock
+      & Unhooked Claude/Pi Hygiene (GATE-1..5, V52-14, W1..W2)'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - src/macos/**\n    - site/**\n    - README.md\n    -\
+      \ docs/**\n    - deploy/**\n    - packaging/**\n\nDeliver:\n- Close the 5 blocking\
+      \ findings (`GATE-1`..`GATE-5`), 1 `UNPROVEN` regression gap (`V52-14`), and\
+      \ `structural W1`..`W2` identified in `v52.review` at version `0.21.3` (NO SemVer\
+      \ bump, NO git tag):\n  1. **`GATE-1` / `PATH-2` (`V52-02`, `crates/cito-native/src/core/hub.rs`)**:\
+      \ In the `kv_create | kv_update | kv_put` tuple-collision guard, compare `principal_id`\
+      \ using `crate::core::auth::principal_ids_equal` (or the hub module's equivalent\
+      \ helper) so legitimate legacy OIDC principal aliases (e.g., `https://id.example.com#alice`\
+      \ vs `oidc:https://id.example.com|alice`) preserve re-enrollment and second-device\
+      \ attachment, while distinct principals and delimiter-shifted `(harness, session_id)`\
+      \ tuples are still rejected with `PERMISSIONS_VIOLATION: listener_id tuple collision`.\
+      \ Add a discriminating production-path regression test registering against a\
+      \ legacy OIDC agent row.\n  2. **`GATE-2` / `PATH-1` (`V52-05`, `crates/cito-native/src/core/hub.rs`)**:\
+      \ In `set_poll_error`, make unchanged `poll_error` / `service_state_json` persistence\
+      \ a no-op (do not `UPDATE hub_plugin_services` when the stored `poll_error`\
+      \ already matches) and preserve the bounded 5-second worker retry wait across\
+      \ diagnostic writes so persistent channel executable/startup failures do not\
+      \ self-wake the `HubEngine` worker into a spin loop. Add a live unpaused-worker\
+      \ regression test proving persistent warning attribution, healthy sibling progress,\
+      \ and bounded retry attempts.\n  3. **`GATE-3` / `PATH-3` (`V52-07`, `crates/cito-native/src/core/daemon/mod.rs`)**:\
+      \ During daemon shutdown (`SIGTERM`), notify all interactive and background\
+      \ login cancellation `WakePipe` handles (`self.logins` / shutdown cancellation)\
+      \ after entering closing and before joining HTTP login workers (preserving publication-lock\
+      \ release ordering) so OIDC callback waits wake and exit promptly without stalling\
+      \ up to 45s. Add a regression test exercising daemon `SIGTERM` during an active\
+      \ OIDC callback wait.\n  4. **`GATE-4` / `structural W1` (`V52-10`, `crates/cito-native/src/core/daemon/http_actions.rs`)**:\
+      \ Ensure `send_signal` and `send_reply_from_human` emit a single correlated\
+      \ `composer_result` (`ok: false, error`) even when an early pre-arm guard (such\
+      \ as `self.reload_slots()?` or `validate_ui_generation`) fails before the match\
+      \ arm, without emitting duplicate outer `op: \"error\"` frames. Add a discriminating\
+      \ regression test triggering `reload_slots` failure on `send_signal` / `send_reply_from_human`\
+      \ and asserting `composer_result` settlement.\n  5. **`GATE-5` / `PATH-4` (`V52-21`,\
+      \ `crates/cito-native/src/core/setup.rs`, `crates/cito-native/src/plugin_support.rs`)**:\
+      \ Unify config exclusion locking across `setup::mutate_file` and `DaemonService::mutate_config`\
+      \ (`with_config_lock`) so both lock `<canonical config>.lock` (not `.cito.lock`\
+      \ vs `.lock`). Add a mixed-producer concurrency test racing `setup::mutate_file`\
+      \ against `DaemonService::mutate_config` on the same target (and symlink alias)\
+      \ proving no lost committed updates.\n  6. **`V52-14` UNPROVEN gap (`plugins/claude/native.rs`,\
+      \ `crates/cito-native/tests/support/plugins.rs`)**: Add a discriminating two-instance\
+      \ unhooked-Claude regression test proving two concurrent unhooked Claude processes\
+      \ sharing a workspace/transcript keep independent identities (`other_endpoint`\
+      \ fallback) without adopting the shared workspace transcript UUID.\n  7. **`structural\
+      \ W2` (`plugins/pi/native.rs`)**: Consolidate the duplicate endpoint process-identity\
+      \ mismatch guard between the `probe` pre-check and the `probe` match arm into\
+      \ one consistent helper.\n\nBoundary:\n- Owner: `rust-engineer`. Isolated worktree\
+      \ transaction modifying `crates/cito-native/**` and `plugins/**` only (`plan.yaml`,\
+      \ `src/macos/**`, `site/**`, `README.md`, `docs/**`, `deploy/**`, and `packaging/**`\
+      \ are blocked). Keep version at `0.21.3` (NO SemVer bump, NO git tag).\n\nAdmit:\n\
+      - Depends on `v52.core` and `v52.ui`.\n- Verification: fast targeted checks\
+      \ (`cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings && cargo test -p cito-native --lib -- --test-threads=2 && cargo\
+      \ test -p cito-native --test native hub:: -- --test-threads=2 && cargo test\
+      \ -p cito-native --test native daemon:: -- --test-threads=2 && cargo test -p\
+      \ cito-native --test native plugins:: -- --test-threads=2`). Consumed by `v52.review`\
+      \ (Delta re-verification).\n\nRecovery:\n- Repair any Rust, plugin, or test\
+      \ failure in place within the worktree before completion."
+    verification: 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test -p cito-native --lib -- --test-threads=2
+      && cargo test -p cito-native --test native hub:: -- --test-threads=2 && cargo
+      test -p cito-native --test native daemon:: -- --test-threads=2 && cargo test
+      -p cito-native --test native plugins:: -- --test-threads=2'
+    evidence_template: 'Artifact:
+
+      - Commit: <sha>
+
+
+      Coverage:
+
+      - Closed GATE-1..GATE-5, V52-14 UNPROVEN regression gap, and structural W1..W2
+      across crates/cito-native/** and plugins/** at version 0.21.3.
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> Passed
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> Passed
+
+      - Run: cargo test -p cito-native --lib -- --test-threads=2 -> <count> passed
+
+      - Run: cargo test -p cito-native --test native hub:: -- --test-threads=2 ->
+      <count> passed
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --test-threads=2
+      -> <count> passed
+
+      - Run: cargo test -p cito-native --test native plugins:: -- --test-threads=2
+      -> <count> passed
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1-6), plan.yaml v52.fix_review'
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/claude/native.rs
+    - plugins/pi/native.rs
+    - crates/cito-native/tests/support/plugins.rs
+    depends_on:
+    - v52.core
+    - v52.ui
+    agent: rust-engineer
