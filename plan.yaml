@@ -18010,7 +18010,7 @@ phases:
   name: 'V54 3-Pass Converged Audit Remediation: Subprocess ESRCH, Reload & Registration
     Fencing, Host-Hub Invite & Authority Parity, Claude Hook/UTF-8/CWD Closure, UI
     Directory Refresh & 34-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: in_progress
   gate: 'All 34 admitted findings (#1–#25 Tier 1 [CONTRACT / WIRE] and #26–#34 Tier
     2 [SIMPLICITY / TRIM]) are closed with discriminating regression coverage and
     0 remaining Tier 1 or Tier 2 defects in the post-fix delta convergence audit;
@@ -18037,7 +18037,7 @@ phases:
     name: 'V54 Core, Hub, Daemon & Receiver Closure: Dedup Partitioning, Heartbeat/Reload/Registration
       Fencing, Host-Hub Invite & Authority Parity, HTTP Boundary & SQLite Consolidations
       (#1–#8, #13–#17, #22, #26–#28, #33-core) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/core/daemon/**\n    - crates/cito-native/src/core/receiver.rs\n\
       \    - crates/cito-native/src/core/receiver_tests.rs\n    - crates/cito-native/src/core/state.rs\n\
@@ -18208,12 +18208,14 @@ phases:
     - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
     - crates/cito-native/tests/hub/cases.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-20T02:08:57.377837Z'
   - id: v54.cli-setup-plugins
     name: 'V54 Subprocess, CLI/Setup & Agent Plugins Closure: macOS kevent ESRCH Zombie
       Drain, Setup Lock & Detach Warning Surfacing, Claude Live-Process CWD/Hook-Quoting/UTF-8
       Tail, Pi Shutdown Fence & Docs Parity (#9–#11, #13-plugins, #18–#20, #23–#24,
       #29, #32, #33-plugins) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/support/subprocess.rs\n    -\
       \ crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/**\n\
@@ -18323,12 +18325,14 @@ phases:
     - docs/DESIGN.md
     - crates/cito-native/tests/support/plugins.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-20T02:08:57.378051Z'
   - id: v54.macos-ui
     name: 'V54 macOS Swift UI, HeadlessOracle & UI Tests Closure: Composer Post-Close
       Error/Warning Surfacing, Directory Remote/Online Refresh, Drawer Button & Truncation
       Oracle Parity & UI Consolidations (#4-ui, #12, #21, #25, #30–#31, #34) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/mod.rs\n\
@@ -18396,6 +18400,8 @@ phases:
     - crates/cito-native/tests/support/ui/render_stability.rs
     - crates/cito-native/tests/support/ui/settings_hubs.rs
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-20T02:08:57.378142Z'
   - id: v54.gate
     name: 'V54 Full Workspace Verification & 34-Item Post-Fix Delta Convergence Gate
       (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
