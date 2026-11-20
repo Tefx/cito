@@ -18037,7 +18037,7 @@ phases:
     name: 'V54 Core, Hub, Daemon & Receiver Closure: Dedup Partitioning, Heartbeat/Reload/Registration
       Fencing, Host-Hub Invite & Authority Parity, HTTP Boundary & SQLite Consolidations
       (#1–#8, #13–#17, #22, #26–#28, #33-core) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/core/daemon/**\n    - crates/cito-native/src/core/receiver.rs\n\
       \    - crates/cito-native/src/core/receiver_tests.rs\n    - crates/cito-native/src/core/state.rs\n\
@@ -18210,6 +18210,19 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-20T02:08:57.377837Z'
+    done_at: '2026-11-20T03:22:27.247953+00:00'
+    evidence: "Closed all 20 assigned items (#1..#8, #13-core, #14..#17, #22, #26..#28,\
+      \ #33-core) on candidate commit b012c3bc8911fc73b6c65b1b1412fa487267fad3, rebased\
+      \ onto main + #19 lock-inode update at e86ccff57f7432b43fb4fee5caf184e698948c0f\
+      \ (version 0.21.3 unchanged).\n- Commands run in isolated worktree (initial\
+      \ + rebased):\n  - cargo fmt --all -- --check (exit 0)\n  - git diff --check\
+      \ (exit 0)\n  - cargo clippy --workspace --all-targets --locked -- -D warnings\
+      \ (exit 0)\n  - cargo test -p cito-native --lib -- --test-threads=2 (327 passed,\
+      \ 0 failed, 4 ignored; includes 77 core::hub:: tests)\n  - cargo test -p cito-native\
+      \ --test native daemon:: -- --test-threads=2 (81 passed, 0 failed, including\
+      \ updated uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable\
+      \ inode check)\n  - cargo test -p cito-native --test native ui::directory --\
+      \ --test-threads=1 (10 passed, 0 failed; cross-track #4 end-to-end verification)"
   - id: v54.cli-setup-plugins
     name: 'V54 Subprocess, CLI/Setup & Agent Plugins Closure: macOS kevent ESRCH Zombie
       Drain, Setup Lock & Detach Warning Surfacing, Claude Live-Process CWD/Hook-Quoting/UTF-8
