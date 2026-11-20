@@ -1,4 +1,4 @@
-use cito_native::database::Database;
+use cito_native::{database::Database, support::wait_child_exit};
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,
@@ -8,7 +8,7 @@ use std::{
     net::{TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
@@ -128,44 +128,61 @@ pub fn channel_provider(f: &Fixture, id: &str, fields: Value) -> PathBuf {
 
 struct Process {
     child: Child,
+    stopped: Option<Result<ExitStatus, String>>,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     readers: Vec<std::thread::JoinHandle<()>>,
 }
 impl Process {
-    fn stop(&mut self) -> Vec<String> {
+    fn stop(&mut self) -> Result<ExitStatus, String> {
+        if let Some(result) = &self.stopped {
+            return result.clone();
+        }
         let mut errors = Vec::new();
-        let mut running = |child: &mut Child| match child.try_wait() {
-            Ok(status) => status.is_none(),
-            Err(error) => {
-                errors.push(format!("Cannot inspect child: {error}"));
-                false
-            }
-        };
-        if running(&mut self.child) {
-            // SAFETY: each owned child leads its own process group. Reap before its ID can be reused.
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGTERM);
-            }
-            let until = Instant::now() + Duration::from_secs(2);
-            while running(&mut self.child) && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if running(&mut self.child) {
-                unsafe {
-                    libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        let signal_group = |signal| {
+            // SAFETY: process_group(0) gives the child its own group. Only wait() below
+            // releases its PID, so even an already-exited leader still reserves the ID.
+            if unsafe { libc::kill(-(self.child.id() as i32), signal) } < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(format!("Cannot signal child group: {error}"));
                 }
             }
-        }
-        if let Err(error) = self.child.wait() {
-            errors.push(format!("Cannot reap child: {error}"));
-        }
+            Ok(())
+        };
+        let graceful = wait_child_exit(&self.child, Duration::ZERO).and_then(|exited| {
+            if !exited {
+                signal_group(libc::SIGTERM)?;
+                wait_child_exit(&self.child, Duration::from_secs(2))?;
+            }
+            Ok(())
+        });
+        errors.extend(graceful.err());
+        errors.extend(signal_group(libc::SIGKILL).err());
+        let status = self
+            .child
+            .wait()
+            .map_err(|e| format!("Cannot reap child: {e}"));
+
+        let until = Instant::now() + Duration::from_secs(2);
         for reader in self.readers.drain(..) {
-            if reader.join().is_err() {
+            while !reader.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !reader.is_finished() {
+                errors.push("Process output reader timed out".into());
+            } else if reader.join().is_err() {
                 errors.push("Process output reader panicked".into());
             }
         }
-        errors
+        let result = if errors.is_empty() {
+            status
+        } else {
+            errors.extend(status.err());
+            Err(errors.join("; "))
+        };
+        self.stopped = Some(result.clone());
+        result
     }
 }
 pub struct Fixture {
@@ -260,6 +277,7 @@ impl Fixture {
         let index = children.len();
         children.push(Process {
             child,
+            stopped: None,
             stdout,
             stderr,
             readers,
@@ -308,20 +326,26 @@ impl Fixture {
         self.children.borrow()[index].child.id()
     }
     pub fn signal(&self, index: usize, signal: i32) {
-        unsafe {
-            libc::kill(self.pid(index) as i32, signal);
+        let children = self.children.borrow();
+        let p = &children[index];
+        if p.stopped.is_none() {
+            // SAFETY: the fixture still owns this unreaped PID.
+            unsafe { libc::kill(p.child.id() as i32, signal) };
         }
     }
     pub fn exited(&self, index: usize) -> bool {
-        self.children.borrow_mut()[index]
-            .child
-            .try_wait()
-            .unwrap()
-            .is_some()
+        let children = self.children.borrow();
+        let p = &children[index];
+        match &p.stopped {
+            Some(Ok(_)) => true,
+            Some(Err(error)) => panic!("Process cleanup failed: {error}"),
+            None => wait_child_exit(&p.child, Duration::ZERO).unwrap(),
+        }
     }
     pub fn stop(&self, index: usize) {
-        let errors = self.children.borrow_mut()[index].stop();
-        assert!(errors.is_empty(), "Process cleanup failed: {errors:?}");
+        self.children.borrow_mut()[index]
+            .stop()
+            .unwrap_or_else(|error| panic!("Process cleanup failed: {error}"));
     }
     pub fn command(&self, bin: &str, args: &[&str], input: &str) -> (bool, String, String) {
         let i = self.spawn(bin, args, &[]);
@@ -330,11 +354,9 @@ impl Fixture {
         }
         self.eof(i);
         wait(|| self.exited(i));
-        self.stop(i);
         let success = self.children.borrow_mut()[i]
-            .child
-            .wait()
-            .unwrap()
+            .stop()
+            .unwrap_or_else(|error| panic!("Process cleanup failed: {error}"))
             .success();
         (success, self.output(i, false), self.output(i, true))
     }
@@ -439,11 +461,44 @@ fn fixture_teardown_failure_worker() {
         fixture.dir.to_str().unwrap(),
     )
     .unwrap();
-    if mode == "ordinary-reader" {
+    if mode.ends_with("-descendant") {
+        // The sleep inherits both output pipes. Its PID is recorded outside the
+        // worker's sandbox so the caller can check liveness even after a panic.
+        let pid_file = std::env::var("CITO_TEARDOWN_PID").unwrap();
+        let args = [
+            "-c",
+            "sleep 30 & echo $! > \"$1\"; echo out; echo err >&2; exit 23",
+            "sh",
+            &pid_file,
+        ];
+        if mode == "command-descendant" {
+            assert_eq!(
+                fixture.command("/bin/sh", &args, ""),
+                (false, "out\n".into(), "err\n".into())
+            );
+            assert!(fixture.exited(0));
+            fixture.stop(0);
+            return;
+        }
+        let i = fixture.spawn("/bin/sh", &args, &[]);
+        wait(|| fixture.exited(i));
+        if mode == "drop-descendant" {
+            return;
+        }
+        // Continue into the failing health probe during primary panic cleanup.
+    }
+    if matches!(mode.as_str(), "ordinary-reader" | "ordinary-reader-timeout") {
         let i = fixture.spawn("/bin/sh", &["-c", "exit 0"], &[]);
         fixture.children.borrow_mut()[i]
             .readers
-            .push(std::thread::spawn(|| panic!("fixture reader failed")));
+            .push(std::thread::spawn(move || {
+                if mode == "ordinary-reader" {
+                    panic!("fixture reader failed");
+                }
+                loop {
+                    std::thread::park();
+                }
+            }));
         return;
     }
     let listener = TcpListener::bind(("127.0.0.1", fixture.port)).unwrap();
@@ -477,7 +532,7 @@ fn fixture_teardown_failure_worker() {
 }
 
 #[test]
-fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
+fn fixture_teardown_settles_children_and_preserves_primary_failures() {
     use std::os::unix::process::ExitStatusExt;
     let _lock = serial();
     let parent = Fixture::new(json!({}));
@@ -488,32 +543,59 @@ fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
         "ordinary-closed",
         "ordinary-malformed",
         "ordinary-reader",
+        "ordinary-reader-timeout",
+        "command-descendant",
+        "drop-descendant",
+        "panic-descendant",
     ] {
-        let output = parent
-            .command_builder(
-                std::env::current_exe().unwrap().to_str().unwrap(),
-                &[
-                    "--exact",
-                    "support::fixture_teardown_failure_worker",
-                    "--ignored",
-                    "--nocapture",
-                ],
-            )
+        let pid_file = parent.dir.join(format!("{mode}.pid"));
+        let mut command = parent.command_builder(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            &[
+                "--exact",
+                "support::fixture_teardown_failure_worker",
+                "--ignored",
+                "--nocapture",
+            ],
+        );
+        command
             .env("CITO_TEARDOWN_CASE", mode)
             .env("CITO_TEARDOWN_PATH", &marker)
-            .output()
-            .unwrap();
+            .env("CITO_TEARDOWN_PID", &pid_file);
+        let output =
+            cito_native::support::run_command_with_timeout(command, Duration::from_secs(8))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{mode}: teardown timed out"));
         assert_eq!(output.status.signal(), None, "{mode}: {output:?}");
-        assert_eq!(output.status.code(), Some(101), "{mode}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(if mode.starts_with("panic") {
-                "primary assertion failure"
-            } else {
-                "Fixture teardown failed"
-            }),
-            "{stderr}"
-        );
+        if matches!(mode, "command-descendant" | "drop-descendant") {
+            assert!(output.status.success(), "{mode}: {output:?}");
+        } else {
+            assert_eq!(output.status.code(), Some(101), "{mode}: {output:?}");
+            assert!(
+                stderr.contains(if mode.starts_with("panic") {
+                    "primary assertion failure"
+                } else {
+                    "Fixture teardown failed"
+                }),
+                "{mode}: {stderr}"
+            );
+        }
+        if mode.ends_with("-descendant") {
+            let pid = fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            assert!(pid > 1);
+            wait(|| !cito_native::support::alive(pid));
+        }
+        if mode == "ordinary-reader-timeout" {
+            assert!(
+                stderr.contains("Process output reader timed out"),
+                "{stderr}"
+            );
+        }
         if mode == "ordinary-reader" {
             assert!(
                 stderr.contains("Process output reader panicked"),
@@ -521,6 +603,7 @@ fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
             );
         }
         let child_dir = fs::read_to_string(&marker).unwrap();
+        fs::remove_file(&marker).unwrap();
         assert!(
             !Path::new(&child_dir).exists(),
             "Fixture directory survived: {child_dir}"
@@ -532,7 +615,7 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let mut failures = Vec::new();
         for p in self.children.get_mut().iter_mut().rev() {
-            failures.extend(p.stop());
+            failures.extend(p.stop().err());
         }
         // CLI auto-starts a detached daemon. Only stop a health-verified sandbox owner.
         if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
