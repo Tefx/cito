@@ -18520,7 +18520,7 @@ phases:
   - id: v54.audit_fix
     name: 'V54 Fixture Subprocess Group Teardown & Inherited-Pipe Reader Settlement
       Closure (PA-1 / #13 & #33) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/tests/support/mod.rs\n  blocked_paths:\n\
       \    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n    - src/macos/**\n\
@@ -18586,3 +18586,5 @@ phases:
     - v54.cli-setup-plugins
     - v54.macos-ui
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-20T04:04:48.672359Z'
