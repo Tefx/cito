@@ -18520,7 +18520,7 @@ phases:
   - id: v54.audit_fix
     name: 'V54 Fixture Subprocess Group Teardown & Inherited-Pipe Reader Settlement
       Closure (PA-1 / #13 & #33) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/tests/support/mod.rs\n  blocked_paths:\n\
       \    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n    - src/macos/**\n\
@@ -18588,3 +18588,15 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-20T04:04:48.672359Z'
+    done_at: '2026-11-20T04:12:53.455679+00:00'
+    evidence: "Closed PA-1 (#13/#33) on commit 4a9060d31866d8c135fbff156079b8b4d700cf09\
+      \ (version 0.21.3 unchanged; only crates/cito-native/tests/support/mod.rs changed).\n\
+      - Observed exit without reaping in Fixture::exited via wait_child_exit; made\
+      \ Process::stop idempotent (caching stopped: Option<Result<ExitStatus, String>>),\
+      \ signaling the reserved process group with SIGKILL even after parent exit before\
+      \ wait(), and joining stdout/stderr reader threads with a 2s bounded deadline.\n\
+      - Commands run in isolated worktree:\n  - cargo fmt --all -- --check (exit 0)\n\
+      \  - git diff --check (exit 0)\n  - cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings (exit 0)\n  - cargo test -p cito-native --test native support::\
+      \ -- --test-threads=2 (1 passed, 0 failed, 1 ignored worker running 9 teardown\
+      \ cases including command-descendant, drop-descendant, panic-descendant, ordinary-reader-timeout)"
