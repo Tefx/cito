@@ -18010,7 +18010,7 @@ phases:
   name: 'V54 3-Pass Converged Audit Remediation: Subprocess ESRCH, Reload & Registration
     Fencing, Host-Hub Invite & Authority Parity, Claude Hook/UTF-8/CWD Closure, UI
     Directory Refresh & 34-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All 34 admitted findings (#1–#25 Tier 1 [CONTRACT / WIRE] and #26–#34 Tier
     2 [SIMPLICITY / TRIM]) are closed with discriminating regression coverage and
     0 remaining Tier 1 or Tier 2 defects in the post-fix delta convergence audit;
@@ -18442,7 +18442,7 @@ phases:
   - id: v54.gate
     name: 'V54 Full Workspace Verification & 34-Item Post-Fix Delta Convergence Gate
       (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v54` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the merged outcomes\
@@ -18520,6 +18520,37 @@ phases:
     agent: integration-verifier
     claimed_by: integration-verifier
     claimed_at: '2026-11-20T04:56:29.282520Z'
+    done_at: '2026-11-20T05:23:17.169136+00:00'
+    evidence: "Artifact:\n- Integrated commits on main:\n  - v54.cli-setup-plugins:\
+      \ 8e3133c79dcf24c5ac396a0c049ae217104e053c\n  - v54.macos-ui: 7bd3edd (rebased\
+      \ from d1505614a3996dbaa532e250bb2f0c1060617de1)\n  - v54.core-hub-daemon: b617dc4\
+      \ + e86ccff57f7432b43fb4fee5caf184e698948c0f (rebased from b012c3bc8911fc73b6c65b1b1412fa487267fad3)\n\
+      \  - v54.audit_fix: 4a9060d31866d8c135fbff156079b8b4d700cf09 (PA-1 fixture process-group\
+      \ teardown & bounded reader settlement)\n  - v54.audit_fix_2: 3c816c3d9412b72433e4eaf90d6b54f09e7eac46\
+      \ (macOS zombie-leader killpg EPERM fix & fast-exit regressions)\n- Gate target\
+      \ HEAD: 4475eff400f7fa8fd59a97fa38babe0429507577 (version 0.21.3 unchanged,\
+      \ NO SemVer bump, NO git tag).\n- Retained candidate refs: refs/v54/candidates/{cli-setup-plugins,macos-ui,core-hub-daemon,audit-fix,audit-fix-2}.\
+      \ All isolated worktrees removed cleanly; working tree clean after restoring\
+      \ build-staged binaries.\n\nPost-Fix Delta Convergence & Independent Gate:\n\
+      - pathway-auditor (verifier.report.v2, valid=true, binding_checked=true): PA-1,\
+      \ v54.13, v54.33, and all 34 ledger items (#1-#34) + v54.version_0_21_3 PROVEN;\
+      \ zero_new_issues=true on inspected delta.\n- integration-verifier (verifier.report.v2,\
+      \ valid=true, binding_checked=true, POSITIVE_EVIDENCE): 37/37 bound requirements\
+      \ PROVEN (v54.1..v54.34, v54.version_0_21_3, v54.full_workspace_verification,\
+      \ PA-1).\n- gate-reviewer (gate.report.v2, FULL PHASE_GATE, valid=true, binding_checked=true,\
+      \ POSITIVE_GATE_EVIDENCE): PASS (37/37 PROVEN, 0 remaining Tier 1 or Tier 2\
+      \ defects).\n\nFull Workspace Verification (at HEAD 4475eff400f7fa8fd59a97fa38babe0429507577):\n\
+      - cargo fmt --all -- --check: exit 0\n- git diff --check: exit 0\n- cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings: exit 0 (0 warnings)\n-\
+      \ cargo build --release --locked: exit 0 (fresh Swift UI build provenance +\
+      \ 7 verified signatures)\n- cargo test --workspace --locked -- --test-threads=2\
+      \ (neutral PPID 1 + Python 3.14 PATH): 595 passed, 0 failed, 5 ignored (328\
+      \ lib, 3 main, 3 telegram, 261 native [81 daemon, 7 distribution, 54 plugins,\
+      \ 1 support, 118 ui])\n- cargo test -p cito-native --test native plugins::pi_bridge\
+      \ -- --test-threads=1: 2 passed, 0 failed\n- python3.14 -m unittest discover\
+      \ -s packaging -p 'test_*.py' -v: 19 passed, 0 failed\n- python3.14 packaging/release.py\
+      \ check: exit 0 (0.21.3)\n- node crates/cito-native/tests/support/site-clipboard.mjs:\
+      \ exit 0\n- /usr/bin/ruby -c packaging/homebrew/cito.rb: Syntax OK"
   - id: v54.audit_fix
     name: 'V54 Fixture Subprocess Group Teardown & Inherited-Pipe Reader Settlement
       Closure (PA-1 / #13 & #33) [REQUIRES_SKILL: contract-and-simplicity]'
