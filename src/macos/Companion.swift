@@ -398,17 +398,31 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         return children.compactMap { findTextField(in: $0, id: id) }.first
     }
-    @discardableResult
-    func settleChannelReceipt(_ frame: Frame) -> Bool {
-        let operation = frame.source_op ?? frame.action ?? (frame.op == "pair_code" ? "channel_pair" : frame.op == "channel_test_result" ? "channel_test" : "")
-        guard let request = frame.request_id,
-              let pending = pendingControls[request], pending.op == operation,
-              frame.hub == nil || pending.hub == frame.hub,
-              pending.target == (frame.channel_id ?? frame.channel ?? "") else { return false }
-        let hub = pending.hub
+    private func settleControlReceipt(_ frame: Frame, receiptOnly: Bool = false) -> Bool {
+        // Pair codes preview instructions; the later settings receipt settles the control.
+        if frame.op == "pair_code" && !receiptOnly { return false }
+        guard let request = frame.request_id, let pending = pendingControls[request] else { return false }
+        let operation = frame.source_op ?? frame.action ?? ""
+        let channelOp = frame.source_op ?? frame.action ?? (frame.op == "pair_code" ? "channel_pair" : frame.op == "channel_test_result" ? "channel_test" : "")
+        let hubMatches = frame.hub == nil || frame.hub == pending.hub
+        let channelMatches = pending.op == channelOp && hubMatches && pending.target == (frame.channel_id ?? frame.channel ?? "")
+        if !channelMatches {
+            let targetMatches = hubMatches && (frame.channel_id == nil || frame.channel_id == pending.target) &&
+                (frame.channel == nil || frame.channel == pending.target)
+            if receiptOnly {
+                guard targetMatches, operation.isEmpty || operation == pending.op else { return false }
+            } else {
+                guard frame.op != "channel_test_result", pending.op != "channel_pair" || targetMatches,
+                      frame.source_op == pending.op || frame.op == "error" ||
+                      (frame.op == "settings" && frame.source_op == nil && pending.op == "set_host_hub" && request == hostPort.requestId) else { return false }
+            }
+        }
         pendingControls.removeValue(forKey: request)
+        let reset = pendingChannelResets.removeValue(forKey: request)
+        guard channelMatches else { return true }
+        let hub = pending.hub
         let key = "\(hub)|\(pending.target)"
-        if let reset = pendingChannelResets.removeValue(forKey: request),
+        if let reset,
            (frame.ok == true || frame.committed == true), frame.authority_changed != true {
             let unchanged = (channelUiStates[key] ?? ChannelUiState()) == reset.submitted
             let fields = channelSettingsByHub[hub]?.first { $0.id == pending.target }?.fields ?? []
@@ -423,7 +437,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             }
         }
         if let entry = pendingChannelValues[request], entry.hub == hub, entry.channelId == pending.target,
-           ["channel_save", "save_hub_service"].contains(operation), frame.settings == nil || frame.authority_changed == true {
+           ["channel_save", "save_hub_service"].contains(channelOp), frame.settings == nil || frame.authority_changed == true {
             pendingChannelValues.removeValue(forKey: request)
             // Retire only submitted secrets, which settings never echo. Keep
             // non-secret drafts until fresh settings reconcile their values,
@@ -437,7 +451,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 }
             }
         }
-        if operation == "channel_pair", channelUiStates[key]?.pendingPairRequest == request {
+        if channelOp == "channel_pair", channelUiStates[key]?.pendingPairRequest == request {
             channelUiStates[key]?.pendingPairRequest = nil
         }
         return true
@@ -445,7 +459,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
 
     @discardableResult
     func settleReceiptOnly(_ frame: Frame) -> Bool {
-        var settled = settleChannelReceipt(frame)
+        var settled = settleControlReceipt(frame, receiptOnly: true)
         var routedToForm = false
         guard let request = frame.request_id else { return settled }
         let operation = frame.source_op ?? frame.action ?? ""
@@ -465,14 +479,6 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         if request == hostPort.requestId && (operation.isEmpty || operation == "set_host_hub") {
             hostPort.pending = false; hostPort.requestId = ""; settled = true
-        }
-        if let pending = pendingControls[request], pending.op == operation || operation.isEmpty,
-           frame.hub == nil || frame.hub == pending.hub,
-           frame.channel_id == nil || frame.channel_id == pending.target,
-           frame.channel == nil || frame.channel == pending.target {
-            pendingControls.removeValue(forKey: request)
-            pendingChannelResets.removeValue(forKey: request)
-            settled = true
         }
         if settled && !routedToForm && operation != "channel_test", let message = message, !message.isEmpty {
             if settingsVisible { settingsBannerError = message } else { menuBannerError = message }
@@ -521,18 +527,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         let pendingReceipt = frame.request_id.flatMap { pendingControls[$0] }
         let receiptHub = frame.hub ?? pendingReceipt?.hub
-        var settledControl = frame.op == "pair_code" ? false : settleChannelReceipt(frame)
-        if let request = frame.request_id, let pending = pendingControls[request],
-           frame.op != "pair_code" && frame.op != "channel_test_result",
-           pending.op != "channel_pair" || (frame.hub == nil || frame.hub == pending.hub) &&
-               (frame.channel_id == nil || frame.channel_id == pending.target) &&
-               (frame.channel == nil || frame.channel == pending.target),
-           frame.source_op == pending.op || frame.op == "error" ||
-           (frame.op == "settings" && frame.source_op == nil && pending.op == "set_host_hub" && request == hostPort.requestId) {
-            pendingControls.removeValue(forKey: request)
-            pendingChannelResets.removeValue(forKey: request)
-            settledControl = true
-        }
+        let settledControl = settleControlReceipt(frame)
         if frame.op == "state", (frame.request_id == nil || settledControl), let message = frame.error ?? frame.warning, !message.isEmpty {
             if settingsVisible { settingsBannerError = message } else { menuBannerError = message }
         }
@@ -580,7 +575,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 if composerTarget == pending.target && composerTargetHub == pending.hub && composerReplySignalId == pending.replySignalId && composerInputField?.stringValue == pending.text { closeComposer() }
                 else { setComposerStatus(""); composerSendButton?.copied("✓ Sent") }
             } else {
-                setComposerStatus(frame.error ?? "Send failed. Your draft is preserved.")
+                showComposerFailure(frame.error)
+            }
+            if let warning = frame.warning, !warning.isEmpty {
+                showComposerDirectoryNotice(warning)
             }
             return
         }
@@ -627,11 +625,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if isAddHubError { hubForm.pendingSave = nil }
             let isComposerError = ["send_signal", "send_reply_from_human", ""].contains(sourceOp) &&
                 pendingComposer != nil && frame.request_id == pendingComposer?.requestId
+            if isComposerError { pendingComposer = nil }
             if error.isEmpty { }
-            else if isComposerError {
-                setComposerStatus(error)
-                pendingComposer = nil
-            } else if isAddHubError { hubForm.error = error }
+            else if isComposerError { showComposerFailure(error) }
+            else if isAddHubError { hubForm.error = error }
             else if ["query_directory", "open_directory", "directory"].contains(sourceOp) || (frame.op == "directory" && sourceOp.isEmpty) {
                 if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
             }
@@ -716,6 +713,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             discovery = nextDiscovery
             let r = preserveCollections && hasRenderedState ? myRemote : (frame.my_remote_listeners ?? []).filter { $0.harness != "human" }
             let onlineCount = frame.directory_online_count ?? max(directoryOnlineCount, r.count)
+            let directoryRemoteChanged = r != myRemote || onlineCount != directoryOnlineCount
             let nextUnread = frame.unread_count ?? unreadCount
             let nextActivity = preserveCollections ? activityAllItems : frame.activity ?? activityAllItems
             let activityChanged = activityPresenceChanged || nextUnread != unreadCount || nextActivity != activityAllItems ||
@@ -736,7 +734,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings != settings || (hostPort.pending && frame.request_id == hostPort.requestId)
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name, savedRequest: frame.request_id) }
-            if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
+            if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && !directoryMembershipChanged && a == available && !directoryRemoteChanged {
                 updateStatusItem()
             } else {
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
@@ -744,7 +742,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 hasRenderedState = true; pendingMutation = false
                 rebuild()
                 refreshDirectoryViews()
-                if directoryVisible && directoryMembershipChanged { queryDirectory() }
+                if directoryVisible && (directoryMembershipChanged || directoryRemoteChanged) { queryDirectory() }
                 if settingsChanged || settledControl || directoryMembershipChanged {
                     rebuildSettingsPanel(preservingEditor: frame.request_id == nil && frame.source_op == nil)
                 }
@@ -904,7 +902,23 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         if let field = obj.object as? NSTextField, field === composerInputField { composerDraftIdempotencyKey = UUID().uuidString }
-        if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostPort.draft=field.stringValue; hostPort.savedUntil=nil; hostPort.error=nil; if let root=settingsPanel?.contentView { findControl(in:root,id:"apply_host_hub_port")?.isEnabled = !hostPort.pending && Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) != settings?.host_hub.port } }
+        if let field = obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" {
+            hostPort.draft = field.stringValue
+            hostPort.savedUntil = nil
+            hostPort.error = nil
+            if let root = settingsPanel?.contentView, let apply = findControl(in: root, id: "apply_host_hub_port") {
+                apply.feedbackTimer?.invalidate()
+                apply.feedbackTimer = nil
+                apply.restingTitle = nil
+                apply.restingAccessibilityLabel = nil
+                let title = hostPort.pending ? "Applying…" : "Apply"
+                apply.label.stringValue = title
+                apply.setAccessibilityLabel(title)
+                apply.toolTip = title
+                apply.isEnabled = !hostPort.pending && Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) != settings?.host_hub.port
+                apply.layoutContents()
+            }
+        }
         if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue {
             if id.hasPrefix("channel_field:"),
                let ch=(channelSettingsByHub[effectiveChannelHub] ?? []).first(where:{id.hasPrefix("channel_field:\($0.id):")}),

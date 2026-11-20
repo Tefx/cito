@@ -53,12 +53,12 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
         // Timed feedback retains the resting width so its label fits after expiry.
         // Address chips reserve copy feedback space; scope toggles keep a uniform width.
         let reservedWidth = control.feedbackTimer?.isValid == true || id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
-        let pairedWidth = MenuControl.toggleWidth(id, title:control.label.stringValue, font: control.label.font ?? .systemFont(ofSize:11,weight:.medium))
+        let pairedWidth = MenuControl.toggleWidth(id, title:control.label.stringValue, font: control.label.font ?? .systemFont(ofSize:11,weight:.medium), paddingX:control.paddingX)
         control.frame.size.width = min(control.maximumWidth, max(control.pendingWidth, reservedWidth, pairedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
             leadingDot:control.leadingDotView?.isHidden == false,
-            paddingX: id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") ? 3 : (id == "open_settings" ? 6 : (id.hasPrefix("scope:") ? 9 : (id == "open_uninstall_confirm" ? 12 : 11))))))
+            paddingX: control.paddingX)))
         control.layoutContents()
     }
     var left = insetLeft
@@ -118,6 +118,13 @@ func textLabel(_ title: String, _ frame: NSRect, size: CGFloat = 11, weight: NSF
     label.frame = frame; label.font = .systemFont(ofSize: size, weight: weight); label.textColor = color
     label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1
     return label
+}
+
+extension NSTextField {
+    var requiredSingleLineWidth: CGFloat {
+        // The native cell can retain a narrower cached width after an appearance update.
+        max(cell?.cellSize.width ?? 0, attributedStringValue.size().width)
+    }
 }
 
 class SurfaceView: NSView {
@@ -320,20 +327,19 @@ final class MenuControl: NSControl {
                                leadingSymbol: String? = nil, leadingDot: Bool = false, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat {
         max(minWidth, ceil(measureTextWidth(title, font: font)) + paddingX * 2 + (leadingSymbol == nil ? 0 : 17) + (leadingDot ? 12 : 0))
     }
-    static func toggleWidth(_ id: String, title: String, font: NSFont = .systemFont(ofSize:11,weight:.medium)) -> CGFloat {
+    static func toggleWidth(_ id: String, title: String, font: NSFont = .systemFont(ofSize:11,weight:.medium), paddingX: CGFloat = 11) -> CGFloat {
         let states: [(String,String?)]
-        let padding: CGFloat
-        if id.hasPrefix("scope:") { states = [("Self","lock.fill"),("Team","person.2.fill")]; padding = 9 }
-        else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)]; padding = 11 }
-        else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)]; padding = 11 }
-        else if id == "toggle_host_hub" { states = [("Start Sharing",nil),("Stop Sharing",nil)]; padding = 11 }
-        else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)]; padding = 11 }
+        if id.hasPrefix("scope:") { states = [("Self","lock.fill"),("Team","person.2.fill")] }
+        else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)] }
+        else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)] }
+        else if id == "toggle_host_hub" { states = [("Start Sharing",nil),("Stop Sharing",nil)] }
+        else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)] }
         else if id.hasPrefix("toggle_channel:") {
             let name=String(title.dropFirst(title.hasPrefix("Pause ") ? 6 : 7))
-            states = [("Pause " + name,nil),("Resume " + name,nil)]; padding = 11
+            states = [("Pause " + name,nil),("Resume " + name,nil)]
         }
         else { return 0 }
-        return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:padding) }.max() ?? 0
+        return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:paddingX) }.max() ?? 0
     }
     func layoutContents() {
         let font = label.font ?? .systemFont(ofSize: 11)
@@ -354,10 +360,12 @@ final class MenuControl: NSControl {
             icon.frame = NSRect(x: startX, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
             label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - (copyChip ? 17 : 27)) : textW, height: cellH)
         } else {
-            label.frame = NSRect(x: paddingX, y: labelY, width: max(0, bounds.width - 2 * paddingX), height: cellH)
+            // Leave room for the native cell's text insets, including in fixed-width controls.
+            let inset = min(paddingX, max(4, floor((bounds.width - label.requiredSingleLineWidth) / 2)))
+            label.frame = NSRect(x: inset, y: labelY, width: max(0, bounds.width - 2 * inset), height: cellH)
         }
     }
-    var paddingX: CGFloat = 4
+    let paddingX: CGFloat
     var leadingDotView: SurfaceView?
     private var dotColor: NSColor = CitoPalette.secondaryText
     private var dotRing = false
@@ -392,7 +400,7 @@ final class MenuControl: NSControl {
     // Headless hooks exercise logical transitions without a visible window or physical pointer.
     static var tracksPhysicalPointer = true
     override var wantsUpdateLayer: Bool { true }
-    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6, paddingX: CGFloat = 4) {
+    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6, paddingX: CGFloat = 11) {
         self.paddingX = paddingX
         label = MenuTitleField(labelWithString:title)
         symbolName = leadingSymbol ?? symbol

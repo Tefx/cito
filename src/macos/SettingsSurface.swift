@@ -430,7 +430,7 @@ extension Companion {
         }
         footerBar.addSubview(loginBtn)
 
-        let uninstallBtn = MenuControl("Disconnect Agent Apps…", frame: NSRect(x: 316, y: 10, width: MenuControl.intrinsicWidth("Disconnect Agent Apps…", paddingX: 12), height: 24), radius: 6)
+        let uninstallBtn = MenuControl("Disconnect Agent Apps…", frame: NSRect(x: 316, y: 10, width: MenuControl.intrinsicWidth("Disconnect Agent Apps…", paddingX: 12), height: 24), radius: 6, paddingX: 12)
         uninstallBtn.identifier = NSUserInterfaceItemIdentifier("open_uninstall_confirm")
         uninstallBtn.style = .destructiveHover
         uninstallBtn.pressed = { [weak self] in
@@ -1359,6 +1359,7 @@ extension Companion {
                 row.identifier = NSUserInterfaceItemIdentifier("settings_hub:\(hub.name)")
                 row.addSubview(roundedView(NSRect(x:CitoMetrics.cardInset,y:rowHeight-24,width:8,height:8),radius:4,color:statusColor(hub.enabled ? hub.status : "disconnected")))
                 let nameLabel = textLabel(hub.name,NSRect(x:28,y:rowHeight-24,width:0,height:16),size:12.5,weight:.semibold)
+                nameLabel.identifier = NSUserInterfaceItemIdentifier("settings_hub_name:\(hub.name)")
                 nameLabel.lineBreakMode = .byTruncatingMiddle; nameLabel.toolTip = hub.name
                 row.addSubview(nameLabel)
                 let subtitleLabel = textLabel(subtitle,NSRect(x:28,y:9,width:subtitleWidth,height:subtitleHeight),size:10.5,color:CitoPalette.secondaryText)

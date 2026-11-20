@@ -67,6 +67,20 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         updateDirectoryWarnings()
     }
 
+    func showComposerDirectoryNotice(_ message: String) {
+        directoryActionError = message
+        directoryActionErrorSourceOp = "send_signal"
+        updateDirectoryWarnings()
+    }
+
+    func showComposerFailure(_ error: String?) {
+        if directoryComposerBar?.isHidden == false {
+            setComposerStatus(error ?? "Send failed. Your draft is preserved.")
+        } else {
+            showComposerDirectoryNotice(error ?? "Send failed.")
+        }
+    }
+
     // MARK: - Surface 2: Spotlight-Style Network Directory Panel (560 × 440 pt KeyPanel: NSPanel)
 
     func ensureDirectoryPanel() {
@@ -859,7 +873,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self = self else { return }
                 self.replyToActivity(item)
             }
-            restoreActivityCopyFeedback(item, cell: cell)
+            restoreCopyFeedback(until: activityCopiedUntil["\(item.hub)|\(item.signal_id)"], control: cell.copyControl)
             return cell
         }
         guard directoryFilteredPeers.indices.contains(row) else { return nil }
@@ -871,14 +885,13 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             guard let self = self else { return }
             self.openComposer(target: peer.display_address, hub: peer.hub ?? "", replySignalId: nil)
         }
-        let remaining = (directoryCopiedUntil[peer.scoped_id] ?? .distantPast).timeIntervalSinceNow
-        if remaining > 0 && cell.copyControl.feedbackTimer?.isValid != true { cell.copyControl.copied(for: remaining) }
+        restoreCopyFeedback(until: directoryCopiedUntil[peer.scoped_id], control: cell.copyControl)
         return cell
     }
 
-    func restoreActivityCopyFeedback(_ item: ActivityItem, cell: DirectoryPeerCellView) {
-        let remaining = (activityCopiedUntil["\(item.hub)|\(item.signal_id)"] ?? .distantPast).timeIntervalSinceNow
-        if remaining > 0 && cell.copyControl.feedbackTimer?.isValid != true { cell.copyControl.copied(for: remaining) }
+    private func restoreCopyFeedback(until: Date?, control: MenuControl) {
+        guard control.feedbackTimer?.isValid != true, let remaining = until?.timeIntervalSinceNow, remaining > 0 else { return }
+        control.copied(for: remaining)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -895,7 +908,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 if let cell = table.view(atColumn:0,row:index,makeIfNecessary:false) as? DirectoryPeerCellView {
                     let item = activityFilteredItems[index]
                     cell.configureActivity(with:item,selected:index==row,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
-                    restoreActivityCopyFeedback(item, cell: cell)
+                    restoreCopyFeedback(until: activityCopiedUntil["\(item.hub)|\(item.signal_id)"], control: cell.copyControl)
                 }
             }
         }

@@ -1482,7 +1482,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     );
     f.send(
         p,
-        json!({"op":"composer_result","ok":true,"request_id":replies[0]["request_id"]}),
+        json!({"op":"composer_result","ok":true,"error":null,"warning":"Message sent. Activity could not refresh.","request_id":replies[0]["request_id"]}),
     );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
@@ -1495,6 +1495,12 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(
         node(&s, "directory_items", "composer_send")["text"],
         "✓ Sent"
+    );
+    let warning = node(&s, "directory_items", "directory_warning_label");
+    assert_eq!(warning["hidden"], false);
+    assert_eq!(
+        warning["tooltip"],
+        "Message sent. Activity could not refresh."
     );
     control(&f, p, "composer_send");
     inspect(&f, p);
@@ -1555,6 +1561,106 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     f.send(p, json!({"op":"test_directory_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["directory_open"], false);
 }
+#[test]
+fn composer_settles_empty_errors_and_surfaces_late_failures_after_close() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    send_fixture(&f, p, json!({"op":"directory","peers":[peer("one")]}));
+    let submit = |draft: &str| {
+        control(&f, p, "msg_dir:personal:one");
+        f.send(p, json!({"op":"test_composer_input","value":draft}));
+        control(&f, p, "composer_send");
+        let submitted = inspect(&f, p);
+        assert_eq!(
+            node(&submitted, "directory_items", "composer_send")["text"],
+            "Sending…"
+        );
+        f.frames(p)
+            .into_iter()
+            .find(|v| v["op"] == "send_signal" && v["message"] == draft)
+            .unwrap()["request_id"]
+            .clone()
+    };
+    let empty_error = submit("First draft");
+    f.send(
+        p,
+        json!({"op":"error","source_op":"send_signal","error":"","request_id":empty_error}),
+    );
+    let settled = inspect(&f, p);
+    assert_eq!(
+        node(&settled, "directory_items", "composer_send")["enabled"],
+        true
+    );
+    assert_eq!(
+        node(&settled, "directory_items", "composer_input")["text"],
+        "First draft"
+    );
+    assert_eq!(
+        node(&settled, "directory_items", "directory_warning_label")["hidden"],
+        true
+    );
+
+    for (draft, mut receipt) in [
+        (
+            "Second draft",
+            json!({"op":"composer_result","ok":false,"error":"The Hub cannot deliver this message."}),
+        ),
+        (
+            "Third draft",
+            json!({"op":"error","source_op":"send_signal","error":"The connection closed during send."}),
+        ),
+    ] {
+        receipt["request_id"] = submit(draft);
+        control(&f, p, "composer_cancel");
+        let message = receipt["error"].clone();
+        f.send(p, receipt);
+        let closed = inspect(&f, p);
+        assert_eq!(closed["composer_open"], false);
+        let warning = node(&closed, "directory_items", "directory_warning_label");
+        assert_eq!(warning["hidden"], false);
+        assert_eq!(warning["tooltip"], message);
+    }
+    let success = submit("Fourth draft");
+    control(&f, p, "composer_cancel");
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"error":null,"warning":"","request_id":success}),
+    );
+    let final_state = inspect(&f, p);
+    assert_eq!(
+        node(&final_state, "directory_items", "directory_warning_label")["tooltip"],
+        "The connection closed during send."
+    );
+}
+
+#[test]
+fn oracle_checks_static_directory_pills_even_when_they_have_tooltips() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    inspect(&f, p);
+    let ids = ["dir_mode:directory", "dir_scope:mine", "dir_harness:all"];
+    for id in ids {
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":"truncated_labels","id":id}),
+        );
+    }
+    let snapshot = inspect_unchecked(&f, p, None);
+    let truncated = snapshot["truncated_labels"].as_array().unwrap();
+    for id in ids {
+        assert!(
+            truncated.contains(&json!(id)),
+            "Missing truncation for {id}: {truncated:?}"
+        );
+    }
+}
+
 #[test]
 fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     let _lock = serial();

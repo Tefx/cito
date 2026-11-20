@@ -100,7 +100,7 @@ extension Companion: NSMenuDelegate {
 
     func makeScopeControl(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl {
         let team = scope == "workspace"
-        let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill")
+        let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill", paddingX:9)
         control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
         updateScopeControl(control, scope:scope, hub:hub, user:user)
         return control
@@ -122,7 +122,7 @@ extension Companion: NSMenuDelegate {
         let title = compactAddressLabel(address,maxWidth:220,font:font,paddingX:3)
         let width = min(220, max(MenuControl.intrinsicWidth("✓ Copied",font:font,leadingSymbol:"doc.on.doc",paddingX:3),
                                 MenuControl.intrinsicWidth(title,font:font,leadingSymbol:"doc.on.doc",paddingX:3)))
-        let copy = MenuControl(title,frame:NSRect(x:0,y:7,width:width,height:height),leadingSymbol:"doc.on.doc")
+        let copy = MenuControl(title,frame:NSRect(x:0,y:7,width:width,height:height),leadingSymbol:"doc.on.doc",paddingX:3)
         copy.identifier = NSUserInterfaceItemIdentifier(id)
         copy.label.font = font; copy.label.alignment = .left
         copy.toolTip = address; copy.setAccessibilityLabel(address)
@@ -232,7 +232,7 @@ extension Companion: NSMenuDelegate {
             }
             var drawerControls: [NSView] = []
             for (title, action, primary, run) in buttons {
-                let width = measureTextWidth(title, font: btnFont) + 16
+                let width = MenuControl.intrinsicWidth(title, font: btnFont)
                 let control = MenuControl(title, frame: NSRect(x: 0, y: 5, width: width, height: 22))
                 control.label.font = btnFont
                 control.style = primary ? .prominent : .neutral
@@ -250,7 +250,9 @@ extension Companion: NSMenuDelegate {
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = statusText; drawer.addSubview(detail)
             let detailWidth = drawer.bounds.width - 24 - drawerControls.reduce(CGFloat(0)) { $0 + $1.frame.width + 4 }
-            if hub.error != nil || measureTextWidth(statusText,font:detail.font ?? .systemFont(ofSize:11)) > detailWidth {
+            let detailBounds = NSRect(x: 0, y: 0, width: max(0, detailWidth), height: detail.bounds.height)
+            let drawingWidth = detail.cell?.drawingRect(forBounds: detailBounds).width ?? detailBounds.width
+            if hub.error != nil || detail.requiredSingleLineWidth > drawingWidth {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
@@ -796,7 +798,7 @@ extension Companion: NSMenuDelegate {
             stopAll.pressed = { self.emit(["op": "unlisten_all", "hub":targetHub]) }
             footer.addSubview(stopAll)
         }
-        let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: MenuControl.intrinsicWidth("Settings…", leadingSymbol: "gearshape", paddingX: 6), height: 24), leadingSymbol: "gearshape")
+        let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: MenuControl.intrinsicWidth("Settings…", leadingSymbol: "gearshape", paddingX: 6), height: 24), leadingSymbol: "gearshape", paddingX: 6)
         openSettings.identifier = NSUserInterfaceItemIdentifier("open_settings")
         openSettings.style = .subtleHeader
         openSettings.toolTip = "Settings… (⌘,)"

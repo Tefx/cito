@@ -801,21 +801,22 @@ fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
-    let names = ["personal-working-group", "workspace-working-group"];
+    let names = [
+        "personal-engineering-and-research-working-group",
+        "workspace-engineering-and-research-working-group",
+    ];
     let mut frame = state();
     let mut cfg = settings();
     for (index, name) in names.iter().enumerate() {
         frame["hubs"][index]["name"] = json!(name);
         cfg["hubs"][index]["name"] = json!(name);
     }
-    frame["listeners"][0]["hub"] = json!(names[0]);
+    frame["listeners"] = json!([]);
     frame["settings"] = cfg;
     f.send(p, frame);
     for name in names {
         control(&f, p, &format!("hub:{name}"));
-        let snapshot = inspect_unchecked(&f, p, None);
-        assert_eq!(snapshot["clipped_views"], json!([]));
-        assert_eq!(snapshot["overlapping_siblings"], json!([]));
+        let snapshot = inspect(&f, p);
         let strip = node(&snapshot, "items", "header_hub_strip");
         assert_eq!(strip["content_x"], 0);
         for name in names {
@@ -826,8 +827,22 @@ fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
                     <= strip["width"].as_f64().unwrap() - 2.0
             );
             assert!(pill["accessibility_label"].as_str().unwrap().contains(name));
+            assert!(pill["label_measured_width"].as_f64() > pill["label_width"].as_f64());
         }
     }
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    let settings_snapshot = inspect(&f, p);
+    for name in names {
+        let label = node(
+            &settings_snapshot,
+            "settings_items",
+            &format!("settings_hub_name:{name}"),
+        );
+        assert_eq!(label["tooltip"], name);
+        assert!(label["label_measured_width"].as_f64() > label["label_width"].as_f64());
+    }
+    control(&f, p, "close_settings");
     let mut frame = state();
     frame["settings"] = settings();
     f.send(p, frame);
@@ -855,6 +870,34 @@ fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
         .unwrap();
     assert_eq!(label["wraps"], true);
     assert!(row["height"].as_f64().unwrap() > 36.0);
+}
+
+#[test]
+fn hub_drawer_wraps_status_when_packed_actions_need_the_width() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    f.send(p, frame.clone());
+    control(&f, p, "hub:personal");
+    let short = inspect(&f, p);
+    assert_eq!(node(&short, "items", "drawer:personal")["height"], 32);
+    assert_eq!(
+        node(&short, "items", "login:personal")["text"],
+        "Switch Account"
+    );
+    frame["hubs"][0]["user"] = json!("alexmorgan");
+    f.send(p, frame);
+    let snapshot = inspect(&f, p);
+    let status = node(&snapshot, "items", "hub_error:personal");
+    assert_eq!(status["text"], "Connected as alexmorgan");
+    assert_eq!(status["wraps"], true);
+    assert!(
+        node(&snapshot, "items", "drawer:personal")["height"]
+            .as_f64()
+            .unwrap()
+            > 32.0
+    );
 }
 
 #[test]

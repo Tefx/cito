@@ -40,6 +40,53 @@ fn host_hub_failed_projection_and_trailing_error_have_one_error_surface() {
 }
 
 #[test]
+fn editing_host_port_retires_saved_feedback_in_place() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["host_hub"]["enabled"] = json!(true);
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    let input = |value: &str| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":value}),
+        );
+    };
+    input("4292");
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    cfg["host_hub"]["port"] = json!(4292);
+    f.send(p, json!({"op":"settings","source_op":"set_host_hub","ok":true,"request_id":request["request_id"],"settings":cfg}));
+    let button = |snapshot: &Value| node(snapshot, "settings_items", "apply_host_hub_port");
+    let saved = button(&inspect(&f, p));
+    assert_eq!(saved["text"], "✓ Saved");
+    assert_eq!(saved["green"], true);
+    assert_eq!(saved["enabled"], false);
+    input("4293");
+    let edited = button(&inspect(&f, p));
+    assert_eq!(edited["instance"], saved["instance"]);
+    assert_eq!(edited["enabled"], true);
+    assert_eq!(edited["text"], "Apply");
+    assert_eq!(edited["accessibility_label"], "Apply");
+    assert_eq!(edited["green"], false);
+    input("4292");
+    let unchanged = button(&inspect(&f, p));
+    assert_eq!(unchanged["enabled"], false);
+    assert_eq!(unchanged["text"], "Apply");
+}
+
+#[test]
 fn hub_row_mutations_disable_duplicate_submission_and_settle_correlated_receipts() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

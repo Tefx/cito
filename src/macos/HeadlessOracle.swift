@@ -119,8 +119,11 @@ extension Companion {
                     for root in roots { if let c = findControl(in:root,id:id) { return c } }
                     return nil
                 }
+                if kind == "truncated_labels", let c = control(object["id"] as? String ?? "quit") {
+                    c.label.stringValue = String(repeating:"Wide chrome ",count:20)
+                    c.label.toolTip = c.label.stringValue
+                }
                 if let c = control("quit") {
-                    if kind == "truncated_labels" { c.label.stringValue = String(repeating:"Wide chrome ",count:20) }
                     if kind == "jargon_leaks" { c.label.stringValue = object["text"] as? String ?? "Human receiver" }
                     if kind == "tooltip_jargon" { c.toolTip = "Human receiver" }
                     if kind == "accessibility_jargon" { c.setAccessibilityLabel("Human receiver") }
@@ -519,10 +522,20 @@ extension Companion {
             while let current = ancestor {
                 let id = current.identifier?.rawValue ?? ""
                 if id.hasPrefix("act_held:") || id.hasPrefix("candidate_hint:") { return false }
-                if id == "host_hub_endpoint" || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || current is DirectoryPeerCellView { return true }
+                if id == "host_hub_endpoint" || ["dir_row:", "msg_dir:", "copy_dir:", "act_", "session:", "candidate:", "remote:"].contains(where: { id.hasPrefix($0) }) || current is DirectoryPeerCellView { return true }
                 ancestor = current.superview
             }
             return false
+        }
+        func intentionallyTruncatedLabel(_ label: NSTextField) -> Bool {
+            guard !(label.toolTip ?? label.superview?.toolTip ?? "").isEmpty,
+                  label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail else { return false }
+            if isDataRow(label) { return !(label.toolTip ?? "").isEmpty }
+            let parentID = label.superview?.identifier?.rawValue
+            let title = label.stringValue
+            return (hubs.count == 2 && parentID == "hub:\(title)") ||
+                ((settings?.hubs.count ?? hubs.count) == 2 && parentID == "settings_hub:\(title)" &&
+                 label.identifier?.rawValue == "settings_hub_name:\(title)")
         }
         func components(_ color: NSColor?) -> [CGFloat] {
             guard let rgb = color?.usingColorSpace(.deviceRGB) else { return [] }
@@ -592,13 +605,10 @@ extension Companion {
                 let hasTooltip = !(label.toolTip ?? "").isEmpty
                 let truncated: Bool
                 if label.maximumNumberOfLines == 1 || label.cell?.wraps == false {
-                    let intentional = isDataRow(label) && hasTooltip && (label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail)
                     // Native cell insets and attributed glyph metrics determine
                     // what AppKit can actually draw, not the outer field width.
                     let drawingWidth = label.cell?.drawingRect(forBounds:label.bounds).width ?? label.bounds.width
-                    // NSCell can retain a narrower cached width after a color/appearance update.
-                    let requiredWidth = max(label.cell?.cellSize.width ?? 0,label.attributedStringValue.size().width)
-                    truncated = !intentional && requiredWidth > drawingWidth
+                    truncated = label.requiredSingleLineWidth > drawingWidth && !intentionallyTruncatedLabel(label)
                 } else if name(label).hasPrefix("act_msg:") && hasTooltip {
                     // Expanded Activity messages deliberately cap the preview height.
                     truncated = false
