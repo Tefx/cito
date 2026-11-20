@@ -144,8 +144,12 @@ impl Process {
             // releases its PID, so even an already-exited leader still reserves the ID.
             if unsafe { libc::kill(-(self.child.id() as i32), signal) } < 0 {
                 let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(format!("Cannot signal child group: {error}"));
+                match error.raw_os_error() {
+                    Some(libc::ESRCH) => {}
+                    // macOS can return EPERM when only the zombie leader remains.
+                    Some(libc::EPERM)
+                        if wait_child_exit(&self.child, Duration::ZERO) == Ok(true) => {}
+                    _ => return Err(format!("Cannot signal child group: {error}")),
                 }
             }
             Ok(())
@@ -461,6 +465,15 @@ fn fixture_teardown_failure_worker() {
         fixture.dir.to_str().unwrap(),
     )
     .unwrap();
+    if mode == "command-fast-exit" {
+        assert!(fixture.command("/bin/sh", &["-c", "exit 0"], "").0);
+        return;
+    }
+    if mode == "drop-fast-exit" {
+        let i = fixture.spawn("/bin/sh", &["-c", "exit 0"], &[]);
+        wait(|| fixture.exited(i));
+        return;
+    }
     if mode.ends_with("-descendant") {
         // The sleep inherits both output pipes. Its PID is recorded outside the
         // worker's sandbox so the caller can check liveness even after a panic.
@@ -544,6 +557,8 @@ fn fixture_teardown_settles_children_and_preserves_primary_failures() {
         "ordinary-malformed",
         "ordinary-reader",
         "ordinary-reader-timeout",
+        "command-fast-exit",
+        "drop-fast-exit",
         "command-descendant",
         "drop-descendant",
         "panic-descendant",
@@ -568,7 +583,7 @@ fn fixture_teardown_settles_children_and_preserves_primary_failures() {
                 .unwrap_or_else(|| panic!("{mode}: teardown timed out"));
         assert_eq!(output.status.signal(), None, "{mode}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if matches!(mode, "command-descendant" | "drop-descendant") {
+        if mode.starts_with("command-") || mode.starts_with("drop-") {
             assert!(output.status.success(), "{mode}: {output:?}");
         } else {
             assert_eq!(output.status.code(), Some(101), "{mode}: {output:?}");
