@@ -18215,7 +18215,7 @@ phases:
       Drain, Setup Lock & Detach Warning Surfacing, Claude Live-Process CWD/Hook-Quoting/UTF-8
       Tail, Pi Shutdown Fence & Docs Parity (#9–#11, #13-plugins, #18–#20, #23–#24,
       #29, #32, #33-plugins) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/support/subprocess.rs\n    -\
       \ crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/**\n\
@@ -18327,6 +18327,20 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-20T02:08:57.378051Z'
+    done_at: '2026-11-20T03:22:19.928556+00:00'
+    evidence: "Closed all 11 assigned items (#9, #10, #11, #13-plugins, #18, #19,\
+      \ #20, #23, #24, #29, #32, #33-plugins) on commit 8e3133c79dcf24c5ac396a0c049ae217104e053c\
+      \ (version 0.21.3 unchanged).\n- Commands run in isolated worktree:\n  - cargo\
+      \ fmt --all -- --check (exit 0)\n  - git diff --check (exit 0)\n  - cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings (exit 0)\n  - cargo test\
+      \ -p cito-native --lib support:: -- --test-threads=2 (13 passed, 0 failed)\n\
+      \  - cargo test -p cito-native --lib core::setup:: -- --test-threads=2 (20 passed,\
+      \ 0 failed, 1 ignored subprocess worker)\n  - cargo test -p cito-native --lib\
+      \ core::cli:: -- --test-threads=2 (5 passed, 0 failed)\n  - cargo test -p cito-native\
+      \ --lib claude:: -- --test-threads=2 (1 passed, 0 failed)\n  - cargo test -p\
+      \ cito-native --test native plugins:: -- --test-threads=2 (54 passed, 0 failed)\n\
+      - Cross-track #19 lock-inode assertion in discovery_and_setup.rs:445 verified\
+      \ after rebase in v54.core-hub-daemon (e86ccff57f7432b43fb4fee5caf184e698948c0f)."
   - id: v54.macos-ui
     name: 'V54 macOS Swift UI, HeadlessOracle & UI Tests Closure: Composer Post-Close
       Error/Warning Surfacing, Directory Remote/Online Refresh, Drawer Button & Truncation
