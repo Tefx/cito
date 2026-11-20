@@ -2,6 +2,21 @@ use super::support::*;
 use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant};
 
+fn wait_for_connection(listener: &impl std::os::fd::AsRawFd) {
+    assert!(
+        cito_native::support::poll_until(
+            &mut [libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0
+            }],
+            Some(Instant::now() + Duration::from_secs(3))
+        )
+        .unwrap(),
+        "Connection timed out"
+    );
+}
+
 #[test]
 fn claude_wake_distinguishes_session_switch_from_transient_socket_failure() {
     let _lock = serial();
@@ -13,16 +28,7 @@ fn claude_wake_distinguishes_session_switch_from_transient_socket_failure() {
         let listener = UnixListener::bind(&path).unwrap();
         let server = std::thread::spawn(move || {
             for op in ["identify", "deliver"] {
-                use std::os::fd::AsRawFd;
-                assert!(cito_native::support::poll_until(
-                    &mut [libc::pollfd {
-                        fd: listener.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    }],
-                    Some(Instant::now() + Duration::from_secs(3))
-                )
-                .unwrap());
+                wait_for_connection(&listener);
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
@@ -260,6 +266,11 @@ fn two_unhooked_claude_endpoints_never_adopt_a_shared_workspace_transcript() {
             assert!(!f.exited(sidecar), "Sidecar rejected endpoint: {}", f.output(sidecar, true));
             f.frames(sidecar).iter().any(|frame| frame["op"] == "ready")
         });
+        // The second owner is already live, even before its bridge is started.
+        let pid = f.pid(*owner);
+        let identity = socket(&f.state.join(format!("sockets/claude-pid-{pid}.sock")),json!({"op":"identify"}));
+        assert_eq!(identity["session_id"], format!("claude-{pid}"));
+        assert!(!f.state.join("claude/aliases").join(first).exists());
         sidecar
     }).collect();
     for transcript in [first, "22222222-2222-4222-8222-222222222222"] {
@@ -453,6 +464,13 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
     let canonical = fs::read(&binding).unwrap();
     let canonical_value: Value = serde_json::from_slice(&canonical).unwrap();
     assert_eq!(canonical_value["source"], "hook");
+    let dir = f.home.join(".claude/projects/-repo-b");
+    fs::create_dir_all(&dir).unwrap();
+    let title = b"\n{\"type\":\"custom-title\",\"customTitle\":\"Canonical title\"}\n";
+    let mut bytes = "é".as_bytes().to_vec();
+    bytes.resize(128 * 1024 + 1 - title.len(), b'x');
+    bytes.extend_from_slice(title);
+    fs::write(dir.join("canonical-session.jsonl"), bytes).unwrap();
 
     // Let an initial channel request see no binding, then publish the canonical
     // hook while owning the lock. The channel must re-read it after acquisition.
@@ -488,6 +506,11 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
         f.output(sidecar, true)
     );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
+    assert_eq!(f.frames(client).last().unwrap()["cwd"], "/repo-b");
+    assert_eq!(
+        f.frames(client).last().unwrap()["session_name"],
+        "Canonical title"
+    );
     assert_eq!(
         f.frames(client).last().unwrap()["session_id"],
         "canonical-session"
@@ -510,6 +533,10 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
         "canonical-session"
     );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
+    assert_eq!(
+        socket(&socket_path, json!({"op":"identify"}))["cwd"],
+        "/repo-b"
+    );
     assert!(!f.state.join("claude/aliases/canonical-session").exists());
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
@@ -588,6 +615,7 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         let (received_tx, received_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
+            wait_for_connection(&listener);
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -1870,6 +1898,33 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
 }
 
 #[test]
+fn claude_hook_special_path_runs_as_one_shell_word_and_is_removed() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let dir = f.dir.join("Alice's $(echo example) plugin");
+    script(
+        &dir.join("bin/cito-claude-hook"),
+        "#!/bin/sh\nprintf 'hook invoked\\n'\n",
+    );
+    let call = |op| f.plugin(CLAUDE, json!({"op":op,"plugin_dir":dir}));
+    assert_eq!(call("setup_apply")["ok"], true);
+    let settings = f.home.join(".claude/settings.json");
+    let read = || serde_json::from_slice::<Value>(&fs::read(&settings).unwrap()).unwrap();
+    let configured = read();
+    let cmd = configured["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let (ok, out, err) = f.command("/bin/sh", &["-c", cmd], "");
+    assert!(ok, "{err}");
+    assert_eq!(out, "hook invoked\n");
+    assert_eq!(call("setup_inspect")["configured"], true);
+    assert_eq!(call("setup_apply")["ok"], true);
+    assert_eq!(read(), configured);
+    assert_eq!(call("setup_remove")["ok"], true);
+    assert!(read().get("hooks").is_none());
+}
+
+#[test]
 fn codex_multiline_toml_and_complete_subtree_removal() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -2914,6 +2969,22 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
     assert!(fs::read_to_string(f.home.join("mock-calls"))
         .unwrap()
         .contains("codex://threads/wake/thread%2Fa%3F%23%20b"));
+    // The queue command is authoritative for insertion. An unreadable activity
+    // database can degrade the post-queue attribution, but must not veto the command.
+    fs::create_dir_all(f.home.join(".codex")).unwrap();
+    fs::write(f.home.join(".codex/state_5.sqlite"), b"invalid database").unwrap();
+    let mut checkpoint = request.clone();
+    checkpoint["checkpoint_only"] = json!(true);
+    let receipt = f.plugin(CODEX, checkpoint);
+    assert_eq!(receipt["queue_confirmed"], true, "{receipt}");
+    assert!(receipt["reason"].is_string(), "{receipt}");
+    assert_eq!(
+        fs::read_to_string(f.home.join("queue-args"))
+            .unwrap()
+            .lines()
+            .count(),
+        12
+    );
     let mut retry = request;
     retry["queue_written"] = json!(true);
     let result = f.plugin(CODEX, retry.clone());
@@ -2931,7 +3002,7 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
             .unwrap()
             .lines()
             .count(),
-        6
+        12
     );
 }
 #[test]
@@ -3195,6 +3266,7 @@ fn claude_hook_routes_alias_and_session_acks_and_requires_confirmed_counts() {
         );
         f.eof(hook);
         for (sid, batch) in [("claude-42", "alias-batch"), ("session-a", "sid-batch")] {
+            wait_for_connection(&listener);
             let (stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -3416,6 +3488,87 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
     }
 }
 #[test]
+fn setup_cli_exposes_removal_receipts_and_post_save_reload_errors() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}));
+    let daemon = f.spawn("python3", &["-c", r#"import http.server,json,os,sys
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def reply(self,status,obj):
+  raw=json.dumps(obj).encode();self.send_response(status);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+ def do_GET(self): self.reply(200,dict(ok=True,pid=os.getpid(),stateDir=os.environ['CITO_STATE_DIR'],version=sys.argv[1]))
+ def do_POST(self):
+  op=json.loads(self.rfile.read(int(self.headers['Content-Length'])))['op']
+  if op=='set_host_hub': self.reply(503,dict(ok=False,error='Reload refused'))
+  else: self.reply(200,dict(ok=True,warning=op+' incomplete',warnings=['Remote unavailable'],detach_status='pending'))
+s=http.server.HTTPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
+"#,env!("CARGO_PKG_VERSION")], &[]);
+    wait(|| f.output(daemon, false).contains("ready"));
+    for (flag, value, op) in [
+        ("--remove-hub", "work", "setup_remove_hub"),
+        ("--disable", "pi", "setup_remove_app"),
+    ] {
+        let (ok, out, err) = f.command(NATIVE, &["setup", flag, value, "--json"], "");
+        assert!(ok, "{out} {err}");
+        let receipt: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            receipt["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["status"] == "warning"
+                    && action["detail"].as_str().is_some_and(|s| s.contains(op)
+                        && s.contains("Remote unavailable")
+                        && s.contains("Detach status: pending"))),
+            "{receipt}"
+        );
+    }
+    let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3021"], "");
+    assert!(
+        !ok && err.contains("Configuration saved") && err.contains("Reload refused"),
+        "{err}"
+    );
+    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    assert_eq!(config["host_hub"]["port"], 3021);
+}
+
+#[test]
+fn purge_waits_for_config_and_staging_writers_and_preserves_lock_inodes() {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    let _lock = serial();
+    for (name, marker) in [
+        ("config.json.lock", "config.json"),
+        ("runtime/staging.lock", "runtime/staged"),
+    ] {
+        let f = Fixture::new(json!({}));
+        let lock_path = f.state.join(name);
+        let guard = cito_native::support::FileLock::acquire(&lock_path).unwrap();
+        let held = fs::File::open(&lock_path).unwrap();
+        let child = f.spawn(NATIVE, &["setup", "--uninstall", "--purge-data"], &[]);
+        wait(|| {
+            assert!(!f.exited(child), "Uninstall bypassed {name}");
+            fs::File::open(f.state.join("daemon.lock")).is_ok_and(|file| {
+                // SAFETY: closing this descriptor releases a successful probe lock.
+                (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }) != 0
+            })
+        });
+        fs::write(f.state.join(marker), "{}").unwrap();
+        drop(guard);
+        wait(|| f.exited(child));
+        assert!(
+            f.output(child, true).is_empty(),
+            "{}",
+            f.output(child, true)
+        );
+        assert!(!f.state.join(marker).exists());
+        assert_eq!(
+            held.metadata().unwrap().ino(),
+            fs::metadata(lock_path).unwrap().ino()
+        );
+    }
+}
+
+#[test]
 fn pi_bridge_real_typescript_host_contract_without_npm() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -3427,6 +3580,48 @@ fn pi_bridge_real_typescript_host_contract_without_npm() {
     );
     assert!(ok, "{out}\n{err}");
 }
+#[test]
+fn pi_bridge_rejects_invalid_config_and_ignores_settlement_after_shutdown() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let module = root().join("plugins/pi/cito-bridge.ts");
+    let probe = r#"
+import assert from 'node:assert/strict';
+import {writeFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const {default:bridge} = await import(pathToFileURL(process.argv[1]));
+delete process.env.CITO_DAEMON_PORT;
+process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='0';
+for (const reject of [false,true]) {
+  let run, shutdown, settle, urls=[], ui=[];
+  bridge({on:(name,fn)=>{if(name==='session_shutdown') shutdown=fn},registerCommand:(_,cmd)=>run=cmd.handler});
+  const ctx={cwd:'/repo',sessionManager:{getSessionId:()=>'test',getSessionName:()=>'Test'},ui:{notify:(...v)=>ui.push(v),setStatus:(...v)=>ui.push(v)}};
+  globalThis.fetch=(url)=>{urls.push(url);return new Promise((yes,no)=>{settle=()=>reject?no(Error('late failure')):yes(new Response(JSON.stringify({result:{content:[]}})))})};
+  for (const invalid of [null,[],0,'text',{daemonPort:0},{daemon_port:65536},{daemonPort:null},{daemon_port:'1234'},{daemonPort:4321,daemon_port:false}]) {
+    writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify(invalid));
+    const result=run('on',ctx);
+    assert.equal(urls.length,0,'Invalid config reached the transport');
+    await result; assert.equal(ui.at(-1)[1],'error');
+  }
+  writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify({daemon_port:4321}));
+  const pending=run('on',ctx); assert.deepEqual(urls,['http://127.0.0.1:4321/mcp']);
+  await shutdown(); const before=ui.length; settle(); await pending; assert.equal(ui.length,before);
+}
+"#;
+    let (ok, out, err) = f.command(
+        "node",
+        &[
+            "--experimental-strip-types",
+            "--input-type=module",
+            "-e",
+            probe,
+            module.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+}
+
 #[test]
 fn empty_and_unbound_hooks_are_silent_and_malformed_input_preserves_queue() {
     let _lock = serial();
@@ -3477,6 +3672,22 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
     use std::time::{Duration, Instant};
     let _lock = serial();
     let f = Fixture::new(json!({}));
+    let child = f
+        .command_builder("/bin/sh", &["-c", "printf out; printf err >&2"])
+        .spawn()
+        .unwrap();
+    wait(|| {
+        cito_native::plugins::peek_plugin_exit(child.id())
+            .unwrap()
+            .is_some()
+    });
+    let ready = cito_native::support::wait_child_exit(&child, Duration::from_millis(100));
+    let drained = child.wait_with_output().unwrap();
+    assert_eq!(ready, Ok(true));
+    assert_eq!(
+        (drained.stdout, drained.stderr),
+        (b"out".to_vec(), b"err".to_vec())
+    );
     let command = f.command_builder(
         "python3",
         &[
@@ -3634,7 +3845,14 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
         // Exercise a command barrier while polling is paused, then cross the minimum
         // retry interval: no additional getUpdates request may run without configure.
         f.send(p, json!({"op":"on_acked"}));
-        std::thread::sleep(std::time::Duration::from_millis(550));
+        let quiet_until = Instant::now() + Duration::from_millis(1100);
+        wait(|| {
+            let count = fs::read_to_string(f.home.join("api-methods.jsonl"))
+                .unwrap()
+                .lines()
+                .count();
+            count != before + 1 || Instant::now() >= quiet_until
+        });
         let after = fs::read_to_string(f.home.join("api-methods.jsonl"))
             .unwrap()
             .lines()

@@ -1,69 +1,17 @@
 //! Application bundle assembly with symlink-preserving resource copying.
-use super::*;
-
-pub(super) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let target = dst.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if metadata.file_type().is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&path).map_err(|e| e.to_string())?, &target)
-                .map_err(|e| e.to_string())?;
-        } else if metadata.is_dir() {
-            copy_dir_recursive(&path, &target)?;
-        } else {
-            fs::copy(&path, &target).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn same_tree(source: &Path, target: &Path) -> bool {
-    let (Ok(left), Ok(right)) = (fs::symlink_metadata(source), fs::symlink_metadata(target)) else {
-        return false;
-    };
-    if left.file_type() != right.file_type() {
-        return false;
-    }
-    if left.file_type().is_symlink() {
-        return fs::read_link(source).ok() == fs::read_link(target).ok();
-    }
-    if left.is_dir() {
-        let names = |path: &Path| -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
-            fs::read_dir(path)
-                .ok()?
-                .map(|entry| entry.ok().map(|entry| entry.file_name()))
-                .collect()
-        };
-        let Some(names) = names(source).filter(|left| Some(left.clone()) == names(target)) else {
-            return false;
-        };
-        return names
-            .into_iter()
-            .all(|name| same_tree(&source.join(&name), &target.join(&name)));
-    }
-    if left.len() != right.len() || left.permissions().mode() != right.permissions().mode() {
-        return false;
-    }
-    use std::io::Read;
-    let (Ok(mut left), Ok(mut right)) = (fs::File::open(source), fs::File::open(target)) else {
-        return false;
-    };
-    let (mut a, mut b) = ([0u8; 65536], [0u8; 65536]);
-    loop {
-        let Ok(count) = left.read(&mut a) else {
-            return false;
-        };
-        if right.read_exact(&mut b[..count]).is_err() || a[..count] != b[..count] {
-            return false;
-        }
-        if count == 0 {
-            return true;
-        }
-    }
-}
+use super::{
+    copy_dir_recursive, ensure_cli_shims_native, publish_directory, resolve_app_bundle_path,
+    resolve_bundled_plugins_root, resolve_package_root, Candidate,
+};
+use crate::plugins::{
+    is_staged_plugins_root, resolve_builtin_plugins_dir, LoadedPlugins, CITO_VERSION,
+};
+use std::os::unix::fs::PermissionsExt;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn dir_bytes(path: &Path) -> u64 {
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -84,21 +32,6 @@ pub fn build_mac_app_bundle_native(
     build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
 }
 
-pub(super) fn resolve_app_bundle_path(
-    dest_dir: Option<&str>,
-    state_dir: &Path,
-) -> Result<PathBuf, String> {
-    let base_dest = match dest_dir {
-        Some(dest) => expand_home_dir(dest, "destDir", None)?,
-        None => state_dir.join("Applications"),
-    };
-    Ok(if base_dest.to_string_lossy().ends_with(".app") {
-        base_dest
-    } else {
-        base_dest.join("Cito.app")
-    })
-}
-
 pub(super) fn build_mac_app_bundle_from_root(
     dest_dir: Option<&str>,
     state_dir: &Path,
@@ -108,12 +41,6 @@ pub(super) fn build_mac_app_bundle_from_root(
     let destination = resolve_app_bundle_path(dest_dir, state_dir)?;
     let app_path =
         destination.with_file_name(format!(".Cito-{}.app", crate::plugins::random_hex(8)));
-    struct Candidate(PathBuf);
-    impl Drop for Candidate {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
     let _candidate = Candidate(app_path.clone());
     let contents_dir = app_path.join("Contents");
     let macos_dir = contents_dir.join("MacOS");

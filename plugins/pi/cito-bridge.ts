@@ -126,22 +126,28 @@ export default function citoBridge(pi: BridgeAPI): void {
     return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
   }
   async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>, expectedSessionId: string | undefined): Promise<Record<string, unknown>> {
-    let configuredPort: unknown;
+    let config: unknown = {};
     const rawConfig = process.env.CITO_CONFIG_PATH ?? join(resolvedStateDir, "config.json");
     const configPath = rawConfig === "~" ? homedir() : rawConfig.startsWith("~/")
       ? join(homedir(), rawConfig.slice(2)) : resolve(rawConfig);
-    try { configuredPort = (JSON.parse(readFileSync(configPath, "utf8")) as { daemonPort?: unknown }).daemonPort; }
+    try { config = JSON.parse(readFileSync(configPath, "utf8")); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw new Error(`Cannot read Cito config.json: ${error instanceof SyntaxError ? "Invalid JSON" : "Read failed"}`);
       }
     } // Only a missing config falls back to the environment and default port.
-    const envPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
-    const candidatePorts = [
-      /^\+?\d+$/.test(envPort) ? Number(envPort) : undefined,
-      typeof configuredPort === "number" ? configuredPort : undefined,
-    ];
-    const port = candidatePorts.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Cito config.json must be an object");
+    const validPort = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535;
+    let configuredPort: number | undefined;
+    for (const key of ["daemonPort", "daemon_port"]) {
+      if (!Object.hasOwn(config, key)) continue;
+      const value = (config as Record<string, unknown>)[key];
+      if (!validPort(value)) throw new Error(`Invalid ${key} in Cito config.json`);
+      configuredPort ??= value;
+    }
+    const rawPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
+    const envPort = /^\+?\d+$/.test(rawPort) ? Number(rawPort) : undefined;
+    const port = validPort(envPort) ? envPort : configuredPort ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       signal: AbortSignal.timeout(15_000),
@@ -397,6 +403,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       return [];
     },
     async handler(args, ctx) {
+      if (shuttingDown) return;
       lastActiveMs = Date.now();
       update(ctx);
       const trimmed = args.trim();
@@ -459,7 +466,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       const generation = ++commandGen;
       try {
         const payload = await callMcpTool(tool, toolArgs, commandSessionId);
-        if (sessionId !== commandSessionId || generation !== commandGen) return;
+        if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
         if (tool === "cito_listen") {
           const publicId = String(payload.listener_id ?? "cito").trim().split(":").at(-1)!;
           const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
@@ -473,7 +480,7 @@ export default function citoBridge(pi: BridgeAPI): void {
           ctx.ui.notify?.("Cito stopped listening", "info");
         }
       } catch (error) {
-        if (sessionId !== commandSessionId || generation !== commandGen) return;
+        if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
       renderBadge(ctx);
@@ -483,6 +490,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    commandGen++;
     repairWatcher?.close();
     await serverReady?.catch(() => {});
     context = undefined;

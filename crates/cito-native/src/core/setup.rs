@@ -1,10 +1,9 @@
-#[cfg(test)]
-use crate::plugins::random_hex;
 use crate::plugins::{
-    expand_home_dir, is_staged_plugins_root, resolve_builtin_plugins_dir, selected_plugin_dir,
-    staged_plugins_dir, try_random_hex, validate_harness_id, validate_hub_name, validate_nats_url,
-    LoadedPlugins, PluginDescriptor, CITO_VERSION,
+    expand_home_dir, selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
+    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
 };
+#[cfg(test)]
+use crate::plugins::{random_hex, CITO_VERSION};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::env;
@@ -12,6 +11,7 @@ use std::fs;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::time::Duration;
 
@@ -174,12 +174,6 @@ fn ensure_plugins_staged<'a>(
     super::plugins::cleanup_retired_companion(state_dir)?;
     let candidate = runtime.join(format!(".staging-{}", try_random_hex(12)?));
     fs::create_dir(&candidate).map_err(|e| e.to_string())?;
-    struct Candidate(PathBuf);
-    impl Drop for Candidate {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
     let _cleanup = Candidate(candidate.clone());
     let bin_dir = candidate.join("bin");
     if state_dir.join("bin").exists() {
@@ -206,7 +200,7 @@ fn ensure_plugins_staged<'a>(
             // No packaged or staged source remains to reconstruct this plugin.
             continue;
         };
-        if app_bundle::same_tree(source, &target) && is_staged_plugin_intact(state_dir, plugin) {
+        if same_tree(source, &target) && is_staged_plugin_intact(state_dir, plugin) {
             continue;
         }
         if !target.exists()
@@ -267,10 +261,81 @@ fn ensure_plugins_staged<'a>(
     for (staged, target) in publications {
         publish_directory(&staged, &target)?;
     }
-    if !app_bundle::same_tree(&bin_dir, &state_dir.join("bin")) {
+    if !same_tree(&bin_dir, &state_dir.join("bin")) {
         publish_directory(&bin_dir, &state_dir.join("bin"))?;
     }
     Ok(written)
+}
+
+struct Candidate(PathBuf);
+impl Drop for Candidate {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&path).map_err(|e| e.to_string())?, &target)
+                .map_err(|e| e.to_string())?;
+        } else if metadata.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            fs::copy(&path, &target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn same_tree(source: &Path, target: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (fs::symlink_metadata(source), fs::symlink_metadata(target)) else {
+        return false;
+    };
+    if left.file_type() != right.file_type() {
+        return false;
+    }
+    if left.file_type().is_symlink() {
+        return fs::read_link(source).ok() == fs::read_link(target).ok();
+    }
+    if left.is_dir() {
+        let names = |path: &Path| -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
+            fs::read_dir(path)
+                .ok()?
+                .map(|entry| entry.ok().map(|entry| entry.file_name()))
+                .collect()
+        };
+        let Some(names) = names(source).filter(|left| Some(left.clone()) == names(target)) else {
+            return false;
+        };
+        return names
+            .into_iter()
+            .all(|name| same_tree(&source.join(&name), &target.join(&name)));
+    }
+    if left.len() != right.len() || left.permissions().mode() != right.permissions().mode() {
+        return false;
+    }
+    use std::io::Read;
+    let (Ok(mut left), Ok(mut right)) = (fs::File::open(source), fs::File::open(target)) else {
+        return false;
+    };
+    let (mut a, mut b) = ([0u8; 65536], [0u8; 65536]);
+    loop {
+        let Ok(count) = left.read(&mut a) else {
+            return false;
+        };
+        if right.read_exact(&mut b[..count]).is_err() || a[..count] != b[..count] {
+            return false;
+        }
+        if count == 0 {
+            return true;
+        }
+    }
 }
 
 /// Publish a validated directory generation without exposing a missing target.
@@ -649,7 +714,17 @@ mod app_bundle;
 #[cfg(test)]
 use app_bundle::build_mac_app_bundle_from_root;
 pub use app_bundle::build_mac_app_bundle_native;
-use app_bundle::{copy_dir_recursive, resolve_app_bundle_path};
+fn resolve_app_bundle_path(dest_dir: Option<&str>, state_dir: &Path) -> Result<PathBuf, String> {
+    let base_dest = match dest_dir {
+        Some(dest) => expand_home_dir(dest, "destDir", None)?,
+        None => state_dir.join("Applications"),
+    };
+    Ok(if base_dest.to_string_lossy().ends_with(".app") {
+        base_dest
+    } else {
+        base_dest.join("Cito.app")
+    })
+}
 
 fn daemon_control_config(
     state_dir: &Path,
@@ -750,139 +825,210 @@ pub(crate) fn uninstall_setup_with_owner(
         &acquired
     };
     let _owner = lock;
-    let mut actions = Vec::new();
-    for plugin in plugins.agent_plugins() {
-        actions.extend(remove_plugin_setup(plugin)?);
-    }
-
-    let plist_path = launch_agent_plist_path(home_dir);
-    if plist_path.exists() {
-        fs::remove_file(&plist_path).map_err(|e| e.to_string())?;
-        actions.push(SetupAction {
-            target: "cito".to_string(),
-            path: plist_path.to_string_lossy().to_string(),
-            status: "updated".to_string(),
-            backup_path: None,
-            detail: "Removed LaunchAgent plist".to_string(),
-        });
-    }
-
-    for (sub, label) in [
-        ("bin", "Removed CLI shims directory"),
-        ("runtime", "Removed staged runtime directory"),
-        ("sockets", "Removed local sockets directory"),
-    ] {
-        let dir = state_dir.join(sub);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: dir.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: label.to_string(),
-            });
-        }
-    }
-    for p in &plugins.plugins {
-        if matches!(p.id.as_str(), "plugins" | "bin" | "runtime" | "sockets") {
-            continue;
-        }
-        let dir = state_dir.join(&p.id);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-            actions.push(SetupAction {
-                target: p.id.clone(),
-                path: dir.to_string_lossy().into_owned(),
-                status: "updated".into(),
-                backup_path: None,
-                detail: "Removed plugin runtime data".into(),
-            });
-        }
-    }
-
-    let app_targets = [
-        resolve_app_bundle_path(None, state_dir)?,
-        resolve_app_bundle_path(None, home_dir)?,
-    ];
-    for (index, app_target) in app_targets.iter().enumerate() {
-        if app_targets[..index].contains(app_target) {
-            continue;
-        }
-        let is_symlink = fs::symlink_metadata(app_target)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if is_symlink {
-            fs::remove_file(app_target).map_err(|e| e.to_string())?;
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: app_target.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: format!("Removed {} symlink", app_target.display()),
-            });
-        } else if purge_data && app_target.exists() {
-            fs::remove_dir_all(app_target).map_err(|e| e.to_string())?;
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: app_target.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: format!("Removed {}", app_target.display()),
-            });
-        }
-    }
+    let state = fs::canonicalize(state_dir).map_err(|e| e.to_string())?;
+    let resolved_config = crate::support::publication_target(config_path)?;
+    let mut config_targets = vec![resolved_config.clone()];
     if purge_data {
-        let resolved_config = crate::support::publication_target(config_path)?;
-        let config_path = resolved_config.as_path();
-        if let Some(parent) = config_path.parent() {
-            if let Some(cname) = config_path.file_name().and_then(|s| s.to_str()) {
-                let lock_name = format!("{cname}.lock");
-                let bak_prefix = format!("{cname}.bak.");
-                if parent.exists() {
-                    for entry in fs::read_dir(parent).map_err(|e| e.to_string())? {
-                        let entry = entry.map_err(|e| e.to_string())?;
-                        let fname = entry.file_name().to_string_lossy().into_owned();
-                        if fname == lock_name
-                            || fname == format!("{cname}.cito.lock")
-                            || fname.starts_with(&bak_prefix)
-                        {
-                            fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+        let default = crate::support::publication_target(&state.join("config.json"))?;
+        if default.starts_with(&state) {
+            config_targets.push(default);
+        }
+        config_targets.sort();
+        config_targets.dedup();
+    }
+    let staging = state.join("runtime/staging.lock");
+    let mut keep = vec![state.join("daemon.lock"), staging.clone()];
+    for target in &config_targets {
+        let mut name = target.as_os_str().to_owned();
+        name.push(".lock");
+        let name = PathBuf::from(name);
+        if keep.contains(&name) || keep.contains(target) {
+            return Err("Config path conflicts with an ownership lock".into());
+        }
+        keep.push(name);
+    }
+    let remove = || {
+        let _staging = crate::support::FileLock::acquire(&staging)?;
+        let mut actions = Vec::new();
+        for plugin in plugins.agent_plugins() {
+            actions.extend(remove_plugin_setup(plugin)?);
+        }
+
+        let plist_path = launch_agent_plist_path(home_dir);
+        if plist_path.exists() {
+            fs::remove_file(&plist_path).map_err(|e| e.to_string())?;
+            actions.push(SetupAction {
+                target: "cito".to_string(),
+                path: plist_path.to_string_lossy().to_string(),
+                status: "updated".to_string(),
+                backup_path: None,
+                detail: "Removed LaunchAgent plist".to_string(),
+            });
+        }
+
+        for (sub, label) in [
+            ("bin", "Removed CLI shims directory"),
+            ("runtime", "Removed staged runtime files"),
+            ("sockets", "Removed local sockets directory"),
+        ] {
+            let dir = state.join(sub);
+            if dir.exists() && remove_except_locks(&dir, &keep).map_err(|e| e.to_string())? {
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: dir.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: label.to_string(),
+                });
+            }
+        }
+        for p in &plugins.plugins {
+            if matches!(p.id.as_str(), "plugins" | "bin" | "runtime" | "sockets") {
+                continue;
+            }
+            let dir = state.join(&p.id);
+            if dir.exists() && remove_except_locks(&dir, &keep).map_err(|e| e.to_string())? {
+                actions.push(SetupAction {
+                    target: p.id.clone(),
+                    path: dir.to_string_lossy().into_owned(),
+                    status: "updated".into(),
+                    backup_path: None,
+                    detail: "Removed plugin runtime data".into(),
+                });
+            }
+        }
+
+        let app_targets = [
+            resolve_app_bundle_path(None, state_dir)?,
+            resolve_app_bundle_path(None, home_dir)?,
+        ];
+        for (index, app_target) in app_targets.iter().enumerate() {
+            if app_targets[..index].contains(app_target) {
+                continue;
+            }
+            let is_symlink = fs::symlink_metadata(app_target)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_symlink {
+                fs::remove_file(app_target).map_err(|e| e.to_string())?;
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: app_target.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: format!("Removed {} symlink", app_target.display()),
+                });
+            } else if purge_data && app_target.exists() {
+                let parent = app_target.parent().ok_or("Missing application directory")?;
+                let path = fs::canonicalize(parent)
+                    .map_err(|e| e.to_string())?
+                    .join(app_target.file_name().ok_or("Missing application name")?);
+                if !remove_except_locks(&path, &keep).map_err(|e| e.to_string())? {
+                    continue;
+                }
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: app_target.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: format!("Removed {}", app_target.display()),
+                });
+            }
+        }
+        if purge_data {
+            let config_path = resolved_config.as_path();
+            if let Some(parent) = config_path.parent() {
+                if let Some(cname) = config_path.file_name().and_then(|s| s.to_str()) {
+                    let bak_prefix = format!("{cname}.bak.");
+                    if parent.exists() {
+                        for entry in fs::read_dir(parent).map_err(|e| e.to_string())? {
+                            let entry = entry.map_err(|e| e.to_string())?;
+                            let fname = entry.file_name().to_string_lossy().into_owned();
+                            if fname == format!("{cname}.cito.lock")
+                                || fname.starts_with(&bak_prefix)
+                            {
+                                fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+                            }
                         }
                     }
                 }
             }
-        }
-        if config_path.exists() && !config_path.starts_with(state_dir) {
-            fs::remove_file(config_path).map_err(|e| e.to_string())?;
-        }
-        if state_dir.exists() {
-            // Keep the stable owner inode: unlinking it would admit a second
-            // daemon while this descriptor still owns the old inode.
-            for entry in fs::read_dir(state_dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if entry.file_name() == "daemon.lock" {
-                    continue;
-                }
-                let path = entry.path();
-                if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                    fs::remove_dir_all(path)
-                } else {
-                    fs::remove_file(path)
-                }
-                .map_err(|e| e.to_string())?;
+            if config_path.exists() && !config_path.starts_with(&state) {
+                fs::remove_file(config_path).map_err(|e| e.to_string())?;
             }
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: state_dir.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: "Removed local data while retaining the daemon ownership lock".to_string(),
-            });
+            if state_dir.exists() {
+                remove_except_locks(&state, &keep).map_err(|e| e.to_string())?;
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: state_dir.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: "Removed local data while retaining ownership and writer locks"
+                        .to_string(),
+                });
+            }
+        }
+
+        Ok((default_hub, actions))
+    };
+    crate::plugins::with_config_lock_mode(&config_targets[0], false, || {
+        match config_targets.get(1) {
+            Some(other) => crate::plugins::with_config_lock_mode(other, false, remove),
+            None => remove(),
+        }
+    })
+}
+
+// Keep stable inodes for both queued and newly arriving writers. Descend only
+// into ancestors of a lock, and never follow a symlink during tree removal.
+fn remove_except_locks(path: &Path, keep: &[PathBuf]) -> std::io::Result<bool> {
+    if keep.iter().any(|p| p == path) {
+        return Ok(false);
+    }
+    if !fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_file(path)?;
+    } else if !keep.iter().any(|p| p.starts_with(path)) {
+        fs::remove_dir_all(path)?;
+    } else {
+        let mut removed = false;
+        for entry in fs::read_dir(path)? {
+            removed |= remove_except_locks(&entry?.path(), keep)?;
+        }
+        return Ok(removed);
+    }
+    Ok(true)
+}
+
+fn removal_action(target: &str, path: &Path, result: &Value, fallback: &str) -> SetupAction {
+    let mut details = vec![result["notice"].as_str().unwrap_or(fallback).to_owned()];
+    if let Some(status) = result["detach_status"].as_str() {
+        details.push(format!("Detach status: {status}"));
+    }
+    let warnings: Vec<_> = result["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let summary = warnings.join("; ");
+    let mut degraded = result["detach_status"] == "pending";
+    for warning in warnings
+        .into_iter()
+        .chain(result["warning"].as_str().filter(|s| *s != summary))
+    {
+        degraded = true;
+        let message = super::cli::presentation_error(warning);
+        if !details.contains(&message) {
+            details.push(message);
         }
     }
-
-    Ok((default_hub, actions))
+    SetupAction {
+        target: target.into(),
+        path: path.display().to_string(),
+        status: if degraded { "warning" } else { "updated" }.into(),
+        backup_path: None,
+        detail: details.join("; "),
+    }
 }
 
 fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<SetupAction>, String> {
@@ -895,16 +1041,12 @@ fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<Set
         &config,
         &json!({"op":"setup_remove_app","harness":plugin.id}),
     )?;
-    Ok(vec![SetupAction {
-        target: plugin.id.clone(),
-        path: config.state_dir.to_string_lossy().into_owned(),
-        status: "updated".into(),
-        backup_path: None,
-        detail: result["notice"]
-            .as_str()
-            .unwrap_or("Disconnected and stopped active listeners")
-            .into(),
-    }])
+    Ok(vec![removal_action(
+        &plugin.id,
+        &config.state_dir,
+        &result,
+        "Disconnected integration",
+    )])
 }
 pub fn run_setup_cli(args: &[String]) {
     let run = || -> Result<Option<PathBuf>, String> {
@@ -1460,6 +1602,12 @@ pub fn run_setup_cli(args: &[String]) {
             }
         })?;
 
+        let saved_error = |error: String| {
+            format!(
+                "Configuration saved; daemon update incomplete: {}",
+                super::cli::presentation_error(&error)
+            )
+        };
         if !dry_run
             && (hub_name.is_some()
                 || !enable_hubs.is_empty()
@@ -1467,25 +1615,34 @@ pub fn run_setup_cli(args: &[String]) {
                 || share_hub.is_some()
                 || share_port.is_some())
         {
-            let config = daemon_control_config(&state_dir, &config_path, &home_dir)?;
+            let config =
+                daemon_control_config(&state_dir, &config_path, &home_dir).map_err(&saved_error)?;
             if crate::plugins::probe_daemon_health(&config).is_some() {
-                let result = super::cli::control_request(&config, &json!({"op":"set_host_hub"}))?;
+                let result = super::cli::control_request(&config, &json!({"op":"set_host_hub"}))
+                    .map_err(&saved_error)?;
                 if let Some(warning) = result["warning"]
                     .as_str()
                     .or_else(|| result["maintenance_warning"].as_str())
                 {
                     return Err(format!(
-                        "Configuration saved; daemon reload incomplete: {warning}"
+                        "Configuration saved; daemon reload incomplete: {}",
+                        super::cli::presentation_error(warning)
                     ));
                 }
             }
         }
 
+        let mut actions = vec![config_action];
         if !dry_run && !remove_hubs.is_empty() {
-            let (config, _) = crate::plugins::load_native_config()?;
-            crate::plugins::ensure_daemon(&config)?;
+            let (config, _) = crate::plugins::load_native_config().map_err(&saved_error)?;
+            crate::plugins::ensure_daemon(&config).map_err(&saved_error)?;
             for hub in &remove_hubs {
-                super::cli::control_request(&config, &json!({"op":"setup_remove_hub","hub":hub}))?;
+                let result = super::cli::control_request(
+                    &config,
+                    &json!({"op":"setup_remove_hub","hub":hub}),
+                )
+                .map_err(&saved_error)?;
+                actions.push(removal_action(hub, &config_path, &result, "Removed hub"));
             }
         }
 
@@ -1498,7 +1655,6 @@ pub fn run_setup_cli(args: &[String]) {
             && launch_at_login.is_none()
             && share_hub.is_none()
             && share_port.is_none();
-        let mut actions = vec![config_action];
         if !dry_run {
             ensure_cli_shims_native(&state_dir, &plugins)?;
         }
@@ -2050,7 +2206,7 @@ mod tests {
                     let actions = result["actions"].as_array().unwrap();
                     assert_eq!(external_config.exists(), !purge);
                     assert_eq!(backup.exists(), !purge);
-                    assert_eq!(lock.exists(), !purge);
+                    assert!(lock.exists(), "Keep the config writer inode");
                     for target in &targets {
                         assert_eq!(fs::symlink_metadata(target).is_err(), symlink || purge);
                         assert_eq!(
@@ -2459,7 +2615,8 @@ mod tests {
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
         assert!(!crate::plugins::pid_alive(pid as i32));
-        for sub in ["bin", "runtime", "sockets", "sample"] {
+        assert!(state.join("runtime/staging.lock").exists());
+        for sub in ["bin", "runtime/plugins", "sockets", "sample"] {
             assert!(
                 !state.join(sub).exists(),
                 "{sub} should be removed on uninstall"

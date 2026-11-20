@@ -210,15 +210,6 @@ pub fn parse_cli(
         && positionals.len() == 1
         && matches!(positionals[0].as_str(), "pause" | "resume")
     {
-        if !meta.is_empty()
-            || input
-                .keys()
-                .any(|key| !matches!(key.as_str(), "hub" | "scope" | "about"))
-        {
-            return Err(
-                "Inbox policy commands accept only --hub, --scope, --team and --about".into(),
-            );
-        }
         input.insert("paused".into(), json!(positionals[0] == "pause"));
     } else if cmd == "rename" {
         if positionals.is_empty() {

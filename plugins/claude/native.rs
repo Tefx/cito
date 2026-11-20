@@ -35,12 +35,37 @@ fn interactive_candidate(req: &Value, p: u32) -> bool {
 }
 use std::time::Duration;
 const EVENTS: [&str; 3] = ["Stop", "SessionStart", "UserPromptSubmit"];
-fn hook_cmd(v: &Value) -> bool {
-    v["type"] == "command"
-        && v["command"]
-            .as_str()
-            .map(|s| s == "cito-claude-hook" || s.ends_with("/cito-claude-hook"))
-            .unwrap_or(false)
+fn quote_hook(path: &str) -> String {
+    if path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/_-.@%+=:,".contains(&b))
+    {
+        path.into()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+fn registered_hook(v: &Value) -> Option<std::borrow::Cow<'_, str>> {
+    if v["type"] != "command" {
+        return None;
+    }
+    let command = v["command"].as_str()?;
+    let path: std::borrow::Cow<'_, str> = if let Some(word) = command.strip_prefix('\'') {
+        let word = word.strip_suffix('\'')?;
+        if word.split("'\\''").any(|part| part.contains('\'')) {
+            return None;
+        }
+        word.replace("'\\''", "'").into()
+    } else if let Some(word) = command.strip_prefix('"') {
+        let word = word.strip_suffix('"')?;
+        if word.contains(['"', '$', '`', '\\']) {
+            return None;
+        }
+        word.into()
+    } else {
+        command.into()
+    };
+    (path == "cito-claude-hook" || path.ends_with("/cito-claude-hook")).then_some(path)
 }
 fn clean_hooks(v: &mut Value) {
     if let Some(events) = v.get_mut("hooks").and_then(Value::as_object_mut) {
@@ -48,7 +73,7 @@ fn clean_hooks(v: &mut Value) {
             if let Some(a) = groups.as_array_mut() {
                 a.retain_mut(|g| {
                     if let Some(hooks) = g.get_mut("hooks").and_then(Value::as_array_mut) {
-                        hooks.retain(|h| !hook_cmd(h));
+                        hooks.retain(|h| registered_hook(h).is_none());
                         !hooks.is_empty()
                     } else {
                         true
@@ -73,6 +98,8 @@ fn setup(req: &Value) -> Result<Value> {
         .map(|s| expand(req, s))
         .unwrap_or_else(|| state(req).join("runtime/plugins/claude"))
         .join("bin/cito-claude-hook");
+    let hook = hook.to_str().ok_or("Hook path must be valid UTF-8")?;
+    let hook_command = quote_hook(hook);
     let desired = json!({"command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
     if op == "setup_inspect" {
         let v = read_json(&path)?;
@@ -84,10 +111,8 @@ fn setup(req: &Value) -> Result<Value> {
                         g["hooks"]
                             .as_array()
                             .map(|h| {
-                                h.iter().any(|entry| {
-                                    entry["type"] == "command"
-                                        && entry["command"].as_str() == hook.to_str()
-                                })
+                                h.iter()
+                                    .any(|entry| registered_hook(entry).as_deref() == Some(hook))
                             })
                             .unwrap_or(false)
                     })
@@ -133,7 +158,7 @@ fn setup(req: &Value) -> Result<Value> {
                 let groups = v["hooks"][e]
                     .as_array_mut()
                     .ok_or("Hook groups must be arrays")?;
-                groups.push(json!({"hooks":[{"type":"command","command":hook}]}));
+                groups.push(json!({"hooks":[{"type":"command","command":hook_command}]}));
             }
         }
         Ok(())
@@ -387,6 +412,17 @@ fn hook_parent_matches(p: u32) -> bool {
                 })
             }))
 }
+fn canonical_hook_identity(binding: &Value, pid: u32) -> Option<(&str, Option<&str>)> {
+    if binding["source"] == "channel"
+        || process_start(pid).as_deref() != Some(str_at(binding, "start")?)
+    {
+        return None;
+    }
+    Some((
+        raw_str_at(binding, "session_id")?,
+        raw_str_at(binding, "cwd"),
+    ))
+}
 fn binding_snapshot(path: &Path) -> Option<Value> {
     read_json(path)
         .ok()
@@ -467,6 +503,16 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
     }
     Ok(explicit.pop())
 }
+// A workspace transcript has no PID. A peer without a bridge can own it too.
+fn workspace_ambiguous(cwd: &str, endpoint: Option<u32>) -> Result<bool> {
+    let canonical = fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
+    let mut peers = user_processes()?.into_iter().filter(|p| {
+        Some(*p) != endpoint
+            && process_command(*p).is_ok_and(|cmd| matches_process(&cmd))
+            && process_cwd(*p).is_ok_and(|dir| Path::new(&dir) == canonical)
+    });
+    Ok(peers.nth(usize::from(endpoint.is_none())).is_some())
+}
 fn resolve(req: &Value) -> Result<String> {
     let explicit = metadata_session(req)?;
     let cwd = str_at(req, "cwd").unwrap_or("");
@@ -516,7 +562,13 @@ fn resolve(req: &Value) -> Result<String> {
             }
         }
     }
-    if transcripts.len() == 1 && (pid(req).is_none() || req["cli_cmd"].is_string()) {
+    if transcripts.len() == 1
+        && (pid(req).is_none() || req["cli_cmd"].is_string())
+        && !workspace_ambiguous(
+            cwd,
+            pid(req).filter(|p| process_command(*p).is_ok_and(|cmd| matches_process(&cmd))),
+        )?
+    {
         Ok(transcripts.remove(0))
     } else {
         Err("A session bound to this endpoint is required; workspace transcripts are missing or ambiguous".into())
@@ -527,11 +579,22 @@ fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
     let value = cached_file_projection(req, "claude/transcript-cache", &p, || {
         let mut f = fs::File::open(&p).map_err(|e| e.to_string())?;
         let size = f.metadata().map_err(|e| e.to_string())?.len();
-        f.seek(SeekFrom::Start(size.saturating_sub(128 * 1024)))
+        let start = size.saturating_sub(128 * 1024);
+        f.seek(SeekFrom::Start(start.saturating_sub(1)))
             .map_err(|e| e.to_string())?;
-        let mut s = String::new();
-        f.read_to_string(&mut s).map_err(|e| e.to_string())?;
-        let title: Option<String> = s
+        let mut bytes = Vec::new();
+        f.take(size - start + u64::from(start > 0))
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        let lines = if start == 0 {
+            &bytes[..]
+        } else {
+            bytes
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(&[][..], |i| &bytes[i + 1..])
+        };
+        let title: Option<String> = String::from_utf8_lossy(lines)
             .lines()
             .rev()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -551,6 +614,24 @@ fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
     })
     .ok()?;
     value.as_str().map(str::to_owned)
+}
+#[cfg(test)]
+#[test]
+fn transcript_tail_only_projects_complete_records() {
+    let root = std::env::temp_dir().join(format!("cito-tail-{}", crate::plugins::random_hex(12)));
+    let req = json!({"state_dir":root, "env":{"CITO_CLAUDE_HOME":root}});
+    let project = transcript_dir(&req, "/repo");
+    fs::create_dir_all(&project).unwrap();
+    for (sid, preceding_byte, expected) in
+        [("complete", b'\n', Some("Work")), ("fragment", b'x', None)]
+    {
+        let mut data = vec![preceding_byte];
+        data.extend_from_slice(b"{\"type\":\"custom-title\",\"customTitle\":\"Work\"}\n");
+        data.resize(1 + 128 * 1024, b' ');
+        fs::write(project.join(format!("{sid}.jsonl")), data).unwrap();
+        assert_eq!(title(&req, sid, "/repo").as_deref(), expected);
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 fn badge(req: &Value, sid: &str) -> Result<()> {
     let path = state(req)
@@ -1281,48 +1362,26 @@ fn sidecar(req: Value) -> Result<()> {
             if v["op"] == "ping" {
                 return Ok(json!({"ok":true}));
             }
-            let latest = latest_transcript(&req, cwd);
             if alias_active && first_transcript.is_none() {
                 first_transcript = alias_for_fallback(&req, &fallback);
             }
             let mut next = explicit.clone();
-            // A hook-recorded endpoint identity takes precedence over workspace scanning.
+            let mut cwd = cwd;
+            let initial;
             if next.is_none() {
-                if let Ok(binding) = read_json(&binding_path(&req, p)) {
-                    if binding["source"] != "channel"
-                        && str_at(&binding, "start").is_some()
-                        && str_at(&binding, "start").map(str::to_string) == process_start(p)
-                    {
-                        next = raw_str_at(&binding, "session_id").map(str::to_string);
-                        alias_active = next.as_deref().is_some_and(|sid| {
-                            alias_for_fallback(&req, &fallback).as_deref() == Some(sid)
-                        });
-                    }
+                initial = read_json(&binding_path(&req, p)).ok();
+                if let Some((sid, workspace)) =
+                    initial.as_ref().and_then(|v| canonical_hook_identity(v, p))
+                {
+                    next = Some(sid.to_owned());
+                    cwd = workspace.unwrap_or(cwd);
+                    alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
                 }
             }
+            let mut latest = latest_transcript(&req, cwd);
             if next.is_none() {
-                let other_endpoint = fs::read_dir(parent)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .any(|entry| {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        let Some(other) = name
-                            .strip_prefix("claude-pid-")
-                            .and_then(|s| s.strip_suffix(".sock"))
-                            .and_then(|s| s.parse::<u32>().ok())
-                        else {
-                            return false;
-                        };
-                        if other == p {
-                            return false;
-                        }
-                        alive(other)
-                            && process_command(other).is_ok_and(|command| matches_process(&command))
-                            && process_cwd(other).is_ok_and(|other_cwd| other_cwd == cwd)
-                    });
-                if other_endpoint {
+                if latest.is_some() && workspace_ambiguous(cwd, Some(p))? {
+                    latest = None;
                     next = Some(fallback.clone());
                     alias_active = false;
                     first_transcript = None;
@@ -1369,18 +1428,21 @@ fn sidecar(req: Value) -> Result<()> {
             let mut next = next.unwrap_or_else(|| fallback.clone());
             let mut channel_req = req.clone();
             channel_req["_binding_source"] = json!("channel");
-            if let Some(binding) = record_binding(&channel_req, p, &next, cwd)? {
-                if binding["source"] != "channel"
-                    && str_at(&binding, "start").is_some()
-                    && str_at(&binding, "start").map(str::to_owned) == process_start(p)
-                {
-                    if let Some(sid) = raw_str_at(&binding, "session_id") {
-                        // A hook can commit while this request waits for the leaf lock.
-                        // Keep an established fallback alias, otherwise adopt its identity.
-                        alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
-                        let selected = if alias_active { &fallback } else { sid };
-                        next = selected.to_string();
-                    }
+            let binding = record_binding(&channel_req, p, &next, cwd)?;
+            if let Some((sid, workspace)) =
+                binding.as_ref().and_then(|v| canonical_hook_identity(v, p))
+            {
+                // A hook can commit while this request waits for the leaf lock.
+                alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
+                next = if alias_active {
+                    first_transcript = Some(sid.into());
+                    fallback.clone()
+                } else {
+                    sid.into()
+                };
+                if let Some(workspace) = workspace.filter(|&path| path != cwd) {
+                    cwd = workspace;
+                    latest = latest_transcript(&req, cwd);
                 }
             }
             if next != current {

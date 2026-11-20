@@ -3,6 +3,11 @@ use super::{Duration, File, Result};
 
 /// Observe an owned, unreaped child without releasing its PID before cleanup.
 pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd> {
+    child_exit_watch(pid)?.ok_or_else(|| std::io::Error::from_raw_os_error(libc::ESRCH).to_string())
+}
+
+// For an owned, unreaped child ESRCH at registration means exit won the race.
+fn child_exit_watch(pid: u32) -> Result<Option<std::os::fd::OwnedFd>> {
     use std::os::fd::FromRawFd;
     #[cfg(target_os = "macos")]
     {
@@ -21,9 +26,13 @@ pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd> {
             udata: std::ptr::null_mut(),
         };
         if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(None);
+            }
+            return Err(error.to_string());
         }
-        Ok(owned)
+        Ok(Some(owned))
     }
     #[cfg(target_os = "linux")]
     {
@@ -32,7 +41,7 @@ pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd> {
         if fd < 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+        Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
     }
 }
 
@@ -64,7 +73,9 @@ pub fn poll_until(fds: &mut [libc::pollfd], deadline: Option<std::time::Instant>
 
 pub fn wait_child_exit(child: &std::process::Child, timeout: Duration) -> Result<bool> {
     use std::os::fd::AsRawFd;
-    let fd = child_exit_fd(child.id())?;
+    let Some(fd) = child_exit_watch(child.id())? else {
+        return Ok(true);
+    };
     poll_until(
         &mut [libc::pollfd {
             fd: fd.as_raw_fd(),
@@ -127,8 +138,16 @@ pub fn run_piped_command(
                 }
             }
         }
-        let exited = child_exit_fd(child.id())?;
-        let mut child_exited = false;
+        let mut exited = child_exit_watch(child.id())?;
+        let kill_descendants = || {
+            // SAFETY: the unreaped child reserves its owned process-group ID.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+        };
+        if exited.is_none() {
+            kill_descendants();
+        }
         let mut output = [Vec::new(), Vec::new()];
         loop {
             if std::time::Instant::now() >= deadline {
@@ -176,7 +195,7 @@ pub fn run_piped_command(
                     }
                 }
             }
-            if child_exited && pipes.iter().all(Option::is_none) {
+            if exited.is_none() && pipes.iter().all(Option::is_none) {
                 return Ok(Some(output));
             }
             let mut fds = [
@@ -196,7 +215,7 @@ pub fn run_piped_command(
                     revents: 0,
                 },
                 libc::pollfd {
-                    fd: if child_exited { -1 } else { exited.as_raw_fd() },
+                    fd: exited.as_ref().map_or(-1, AsRawFd::as_raw_fd),
                     events: libc::POLLIN,
                     revents: 0,
                 },
@@ -207,12 +226,9 @@ pub fn run_piped_command(
                 deadline
             };
             poll_until(&mut fds, Some(wake_at))?;
-            if !child_exited && fds[3].revents != 0 {
-                child_exited = true;
-                // SAFETY: the unreaped child reserves its owned process-group ID.
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
+            if fds[3].revents != 0 {
+                exited = None;
+                kill_descendants();
             }
         }
     })();

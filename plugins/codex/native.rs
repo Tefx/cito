@@ -824,9 +824,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                         )
                     }
                 };
-                if let Err(error) =
-                    row_for_id(req, sid).and_then(|_| record_effect(req, sid, Some(text), None))
-                {
+                if let Err(error) = record_effect(req, sid, Some(text), None) {
                     return Ok(
                         json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":error}),
                     );
