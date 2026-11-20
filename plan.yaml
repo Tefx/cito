@@ -18604,7 +18604,7 @@ phases:
   - id: v54.audit_fix_2
     name: 'V54 macOS Zombie-Leader Process-Group EPERM Teardown Fix & Fast-Exit Regression
       Closure [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/tests/support/mod.rs\n  blocked_paths:\n\
       \    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n    - src/macos/**\n\
@@ -18656,3 +18656,16 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-20T04:52:15.635937Z'
+    done_at: '2026-11-20T04:56:25.456964+00:00'
+    evidence: "Closed macOS zombie-leader process-group EPERM regression in crates/cito-native/tests/support/mod.rs\
+      \ on commit 3c816c3d9412b72433e4eaf90d6b54f09e7eac46 (version 0.21.3 unchanged).\n\
+      - Process::stop accepts libc::EPERM from kill(-pgid, signal) only when wait_child_exit(&self.child,\
+      \ Duration::ZERO) == Ok(true) confirms the leader is already an exited zombie,\
+      \ preserving error reporting for live leaders.\n- Extended fixture_teardown_settles_children_and_preserves_primary_failures\
+      \ with command-fast-exit and drop-fast-exit cases (reproduced os error 1 before\
+      \ fix; passed 0 after fix).\n- Commands run in isolated worktree:\n  - cargo\
+      \ fmt --all -- --check (exit 0)\n  - git diff --check (exit 0)\n  - cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings (exit 0)\n  - cargo test\
+      \ -p cito-native --test native support:: -- --test-threads=2 (1 passed, 0 failed,\
+      \ 1 ignored worker)\n  - cargo test -p cito-native --test native plugins::pi_bridge\
+      \ -- --test-threads=1 (2 passed, 0 failed)"
