@@ -513,8 +513,7 @@ impl LocalState {
             for id in ids {
             let rows = c.query("SELECT hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?", &[json!(hub),json!(node),id.clone()])?;
             if !rows.first().is_some_and(|signal| signal_matches_listener(signal, &listener)) { continue; }
-            c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(now_ms()),json!(hub),json!(node),id.clone()])?;
-            c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?,?,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(channel),json!(now_ms()),json!(hub),json!(node),id.clone()])?;
+            acknowledge_current(c, hub, node, id, channel)?;
         }
         reconcile_wake_retry(c, hub, node)?;
         Ok(()) })
@@ -729,6 +728,19 @@ pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
     searchable
         .to_lowercase()
         .contains(&query.trim().to_lowercase())
+}
+
+fn acknowledge_current(
+    c: &Connection,
+    hub: &str,
+    node: &str,
+    id: &Value,
+    channel: &str,
+) -> Result<(), String> {
+    let at = json!(now_ms());
+    c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[at.clone(),json!(hub),json!(node),id.clone()])?;
+    c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?,?,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(channel),at,json!(hub),json!(node),id.clone()])?;
+    Ok(())
 }
 
 fn current_listener(c: &Connection, hub: &str, id: &str) -> Result<Value, String> {

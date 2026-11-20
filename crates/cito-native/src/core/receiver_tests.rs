@@ -1,4 +1,8 @@
-use super::super::{database::Database, hub::HubEngine, registration::register_listener};
+use super::super::{
+    database::Database,
+    hub::{HubEngine, TestDirectory, TestEngine},
+    registration::register_listener,
+};
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{path::PathBuf, sync::Arc, thread, time::Instant};
@@ -29,27 +33,27 @@ impl Drop for Worker {
 }
 
 struct Fixture {
-    dir: PathBuf,
     state: LocalState,
-    engine: Arc<HubEngine>,
+    engine: TestEngine,
     client: HubClient,
     row: Value,
+    dir: TestDirectory,
 }
 impl Fixture {
     fn new() -> Result<Self, String> {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = TestDirectory(std::env::temp_dir().join(format!(
             "cito-receiver-{}",
             crate::plugins::random_uuid_v4()
-        ));
+        )));
         std::fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
         let state = LocalState::open(&dir)?;
-        let engine = Arc::new(HubEngine::open(&dir.join("hub"))?);
+        let engine = TestEngine(HubEngine::open(&dir.join("hub"))?);
         engine.set_plugin_roots(&[])?;
         let mut client = HubClient::new(
             "local".into(),
             json!({"url":"local://"}),
             "alice",
-            Some(engine.clone()),
+            Some(Arc::new(engine.clone())),
         );
         client.registration = state.registration_lock("local")?;
         let registration = register_listener(
@@ -57,7 +61,7 @@ impl Fixture {
             &client,
             "host",
             &json!({"about":"Test receiver","scope":"workspace"}),
-            &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":dir,"endpoint_pid":null,"repo":null,"branch":null}),
+            &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}),
         )?;
         let row = state
             .listener("local", string(&registration, "canonical_listener_id"))?
@@ -156,55 +160,89 @@ impl Fixture {
         }
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.engine.shutdown();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
 #[test]
 fn transient_probe_revocation_respects_dispatch_and_lease() -> Result<(), String> {
+    for definitive in [false, true] {
+        let f = Fixture::new()?;
+        f.seed("in-flight")?;
+        let mut row = f.row.clone();
+        row["consecutive_probe_failures"] = json!(2);
+        f.state.db.execute(
+            "UPDATE local_listeners SET lease_until_ms=?",
+            &[json!(now_ms() + 60_000)],
+        )?;
+        apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
+        assert_eq!(
+            f.state
+                .listener("local", string(&row, "listener_id"))?
+                .unwrap()["status"],
+            "ACTIVE"
+        );
+        f.state
+            .db
+            .execute("UPDATE local_listeners SET lease_until_ms=0", &[])?;
+        f.state.db.execute(
+            "UPDATE local_signals SET state='DISPATCHING',dispatcher_token='worker'",
+            &[],
+        )?;
+        apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
+        assert_eq!(
+            f.state
+                .listener("local", string(&row, "listener_id"))?
+                .unwrap()["status"],
+            "ACTIVE"
+        );
+        if !definitive {
+            f.state
+                .db
+                .execute("UPDATE local_signals SET dispatcher_token=NULL", &[])?;
+        }
+        apply_probe(
+            &f.state,
+            &f.client,
+            &row,
+            &json!({"ok":definitive,"status":"closed_definitive"}),
+        )?;
+        assert_eq!(
+            f.state
+                .listener("local", string(&row, "listener_id"))?
+                .unwrap()["status"],
+            "UNLISTENED"
+        );
+        assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    }
+    Ok(())
+}
+
+#[test]
+fn local_registration_failure_compensates_only_new_remote_attachments() -> Result<(), String> {
     let f = Fixture::new()?;
-    f.seed("in-flight")?;
-    let mut row = f.row.clone();
-    row["consecutive_probe_failures"] = json!(2);
-    f.state.db.execute(
-        "UPDATE local_listeners SET lease_until_ms=?",
-        &[json!(now_ms() + 60_000)],
-    )?;
-    apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
-    assert_eq!(
-        f.state
-            .listener("local", string(&row, "listener_id"))?
-            .unwrap()["status"],
-        "ACTIVE"
-    );
-    f.state
-        .db
-        .execute("UPDATE local_listeners SET lease_until_ms=0", &[])?;
-    f.state
-        .db
-        .execute("UPDATE local_signals SET state='DISPATCHING'", &[])?;
-    apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
-    assert_eq!(
-        f.state
-            .listener("local", string(&row, "listener_id"))?
-            .unwrap()["status"],
-        "ACTIVE"
-    );
-    apply_probe(
-        &f.state,
-        &f.client,
-        &row,
-        &json!({"ok":true,"status":"closed_definitive"}),
-    )?;
-    assert_eq!(
-        f.state
-            .listener("local", string(&row, "listener_id"))?
-            .unwrap()["status"],
-        "UNLISTENED"
-    );
-    assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    f.state.db.execute("CREATE TRIGGER reject_enrollment BEFORE INSERT ON local_listeners BEGIN SELECT RAISE(ABORT,'enrollment rejected'); END", &[])?;
+    for (harness, session, expected) in [
+        ("fixture", "session", "ACTIVE"),
+        ("fixture", "other", "UNLISTENED"),
+        ("human", "default", "UNLISTENED"),
+    ] {
+        let error = register_listener(
+            &f.state,
+            &f.client,
+            "host",
+            &json!({"about":"Receiver"}),
+            &json!({"harness":harness,"session_id":session}),
+        )
+        .unwrap_err();
+        assert_eq!(error, "enrollment rejected");
+        let id = crate::core::identity::listener_id(
+            string(&f.client.identity, "principal_id"),
+            harness,
+            session,
+        );
+        let (remote, _) = f.client.kv_get(&id)?.ok_or("Missing remote registration")?;
+        assert_eq!(
+            remote["channels"][format!("host:{harness}")]["state"],
+            expected
+        );
+    }
     Ok(())
 }
 
@@ -226,7 +264,7 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
             "consumer_ack",
             "stream_get_message",
         ] {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = crate::core::http_boundary::accept_test_client(&listener).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -235,7 +273,11 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
             let mut length = 0;
             loop {
                 line.clear();
-                reader.read_line(&mut line).unwrap();
+                assert_ne!(
+                    reader.read_line(&mut line).unwrap(),
+                    0,
+                    "Truncated fixture request"
+                );
                 if line == "\r\n" {
                     break;
                 }
@@ -864,7 +906,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
             "local".into(),
             json!({"url":"local://"}),
             "alice",
-            Some(f.engine.clone()),
+            Some(Arc::new(f.engine.clone())),
         );
         assert!(!Arc::ptr_eq(
             &replacement_client.registration,
@@ -893,7 +935,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                 wait_until(||f.state.listener("local",id).ok().flatten().is_some_and(|row|row["status"]=="UNLISTENED"),Duration::from_secs(3))?;
                 assert!(matches!(f.client.registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"Terminal revocation must hold registration authority through remote detach; probe={probe}");
                 Ok(scope.spawn(|| {
-                    let result=register_listener(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null,"repo":null,"branch":null}));
+                    let result=register_listener(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}));
                     let _=finished.send(());
                     result
                 }))
@@ -1019,7 +1061,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                         &f.client,
                         "host",
                         &json!({"about":"New owner"}),
-                        &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null}),
+                        &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null}),
                     )?;
                     let before = f.client.kv_get(id)?;
                     assert_ne!(
@@ -1094,7 +1136,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         &f.client,
         "host",
         &json!({"about":"Replacement"}),
-        &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null,"repo":null,"branch":null}),
+        &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}),
     )?;
     assert!(replacement["binding_generation"].as_u64() > f.row["binding_generation"].as_u64());
     let successor = f
@@ -1337,7 +1379,12 @@ fn unlisten_aborts_child_and_preserves_unlistened_passive_reason() -> Result<(),
 fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), String> {
     let f = Fixture::new()?;
     // Keep cold system-interpreter initialization outside the one-second expiry budget.
-    plugin_request(&f.plugin(DELIVER), &json!({"state_dir": f.dir}), None, None)?;
+    plugin_request(
+        &f.plugin(DELIVER),
+        &json!({"state_dir": f.dir.as_path()}),
+        None,
+        None,
+    )?;
     f.seed("early")?;
     f.seed("late")?;
     f.state.db.execute(

@@ -145,16 +145,7 @@ fn http_json(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Resu
 }
 
 fn http_error(stream: &mut TcpStream, err: &str) {
-    let code = err
-        .split_once(':')
-        .map(|(code, _)| code)
-        .filter(|code| {
-            !code.is_empty()
-                && code
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-        })
-        .unwrap_or("INTERNAL_ERROR");
+    let (code, _) = crate::core::http_boundary::coded_error(err);
     let status = match code {
         "FORBIDDEN" | "PERMISSIONS_VIOLATION" | "FORBIDDEN_TARGET_SCOPE" => 403,
         "AUTHORIZATION_VIOLATION" => 401,
@@ -191,8 +182,13 @@ fn handle_http(
         // blocking reads with timeouts, including between fragmented headers.
         stream.set_nonblocking(false).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-        let head = crate::core::http_boundary::read_head(&mut reader, 65_536)
-            .map_err(|(_, message)| format!("INVALID_INPUT: {message}"))?;
+        let invalid = |stream: &mut TcpStream, status, message: &str| {
+            http_json(stream, status, &json!({"ok":false,"error":{"code":"INVALID_INPUT","message":format!("INVALID_INPUT: {message}")}})).map_err(|e| e.to_string())
+        };
+        let head = match crate::core::http_boundary::read_head(&mut reader, 65_536) {
+            Ok(head) => head,
+            Err((status, message)) => return invalid(&mut stream, status, message),
+        };
         let method = head.method;
         let path = head.target.split('?').next().unwrap_or("/").to_owned();
         let headers = head.headers;
@@ -301,7 +297,7 @@ fn handle_http(
             return Err("NOT_FOUND: Not found".into());
         }
         if length > 8 * 1024 * 1024 {
-            return Err("INVALID_INPUT: RPC body exceeds 8 MiB".into());
+            return invalid(&mut stream, 413, "RPC body exceeds 8 MiB");
         }
         let mut body = vec![0u8; length];
         reader

@@ -290,6 +290,11 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
+        let host = if self.host_server.is_some() {
+            self.applied_host_config.as_ref().unwrap_or(host)
+        } else {
+            host
+        };
         let port = self
             .host_server
             .as_ref()
@@ -344,6 +349,13 @@ impl DaemonService {
             let name = hub_name_from_url(url);
             let mut command = format!("cito setup --hub {name} --url {url}");
             if host_hub_auth_mode(host) == "token" && !token.is_empty() {
+                if token.starts_with("--")
+                    || !token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-/=".contains(&b))
+                {
+                    return json!({"name":name,"url":url,"auth_mode":"token","token":token,"set_default":true}).to_string();
+                }
                 command.push_str(&format!(" --auth token --token {token}"));
             }
             command.push_str(" --default");
@@ -372,15 +384,18 @@ impl DaemonService {
         crate::core::identity::display_address(hub, &self.config.default_hub, row, &peers)
     }
 
-    fn address_book(&self) -> HashMap<&str, Vec<Value>> {
+    pub(super) fn address_book(&self) -> HashMap<&str, Vec<Value>> {
         self.slots
             .iter()
             .map(|(name, slot)| (name.as_str(), address_peers(&self.state, slot)))
             .collect()
     }
 
-    pub(super) fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
-        let addresses = self.address_book();
+    pub(super) fn activity_dto(
+        &self,
+        rows: Vec<Value>,
+        addresses: &HashMap<&str, Vec<Value>>,
+    ) -> Vec<Value> {
         rows.into_iter()
             .map(|mut row| {
                 let target = self
@@ -494,6 +509,7 @@ impl DaemonService {
             .into_iter()
             .filter(|row| self.slots.contains_key(string(row, "hub")))
             .collect();
+        let addresses = self.address_book();
         for row in &mut sessions {
             *row = project_fields(row, SESSION_FIELDS);
             self.project_session_controls(row);
@@ -525,7 +541,13 @@ impl DaemonService {
                 .custom_title(string(row, "harness"), string(row, "session_id"))?
                 .is_some());
             row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
-            row["display_address"] = json!(self.display_address(string(row, "hub"), row));
+            let hub = string(row, "hub");
+            row["display_address"] = json!(crate::core::identity::display_address(
+                hub,
+                &self.config.default_hub,
+                row,
+                &addresses[hub]
+            ));
         }
         let mut available = self
             .session_activity
@@ -545,7 +567,7 @@ impl DaemonService {
                 row["custom_title"] = json!(true);
             }
         }
-        let activity = self.activity_dto(activity);
+        let activity = self.activity_dto(activity, &addresses);
         let mut remote = Vec::new();
         let mut online = 0;
         let now = now_ms();
@@ -568,7 +590,13 @@ impl DaemonService {
                         .iter()
                         .any(|s| s["hub"] == *hub && s["listener_id"] == row["listener_id"])
                 {
-                    let mut peer = self.peer_dto(hub, &row);
+                    let display = crate::core::identity::display_address(
+                        hub,
+                        &self.config.default_hub,
+                        &row,
+                        &addresses[hub.as_str()],
+                    );
+                    let mut peer = self.peer_dto(hub, &row, &display);
                     if row["harness"] == "human" {
                         if let Some(sample) = settings["hubs"]
                             .as_array()
@@ -595,8 +623,8 @@ impl DaemonService {
         )
     }
 
-    pub(super) fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"listen_mode":row["listen_mode"].as_str().unwrap_or("manual"),"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":row["updated_at_ms"].as_u64().into_iter().chain(row["channels"].as_object().into_iter().flat_map(|channels| channels.values()).filter_map(|channel| channel["updated_at_ms"].as_u64())).max().map(iso),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|crate::core::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id")))});
+    pub(super) fn peer_dto(&self, hub: &str, row: &Value, display: &str) -> Value {
+        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":display,"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"listen_mode":row["listen_mode"].as_str().unwrap_or("manual"),"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":row["updated_at_ms"].as_u64().into_iter().chain(row["channels"].as_object().into_iter().flat_map(|channels| channels.values()).filter_map(|channel| channel["updated_at_ms"].as_u64())).max().map(iso),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|crate::core::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id")))});
         let attachments = crate::core::lease::attachments(row, &self.host_id, now_ms());
         result["channels"] = json!(attachments
             .iter()
@@ -751,10 +779,17 @@ impl DaemonService {
             }
         }
         let mut sessions = self.state.active()?;
+        let addresses = self.address_book();
         sessions.retain(|row| self.slots.contains_key(string(row, "hub")));
         for row in &mut sessions {
             row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
-            row["display_address"] = json!(self.display_address(string(row, "hub"), row));
+            let hub = string(row, "hub");
+            row["display_address"] = json!(crate::core::identity::display_address(
+                hub,
+                &self.config.default_hub,
+                row,
+                &addresses[hub]
+            ));
             row["custom_title"] = json!(self
                 .state
                 .custom_title(string(row, "harness"), string(row, "session_id"))?

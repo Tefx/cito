@@ -9,23 +9,7 @@ use super::{
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
-struct TestDirectory(std::path::PathBuf);
-impl std::ops::Deref for TestDirectory {
-    type Target = std::path::PathBuf;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl AsRef<std::path::Path> for TestDirectory {
-    fn as_ref(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use crate::core::hub::{TestDirectory, TestEngine};
 
 struct TestService(Option<DaemonService>);
 impl TestService {
@@ -57,7 +41,6 @@ impl Drop for TestService {
 
 struct ServiceCleanup {
     service: Arc<Mutex<DaemonService>>,
-    directory: std::path::PathBuf,
 }
 impl Drop for ServiceCleanup {
     fn drop(&mut self) {
@@ -65,7 +48,6 @@ impl Drop for ServiceCleanup {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .shutdown();
-        let _ = fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -120,7 +102,6 @@ fn composer_prearm_failures_settle_once_and_config_producers_share_lock() -> Res
     )?));
     let _cleanup = ServiceCleanup {
         service: service.clone(),
-        directory: dir.clone(),
     };
     for generation in [None, Some(u64::MAX)] {
         fs::write(&config.config_path, "{").unwrap();
@@ -218,7 +199,6 @@ fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(),
     )?));
     let _cleanup = ServiceCleanup {
         service: service.clone(),
-        directory: dir.clone(),
     };
     let result = (|| {
         {
@@ -327,40 +307,35 @@ fn credential_save_restricts_existing_external_config_mode() -> Result<(), Strin
         user: "alice".into(),
         default_hub: "local".into(),
     };
-    let result = (|| -> Result<(), String> {
-        fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
-        fs::set_permissions(&config.config_path, fs::Permissions::from_mode(0o644))
-            .map_err(|e| e.to_string())?;
-        let mut service = TestService::open(
-            &config,
-            &LoadedPlugins {
-                plugins: vec![],
-                rejected_ids: Default::default(),
-            },
-        )?;
-        let saved = service.mutate_config(|raw| {
-            raw["token"] = json!("secret");
-            Ok(())
-        });
-        service.shutdown();
-        saved?;
-        let stored: Value = serde_json::from_str(
-            &fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
-        )
+    fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+    fs::set_permissions(&config.config_path, fs::Permissions::from_mode(0o644))
         .map_err(|e| e.to_string())?;
-        assert_eq!(stored["token"], "secret");
-        assert_eq!(
-            fs::metadata(&config.config_path)
-                .map_err(|e| e.to_string())?
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+    let mut service = TestService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    let saved = service.mutate_config(|raw| {
+        raw["token"] = json!("secret");
         Ok(())
-    })();
-    let _ = fs::remove_dir_all(dir);
-    result
+    });
+    service.shutdown();
+    saved?;
+    let stored: Value =
+        serde_json::from_str(&fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    assert_eq!(stored["token"], "secret");
+    assert_eq!(
+        fs::metadata(&config.config_path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    Ok(())
 }
 
 #[test]
@@ -503,10 +478,36 @@ fn authoritative_commits_survive_secondary_local_projection_failures() -> Result
             .state
             .db
             .execute("DROP TRIGGER fail_projection", &[])?;
+        // An already-admitted old-slot writer finishes after cancellation. The
+        // replacement must not enumerate durable rows until that writer exits.
+        let state = service.state.clone();
+        let (ready, rx) = std::sync::mpsc::channel();
+        thread::scope(|threads| -> Result<(), String> {
+            let writer = threads.spawn(|| -> Result<(), String> {
+                let _guard = client.registration.lock().unwrap();
+                ready.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !client.closed.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    client.wait_for_event(client.event_revision(), deadline);
+                }
+                assert!(client.closed.load(Ordering::SeqCst));
+                state.db.execute(
+                    "UPDATE local_listeners SET status='ACTIVE' WHERE listener_id=?",
+                    &[json!(agent_id)],
+                )?;
+                Ok(())
+            });
+            rx.recv().unwrap();
+            service.reload_slots()?;
+            writer.join().unwrap()?;
+            Ok(())
+        })?;
+        assert_eq!(
+            state.listener("local", agent_id)?.unwrap()["status"],
+            "FENCED_INACTIVE"
+        );
         Ok(())
     })();
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -537,7 +538,6 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
     )?));
     let _cleanup = ServiceCleanup {
         service: service.clone(),
-        directory: dir.clone(),
     };
     let result = (|| -> Result<(), String> {
         for op in ["setup_save_hub", "save_hub", "paste_hub_invite"] {
@@ -549,7 +549,7 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
             let (started, observed) = mpsc::sync_channel(1);
             let (release, wait) = mpsc::sync_channel(1);
             let server = thread::spawn(move || -> Result<(), String> {
-                let (mut stream, _) = listener.accept().map_err(|e| e.to_string())?;
+                let mut stream = crate::core::http_boundary::accept_test_client(&listener)?;
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .map_err(|e| e.to_string())?;
@@ -707,8 +707,6 @@ fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profi
         assert!(config.state_dir.join("oidc-token-local.json").exists());
         Ok(())
     })();
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -827,8 +825,6 @@ print(json.dumps(result))
         );
         Ok(())
     })();
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -988,6 +984,21 @@ print(json.dumps(v))
         service.action(
             &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
         )?;
+        let client = service.slot("local")?;
+        let channel = format!("{}:fixture", service.host_id);
+        assert!(DaemonService::heartbeat_agent(
+            &service.state,
+            client,
+            &channel,
+            &manual
+        )?);
+        assert_eq!(client.kv_get(&id)?.unwrap().0["listen_mode"], "auto");
+        assert!(!DaemonService::heartbeat_agent(
+            &service.state,
+            client,
+            &channel,
+            &stopped
+        )?);
         service.state.db.execute(
             "UPDATE local_listeners SET last_activity_at_ms=?,lease_until_ms=? WHERE listener_id=?",
             &[
@@ -1027,6 +1038,24 @@ print(json.dumps(v))
             "INSERT OR REPLACE INTO wake_retries VALUES('local',?,?)",
             &[json!(id), json!(now_ms() + 30_000)],
         )?;
+        let lock = service.state.registration_lock("local")?;
+        let (ready, rx) = std::sync::mpsc::channel();
+        let (release, done) = std::sync::mpsc::channel();
+        thread::scope(|scope| -> Result<(), String> {
+            scope.spawn(move || {
+                let _guard = lock.lock().unwrap();
+                ready.send(()).unwrap();
+                let _ = done.recv_timeout(Duration::from_secs(2));
+            });
+            rx.recv().unwrap();
+            service.auto_listen()?;
+            assert_eq!(
+                service.state.listener("local", &id)?.unwrap()["status"],
+                "ACTIVE"
+            );
+            release.send(()).unwrap();
+            Ok(())
+        })?;
         service.auto_listen()?;
         assert!(
             service
@@ -1196,8 +1225,6 @@ print(json.dumps(v))
     if let Some(mut activity) = service.session_activity.take() {
         activity.shutdown()?;
     }
-    drop(service);
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -1319,8 +1346,6 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
     );
     assert!(service.slots["work"].cached_directory().is_empty());
     assert!(!service.channel_inventories.contains_key("work"));
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1433,8 +1458,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             .into_iter()
             .find(|row| row["harness"] == "fixture")
             .ok_or("Missing agent")?;
-        let args =
-            json!({"to":target["listener_id"],"message":"Review ready","idempotency_key":"same"});
+        let args = json!({"to":target["listener_id"],"message":"Review | ready","idempotency_key":"same|key"});
         service.state.db.execute("CREATE TRIGGER reject_sent_maintenance BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'maintenance unavailable'); END", &[])?;
         let committed_args = json!({"to":target["listener_id"],"message":"Committed despite local maintenance","idempotency_key":"maintenance"});
         let committed = service.send("local", &committed_args, &json!({}))?;
@@ -1452,9 +1476,30 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         assert_eq!(recovered["signal_id"], committed["signal_id"]);
         assert_eq!(recovered["seq"], committed["seq"]);
         assert!(recovered["maintenance_warning"].is_null());
-        let first = service.send("local", &args, &json!({}))?;
+        let first = service.send_from("local", &args, None)?;
+        let endpoint = format!(
+            "{}|{}|unbound|default",
+            string(&service.slot("local")?.identity, "principal_id"),
+            service.host_id
+        );
+        let old_key = crate::core::identity::hash(
+            &json!([
+                endpoint,
+                "local://",
+                target["listener_id"],
+                args["idempotency_key"]
+            ])
+            .to_string(),
+        );
         assert_eq!(
-            service.send("local", &args, &json!({}))?["signal_id"],
+            service.state.db.execute(
+                "UPDATE local_sent_idempotency SET dedup_id=? WHERE seq=?",
+                &[json!(old_key), first["seq"].clone()]
+            )?,
+            1
+        );
+        assert_eq!(
+            service.send_from("local", &args, None)?["signal_id"],
             first["signal_id"]
         );
         // Keep the embedded transport hermetic while changing the target URL input
@@ -1739,8 +1784,6 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             .is_null());
         Ok(())
     })();
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 
@@ -2025,12 +2068,12 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
             .find(|row| row["session_id"] == "session-26")
             .ok_or("Missing first session")?;
         assert_eq!(first["display_address"], "alice/fixture#a5705540");
-        let activity = service.activity_dto(vec![json!({"hub":"local","listener_id":"missing","from_listener_id":"alice-abcd123456789012","from_user":"alice","from_harness":"fixture","message":"hello"})]);
+        let activity = service.activity_dto(vec![json!({"hub":"local","listener_id":"missing","from_listener_id":"alice-abcd123456789012","from_user":"alice","from_harness":"fixture","message":"hello"})], &service.address_book());
         assert_eq!(activity[0]["from_display_address"], "alice/fixture#abcd");
         assert!(activity[0]["target_display_address"].is_null());
         // Exercise late revocation in both destination iteration orders without
         // a network server or sleeps: setup inspection performs the local transition.
-        let other = Arc::new(HubEngine::open(&dir.join("other-hub"))?);
+        let other = TestEngine(HubEngine::open(&dir.join("other-hub"))?);
         let fanout_result = (|| -> Result<(), String> {
             service.slots.insert(
                 "work".into(),
@@ -2038,7 +2081,7 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
                     "work".into(),
                     json!({"url":"local://"}),
                     "alice",
-                    Some(other.clone()),
+                    Some(Arc::new(other.clone())),
                 ),
             );
             service
@@ -2595,12 +2638,9 @@ print(json.dumps(result), flush=True)
             }
             Ok(())
         })();
-        other.shutdown();
         fanout_result?;
         Ok(())
     })();
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 #[test]
@@ -2824,7 +2864,6 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
         service.shutdown();
         result
     })();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 #[test]
@@ -2880,6 +2919,15 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
             state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED','local://','none#alice')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
         }
+        state.db.execute("CREATE TRIGGER reject_second_ack BEFORE INSERT ON pending_hub_acks WHEN NEW.signal_id IN ('matching','unmatched') AND EXISTS (SELECT 1 FROM pending_hub_acks WHERE signal_id IN ('matching','unmatched')) BEGIN SELECT RAISE(ABORT,'second ack rejected'); END", &[])?;
+        assert_eq!(
+            state
+                .acknowledge_activity(&json!({"hub":"local"}), "all", "host", true)
+                .unwrap_err(),
+            "second ack rejected"
+        );
+        assert_eq!(unread()?.len(), 2);
+        state.db.execute("DROP TRIGGER reject_second_ack", &[])?;
         let (_, matched, _) = state.query_activity("all", " review ")?;
         assert_eq!(matched, 1);
         service.action(&json!({"op":"ack_signals","ack_all":true,"query":" review "}))?;
@@ -2902,6 +2950,16 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         let human = super::super::registration::local_node(&state, &client, "human", "default")?
             .ok_or("Missing Human")?;
         let id = string(&human, "listener_id");
+        state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local','clear-human',?,3,1,'alice','host','','clear me','now',?,'RECEIVED',?,?)", &[json!(id),json!(now_ms()+60_000),human["hub_url"].clone(),human["principal_id"].clone()])?;
+        state.clear_activity_history(
+            &json!({"hub":"local","signal_id":"clear-human"}),
+            "all",
+            &service.host_id,
+        )?;
+        let cleared = state.db.query("SELECT state,activity_hidden,acknowledged_at_ms FROM local_signals WHERE signal_id='clear-human'",&[])?;
+        assert_eq!(cleared[0]["state"], "STORED_PASSIVE");
+        assert_eq!(cleared[0]["activity_hidden"], 1);
+        assert!(cleared[0]["acknowledged_at_ms"].is_number());
         let channel = format!("{}:human", service.host_id);
         let hub_db = super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
         for (age, expected_heartbeats) in [(0, 0), (21_000, 1), (0, 0)] {
@@ -2956,8 +3014,6 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         assert_eq!(settings["channels"][0]["delivery_enabled"], false);
         Ok(())
     })();
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 #[test]
@@ -3033,7 +3089,7 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             let address = service.host_server.as_ref().unwrap().address;
             service.reload_slots()?;
             assert_eq!(service.host_server.as_ref().unwrap().address, address);
-            let rpc = |address, token| -> Result<(), String> {
+            let rpc = |address, token: &str| -> Result<(), String> {
                 let response: Value = ureq::post(&format!("http://{address}/v1/rpc"))
                     .set("Authorization", &format!("Bearer {token}"))
                     .timeout(Duration::from_secs(2))
@@ -3067,6 +3123,13 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
                 assert!(error.starts_with("INVALID_INPUT:"), "{error}");
                 assert_eq!(settings["host_hub"]["running"], true);
                 assert_eq!(settings["host_hub"]["port"], address.port());
+                let invite = super::host_hub::parse_hub_invite(string(
+                    &settings["host_hub"],
+                    "invite_command",
+                ))?;
+                assert_eq!(invite["token"], "previous-token");
+                assert_eq!(invite["auth_mode"], "token");
+                assert_eq!(invite["url"], format!("http://{address}"));
                 assert_eq!(service.host_server.as_ref().unwrap().address, address);
                 assert_eq!(
                     fs::read(&config.config_path).map_err(|e| e.to_string())?,
@@ -3130,10 +3193,15 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
 
             // Updating credentials on the same socket must release and rebind that port.
             service.action(
-                &json!({"op":"set_host_hub","port":address.port(),"token":"replacement-token"}),
+                &json!({"op":"set_host_hub","port":address.port(),"token":"--replacement=token"}),
             )?;
             assert_eq!(service.host_server.as_ref().unwrap().address, address);
-            rpc(address, "replacement-token")?;
+            let hosted = &service.settings()["host_hub"];
+            for key in ["invite_command", "lan_invite_command"] {
+                let invite = super::host_hub::parse_hub_invite(string(hosted, key))?;
+                assert_eq!(invite["token"], "--replacement=token");
+                rpc(address, string(&invite, "token"))?;
+            }
             let rejected = ureq::post(&format!("http://{address}/v1/rpc"))
                 .set("Authorization", "Bearer previous-token")
                 .timeout(Duration::from_secs(2))
@@ -3157,7 +3225,7 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             service.action(&json!({"op":"set_host_hub","port":0}))?;
             let replacement = service.host_server.as_ref().unwrap().address;
             assert_ne!(replacement, address);
-            rpc(replacement, "replacement-token")?;
+            rpc(replacement, "--replacement=token")?;
             fs::write(
                 &config.config_path,
                 json!({"host_hub":{"enabled":false}}).to_string(),
@@ -3171,7 +3239,6 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
         service.shutdown();
         result
     })();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     result
 }
 #[test]
@@ -3179,21 +3246,17 @@ fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
     let dir =
         TestDirectory(std::env::temp_dir().join(format!("cito-ui-layout-{}", random_uuid_v4())));
     let root = dir.join("Cito.app/Contents");
-    let result = (|| {
-        fs::create_dir_all(root.join("Helpers")).map_err(|e| e.to_string())?;
-        let bin = root.join("Helpers/cito-ui");
-        fs::write(&bin, "").map_err(|e| e.to_string())?;
-        assert_eq!(resolve_ui_binary(&root, None), Some(bin));
-        let override_bin = dir.join("custom-ui");
-        fs::write(&override_bin, "").map_err(|e| e.to_string())?;
-        assert_eq!(
-            resolve_ui_binary(&root, Some(override_bin.clone())),
-            Some(override_bin)
-        );
-        Ok(())
-    })();
-    let _ = fs::remove_dir_all(dir);
-    result
+    fs::create_dir_all(root.join("Helpers")).map_err(|e| e.to_string())?;
+    let bin = root.join("Helpers/cito-ui");
+    fs::write(&bin, "").map_err(|e| e.to_string())?;
+    assert_eq!(resolve_ui_binary(&root, None), Some(bin));
+    let override_bin = dir.join("custom-ui");
+    fs::write(&override_bin, "").map_err(|e| e.to_string())?;
+    assert_eq!(
+        resolve_ui_binary(&root, Some(override_bin.clone())),
+        Some(override_bin)
+    );
+    Ok(())
 }
 #[test]
 fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
@@ -3348,13 +3411,14 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
     let shared = Arc::new(Mutex::new(service.into_inner()));
     let _cleanup = ServiceCleanup {
         service: shared.clone(),
-        directory: dir.clone(),
     };
     let http_result = (|| -> Result<(), String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         for (method, headers, status) in [
-            ("GET /health", format!("Host: {address}\r\n"), 200),
+            ("GET /health?detail=true", format!("Host: {address}\r\n"), 200),
+            ("GET /absent",format!("Host: {address}\r\n"),404),
+            ("POST /mcp?truncated",format!("Host: {address}\r\nContent-Type: application/json\r\n"),400),
             (
                 "GET /health",
                 format!("Host: {address}\r\nOrigin: http://{address}\r\n"),
@@ -3384,16 +3448,14 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         ] {
             let service = shared.clone();
             let mut client = TcpStream::connect(address).map_err(|e| e.to_string())?;
-            let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
+            let stream = crate::core::http_boundary::accept_test_client(&listener)?;
             let worker = thread::spawn(move || {
                 super::http_actions::handle_http(stream, service, Arc::new(json!({})))
             });
             let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}).to_string();
-            write!(
-                client,
-                "{method} HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()
-            )
-            .map_err(|e| e.to_string())?;
+            let sent = if method.starts_with("GET") || method.ends_with("?truncated") { "" } else { &body };
+            write!(client, "{method} HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n{sent}",body.len()).map_err(|e| e.to_string())?;
+            client.shutdown(std::net::Shutdown::Write).map_err(|e|e.to_string())?;
             // Read the declared frame, not transport EOF: early request rejection
             // may close unread request bytes after delivering its complete response.
             let response = crate::plugins::read_http_response(&mut client)?;
@@ -3474,7 +3536,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         listener.local_addr().map_err(|e| e.to_string())?
     );
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = crate::core::http_boundary::accept_test_client(&listener).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -3575,8 +3637,6 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
     assert_eq!(hub["human_can_set_scope"], false);
     assert_eq!(hub["human_state_status"], peer["human_state_status"]);
     client.closed.store(true, Ordering::SeqCst);
-    service.shutdown();
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     Ok(())
 }
 #[test]
@@ -3693,9 +3753,6 @@ print(json.dumps(result))
         .caller(&json!({"_stdio":{"endpoint_pid":pid}}), true)?
         .unwrap();
     assert_eq!(caller["harness"], "z-fallback");
-    service.shutdown();
-    drop(service);
-    fs::remove_dir_all(dir).unwrap();
     Ok(())
 }
 
@@ -3749,9 +3806,6 @@ fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
             .unwrap_err()
             .starts_with("FORBIDDEN:"));
     }
-    service.shutdown();
-    drop(service);
-    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     Ok(())
 }
 

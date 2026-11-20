@@ -75,7 +75,7 @@ pub(in crate::core::daemon) fn handle_http(
         }
     };
     let method = head.method.as_str();
-    let path = head.target.as_str();
+    let path = head.target.split('?').next().unwrap_or("");
     let length = head.length;
     let headers: Map<String, Value> = head
         .headers
@@ -95,18 +95,6 @@ pub(in crate::core::daemon) fn handle_http(
         respond(&mut stream, status, &json!({"error":error}));
         return;
     }
-    if length > REQUEST_LIMIT {
-        respond(
-            &mut stream,
-            413,
-            &json!({"error":"Request body exceeds 1 MiB"}),
-        );
-        return;
-    }
-    let mut body = vec![0; length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
-    }
     if path == "/health" && method == "GET" {
         if shutdown_requested() {
             respond(
@@ -121,6 +109,23 @@ pub(in crate::core::daemon) fn handle_http(
     }
     if method != "POST" {
         respond(&mut stream, 404, &json!({"error":"Not found"}));
+        return;
+    }
+    if length > REQUEST_LIMIT {
+        respond(
+            &mut stream,
+            413,
+            &json!({"error":"Request body exceeds 1 MiB"}),
+        );
+        return;
+    }
+    let mut body = vec![0; length];
+    if reader.read_exact(&mut body).is_err() {
+        respond(
+            &mut stream,
+            400,
+            &json!({"error":"Incomplete request body"}),
+        );
         return;
     }
     let Ok(mut parsed) = serde_json::from_slice::<Value>(&body) else {
@@ -191,9 +196,7 @@ pub(in crate::core::daemon) fn handle_http(
                     json!({"isError":false,"content":[{"type":"text","text":payload.to_string()}]})
                 }
                 Err(error) => {
-                    let (code, message) = error
-                        .split_once(':')
-                        .unwrap_or(("INTERNAL_ERROR", error.as_str()));
+                    let (code, message) = crate::core::http_boundary::coded_error(&error);
                     json!({"isError":true,"content":[{"type":"text","text":json!({"ok":false,"error":{"code":code,"message":message.trim(),"retryable":matches!(code,"NATS_UNAVAILABLE"|"AUTH_UNAVAILABLE"|"STALE_GENERATION")}}).to_string()}]})
                 }
             }

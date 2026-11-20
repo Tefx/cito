@@ -80,7 +80,8 @@ fn paused_cli_and_mcp_status_discover_sessions_started_after_idle() {
 fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let script = f.dir.join("endpoint.cjs");
+    // Discovery finds the live socket; subsequent probes also verify the process entrypoint.
+    let script = f.dir.join("pi.js");
     fs::write(&script, include_str!("../endpoint.cjs")).unwrap();
     let endpoint = f.spawn(
         "node",
@@ -234,17 +235,10 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let process = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     // Use this build's real provider, independently of checked-in release staging.
-    let plugin_dir = f.state.join("plugins/codex");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    let mut manifest: Value = serde_json::from_str(
-        &fs::read_to_string(root().join("plugins/codex/plugin.json")).unwrap(),
-    )
-    .unwrap();
-    manifest["command"] = json!([CODEX]);
-    fs::write(plugin_dir.join("plugin.json"), manifest.to_string()).unwrap();
+    install_provider_command(&f, "codex", json!([CODEX]));
     f.daemon(&[]);
     wait(|| {
         f.rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
@@ -285,7 +279,7 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
             )
             .unwrap();
     }
-    let reopened = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let reopened = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(reopened, false).contains("ready"));
     let sliced = f.plugin(
         CODEX,
@@ -621,13 +615,7 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", recorder.to_str().unwrap()),
     ]);
-    let frames = || {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .collect::<Vec<_>>()
-    };
+    let frames = || ui_frames(&f);
     let inspections = || {
         fs::read_to_string(&calls_path)
             .unwrap()
@@ -1573,17 +1561,13 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         ("setup_remove_app", "app-remove"),
     ] {
         wait(|| {
-            fs::read_to_string(f.home.join("ui-frames"))
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|frame| {
-                    frame["op"] == "settings"
-                        && frame["ok"] == true
-                        && frame["source_op"] == op
-                        && frame["request_id"] == request
-                        && frame["settings"]["apps"].is_array()
-                })
+            ui_frames(&f).into_iter().any(|frame| {
+                frame["op"] == "settings"
+                    && frame["ok"] == true
+                    && frame["source_op"] == op
+                    && frame["request_id"] == request
+                    && frame["settings"]["apps"].is_array()
+            })
         });
     }
     enroll(&f, meta);
@@ -1684,10 +1668,8 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
     f.action(json!({"op":"open_settings"}));
     let mut settings = Value::Null;
     wait(|| {
-        settings = fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        settings = ui_frames(&f)
+            .into_iter()
             .rfind(|v| v["op"] == "settings")
             .unwrap_or(Value::Null);
         settings.is_object()

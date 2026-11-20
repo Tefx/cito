@@ -649,6 +649,7 @@ impl DaemonService {
         for (name, slot, snapshot) in snapshots {
             match snapshot {
                 Ok(directory) => {
+                    let peers = super::projection::address_peers(&self.state, &slot);
                     for row in directory {
                         if !matches!(
                             crate::core::lease::evaluate_node_lease(&row, now_ms()),
@@ -706,7 +707,12 @@ impl DaemonService {
                             continue;
                         }
                         let scoped_id = self.scoped(&name, string(&row, "public_id"));
-                        let display_address = self.display_address(&name, &row);
+                        let display_address = crate::core::identity::display_address(
+                            &name,
+                            &self.config.default_hub,
+                            &row,
+                            &peers,
+                        );
                         let full_alias = format!(
                             "{}/{}#{}",
                             normalize_slug(string(&row, "owner_user")),
@@ -786,7 +792,7 @@ impl DaemonService {
                         }) {
                             continue;
                         }
-                        rows.push(self.peer_dto(&name, &row));
+                        rows.push(self.peer_dto(&name, &row, &display_address));
                     }
                 }
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
@@ -1199,10 +1205,9 @@ impl DaemonService {
         {
             return Err("SELF_SEND_FORBIDDEN: Cannot send to your own session".into());
         }
-        let endpoint = format!(
-            "{}|{}|{}|{}",
+        let fields = [
             string(&slot.identity, "principal_id"),
-            self.host_id,
+            self.host_id.as_str(),
             caller
                 .as_ref()
                 .map(|c| string(c, "harness"))
@@ -1210,24 +1215,20 @@ impl DaemonService {
             caller
                 .as_ref()
                 .map(|c| string(c, "session_id"))
-                .unwrap_or("default")
-        );
+                .unwrap_or("default"),
+        ];
+        let endpoint = fields.join("|");
+        let [principal, host, harness, session] = fields;
         let key = args["idempotency_key"]
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(random_uuid_v4);
         let dedup = hash(
             &json!([
-                string(&slot.identity, "principal_id"),
-                self.host_id,
-                caller
-                    .as_ref()
-                    .map(|c| string(c, "harness"))
-                    .unwrap_or("unbound"),
-                caller
-                    .as_ref()
-                    .map(|c| string(c, "session_id"))
-                    .unwrap_or("default"),
+                principal,
+                host,
+                harness,
+                session,
                 string(&slot.config, "url"),
                 canonical,
                 key
@@ -1245,30 +1246,22 @@ impl DaemonService {
         // Unlike Hub publications, legacy reservations do not retain structured
         // sender/key metadata. Do not guess their identity when delimiters can
         // move tuple boundaries (or message/reply boundaries in the old hash).
-        let ambiguous_legacy = [
-            string(&slot.identity, "principal_id"),
-            &self.host_id,
-            caller
-                .as_ref()
-                .map(|c| string(c, "harness"))
-                .unwrap_or("unbound"),
-            caller
-                .as_ref()
-                .map(|c| string(c, "session_id"))
-                .unwrap_or("default"),
-            string(&slot.config, "url"),
-            canonical,
-            &key,
-            &message,
-            reply_to.as_str().unwrap_or(""),
-        ]
-        .iter()
-        .any(|part| part.contains('|'));
+        let ambiguous_endpoint = fields.iter().any(|field| field.contains('|'));
+        let ambiguous_legacy = ambiguous_endpoint
+            || [
+                string(&slot.config, "url"),
+                canonical,
+                &key,
+                &message,
+                reply_to.as_str().unwrap_or(""),
+            ]
+            .iter()
+            .any(|part| part.contains('|'));
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
             if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
-            if !ambiguous_legacy {
+            if !ambiguous_endpoint {
                 if let Some(old) = c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?", &[json!(hub), json!(endpoint_dedup)])?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
                     if old["request_hash"] != request_hash { return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into()); }
                     return Ok(old);

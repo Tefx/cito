@@ -555,7 +555,7 @@ mod remediation_tests {
         let (committed_tx, committed_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let server = std::thread::spawn(move || loop {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = crate::core::http_boundary::accept_test_client(&listener).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -566,7 +566,7 @@ mod remediation_tests {
             let mut length = 0;
             loop {
                 line.clear();
-                reader.read_line(&mut line).unwrap();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0, "Truncated request");
                 if line == "\r\n" {
                     break;
                 }
@@ -743,7 +743,7 @@ mod remediation_tests {
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
             for expected in ["human_channels_configure", "human_channels_list"] {
-                let (mut stream, _) = listener.accept().unwrap();
+                let mut stream = crate::core::http_boundary::accept_test_client(&listener).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -751,7 +751,7 @@ mod remediation_tests {
                 let mut length = 0;
                 loop {
                     let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
+                    assert_ne!(reader.read_line(&mut line).unwrap(), 0, "Truncated request");
                     if line == "\r\n" {
                         break;
                     }

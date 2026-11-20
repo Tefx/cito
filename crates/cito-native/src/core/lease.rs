@@ -103,7 +103,7 @@ pub fn reconcile_registration_state(reg: &mut Value, now: u64) {
 /// Public attachment projection deliberately excludes fencing tokens and credentials.
 pub fn attachments(reg: &Value, local_host: &str, now: u64) -> Vec<Value> {
     let now = registration_now(reg, now);
-    let mut projected = std::collections::BTreeMap::<(String, String), Value>::new();
+    let mut projected = std::collections::BTreeMap::new();
     for (id, channel) in reg["channels"]
         .as_object()
         .into_iter()
@@ -120,16 +120,27 @@ pub fn attachments(reg: &Value, local_host: &str, now: u64) -> Vec<Value> {
             .filter(|s| !s.is_empty())
             .or_else(|| channel["host_name"].as_str().filter(|s| !s.is_empty()))
             .unwrap_or(if hub { "Channel" } else { "Device" });
-        let mut attachment = json!({"channel_id":id,"location":if hub{"hub"}else{"device"},"display_name":display,"availability":attachment_availability(channel,now),"is_local":!hub && host==local_host});
-        if hub {
-            attachment["plugin_id"] = json!(id.strip_prefix("hub:").unwrap_or(id));
+        let location = if hub { "hub" } else { "device" };
+        let mut attachment = json!({"channel_id":id,"location":location,"display_name":display,"availability":availability,"is_local":!hub && host==local_host});
+        let identity = if hub {
+            let plugin = if id.is_empty() {
+                channel["plugin_id"].as_str().unwrap_or("")
+            } else {
+                id.strip_prefix("hub:").unwrap_or(id)
+            };
+            attachment["plugin_id"] = json!(plugin);
+            if !id.is_empty() {
+                id
+            } else if !plugin.is_empty() {
+                plugin
+            } else {
+                display
+            }
         } else {
             attachment["host_id"] = json!(host);
-        }
-        let key = (
-            if hub { "hub" } else { "device" }.to_owned(),
-            display.to_owned(),
-        );
+            display
+        };
+        let key = (location, identity);
         let rank = |a: &Value| (a["is_local"] == true, a["availability"] == "ACTIVE");
         if projected
             .get(&key)
@@ -173,6 +184,14 @@ mod tests {
         }});
         let projected = attachments(&reg, "local", 100001);
         assert_eq!(projected.len(), 3);
+        reg["channels"]["hub:alternate"] = reg["channels"]["hub:messenger"].clone();
+        assert_eq!(
+            attachments(&reg, "local", 100001)
+                .iter()
+                .filter(|a| a["display_name"] == "Messenger")
+                .count(),
+            2
+        );
         let laptop = projected
             .iter()
             .find(|a| a["display_name"] == "Laptop")
@@ -193,7 +212,7 @@ mod tests {
         assert_eq!(reg["device_generation_fences"]["expired:human"], 9);
         assert_eq!(reg["human_control_revision"], 4);
         assert_eq!(reg["scope"], "self");
-        assert_eq!(attachments(&reg, "local", 2000001).len(), 2);
+        assert_eq!(attachments(&reg, "local", 2000001).len(), 3);
     }
     #[test]
     fn exact_hub_clock_boundaries_and_stale_summary() {

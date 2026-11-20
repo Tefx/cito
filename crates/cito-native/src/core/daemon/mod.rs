@@ -228,8 +228,9 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let mut calls: Vec<thread::JoinHandle<()>> = Vec::new();
     let mut last_poll = Instant::now();
     let mut poll_requested = true;
-    let mut ui_retry = None;
     let mut ui_backoff = crate::support::RetryBackoff::default();
+    let mut ui_retry = (ui.is_none() && std::env::var("CITO_DISABLE_UI").as_deref() != Ok("1"))
+        .then(|| Instant::now() + ui_backoff.failed());
     let mut ui_started = Instant::now();
     'running: while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         loop {
@@ -700,8 +701,6 @@ impl DaemonService {
                 continue;
             }
             let registration = self.state.registration_lock(&name)?;
-            // Keep the old authority owned until every fallible local fence
-            // succeeds, so reload failure cannot orphan its event worker.
             let mut previous = self.slots.get(&name).cloned();
             if let Some(old) = &previous {
                 let changed = old.config["url"] != hub["url"]
@@ -724,15 +723,6 @@ impl DaemonService {
                             &channel,
                             &row,
                         );
-                    }
-                }
-                if changed {
-                    for row in self
-                        .state
-                        .active()?
-                        .into_iter()
-                        .filter(|row| row["hub"] == name)
-                    {
                         self.state
                             .fence_listener_for(&row, "fenced_before_dispatch")?;
                     }
@@ -847,6 +837,21 @@ impl DaemonService {
                         string(&client.identity, "principal_id"),
                     )
             });
+            if let Some(old) = &previous {
+                if retained {
+                    client.inherit_authority(old);
+                } else {
+                    old.close();
+                    // A failed fence must leave the replacement eligible for retry.
+                    self.slots.remove(&name);
+                }
+            }
+            // Close cancels in-flight RPCs before we wait for their registration guard.
+            let registration = previous.as_ref().unwrap_or(&client).registration.clone();
+            let _settled = (!retained)
+                .then(|| registration.lock())
+                .transpose()
+                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
             // Disabled profiles have no previous slot. Durable binding identity must
             // still be checked before any receiver can use the replacement client.
             for row in self.state.db.query(
@@ -865,13 +870,6 @@ impl DaemonService {
                 } else if row["hub_url"].is_null() {
                     // Legacy bindings predate URL persistence; record the first known profile.
                     self.state.db.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=? AND hub_url IS NULL", &[hub["url"].clone(),row["hub"].clone(),row["listener_id"].clone()])?;
-                }
-            }
-            if let Some(old) = &previous {
-                if retained {
-                    client.inherit_authority(old);
-                } else {
-                    old.close();
                 }
             }
             if !retained {
@@ -1246,25 +1244,8 @@ impl DaemonService {
                         return;
                     }
                     }
-                } else {
-                    let Ok(registration) = state.registration_lock(&slot.name) else { return; };
-                    let Ok(_guard) = registration.lock() else { return; };
-                    if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
-                    if !super::registration::remote_matches_listener(&remote,&row,&channel) || remote["channels"][&channel]["state"] != "ACTIVE" {let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
-                    let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
-                    let mut changed = remote["listen_mode"] != row["listen_mode"];
-                    remote["listen_mode"] = row["listen_mode"].clone();
-                    if let Ok(Some(title)) = state.custom_title(string(&row,"harness"),string(&row,"session_id")) {
-                        if remote["title"] != title || remote["custom_title"] != true {
-                            remote["title"] = json!(title); remote["custom_title"] = json!(true); changed = true;
-                        }
-                    }
-                    if let Some(ch) = remote["channels"].get_mut(&channel).and_then(Value::as_object_mut) {
-                        let updated=ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
-                        if slot.server_now().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(slot.server_now())); changed=true; }
-                    }
-                    if changed { let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision)); }
-                    }
+                } else if !Self::heartbeat_agent(&state, &slot, &channel, &row).unwrap_or(false) {
+                    return;
                 }
                 if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |_| {}) {
                     if !slot.closed.load(Ordering::SeqCst) { eprintln!("cito receiver {}: {error}",slot.name); }
@@ -1285,6 +1266,62 @@ impl DaemonService {
             self.last_ui = Instant::now();
         }
         Ok(())
+    }
+
+    fn heartbeat_agent(
+        state: &LocalState,
+        slot: &HubClient,
+        channel: &str,
+        queued: &Value,
+    ) -> Result<bool, String> {
+        let id = string(queued, "listener_id");
+        let lock = state.registration_lock(&slot.name)?;
+        let _guard = lock
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        let Some(row) = state.listener(&slot.name, id)?.filter(|row| {
+            row["status"] == "ACTIVE"
+                && row["binding_generation"] == queued["binding_generation"]
+                && row["owner_token"] == queued["owner_token"]
+        }) else {
+            return Ok(false);
+        };
+        if let Ok(Some((mut remote, revision))) = slot.kv_get(id) {
+            if !super::registration::remote_matches_listener(&remote, &row, channel)
+                || remote["channels"][channel]["state"] != "ACTIVE"
+            {
+                state.fence_listener_for(&row, "fenced_before_dispatch")?;
+                return Ok(false);
+            }
+            let _ = state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
+            let mut changed = remote["listen_mode"] != row["listen_mode"];
+            remote["listen_mode"] = row["listen_mode"].clone();
+            if let Ok(Some(title)) =
+                state.custom_title(string(&row, "harness"), string(&row, "session_id"))
+            {
+                if remote["title"] != title || remote["custom_title"] != true {
+                    remote["title"] = json!(title);
+                    remote["custom_title"] = json!(true);
+                    changed = true;
+                }
+            }
+            if let Some(ch) = remote["channels"]
+                .get_mut(channel)
+                .and_then(Value::as_object_mut)
+            {
+                let now = slot.server_now();
+                if now.saturating_sub(ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0))
+                    >= 20_000
+                {
+                    ch.insert("updated_at_ms".into(), json!(now));
+                    changed = true;
+                }
+            }
+            if changed {
+                let _ = slot.kv_save(id, &remote, Some(revision));
+            }
+        }
+        Ok(true)
     }
 
     fn schedule_probes(&mut self) -> Result<(), String> {
@@ -1514,9 +1551,13 @@ impl DaemonService {
             };
             let hub = string(&row, "hub");
             let lock = self.state.registration_lock(hub)?;
-            let guard = lock
-                .lock()
-                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+            let guard = match lock.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err("STATE_ERROR: Registration lock poisoned".into())
+                }
+            };
             let retired = self.state.db.transaction(|c| {
                 let now = now_ms();
                 let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='idle',retired_activity_revision=last_activity_revision,updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND status='ACTIVE' AND listen_mode='auto' AND ?1-COALESCE(last_activity_at_ms,?1)>?4 AND lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND ((s.state IN ('RECEIVED','DISPATCHING') AND s.held_reason IS NULL AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>?1) OR s.delivered_at_ms+300000>?1))", &[json!(now),json!(hub),row["listener_id"].clone(),json!(timeout)])?;
@@ -1530,7 +1571,12 @@ impl DaemonService {
             if retired {
                 self.state.invalidate_discovery(string(&row, "harness"))?;
                 if let Some(slot) = self.slots.get(hub) {
-                    Self::reconcile_unlistened(&self.state, slot, &self.host_id)?;
+                    if slot.local.is_some() {
+                        Self::reconcile_unlistened(&self.state, slot, &self.host_id)?;
+                    } else {
+                        // The directory worker drains remote detaches outside the service mutex.
+                        self.observations.remove(&format!("directory:{hub}"));
+                    }
                 }
             }
         }

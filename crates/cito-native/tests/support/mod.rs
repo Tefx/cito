@@ -109,6 +109,14 @@ pub fn install_builtin_override(f: &Fixture, id: &str, manifest: Value) -> PathB
     fs::write(path.join("plugin.json"), manifest.to_string()).unwrap();
     path
 }
+pub fn install_provider_command(f: &Fixture, id: &str, command: Value) -> PathBuf {
+    let mut manifest: Value = serde_json::from_slice(
+        &fs::read(root().join("plugins").join(id).join("plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manifest["command"] = command;
+    install_builtin_override(f, id, manifest)
+}
 pub fn channel_provider(f: &Fixture, id: &str, fields: Value) -> PathBuf {
     install_builtin_override(
         f,
@@ -125,13 +133,13 @@ struct Process {
     readers: Vec<std::thread::JoinHandle<()>>,
 }
 impl Process {
-    fn stop(&mut self) {
-        let panicking = std::thread::panicking();
-        let running = |child: &mut Child| match child.try_wait() {
+    fn stop(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let mut running = |child: &mut Child| match child.try_wait() {
             Ok(status) => status.is_none(),
             Err(error) => {
-                assert!(panicking, "Cannot inspect child: {error}");
-                true
+                errors.push(format!("Cannot inspect child: {error}"));
+                false
             }
         };
         if running(&mut self.child) {
@@ -149,15 +157,15 @@ impl Process {
                 }
             }
         }
-        let waited = self.child.wait();
-        assert!(panicking || waited.is_ok(), "Cannot reap child: {waited:?}");
-        for reader in self.readers.drain(..) {
-            let joined = reader.join();
-            assert!(
-                panicking || joined.is_ok(),
-                "Process output reader panicked"
-            );
+        if let Err(error) = self.child.wait() {
+            errors.push(format!("Cannot reap child: {error}"));
         }
+        for reader in self.readers.drain(..) {
+            if reader.join().is_err() {
+                errors.push("Process output reader panicked".into());
+            }
+        }
+        errors
     }
 }
 pub struct Fixture {
@@ -312,7 +320,8 @@ impl Fixture {
             .is_some()
     }
     pub fn stop(&self, index: usize) {
-        self.children.borrow_mut()[index].stop();
+        let errors = self.children.borrow_mut()[index].stop();
+        assert!(errors.is_empty(), "Process cleanup failed: {errors:?}");
     }
     pub fn command(&self, bin: &str, args: &[&str], input: &str) -> (bool, String, String) {
         let i = self.spawn(bin, args, &[]);
@@ -406,15 +415,17 @@ impl Fixture {
         path
     }
     pub fn provider(&self, outcome: &str) -> Value {
-        let d = self.state.join("plugins/fixture");
-        fs::create_dir_all(&d).unwrap();
+        let d = install_builtin_override(
+            self,
+            "fixture",
+            json!({"id":"fixture","kind":"agent-harness","displayName":"Fixture","tier":"experimental","command":["python3","./driver.py"]}),
+        );
         fs::write(
             d.join("options.json"),
             json!({"session_id":"session-1","status":"alive","outcome":outcome}).to_string(),
         )
         .unwrap();
         fs::write(d.join("driver.py"), include_str!("provider.py")).unwrap();
-        fs::write(d.join("plugin.json"),json!({"id":"fixture","kind":"agent-harness","displayName":"Fixture","tier":"experimental","command":["python3","./driver.py"]}).to_string()).unwrap();
         json!({"expected_harness":"fixture","expected_session_id":"session-1"})
     }
 }
@@ -428,6 +439,13 @@ fn fixture_teardown_failure_worker() {
         fixture.dir.to_str().unwrap(),
     )
     .unwrap();
+    if mode == "ordinary-reader" {
+        let i = fixture.spawn("/bin/sh", &["-c", "exit 0"], &[]);
+        fixture.children.borrow_mut()[i]
+            .readers
+            .push(std::thread::spawn(|| panic!("fixture reader failed")));
+        return;
+    }
     let listener = TcpListener::bind(("127.0.0.1", fixture.port)).unwrap();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -469,6 +487,7 @@ fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
         "panic-malformed",
         "ordinary-closed",
         "ordinary-malformed",
+        "ordinary-reader",
     ] {
         let output = parent
             .command_builder(
@@ -495,6 +514,12 @@ fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
             }),
             "{stderr}"
         );
+        if mode == "ordinary-reader" {
+            assert!(
+                stderr.contains("Process output reader panicked"),
+                "{stderr}"
+            );
+        }
         let child_dir = fs::read_to_string(&marker).unwrap();
         assert!(
             !Path::new(&child_dir).exists(),
@@ -505,15 +530,15 @@ fn fixture_teardown_health_failures_do_not_abort_or_skip_cleanup() {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let mut failures = Vec::new();
         for p in self.children.get_mut().iter_mut().rev() {
-            p.stop();
+            failures.extend(p.stop());
         }
-        let mut failure = None;
         // CLI auto-starts a detached daemon. Only stop a health-verified sandbox owner.
         if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
             let health = try_http(self.port, "/health", None);
             if let Err(error) = &health {
-                failure = Some(error.clone());
+                failures.push(error.clone());
             }
             let h = health.map(|(_, value)| value).unwrap_or(Value::Null);
             if h["stateDir"] == json!(self.state) {
@@ -528,15 +553,15 @@ impl Drop for Fixture {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                        failure = Some("detached daemon did not stop".into());
+                        failures.push("detached daemon did not stop".into());
                     }
                 }
             }
         }
         let removed = fs::remove_dir_all(&self.dir);
         assert!(
-            std::thread::panicking() || (removed.is_ok() && failure.is_none()),
-            "Fixture teardown failed: health={failure:?}, removal={removed:?}"
+            std::thread::panicking() || (removed.is_ok() && failures.is_empty()),
+            "Fixture teardown failed: errors={failures:?}, removal={removed:?}"
         );
     }
 }

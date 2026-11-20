@@ -2,27 +2,8 @@ use super::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
-struct TestEngine {
-    engine: HubEngine,
-    directory: PathBuf,
-}
-impl std::ops::Deref for TestEngine {
-    type Target = HubEngine;
-    fn deref(&self) -> &Self::Target {
-        &self.engine
-    }
-}
-impl Drop for TestEngine {
-    fn drop(&mut self) {
-        self.engine.shutdown();
-        let _ = std::fs::remove_dir_all(&self.directory);
-    }
-}
 fn test_engine(directory: &Path) -> TestEngine {
-    TestEngine {
-        engine: HubEngine::open(directory).unwrap(),
-        directory: directory.to_path_buf(),
-    }
+    TestEngine(HubEngine::open(directory).unwrap())
 }
 
 #[test]
@@ -61,8 +42,6 @@ fn human_mutations_fence_expired_devices_without_prior_reads() {
         let reg = e.rpc("human_device_attach", &fresh, Some(&owner)).unwrap()["record"].clone();
         assert_eq!(reg["device_generation_fences"]["device:human"], 3);
         assert_eq!(reg["channels"]["device:human"]["binding_generation"], 4);
-        e.shutdown();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -106,8 +85,6 @@ fn current_reply_keys_reject_conflicts_and_registration_keys_preserve_tuple_boun
             );
         }
     }
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -161,12 +138,10 @@ fn consumer_ack_proves_sequence_filter_and_target_ownership_before_receipts() {
             .len(),
         1
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
-fn temp() -> PathBuf {
-    let dir = std::env::temp_dir().join(random_id("cito-hub-test-").unwrap());
+fn temp() -> TestDirectory {
+    let dir = TestDirectory(std::env::temp_dir().join(random_id("cito-hub-test-").unwrap()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -242,8 +217,6 @@ fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
             .unwrap()[0]["n"],
         2
     );
-    engine.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -311,8 +284,6 @@ fn human_legacy_retry_survives_username_change_and_rejects_payload_conflicts() {
         assert_eq!(payload["message"], request["message"]);
         assert_eq!(payload["in_reply_to"], request["in_reply_to"]);
     }
-    engine.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -358,8 +329,6 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
     );
     assert!(e.inner.db.query("SELECT signal_id FROM hub_signals WHERE signal_id IN ('ack-source','reply-source') AND acked_at_ms IS NULL", &[]).unwrap().is_empty());
     e.inner.processes.clear_poison();
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -386,7 +355,6 @@ fn failed_initial_configuration_evicts_process_before_retry() {
     ));
     e.shutdown();
     assert!(!process.alive());
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -461,8 +429,6 @@ fn processed_reply_pruning_uses_a_monotonic_replay_floor_and_resets_with_credent
         .unwrap()
         .1["reply_floor"]
         .is_null());
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn pruned_device_cannot_reattach_a_superseded_generation() {
@@ -490,8 +456,6 @@ fn pruned_device_cannot_reattach_a_superseded_generation() {
         "new-owner"
     );
     assert_eq!(replaced["record"]["human_control_revision"], 1);
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn human_device_fencing_inbox_cas_and_publish_pause_are_atomic() {
@@ -581,8 +545,6 @@ fn human_device_fencing_inbox_cas_and_publish_pause_are_atomic() {
         .rpc("human_device_detach", &replacement, Some(&stranger))
         .unwrap_err()
         .starts_with("FORBIDDEN:"));
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -590,10 +552,7 @@ fn fresh_device_adopts_retained_human_identity_and_verified_alias() {
     for alias in [false, true] {
         let dir = temp();
         let e = Arc::new(HubEngine::open(&dir.join("hub")).unwrap());
-        let _cleanup = TestEngine {
-            engine: (*e).clone(),
-            directory: dir.clone(),
-        };
+        let _cleanup = TestEngine((*e).clone());
         e.set_plugin_roots(&[]).unwrap();
         let mut client = super::super::transport::HubClient::new(
             "local".into(),
@@ -638,8 +597,6 @@ fn fresh_device_adopts_retained_human_identity_and_verified_alias() {
             );
             assert_eq!(record["channels"]["fresh:human"]["state"], "ACTIVE");
         }
-        e.shutdown();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -648,10 +605,7 @@ fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
     for (mode, expected) in [("none", "workspace"), ("token", "self"), ("oidc", "self")] {
         for device_first in [true, false] {
             let dir = temp();
-            let e = TestEngine {
-                engine: HubEngine::open_with_auth_mode(&dir, mode).unwrap(),
-                directory: dir.clone(),
-            };
+            let e = TestEngine(HubEngine::open_with_auth_mode(&dir, mode).unwrap());
             e.set_plugin_roots(&[]).unwrap();
             let owner = json!({"principal_id":"none#alice","owner_user":"alice","auth_mode":mode});
             let device = json!({"host_id":"mac","channel_id":"mac:human","binding_generation":1,"owner_token":"owner"});
@@ -679,8 +633,6 @@ fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
                 "{mode}, device_first={device_first}"
             );
             assert_eq!(record["title"], "Human");
-            e.shutdown();
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 }
@@ -789,8 +741,6 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
             .unwrap();
         assert_eq!(record["scope"], scope, "{user}");
     }
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -854,8 +804,6 @@ fn idle_and_policy_only_hubs_prune_expired_audit_rows_without_channels() {
         })
         .unwrap();
     assert_eq!(record["channels"]["mac:human"]["state"], "UNLISTENED");
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -915,8 +863,6 @@ fn hub_stamps_changed_agent_leases_and_prunes_audit_history() {
         assert_eq!(c.query("SELECT id FROM hub_audit_log WHERE action='recent'", &[])?.len(), 1);
         Ok(())
     }).unwrap();
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 fn put(e: &HubEngine, id: &str, pid: &str, scope: &str) {
@@ -973,8 +919,6 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
     assert!(rows
         .iter()
         .all(|r| r["reservation_id"].is_null() && r["from_listener_id"].is_null()));
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labels() {
@@ -1066,8 +1010,6 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
         assert!(config.get("_external_chat_id").is_none());
         assert!(config.get("_external_user_id").is_none());
     }
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -1137,8 +1079,6 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
         list["channels"][0]["pairing_url"],
         "https://example.com/pair"
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn unthreaded_reply_requires_one_recent_sender_and_threaded_reply_disambiguates_legacy_bindings() {
@@ -1197,8 +1137,6 @@ fn unthreaded_reply_requires_one_recent_sender_and_threaded_reply_disambiguates_
         .unwrap();
     assert_eq!(published.len(), 4);
     assert!(published.iter().all(|row| row["pid"] == "none#alice"));
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn stopped_channel_process_waits_for_its_reader_callback() {
@@ -1241,7 +1179,6 @@ fn stopped_channel_process_waits_for_its_reader_callback() {
     done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     worker.join().unwrap();
     drop(process);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn pairing_preparation_quiesces_old_credential_frames_before_commit() {
@@ -1354,8 +1291,6 @@ for line in sys.stdin:
             })
             .unwrap();
     }));
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
@@ -1400,8 +1335,6 @@ fn oidc_admin_can_edit_redacted_service_fields() {
     assert_eq!(f["redacted"], true);
     assert_eq!(f["value"], "");
     assert_eq!(f["configured"], true);
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
@@ -1447,7 +1380,22 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     assert_eq!(list()["enabled"], false);
     configure(json!({"enabled":true,"user_config":{"address":"room"}}));
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
-    configure(json!({"hub_config":{"credential":"saved"}}));
+    e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,attempts,next_retry_ms,delivered_ms) VALUES('fixture','none#alice','failed',1,'failed_permanent',6,999999,1)",&[]).unwrap();
+    let bob = local_principal("bob");
+    let events = e.subscribe(None).unwrap();
+    e.rpc(
+        "human_channel_pair_start",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"}}),
+        Some(&bob),
+    )
+    .unwrap();
+    assert_eq!(events.try_recv().unwrap(), json!({"type":"kv"}));
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
+    let retries = e.inner.db.query("SELECT status,attempts,next_retry_ms FROM hub_channel_deliveries WHERE signal_id='failed'",&[]).unwrap();
+    assert_eq!(
+        retries,
+        [json!({"status":"failed","attempts":0,"next_retry_ms":0})]
+    );
     assert_eq!(list()["status"], "ready");
     let field = list()["fields"][0].clone();
     assert_eq!(field["hidden"], false);
@@ -1604,8 +1552,6 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
     configure(json!({"hub_config":{"credential":"restored"}}));
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_service() {
@@ -1653,50 +1599,40 @@ fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_serv
         .unwrap();
     assert_eq!(request["hub_config"]["credential"], "candidate");
     assert_eq!(request["user_config"]["address"], "candidate-room");
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<(), String> {
     let dir = temp();
-    let e = TestEngine {
-        engine: HubEngine::open(&dir)?,
-        directory: dir.clone(),
-    };
-    let result = (|| {
-        let pid = "none#alice";
-        let id = listener_id(pid, "human", "default");
-        for value in [
-            json!([]),
-            json!(42),
-            json!(true),
-            json!("invalid"),
-            Value::Null,
-        ] {
-            e.rpc(
-                "kv_put",
-                &json!({"key":id,"data_b64":encoded(&value)}),
-                None,
-            )?;
-            let binding = json!({"principal_id":pid,"owner_user":"alice","plugin_id":"fixture"});
-            assert_eq!(
-                e.inner
-                    .db
-                    .transaction(|c| attach(c, &binding, true, "workspace", None)),
-                Err("INVALID_INPUT: Listener must be an object".into()),
-            );
-            let row = e
-                .inner
+    let e = TestEngine(HubEngine::open(&dir)?);
+    let pid = "none#alice";
+    let id = listener_id(pid, "human", "default");
+    for value in [
+        json!([]),
+        json!(42),
+        json!(true),
+        json!("invalid"),
+        Value::Null,
+    ] {
+        e.rpc(
+            "kv_put",
+            &json!({"key":id,"data_b64":encoded(&value)}),
+            None,
+        )?;
+        let binding = json!({"principal_id":pid,"owner_user":"alice","plugin_id":"fixture"});
+        assert_eq!(
+            e.inner
                 .db
-                .transaction(|c| kv_row(c, &id))?
-                .ok_or("Missing registration")?;
-            assert_eq!(parse(&row, "value"), value);
-        }
-        Ok(())
-    })();
-    e.shutdown();
-    std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
-    result
+                .transaction(|c| attach(c, &binding, true, "workspace", None)),
+            Err("INVALID_INPUT: Listener must be an object".into()),
+        );
+        let row = e
+            .inner
+            .db
+            .transaction(|c| kv_row(c, &id))?
+            .ok_or("Missing registration")?;
+        assert_eq!(parse(&row, "value"), value);
+    }
+    Ok(())
 }
 
 #[test]
@@ -1776,8 +1712,6 @@ fn consumer_next_crosses_byte_pages_without_transport_acknowledgments() {
         .map(|item| item["seq"].clone())
         .collect();
     assert_eq!(pending, sequences[2..]);
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -1840,8 +1774,6 @@ fn atomic_batch_claims_and_business_ack_are_distinct() {
             .len(),
         1
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn oidc_read_and_ack_events_are_private() {
@@ -1879,8 +1811,6 @@ fn oidc_read_and_ack_events_are_private() {
         "nc"
     );
     assert!(b.recv_timeout(Duration::from_millis(30)).is_err());
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn workspace_directory_does_not_grant_message_or_ack_content() {
@@ -1955,8 +1885,6 @@ fn workspace_directory_does_not_grant_message_or_ack_content() {
     assert!(third_events
         .recv_timeout(Duration::from_millis(30))
         .is_err());
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn pair_token_encodes_exactly_six_bytes_as_uppercase_base32() {
@@ -2011,8 +1939,6 @@ fn account_info_counts_only_persisted_stream_configuration() {
         e.rpc("account_info", &json!({}), None).unwrap()["streams"],
         2
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 fn fixture(dir: &Path) -> PathBuf {
     let root = dir.join("fixture-plugins");
@@ -2105,8 +2031,6 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
         assert_eq!(frames[1]["signal"]["message"], "hello");
         assert_eq!(frames[1]["config"]["address"], "room");
     }));
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
@@ -2116,10 +2040,7 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
 fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = TestEngine {
-        engine: HubEngine::open_with_auth_mode(&dir, "token").unwrap(),
-        directory: dir.clone(),
-    };
+    let e = TestEngine(HubEngine::open_with_auth_mode(&dir, "token").unwrap());
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice.smith","owner_user":"alice.smith"});
     e.rpc(
@@ -2145,10 +2066,7 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
         .unwrap()
         .contains("fixture-account"));
     e.shutdown();
-    let e = TestEngine {
-        engine: HubEngine::open_with_auth_mode(&dir, "token").unwrap(),
-        directory: dir.clone(),
-    };
+    let e = TestEngine(HubEngine::open_with_auth_mode(&dir, "token").unwrap());
     e.set_plugin_roots(&[root]).unwrap();
     let list = e
         .rpc("human_channels_list", &json!({}), Some(&owner))
@@ -2205,8 +2123,6 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
         evaluate_node_lease(&reg, (now_ms() + 10_000_000) as u64),
         "ACTIVE"
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn human_public_id_uses_canonical_slug_normalization() {
@@ -2227,8 +2143,6 @@ fn human_public_id_uses_canonical_slug_normalization() {
         parse(&row, "value")["public_id"],
         format!("user-{}", id.trim_start_matches("c_"))
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn cli_option_diagnostics_name_configuration_knobs() {
@@ -2298,8 +2212,6 @@ fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
     )
     .unwrap();
     assert_eq!(data["channels"]["hub:fixture"]["state"], "UNLISTENED");
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn subscriptions_unregister_on_drop_without_waiting_for_an_event() {
@@ -2311,8 +2223,6 @@ fn subscriptions_unregister_on_drop_without_waiting_for_an_event() {
         drop(subscription);
         assert!(e.inner.subscribers.lock().unwrap().is_empty());
     }
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn channel_shutdown_kills_descendants_holding_stdout_open() {
@@ -2339,7 +2249,6 @@ fn channel_shutdown_kills_descendants_holding_stdout_open() {
     let started = std::time::Instant::now();
     process.shutdown();
     assert!(started.elapsed() < Duration::from_secs(2));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn reservations_retry_holes_and_record_all_chunks() {
@@ -2417,7 +2326,6 @@ fn reservations_retry_holes_and_record_all_chunks() {
             .count(),
         2
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
@@ -2506,7 +2414,6 @@ fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
     // Stop the persistent child even when a behavioral assertion fails.
     e.shutdown();
     let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap_or_default();
-    std::fs::remove_dir_all(dir).unwrap();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
@@ -2604,8 +2511,6 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
             .unwrap();
         assert_eq!(parse(&stored[0], "data")["in_reply_to"], "source");
     }));
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
@@ -2688,8 +2593,6 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
             json!({"signal_id":reply["signal_id"]})
         ]
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn reply_mappings_outlive_payloads_for_seven_days_and_ack_missing_sources() {
@@ -2728,8 +2631,6 @@ fn reply_mappings_outlive_payloads_for_seven_days_and_ack_missing_sources() {
         .query("SELECT * FROM hub_channel_delivery_msgs", &[])
         .unwrap()
         .is_empty());
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -2895,8 +2796,6 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
             .len(),
         0
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn non_destructive_upgrade_preserves_legacy_payloads() {
@@ -2942,8 +2841,6 @@ fn non_destructive_upgrade_preserves_legacy_payloads() {
             .unwrap()[0]["code"],
         "legacy"
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn accepted_http_connections_wait_for_fragmented_headers() {
@@ -2967,9 +2864,22 @@ fn accepted_http_connections_wait_for_fragmented_headers() {
     let mut response = String::new();
     client.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-    server.shutdown();
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
+    for (field, status) in [
+        (format!("X: {}", "a".repeat(65_536)), 431),
+        ("Content-Length: 8388609".to_owned(), 413),
+    ] {
+        let mut stream = TcpStream::connect(server.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(stream,"POST /v1/rpc HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n{field}\r\n\r\n",server.address).unwrap();
+        let response = crate::plugins::read_http_response(&mut stream).unwrap();
+        assert_eq!(response.status, status);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.body).unwrap()["error"]["code"],
+            "INVALID_INPUT"
+        );
+    }
 }
 #[test]
 fn http_browser_boundary_and_idle_sse_shutdown() {
@@ -3043,6 +2953,7 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
             loop {
                 line.clear();
                 reader.read_line(&mut line).unwrap();
+                assert!(!line.is_empty(), "Unexpected end of SSE response");
                 if line == ":ok\n" {
                     break;
                 }
@@ -3058,8 +2969,6 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
         );
         assert!(engine.rpc("account_info", &json!({}), None).is_ok());
         drop(clients);
-        engine.shutdown();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 #[test]
@@ -3098,17 +3007,12 @@ fn http_wire_and_stoppable_shared_engine() {
     }
     server.shutdown();
     assert!(e.rpc("account_info", &json!({}), None).is_ok());
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = TestEngine {
-        engine: HubEngine::open_with_auth_mode(&dir, "oidc").unwrap(),
-        directory: dir.clone(),
-    };
+    let e = TestEngine(HubEngine::open_with_auth_mode(&dir, "oidc").unwrap());
     e.set_plugin_roots(&[root]).unwrap();
     let legacy = "https://id.example.com#subject";
     let caller = json!({"principal_id":"oidc:https://id.example.com|subject","legacy_principal_id":legacy,"sub":"subject","owner_user":"alice","oidc":true});
@@ -3148,8 +3052,6 @@ fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
             .unwrap()[0]["principal_id"],
         legacy
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
@@ -3211,8 +3113,6 @@ fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
                 .map(|i| json!(format!("human-{i}")))
                 .collect::<Vec<_>>()
         );
-        e.shutdown();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -3293,8 +3193,6 @@ fn binary_payloads_survive_kv_stream_consumers_and_restart() {
             B64.encode(raw)
         );
     }
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn raw_nc_variants_preserve_ack_bytes_and_publish_signals_durably() {
@@ -3343,8 +3241,6 @@ fn raw_nc_variants_preserve_ack_bytes_and_publish_signals_durably() {
         .unwrap()["data_b64"],
         B64.encode([255, 0, 254])
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn opaque_oidc_payloads_keep_ownership_and_validate_available_metadata() {
@@ -3409,8 +3305,6 @@ fn opaque_oidc_payloads_keep_ownership_and_validate_available_metadata() {
             .unwrap_err()
             .starts_with("PERMISSIONS_VIOLATION"));
     }
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn rpc_preserves_payload_bytes() {
@@ -3441,8 +3335,6 @@ fn rpc_preserves_payload_bytes() {
         .unwrap()["data_b64"],
         b64
     );
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn concurrent_claim_has_one_winner() {
@@ -3473,8 +3365,6 @@ fn concurrent_claim_has_one_winner() {
         .filter(|b| *b)
         .count();
     assert_eq!(wins, 1);
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn pending_request_fails_on_child_exit() {
@@ -3500,7 +3390,6 @@ fn pending_request_fails_on_child_exit() {
         Err(e) => assert!(e.contains("exited")),
     }
     p.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn delivered_unread_history_does_not_starve_later_notifications() {
@@ -3525,7 +3414,6 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
             .count(),
         1
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
@@ -3656,7 +3544,6 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
             .count(),
         2
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
@@ -3889,8 +3776,6 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     );
     assert!(e.inner.processes.lock().unwrap().is_empty());
     e.inner.plugins.lock().unwrap().clear();
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -3926,6 +3811,4 @@ fn retention_and_dedup_expire() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["seq"], 2);
-    e.shutdown();
-    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -69,6 +69,22 @@ print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
 }
 
 #[test]
+fn ui_retries_after_initial_executable_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let ui = f.recording_ui();
+    fs::set_permissions(&ui, fs::Permissions::from_mode(0o600)).unwrap();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    assert!(ui_frames(&f).is_empty());
+    fs::set_permissions(&ui, fs::Permissions::from_mode(0o700)).unwrap();
+    wait(|| ui_frames(&f).iter().any(|r| r["op"] == "state"));
+}
+
+#[test]
 fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
     use std::{
         io::Write,
@@ -82,6 +98,20 @@ fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
     let (release, released) = std::sync::mpsc::channel();
     let (finished, done) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
+        use std::os::fd::AsRawFd;
+        let mut fds = [libc::pollfd {
+            fd: issuer.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        assert!(
+            cito_native::support::poll_until(
+                &mut fds,
+                Some(Instant::now() + Duration::from_secs(10))
+            )
+            .unwrap(),
+            "No issuer connection"
+        );
         let (mut stream, _) = issuer.accept().unwrap();
         stream
             .set_write_timeout(Some(Duration::from_secs(1)))
@@ -753,16 +783,12 @@ fn peer_mutations_return_committed_receipts_only_after_success() {
         assert_eq!(result["ok"], true);
         assert_eq!(result["committed"], true, "{action}: {result}");
         wait(|| {
-            fs::read_to_string(f.home.join("ui-frames"))
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|frame| {
-                    frame["request_id"] == request
-                        && frame["source_op"] == action["op"]
-                        && frame["ok"] == true
-                        && frame["committed"] == true
-                })
+            ui_frames(&f).into_iter().any(|frame| {
+                frame["request_id"] == request
+                    && frame["source_op"] == action["op"]
+                    && frame["ok"] == true
+                    && frame["committed"] == true
+            })
         });
     }
     let agent = f

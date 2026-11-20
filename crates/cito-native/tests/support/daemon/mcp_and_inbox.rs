@@ -7,31 +7,12 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let source =
         cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
     source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[]).unwrap();
-    let plugin = f.state.join("plugins/codex");
-    fs::create_dir_all(&plugin).unwrap();
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(root().join("plugins/codex/plugin.json")).unwrap())
-            .unwrap();
-    manifest["command"] = json!([CODEX]);
-    fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
-    // Pin all real providers. Fixture::new sets the builtin directory but does
-    // not substitute a provider; do not rely on staged binaries for this seam.
-    let pi = f.state.join("plugins/pi");
-    fs::create_dir_all(&pi).unwrap();
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(root().join("plugins/pi/plugin.json")).unwrap()).unwrap();
-    manifest["command"] = json!([PI]);
-    fs::write(pi.join("plugin.json"), manifest.to_string()).unwrap();
-    let claude = f.state.join("plugins/claude");
-    fs::create_dir_all(&claude).unwrap();
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(root().join("plugins/claude/plugin.json")).unwrap())
-            .unwrap();
-    manifest["command"] = json!([CLAUDE]);
-    fs::write(claude.join("plugin.json"), manifest.to_string()).unwrap();
+    for (id, bin) in [("codex", CODEX), ("pi", PI), ("claude", CLAUDE)] {
+        install_provider_command(&f, id, json!([bin]));
+    }
     let app = f.dir.join("claude.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(endpoint, false).contains("ready"));
     let claude_pid = f.pid(endpoint);
     let sidecar = f.spawn(CLAUDE, &[], &[]);
@@ -720,18 +701,11 @@ sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.
     .unwrap();
     let trace = f.dir.join("provider-trace.jsonl");
     for (harness, bin) in [("codex", CODEX), ("claude", CLAUDE), ("pi", PI)] {
-        let plugin = f.state.join("plugins").join(harness);
-        fs::create_dir_all(&plugin).unwrap();
-        let mut manifest: Value = serde_json::from_slice(
-            &fs::read(root().join(format!("plugins/{harness}/plugin.json"))).unwrap(),
-        )
-        .unwrap();
-        manifest["command"] = json!(["python3", forwarder, bin, trace]);
-        fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+        install_provider_command(&f, harness, json!(["python3", forwarder, bin, trace]));
     }
     let app = f.dir.join("claude.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(endpoint, false).contains("ready"));
     let pid = f.pid(endpoint);
     let sidecar = f.spawn(CLAUDE, &[], &[]);
@@ -823,14 +797,7 @@ fn nested_harness_stdio_never_claims_an_outer_bridge_but_shells_can() {
         for shell in [false, true] {
             let f = Fixture::new(json!({}));
             for (id, bin) in [("pi", PI), ("claude", CLAUDE), ("codex", CODEX)] {
-                let plugin = f.state.join("plugins").join(id);
-                fs::create_dir_all(&plugin).unwrap();
-                let mut manifest: Value = serde_json::from_slice(
-                    &fs::read(root().join(format!("plugins/{id}/plugin.json"))).unwrap(),
-                )
-                .unwrap();
-                manifest["command"] = json!([bin]);
-                fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+                install_provider_command(&f, id, json!([bin]));
             }
             let inner_app = f.dir.join(format!("{inner}.mjs"));
             fs::write(
@@ -1974,13 +1941,7 @@ fn incoming_messages_update_unread_state_and_activity_until_read() {
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", recorder.to_str().unwrap()),
     ]);
-    let frames = || {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .collect::<Vec<_>>()
-    };
+    let frames = || ui_frames(&f);
     for message in ["Review requested", "Build completed"] {
         let sent = f.tool(
             "cito_send",

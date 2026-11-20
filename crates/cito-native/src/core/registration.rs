@@ -61,7 +61,7 @@ pub fn local_node(
     Ok(state.db.query(
         "SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY status='ACTIVE' DESC,binding_generation DESC",
         &[json!(client.name), json!(harness), json!(session)],
-    )?.into_iter().find(|row| principal_matches(string(row,"principal_id"), &client.identity)))
+    )?.into_iter().find(|row| (row["hub_url"].is_null() || row["hub_url"] == client.config["url"]) && principal_matches(string(row,"principal_id"), &client.identity)))
 }
 
 pub fn local_node_id(
@@ -230,6 +230,10 @@ fn register_human_device(
         c.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token,hub_url,updated_at) VALUES(?,?,?,?,?,?,?,'human','default','','Human',?,?,'ACTIVE',?,?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET public_id=excluded.public_id,principal_id=excluded.principal_id,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token,hub_url=excluded.hub_url,updated_at=excluded.updated_at", &[json!(client.name),json!(id),public.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host),json!(local_host_name()),record["about"].clone(),record["scope"].clone(),json!(generation),json!(token),client.config["url"].clone(),json!(now_ms())])?;
         c.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(client.name),json!(id)])?;
         Ok(())
+    }).inspect_err(|_| {
+        if reuse.is_none() {
+            let _ = super::receiver::detach_channel_expected(client, id, &channel, &json!({"binding_generation":generation,"owner_token":token}));
+        }
     })?;
     let _ = caller;
     Ok(
@@ -515,6 +519,10 @@ fn register_locked(
                 }
                 Ok(RegistrationCommit::Committed)
             }
+        }).inspect_err(|_| {
+            if same_binding.is_none() {
+                let _ = super::receiver::detach_channel_expected(client, &id, &channel, &json!({"binding_generation":generation,"owner_token":owner}));
+            }
         })?;
         match committed {
             RegistrationCommit::Retry => continue,
@@ -582,6 +590,11 @@ mod tests {
                 local_node(&state, &client, "human", "default")?.ok_or("Missing paused row")?;
             assert_eq!(row["listener_id"], "c_2222222222222222");
             assert_eq!(row["status"], "UNLISTENED");
+            state.db.execute("UPDATE local_listeners SET hub_url='https://old.example.com',status='ACTIVE' WHERE listener_id=?", &[row["listener_id"].clone()])?;
+            assert_eq!(
+                local_node(&state, &client, "human", "default")?.unwrap()["listener_id"],
+                "c_1111111111111111"
+            );
             state.db.execute("UPDATE local_listeners SET status='FENCED_INACTIVE' WHERE principal_id='none#alice'", &[])?;
             assert!(local_node(&state, &client, "human", "default")?.is_none());
             for (label, generic) in [

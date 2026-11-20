@@ -90,6 +90,15 @@ pub(super) fn host_hub_server_config(
     if host["enabled"] != true {
         return Ok(None);
     }
+    if mode == "token"
+        && string(host, "token")
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(
+            "INVALID_INPUT: Host hub token cannot contain whitespace or control characters".into(),
+        );
+    }
     let auth = HubAuth::new(mode, host["token"].as_str().map(str::to_string), None, None)?;
     Ok(Some((bind, port, Arc::new(auth))))
 }

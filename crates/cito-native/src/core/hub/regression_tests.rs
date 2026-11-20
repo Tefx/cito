@@ -79,6 +79,9 @@ fn reservations_are_globally_bounded_and_local_backpressure_does_not_spend_attem
         attach(c,&binding,true,"workspace",Some(&plugin))?;
         let node = find_human(c,&binding)?.unwrap();
         c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES('none#alice','sample','alice')", &[])?;
+        for _ in 0..200 {
+            c.execute("INSERT INTO hub_signals(subject,created_ms,data) VALUES(?,?,X'00')", &[json!(format!("cito.signal.{node}")),json!(now_ms())])?;
+        }
         for index in 0..65 {
             c.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES(?,?,?,CAST(? AS BLOB))", &[json!(format!("cito.signal.{node}")),json!(format!("signal-{index}")),json!(now_ms()),json!(json!({"signal_id":format!("signal-{index}"),"from":{"listener_id":"sender"},"message":"Message"}).to_string())])?;
         }
@@ -112,7 +115,38 @@ fn reservations_are_globally_bounded_and_local_backpressure_does_not_spend_attem
         .unwrap();
     assert_eq!(deferred.len(), 2);
     assert!(deferred.iter().all(|row| row["attempts"] == 5));
-    assert_eq!(f.hub.reserve_deliveries(&plugin).unwrap().len(), 2);
+    let fresh = f.hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(
+        fresh
+            .iter()
+            .map(|r| s(&r["signal"], "signal_id"))
+            .collect::<Vec<_>>(),
+        ["signal-32", "signal-33"]
+    );
+    f.hub
+        .inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET next_retry_ms=0 WHERE status='failed'",
+            &[],
+        )
+        .unwrap();
+    for reservation in fresh {
+        f.hub
+            .delivery_result(
+                "sample",
+                &json!({"delivery_id":reservation["delivery_id"],"ok":true}),
+            )
+            .unwrap();
+    }
+    let retried = f.hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(
+        retried
+            .iter()
+            .map(|r| s(&r["signal"], "signal_id"))
+            .collect::<Vec<_>>(),
+        ["signal-0", "signal-1"]
+    );
 }
 
 #[test]
@@ -158,4 +192,5 @@ fn scope_revocation_sends_a_payload_free_hint_to_nonowners() {
         )
         .unwrap();
     assert_eq!(subscription.try_recv().unwrap(), json!({"type":"kv"}));
+    assert!(subscription.try_recv().is_err());
 }

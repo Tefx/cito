@@ -524,8 +524,13 @@ impl DaemonService {
             if let Some(warning) = result
                 .as_ref()
                 .ok()
-                .and_then(|value| value.get("warning"))
-                .filter(|value| !value.is_null())
+                .and_then(|value| {
+                    value
+                        .get("warning")
+                        .or_else(|| value.get("maintenance_warning"))
+                })
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
             {
                 self.emit(json!({"op":"state","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"warning":warning}));
             }
@@ -547,7 +552,13 @@ impl DaemonService {
 
     fn emit_composer_result(&self, action: &Value, result: &Result<Value, String>) {
         self.emit(match result {
-            Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
+            Ok(value) => {
+                let mut frame = json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]});
+                if let Some(warning) = value["maintenance_warning"].as_str().filter(|s| !s.is_empty()) {
+                    frame["warning"] = json!(warning);
+                }
+                frame
+            },
             Err(error) => json!({"op":"composer_result","ok":false,"error":error,"request_id":action["request_id"]}),
         });
     }
@@ -1589,7 +1600,7 @@ impl DaemonService {
                     let (_, total, unread) = self.state.query_activity("all", "")?;
                     (total, unread)
                 };
-                let activity = self.activity_dto(activity);
+                let activity = self.activity_dto(activity, &self.address_book());
                 let warnings: Vec<String> = result["warnings"]
                     .as_array()
                     .into_iter()

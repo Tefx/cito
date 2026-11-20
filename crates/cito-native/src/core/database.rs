@@ -6,59 +6,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
-#[link(name = "sqlite3")]
-extern "C" {
-    fn sqlite3_open_v2(
-        path: *const libc::c_char,
-        db: *mut *mut libc::c_void,
-        flags: i32,
-        vfs: *const libc::c_char,
-    ) -> i32;
-    fn sqlite3_close_v2(db: *mut libc::c_void) -> i32;
-    fn sqlite3_errmsg(db: *mut libc::c_void) -> *const libc::c_char;
-    fn sqlite3_exec(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        callback: Option<
-            unsafe extern "C" fn(
-                *mut libc::c_void,
-                i32,
-                *mut *mut libc::c_char,
-                *mut *mut libc::c_char,
-            ) -> i32,
-        >,
-        arg: *mut libc::c_void,
-        error: *mut *mut libc::c_char,
-    ) -> i32;
-    fn sqlite3_prepare_v2(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        n: i32,
-        statement: *mut *mut libc::c_void,
-        tail: *mut *const libc::c_char,
-    ) -> i32;
-    fn sqlite3_finalize(statement: *mut libc::c_void) -> i32;
-    fn sqlite3_step(statement: *mut libc::c_void) -> i32;
-    fn sqlite3_bind_null(statement: *mut libc::c_void, index: i32) -> i32;
-    fn sqlite3_bind_int64(statement: *mut libc::c_void, index: i32, value: i64) -> i32;
-    fn sqlite3_bind_double(statement: *mut libc::c_void, index: i32, value: f64) -> i32;
-    fn sqlite3_bind_text(
-        statement: *mut libc::c_void,
-        index: i32,
-        value: *const libc::c_char,
-        n: i32,
-        destructor: Option<unsafe extern "C" fn(*mut libc::c_void)>,
-    ) -> i32;
-    fn sqlite3_column_count(statement: *mut libc::c_void) -> i32;
-    fn sqlite3_column_name(statement: *mut libc::c_void, column: i32) -> *const libc::c_char;
-    fn sqlite3_column_type(statement: *mut libc::c_void, column: i32) -> i32;
-    fn sqlite3_column_int64(statement: *mut libc::c_void, column: i32) -> i64;
-    fn sqlite3_column_double(statement: *mut libc::c_void, column: i32) -> f64;
-    fn sqlite3_column_text(statement: *mut libc::c_void, column: i32) -> *const u8;
-    fn sqlite3_column_bytes(statement: *mut libc::c_void, column: i32) -> i32;
-    fn sqlite3_changes(db: *mut libc::c_void) -> i32;
-    fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
-}
+use crate::support::sqlite::*;
 
 pub struct Connection {
     raw: *mut libc::c_void,

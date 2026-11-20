@@ -71,6 +71,18 @@ pub(super) fn read_head(
     })
 }
 
+pub(super) fn coded_error(error: &str) -> (&str, &str) {
+    error
+        .split_once(':')
+        .filter(|(code, _)| {
+            !code.is_empty()
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .unwrap_or(("INTERNAL_ERROR", error))
+}
+
 pub(super) fn write_json(stream: &mut impl Write, status: u16, body: &[u8]) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -167,6 +179,28 @@ pub(super) fn validate_hub(
 }
 
 #[cfg(test)]
+pub(super) fn accept_test_client(
+    listener: &std::net::TcpListener,
+) -> Result<std::net::TcpStream, String> {
+    use std::os::fd::AsRawFd;
+    let mut fd = [libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    if !crate::support::poll_until(
+        &mut fd,
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+    )? {
+        return Err("Timed out waiting for fixture connection".into());
+    }
+    listener
+        .accept()
+        .map(|(stream, _)| stream)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -187,6 +221,14 @@ mod tests {
                     400
                 );
             }
+            let oversized = format!(
+                "GET / HTTP/1.1\r\nX: {}\r\n\r\n",
+                "x".repeat(limit as usize)
+            );
+            assert_eq!(
+                read_head(&mut std::io::Cursor::new(oversized), limit).err(),
+                Some((431, "Headers too large"))
+            );
             let mut request =
                 std::io::Cursor::new("POST /control HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
             let head = read_head(&mut request, limit).unwrap();

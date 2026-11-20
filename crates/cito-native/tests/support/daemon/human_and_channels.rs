@@ -125,6 +125,19 @@ fn title_bearing_cli_and_mcp_enrollment_preserves_siblings_on_remote_failure() {
             if route == "mcp" {
                 let result = f.tool_result("cito_listen", json!({"hub":"work","about":"Attempted enrollment","title":"Uncommitted title"}), meta.clone());
                 assert_eq!(result["isError"], true, "{result}");
+                let payload: Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert!(
+                    payload["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(if fault == "cas" {
+                            "registration unavailable"
+                        } else {
+                            "expected value"
+                        }),
+                    "{payload}"
+                );
             } else {
                 let (ok, out, err) = f.command(
                     NATIVE,
@@ -398,16 +411,12 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
         let (status, response) = f.action(action);
         assert_eq!(status, 200, "{response}");
         wait(|| {
-            fs::read_to_string(f.home.join("ui-frames"))
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            ui_frames(&f)
+                .into_iter()
                 .any(|frame| frame["request_id"] == request && frame["op"] == "settings")
         });
-        let frames = fs::read_to_string(f.home.join("ui-frames")).unwrap();
-        let receipt: Value = frames
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        let receipt: Value = ui_frames(&f)
+            .into_iter()
             .find(|frame| frame["request_id"] == request && frame["op"] == "settings")
             .unwrap();
         assert_eq!(receipt["ok"], true, "{receipt}");
@@ -1020,11 +1029,11 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"work":{"url":"local://"}},"defaultHub":"work"}));
     let meta = f.provider("delivered_unconfirmed");
-    let channel = f.state.join("plugins/channel");
-    fs::create_dir_all(&channel).unwrap();
-    fs::write(channel.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
-        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
-        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let channel = channel_provider(
+        &f,
+        "channel",
+        json!([{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
+    );
     let ui = f.recording_ui();
     f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -1041,10 +1050,8 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             .collect()
     };
     let ui_results = || -> Vec<Value> {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        ui_frames(&f)
+            .into_iter()
             .filter(|frame| frame["op"] == "composer_result")
             .collect()
     };
@@ -1094,6 +1101,7 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             assert_eq!(status, 200, "{result}");
             wait(|| ui_results().len() == results_before + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], true);
+            assert!(ui_results().last().unwrap().get("warning").is_none());
             assert_eq!(
                 ui_results().last().unwrap()["request_id"],
                 format!("{op}-{id}")
@@ -1230,7 +1238,7 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let recovered = source();
     let local = f.db("state.sqlite");
     local.execute("CREATE TRIGGER reject_sent_commit BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'injected local commit failure'); END", &[]).unwrap();
-    let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
+    let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","request_id":"failed-maintenance","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
     let result = send_human_result(&f, args.clone());
     assert_eq!(result["http_status"], 200);
     assert_eq!(result["ok"], true);
@@ -1240,6 +1248,11 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             .is_some_and(|warning| warning.contains("local sent history")),
         "{result}"
     );
+    wait(|| {
+        ui_results().iter().any(|r| {
+            r["request_id"] == "failed-maintenance" && r["warning"] == result["maintenance_warning"]
+        })
+    });
     let committed = hub.query("SELECT seq,signal_id FROM hub_signals WHERE json_extract(CAST(data AS TEXT),'$.in_reply_to')=?", &[json!(recovered)]).unwrap();
     assert_eq!(committed.len(), 1);
     assert_eq!(result["seq"], committed[0]["seq"]);
@@ -1499,11 +1512,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     assert_eq!(pairing[0]["expires_ms"], paired["expires_at_ms"]);
     assert!(pairing[0]["consumed_ms"].is_null());
     wait(|| {
-        let frames: Vec<Value> = fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
+        let frames = ui_frames(&f);
         frames.iter().any(|v| {
             v["op"] == "channel_test_result"
                 && v["hub"] == "work"

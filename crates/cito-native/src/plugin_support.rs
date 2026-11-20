@@ -1458,56 +1458,72 @@ pub fn stdin_events<T: Send + 'static>(tx: std::sync::mpsc::Sender<T>, wrap: fn(
     });
 }
 
-#[link(name = "sqlite3")]
-extern "C" {
-    fn sqlite3_open_v2(
-        p: *const libc::c_char,
-        db: *mut *mut libc::c_void,
-        flags: libc::c_int,
-        vfs: *const libc::c_char,
-    ) -> libc::c_int;
-    fn sqlite3_close(db: *mut libc::c_void) -> libc::c_int;
-    fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;
-    fn sqlite3_progress_handler(
-        db: *mut libc::c_void,
-        steps: libc::c_int,
-        callback: Option<unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int>,
-        arg: *mut libc::c_void,
-    );
-    fn sqlite3_exec(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        cb: Option<
-            unsafe extern "C" fn(
-                *mut libc::c_void,
-                libc::c_int,
-                *mut *mut libc::c_char,
-                *mut *mut libc::c_char,
-            ) -> libc::c_int,
-        >,
-        arg: *mut libc::c_void,
-        err: *mut *mut libc::c_char,
-    ) -> libc::c_int;
-    fn sqlite3_prepare_v2(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        n: libc::c_int,
-        stmt: *mut *mut libc::c_void,
-        tail: *mut *const libc::c_char,
-    ) -> libc::c_int;
-    fn sqlite3_bind_text(
-        stmt: *mut libc::c_void,
-        index: libc::c_int,
-        text: *const libc::c_char,
-        length: libc::c_int,
-        destructor: Option<unsafe extern "C" fn(*mut libc::c_void)>,
-    ) -> libc::c_int;
-    fn sqlite3_step(stmt: *mut libc::c_void) -> libc::c_int;
-    fn sqlite3_finalize(stmt: *mut libc::c_void) -> libc::c_int;
-    fn sqlite3_column_count(stmt: *mut libc::c_void) -> libc::c_int;
-    fn sqlite3_column_name(stmt: *mut libc::c_void, i: libc::c_int) -> *const libc::c_char;
-    fn sqlite3_column_text(stmt: *mut libc::c_void, i: libc::c_int) -> *const u8;
-    fn sqlite3_column_bytes(stmt: *mut libc::c_void, i: libc::c_int) -> libc::c_int;
+use sqlite::*;
+pub(crate) mod sqlite {
+    #[link(name = "sqlite3")]
+    extern "C" {
+        pub(crate) fn sqlite3_open_v2(
+            p: *const libc::c_char,
+            db: *mut *mut libc::c_void,
+            flags: libc::c_int,
+            vfs: *const libc::c_char,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_close_v2(db: *mut libc::c_void) -> i32;
+        pub(crate) fn sqlite3_errmsg(db: *mut libc::c_void) -> *const libc::c_char;
+        pub(crate) fn sqlite3_bind_null(stmt: *mut libc::c_void, index: i32) -> i32;
+        pub(crate) fn sqlite3_bind_int64(stmt: *mut libc::c_void, index: i32, value: i64) -> i32;
+        pub(crate) fn sqlite3_bind_double(stmt: *mut libc::c_void, index: i32, value: f64) -> i32;
+        pub(crate) fn sqlite3_column_type(stmt: *mut libc::c_void, column: i32) -> i32;
+        pub(crate) fn sqlite3_column_int64(stmt: *mut libc::c_void, column: i32) -> i64;
+        pub(crate) fn sqlite3_column_double(stmt: *mut libc::c_void, column: i32) -> f64;
+        pub(crate) fn sqlite3_changes(db: *mut libc::c_void) -> i32;
+        pub(crate) fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
+        pub(crate) fn sqlite3_close(db: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;
+        pub(crate) fn sqlite3_progress_handler(
+            db: *mut libc::c_void,
+            steps: libc::c_int,
+            callback: Option<unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int>,
+            arg: *mut libc::c_void,
+        );
+        pub(crate) fn sqlite3_exec(
+            db: *mut libc::c_void,
+            sql: *const libc::c_char,
+            cb: Option<
+                unsafe extern "C" fn(
+                    *mut libc::c_void,
+                    libc::c_int,
+                    *mut *mut libc::c_char,
+                    *mut *mut libc::c_char,
+                ) -> libc::c_int,
+            >,
+            arg: *mut libc::c_void,
+            err: *mut *mut libc::c_char,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_prepare_v2(
+            db: *mut libc::c_void,
+            sql: *const libc::c_char,
+            n: libc::c_int,
+            stmt: *mut *mut libc::c_void,
+            tail: *mut *const libc::c_char,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_bind_text(
+            stmt: *mut libc::c_void,
+            index: libc::c_int,
+            text: *const libc::c_char,
+            length: libc::c_int,
+            destructor: Option<unsafe extern "C" fn(*mut libc::c_void)>,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_step(stmt: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_finalize(stmt: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_column_count(stmt: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_column_name(
+            stmt: *mut libc::c_void,
+            i: libc::c_int,
+        ) -> *const libc::c_char;
+        pub(crate) fn sqlite3_column_text(stmt: *mut libc::c_void, i: libc::c_int) -> *const u8;
+        pub(crate) fn sqlite3_column_bytes(stmt: *mut libc::c_void, i: libc::c_int) -> libc::c_int;
+    }
 }
 /// Extract a bounded protocol diagnostic without exposing the JSON envelope.
 pub fn response_diagnostic(response: &Value, fallback: &str) -> String {
