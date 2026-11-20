@@ -18346,7 +18346,7 @@ phases:
       Error/Warning Surfacing, Directory Remote/Online Refresh, Drawer Button & Truncation
       Oracle Parity & UI Consolidations (#4-ui, #12, #21, #25, #30–#31, #34) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/mod.rs\n\
@@ -18416,6 +18416,16 @@ phases:
     agent: frontend-engineer
     claimed_by: frontend-engineer
     claimed_at: '2026-11-20T02:08:57.378142Z'
+    done_at: '2026-11-20T03:22:23.320808+00:00'
+    evidence: "Closed all 8 assigned items (#4-ui, #12, #21, #25, #30, #31, #34) on\
+      \ commit d1505614a3996dbaa532e250bb2f0c1060617de1 (rebased onto main as 7bd3edd,\
+      \ version 0.21.3 unchanged).\n- Commands run in isolated worktree:\n  - cargo\
+      \ fmt --all -- --check (exit 0)\n  - git diff --check (exit 0)\n  - cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings (exit 0)\n  - cargo test\
+      \ -p cito-native --test native ui:: -- --test-threads=1 (118 passed, 0 failed)\n\
+      \  - node crates/cito-native/tests/support/site-clipboard.mjs (exit 0)\n- Cross-track\
+      \ #4 composer_result warning cut-set verified end-to-end against real daemon\
+      \ in ui::directory (10 passed, 0 failed) after rebase."
   - id: v54.gate
     name: 'V54 Full Workspace Verification & 34-Item Post-Fix Delta Convergence Gate
       (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
