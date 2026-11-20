@@ -18604,7 +18604,7 @@ phases:
   - id: v54.audit_fix_2
     name: 'V54 macOS Zombie-Leader Process-Group EPERM Teardown Fix & Fast-Exit Regression
       Closure [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/tests/support/mod.rs\n  blocked_paths:\n\
       \    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n    - src/macos/**\n\
@@ -18654,3 +18654,5 @@ phases:
     depends_on:
     - v54.audit_fix
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-20T04:52:15.635937Z'
