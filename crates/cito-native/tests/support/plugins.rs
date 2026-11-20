@@ -1,11 +1,76 @@
 use super::support::*;
 use std::os::unix::net::UnixListener;
+use std::time::{Duration, Instant};
 
-// Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
-fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
-    let mut command = vec!["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp(sys.argv[1],sys.argv[1:])", bin];
-    command.extend_from_slice(args);
-    f.spawn("python3", &command, extra)
+fn wait_for_connection(listener: &impl std::os::fd::AsRawFd) {
+    assert!(
+        cito_native::support::poll_until(
+            &mut [libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0
+            }],
+            Some(Instant::now() + Duration::from_secs(3))
+        )
+        .unwrap(),
+        "Connection timed out"
+    );
+}
+
+#[test]
+fn claude_wake_distinguishes_session_switch_from_transient_socket_failure() {
+    let _lock = serial();
+    for mode in ["mismatch", "io", "rejected"] {
+        let f = Fixture::new(json!({}));
+        fs::create_dir_all(f.state.join("sockets")).unwrap();
+        let pid = std::process::id();
+        let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for op in ["identify", "deliver"] {
+                wait_for_connection(&listener);
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["op"], op);
+                let reply = if op == "identify" {
+                    json!({"ok":true,"session_id":"session-a"})
+                } else if mode == "io" {
+                    continue;
+                } else if mode == "mismatch" {
+                    json!({"ok":false,"error":"SESSION_MISMATCH"})
+                } else {
+                    json!({"ok":false,"error":"UNAVAILABLE","message":"Try later"})
+                };
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        let reply = f.plugin(CLAUDE, json!({"op":"wake","endpoint_pid":pid,"session_id":"session-a","batch_id":"batch-a","text":"Wake content"}));
+        server.join().unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(
+            reply["outcome"],
+            match mode {
+                "mismatch" => "session_switched",
+                "io" => "delivered_unconfirmed",
+                _ => "driver_unavailable",
+            },
+            "{reply}"
+        );
+        let queue = f.state.join("claude/wakes/session-a.jsonl");
+        if mode == "io" {
+            let queued: Value =
+                serde_json::from_str(fs::read_to_string(queue).unwrap().trim()).unwrap();
+            assert_eq!(queued["batch_id"], "batch-a");
+            assert_eq!(queued["content"], "Wake content");
+        } else {
+            assert!(!queue.exists());
+        }
+    }
 }
 
 // Run hooks from their actual endpoint parent, including intermediary regressions.
@@ -17,9 +82,11 @@ if(process.argv[2]==='child') {
  const result=spawnSync(process.env.TEST_HOOK,[],{input:process.argv[3],env:process.env,encoding:'utf8'});
  process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exit(result.status);
 }
-console.log('ready');
+// The request survives a delayed parent. Poll the atomically published file;
+// directory change notifications can coalesce or omit its rename.
+const path=join(dir,`hook-request-${process.pid}`);
 setInterval(()=>{
- const path=join(dir,`hook-request-${process.pid}`);if(!fs.existsSync(path))return;
+ if(!fs.existsSync(path))return;
  const req=JSON.parse(fs.readFileSync(path));fs.unlinkSync(path);
  const input=JSON.stringify(req.input);
  const env={...process.env,CITO_ENDPOINT_PID:String(process.pid)};
@@ -33,8 +100,10 @@ setInterval(()=>{
        : req.mode==='shell'
          ? spawnSync('/bin/sh',['-c','"$TEST_HOOK"; status=$?; exit "$status"'],options)
          : spawnSync(process.env.TEST_HOOK,[],options);
- fs.writeFileSync(join(dir,`hook-result-${process.pid}`),JSON.stringify({out:result.stdout,err:result.stderr}));
+ const resultPath=join(dir,`hook-result-${process.pid}`), temporary=resultPath+'.tmp';
+ fs.writeFileSync(temporary,JSON.stringify({out:result.stdout,err:result.stderr}));fs.renameSync(temporary,resultPath);
 },10);
+console.log('ready');
 "#).unwrap();
     let mut env = vec![("TEST_HOOK", HOOK)];
     env.extend_from_slice(extra);
@@ -46,12 +115,19 @@ fn hook_from_parent(f: &Fixture, parent: usize, input: Value, mode: &str) -> Val
     let pid = f.pid(parent);
     let result = f.state.join(format!("hook-result-{pid}"));
     let _ = fs::remove_file(&result);
-    fs::write(
-        f.state.join(format!("hook-request-{pid}")),
-        json!({"input":input,"mode":mode}).to_string(),
+    cito_native::support::atomic_write(
+        &f.state.join(format!("hook-request-{pid}")),
+        json!({"input":input,"mode":mode}).to_string().as_bytes(),
     )
     .unwrap();
-    wait(|| result.exists());
+    wait(|| {
+        assert!(
+            !f.exited(parent),
+            "Hook parent exited: {}",
+            f.output(parent, true)
+        );
+        result.exists()
+    });
     serde_json::from_slice(&fs::read(result).unwrap()).unwrap()
 }
 fn parent_hook(f: &Fixture, parent: usize, input: Value) -> Value {
@@ -169,6 +245,93 @@ process.on('SIGTERM',()=>{child.kill();process.exit()});
 }
 
 #[test]
+fn two_unhooked_claude_endpoints_never_adopt_a_shared_workspace_transcript() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready');setInterval(()=>{},1000)").unwrap();
+    let owners = [
+        spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]),
+        spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]),
+    ];
+    for owner in owners {
+        wait(|| f.output(owner, false).contains("ready"));
+    }
+    let cwd = fs::canonicalize(&f.dir).unwrap();
+    let slug: String = cwd
+        .to_str()
+        .unwrap()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let transcripts = f.home.join(".claude/projects").join(slug);
+    fs::create_dir_all(&transcripts).unwrap();
+    let first = "11111111-1111-4111-8111-111111111111";
+    fs::write(transcripts.join(format!("{first}.jsonl")), "{}\n").unwrap();
+    let sidecars: Vec<_> = owners.iter().map(|owner| {
+        let sidecar = f.spawn(CLAUDE, &[], &[]);
+        f.send(sidecar, json!({"op":"stdio_sidecar","endpoint_pid":f.pid(*owner),"cwd":cwd,"state_dir":f.state,"env":f.env}));
+        wait(|| {
+            assert!(!f.exited(sidecar), "Sidecar rejected endpoint: {}", f.output(sidecar, true));
+            f.frames(sidecar).iter().any(|frame| frame["op"] == "ready")
+        });
+        // The second owner is already live, even before its bridge is started.
+        let pid = f.pid(*owner);
+        let identity = socket(&f.state.join(format!("sockets/claude-pid-{pid}.sock")),json!({"op":"identify"}));
+        assert_eq!(identity["session_id"], format!("claude-{pid}"));
+        assert!(!f.state.join("claude/aliases").join(first).exists());
+        sidecar
+    }).collect();
+    for transcript in [first, "22222222-2222-4222-8222-222222222222"] {
+        fs::write(transcripts.join(format!("{transcript}.jsonl")), "{}\n").unwrap();
+        for owner in owners {
+            let pid = f.pid(owner);
+            let fallback = format!("claude-{pid}");
+            let identified = socket(
+                &f.state.join(format!("sockets/claude-pid-{pid}.sock")),
+                json!({"op":"identify"}),
+            );
+            assert_eq!(identified["session_id"], fallback, "{identified}");
+            let resolved = f.plugin(
+                CLAUDE,
+                json!({"op":"resolve_caller","endpoint_pid":pid,"cwd":cwd}),
+            );
+            assert_eq!(resolved["caller"]["session_id"], fallback, "{resolved}");
+            assert_eq!(
+                f.plugin(
+                    CLAUDE,
+                    json!({"op":"probe","endpoint_pid":pid,"session_id":fallback,"cwd":cwd})
+                )["status"],
+                "alive"
+            );
+            let binding: Value = serde_json::from_slice(
+                &fs::read(f.state.join(format!("claude/endpoints/{pid}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(binding["session_id"], fallback);
+            assert_eq!(binding["source"], "channel");
+        }
+        assert!(!f.state.join("claude/aliases").join(transcript).exists());
+    }
+    let sessions = f.plugin(CLAUDE, json!({"op":"discover_sessions"}));
+    for owner in owners {
+        assert!(
+            sessions["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["endpoint_pid"] == f.pid(owner)
+                    && row["session_id"] == format!("claude-{}", f.pid(owner))),
+            "{sessions}"
+        );
+    }
+    for sidecar in sidecars {
+        f.eof(sidecar);
+        wait(|| f.exited(sidecar));
+    }
+}
+
+#[test]
 fn claude_fallback_hook_handoff_and_descendant_session_fence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -255,6 +418,29 @@ print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
         json!({"op":"probe","endpoint_pid":pid,"session_id":fallback,"cwd":"/repo"}),
     );
     assert_eq!(probe["status"], "alive", "{probe}");
+    let transcripts = f.home.join(".claude/projects/-repo");
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::write(
+        transcripts.join("real-session.jsonl"),
+        b"{\"type\":\"custom-title\",\"customTitle\":\"Live title\"}\n",
+    )
+    .unwrap();
+    let resolved = f.plugin(
+        CLAUDE,
+        json!({"op":"resolve_caller","endpoint_pid":pid,"cwd":"/repo","explicit_session_id":"real-session","meta":{"expected_session_id":fallback,"expected_harness":"claude"}}),
+    );
+    assert_eq!(resolved["caller"]["session_id"], fallback, "{resolved}");
+    for (claim, accepted) in [("real-session", true), ("unrelated-session", false)] {
+        let verified = f.plugin(
+            CLAUDE,
+            json!({"op":"verify","endpoint_pid":pid,"_meta":{"expected_session_id":claim}}),
+        );
+        assert_eq!(verified["ok"], accepted, "{verified}");
+        if accepted {
+            assert_eq!(verified["caller"]["session_id"], fallback);
+        }
+    }
+    assert_eq!(resolved["caller"]["title"], "Live title", "{resolved}");
     assert_eq!(session(), "real-session");
     assert!(!f
         .state
@@ -276,6 +462,11 @@ print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
     let cleared = hook("cleared-session", "shell");
     assert_eq!(cleared["err"], "");
     assert_eq!(session(), "cleared-session");
+    let stale = f.plugin(
+        CLAUDE,
+        json!({"op":"verify","endpoint_pid":pid,"meta":{"claudeSessionId":"real-session"}}),
+    );
+    assert_eq!(stale["error_code"], "INVALID_INPUT", "{stale}");
     let resumed = hook("resumed-session", "direct");
     assert_eq!(resumed["err"], "");
     assert_eq!(session(), "resumed-session");
@@ -298,7 +489,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
 
     // A real parent hook must wait for the same lock as channel and discovery writers.
     let lock = FileLock::acquire(&lock_path).unwrap();
-    fs::write(&request, json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo-b"}}).to_string()).unwrap();
+    atomic_write(&request, json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo-b"}}).to_string().as_bytes()).unwrap();
     wait(|| !request.exists());
     std::thread::sleep(Duration::from_millis(100));
     assert!(!result.exists(), "Hook bypassed the endpoint lock");
@@ -310,6 +501,13 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
     let canonical = fs::read(&binding).unwrap();
     let canonical_value: Value = serde_json::from_slice(&canonical).unwrap();
     assert_eq!(canonical_value["source"], "hook");
+    let dir = f.home.join(".claude/projects/-repo-b");
+    fs::create_dir_all(&dir).unwrap();
+    let title = b"\n{\"type\":\"custom-title\",\"customTitle\":\"Canonical title\"}\n";
+    let mut bytes = "é".as_bytes().to_vec();
+    bytes.resize(128 * 1024 + 1 - title.len(), b'x');
+    bytes.extend_from_slice(title);
+    fs::write(dir.join("canonical-session.jsonl"), bytes).unwrap();
 
     // Let an initial channel request see no binding, then publish the canonical
     // hook while owning the lock. The channel must re-read it after acquisition.
@@ -345,6 +543,11 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
         f.output(sidecar, true)
     );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
+    assert_eq!(f.frames(client).last().unwrap()["cwd"], "/repo-b");
+    assert_eq!(
+        f.frames(client).last().unwrap()["session_name"],
+        "Canonical title"
+    );
     assert_eq!(
         f.frames(client).last().unwrap()["session_id"],
         "canonical-session"
@@ -367,6 +570,10 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
         "canonical-session"
     );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
+    assert_eq!(
+        socket(&socket_path, json!({"op":"identify"}))["cwd"],
+        "/repo-b"
+    );
     assert!(!f.state.join("claude/aliases/canonical-session").exists());
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
@@ -445,6 +652,7 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         let (received_tx, received_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
+            wait_for_connection(&listener);
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -498,7 +706,17 @@ fn claude_canonical_adoption_does_not_renew_activity_on_identify_or_discovery() 
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "startup-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {} / {}; endpoint: {} / {}",
+            f.output(sidecar, false),
+            f.output(sidecar, true),
+            f.output(parent, false),
+            f.output(parent, true)
+        );
+        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
+    });
     let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
     assert_eq!(
         socket(&path, json!({"op":"identify"}))["session_id"],
@@ -695,7 +913,7 @@ setInterval(()=>{},1000);
         .unwrap();
     let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
     let lock = FileLock::acquire(&binding.with_extension("lock")).unwrap();
-    fs::write(f.state.join(format!("hook-request-{pid}")), json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"descendant-session","cwd":"/repo"}}).to_string()).unwrap();
+    cito_native::support::atomic_write(&f.state.join(format!("hook-request-{pid}")), json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"descendant-session","cwd":"/repo"}}).to_string().as_bytes()).unwrap();
     let result = f.state.join(format!("hook-result-{pid}"));
     wait(|| result.exists());
     let result: Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();
@@ -790,9 +1008,12 @@ fn live_bridge_rejections_survive_identification_and_wake() {
     let f = Fixture::new(json!({}));
     fs::create_dir_all(f.state.join("sockets")).unwrap();
     for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
-        let path = f
-            .state
-            .join(format!("sockets/{id}-pid-{}.sock", std::process::id()));
+        let script = f.dir.join(format!("{id}.mjs"));
+        fs::write(&script, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+        let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
+        wait(|| f.output(process, false).contains("ready"));
+        let endpoint = f.pid(process);
+        let path = f.state.join(format!("sockets/{id}-pid-{endpoint}.sock"));
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
@@ -824,32 +1045,33 @@ fn live_bridge_rejections_survive_identification_and_wake() {
             }
             count
         });
-        let identify=f.plugin(bin,json!({"op":"verify","endpoint_pid":std::process::id(),"session_id":"session","cached_caller":{},"meta":{}}));
-        let wake=f.plugin(bin,json!({"op":"wake","endpoint_pid":std::process::id(),"session_id":"session","text":"hello"}));
+        let identify=f.plugin(bin,json!({"op":"verify","endpoint_pid":endpoint,"session_id":"session","cached_caller":{},"meta":{}}));
+        let wake = f.plugin(
+            bin,
+            json!({"op":"wake","endpoint_pid":endpoint,"session_id":"session","text":"hello"}),
+        );
         if id == "pi" {
             assert_eq!(
                 identify["error_code"], "PI_BRIDGE_UNAVAILABLE",
                 "{identify}"
             );
-            let resolve = f.plugin(
-                bin,
-                json!({"op":"resolve_caller","endpoint_pid":std::process::id()}),
-            );
+            let resolve = f.plugin(bin, json!({"op":"resolve_caller","endpoint_pid":endpoint}));
             assert_eq!(resolve["error_code"], "PI_BRIDGE_UNAVAILABLE", "{resolve}");
             assert!(resolve["message"]
                 .as_str()
                 .unwrap()
                 .contains("Session is unavailable"));
-            let probe = f.plugin(bin, json!({"op":"probe","endpoint_pid":std::process::id()}));
+            let probe = f.plugin(bin, json!({"op":"probe","endpoint_pid":endpoint}));
             assert_eq!(probe["status"], "transient_error", "{probe}");
             assert!(probe["reason"]
                 .as_str()
                 .unwrap()
                 .contains("Session is unavailable"));
-            let closed = f.plugin(bin, json!({"op":"probe","endpoint_pid":std::process::id()}));
+            let closed = f.plugin(bin, json!({"op":"probe","endpoint_pid":endpoint}));
             assert_eq!(closed["status"], "closed_definitive", "{closed}");
         }
         assert_eq!(server.join().unwrap(), if id == "pi" { 5 } else { 2 });
+        f.stop(process);
         fs::remove_file(path).unwrap();
         assert_eq!(identify["ok"], false, "{id}: {identify}");
         assert!(
@@ -1051,6 +1273,11 @@ fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
     assert_eq!(rejected["status"], "transient_error", "{rejected}");
     assert_eq!(rejected["reason"], "Session closed", "{rejected}");
     assert!(!binding.exists());
+    let stale = f.plugin(
+        CLAUDE,
+        json!({"op":"probe","endpoint_pid":pid,"process_identity":{"started_at":"previous"}}),
+    );
+    assert_eq!(stale["status"], "closed_definitive", "{stale}");
 }
 
 #[test]
@@ -1069,13 +1296,19 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         };
         wait(|| f.output(process, false).contains("ready"));
         let pid = f.pid(process);
-        if id == "claude" {
+        let published = if id == "claude" {
             parent_hook(
                 &f,
                 process,
                 json!({"hook_event_name":"SessionStart","session_id":"live-session","cwd":"/repo"}),
             );
-        }
+            let aliases = f.state.join("claude/aliases");
+            fs::create_dir_all(&aliases).unwrap();
+            fs::write(aliases.join("live-session"), "claude-retained\n").unwrap();
+            "claude-retained"
+        } else {
+            "live-session"
+        };
         let path = f.state.join(format!("sockets/{id}-pid-{pid}.sock"));
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1103,7 +1336,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
                     .read_line(&mut line)
                     .unwrap();
                 match turn {
-                    0 => writeln!(stream,"{}",json!({"ok":true,"session_id":"live-session","cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
+                    0 => writeln!(stream,"{}",json!({"ok":true,"session_id":published,"cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
                     1 | 3 => { let _ = release_rx.recv_timeout(std::time::Duration::from_secs(4)); },
                     _ => writeln!(stream,"{}",json!({"ok":false,"message":"Session closed"})).unwrap(),
                 }
@@ -1111,16 +1344,13 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         });
         let first = f.plugin(bin, json!({"op":"discover_sessions"}));
         assert_eq!(
-            first["sessions"][0]["session_id"], "live-session",
+            first["sessions"][0]["session_id"], published,
             "{id}: {first}"
         );
         let slow = f.plugin(bin, json!({"op":"discover_sessions"}));
         release_tx.send(()).unwrap();
         assert_eq!(slow["ok"], true, "{id}: {slow}");
-        assert_eq!(
-            slow["sessions"][0]["session_id"], "live-session",
-            "{id}: {slow}"
-        );
+        assert_eq!(slow["sessions"][0]["session_id"], published, "{id}: {slow}");
         assert_eq!(slow["sessions"][0]["updated_at_ms"], 1000);
         assert_ne!(slow["sessions"][0]["needs_reload"], true);
         let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
@@ -1378,7 +1608,7 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
                 PI,
                 json!({"op":"probe","endpoint_pid":p,"session_id":row["session_id"]})
             )["status"],
-            "closed_definitive"
+            "transient_error"
         );
         assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":p,"session_id":row["session_id"],"badge":null}))["ok"],true);
     }
@@ -1514,41 +1744,56 @@ fn socket(path: &std::path::Path, request: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 #[test]
-fn pi_badge_clear_converges_for_missing_or_departed_bridges() {
+fn agent_badge_clear_converges_for_missing_or_departed_bridges() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let endpoint = f.spawn("/bin/cat", &[], &[]);
-    let path = f
-        .state
-        .join(format!("sockets/pi-pid-{}.sock", f.pid(endpoint)));
-    let update = |badge: Value| {
-        f.plugin(
-            PI,
+    for (id, plugin) in [("pi", PI), ("claude", CLAUDE)] {
+        let f = Fixture::new(json!({}));
+        let app = f.dir.join(format!("{id}.mjs"));
+        fs::write(&app, "console.log('ready');setInterval(()=>{},1000)").unwrap();
+        let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+        wait(|| f.output(endpoint, false).contains("ready"));
+        let path = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", f.pid(endpoint)));
+        let update = |badge: Value| {
+            f.plugin(
+            plugin,
             json!({"op":"update_badge","endpoint_pid":f.pid(endpoint),"session_id":"session-a","badge":badge}),
         )
-    };
+        };
 
-    // A process discovered before its bridge starts has nothing to clear.
-    assert!(!path.exists());
-    assert_eq!(update(Value::Null), json!({"ok":true}));
-    assert_eq!(update(json!("badge"))["ok"], false);
+        // A process discovered before its bridge starts has nothing to clear.
+        assert!(!path.exists());
+        assert_eq!(update(Value::Null), json!({"ok":true}));
+        assert_eq!(update(json!("badge"))["ok"], false);
 
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-    assert!(path.exists());
-    // A live endpoint's transport failure must remain retryable.
-    assert_eq!(update(Value::Null)["ok"], false);
-    assert!(path.exists());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        // A live endpoint's transport failure must remain retryable.
+        assert_eq!(update(Value::Null)["ok"], false);
+        assert!(path.exists());
 
-    f.stop(endpoint);
-    assert_eq!(update(json!("badge"))["ok"], false);
-    assert!(path.exists(), "badge writes must not clean up the socket");
-    assert_eq!(update(Value::Null), json!({"ok":true}));
-    assert!(
-        !path.exists(),
-        "a departed endpoint's stale socket is removed"
-    );
-    assert_eq!(update(Value::Null), json!({"ok":true}));
+        f.stop(endpoint);
+        assert_eq!(update(json!("badge"))["ok"], false);
+        assert!(path.exists(), "badge writes must not clean up the socket");
+        assert_eq!(update(Value::Null), json!({"ok":true}));
+        assert!(
+            !path.exists(),
+            "a departed endpoint's stale socket is removed"
+        );
+        assert_eq!(update(Value::Null), json!({"ok":true}));
+        let unrelated = f.spawn("/bin/cat", &[], &[]);
+        let stale = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", f.pid(unrelated)));
+        drop(UnixListener::bind(&stale).unwrap());
+        assert_eq!(f.plugin(plugin,json!({"op":"update_badge","endpoint_pid":f.pid(unrelated),"session_id":"session-a","badge":null}))["ok"],true);
+        assert!(
+            !stale.exists(),
+            "A reused PID running another app cannot retain a badge socket"
+        );
+    }
 }
 
 #[test]
@@ -1698,6 +1943,48 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
 }
 
 #[test]
+fn claude_transcript_fallback_requires_uuid_separator_positions() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let project = f.home.join(".claude/projects/-example-workspace");
+    fs::create_dir_all(&project).unwrap();
+    let invalid = project.join(format!("{}.jsonl", "f".repeat(36)));
+    fs::write(&invalid, "").unwrap();
+    let request = json!({"op":"resolve_caller","cwd":"/example-workspace","cli_cmd":"listen","http_transport":true});
+    assert_eq!(f.plugin(CLAUDE, request.clone())["ok"], false);
+    let sid = "11111111-1111-1111-1111-111111111111";
+    fs::rename(invalid, project.join(format!("{sid}.jsonl"))).unwrap();
+    assert_eq!(f.plugin(CLAUDE, request)["caller"]["session_id"], sid);
+}
+
+#[test]
+fn claude_hook_special_path_runs_as_one_shell_word_and_is_removed() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let dir = f.dir.join("Alice's $(echo example) plugin");
+    script(
+        &dir.join("bin/cito-claude-hook"),
+        "#!/bin/sh\nprintf 'hook invoked\\n'\n",
+    );
+    let call = |op| f.plugin(CLAUDE, json!({"op":op,"plugin_dir":dir}));
+    assert_eq!(call("setup_apply")["ok"], true);
+    let settings = f.home.join(".claude/settings.json");
+    let read = || serde_json::from_slice::<Value>(&fs::read(&settings).unwrap()).unwrap();
+    let configured = read();
+    let cmd = configured["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let (ok, out, err) = f.command("/bin/sh", &["-c", cmd], "");
+    assert!(ok, "{err}");
+    assert_eq!(out, "hook invoked\n");
+    assert_eq!(call("setup_inspect")["configured"], true);
+    assert_eq!(call("setup_apply")["ok"], true);
+    assert_eq!(read(), configured);
+    assert_eq!(call("setup_remove")["ok"], true);
+    assert!(read().get("hooks").is_none());
+}
+
+#[test]
 fn codex_multiline_toml_and_complete_subtree_removal() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1789,10 +2076,18 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     let mut cached: Value =
         serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
     assert_eq!(cached["identity"], enrolled["caller"]["process_identity"]);
+    let mismatch=f.plugin(PI,json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir,"meta":{"expected_session_id":"different"}}));
+    assert_eq!(mismatch["error_code"], "BINDING_REQUIRED", "{mismatch}");
+    assert_eq!(f.plugin(PI,json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"]}))["status"],"alive");
+    f.env.remove("CITO_PI_PROCESS_DISCOVERY");
     let probe = || {
         f.plugin(PI, json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"]}))
     };
-    assert_eq!(probe()["status"], "alive");
+    assert_eq!(
+        probe()["status"],
+        "transient_error",
+        "A matching live invocation survives the absent reload socket"
+    );
     fs::create_dir_all(f.state.join("sockets")).unwrap();
     fs::write(
         f.state
@@ -1854,6 +2149,176 @@ fn codex_rollout_errors_are_isolated_and_non_utf8_lines_are_lossy() {
         .is_null());
     f.stop(process);
 }
+#[test]
+fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "credential = 'secret-value' unexpected\n").unwrap();
+    let rejected = f.plugin(CODEX, json!({"op":"setup_inspect"}));
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert!(!rejected.to_string().contains("secret-value"), "{rejected}");
+    fs::write(&config, "").unwrap();
+    assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)",&[]).unwrap();
+    let rollout = f.dir.join("empty.jsonl");
+    fs::write(&rollout, b"{\"payload\":{\"type\":\"tool_output\"}}\n").unwrap();
+    let sid = " thread\0suffix ";
+    db.execute(
+        "INSERT INTO threads VALUES(?,'/repo',0,1,?)",
+        &[json!(sid), json!(rollout)],
+    )
+    .unwrap();
+    let discovered = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
+    );
+    assert_eq!(discovered["sessions"][0]["session_id"], sid, "{discovered}");
+    let cursor = fs::read_dir(f.state.join("activity/codex"))
+        .unwrap()
+        .flatten()
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .unwrap()
+        .path();
+    let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
+    assert_eq!(
+        checkpoint["cursor"]["offset"],
+        fs::metadata(&rollout).unwrap().len()
+    );
+    for op in ["resolve_caller", "probe"] {
+        let response = f.plugin(
+            CODEX,
+            json!({"op":op,"session_id":sid,"meta":{"threadId":sid}}),
+        );
+        assert_eq!(response["ok"], true, "{response}");
+        if op == "resolve_caller" {
+            assert_eq!(response["caller"]["session_id"], sid);
+            assert_eq!(response["caller"]["cwd"], "/repo");
+        } else {
+            assert_eq!(response["status"], "alive", "{response}");
+            assert_eq!(response["current_session_id"], sid);
+        }
+    }
+    for i in 0..10 {
+        db.execute(
+            "INSERT INTO threads VALUES(?,'/repo',0,2,NULL)",
+            &[json!(format!("unrelated-{i}"))],
+        )
+        .unwrap();
+    }
+    let retained = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","retained_session_ids":[sid],"recent_window_ms":0}),
+    );
+    let sessions = retained["sessions"].as_array().unwrap();
+    assert!(
+        sessions.iter().any(|row| row["session_id"] == sid),
+        "{retained}"
+    );
+    assert!(sessions
+        .iter()
+        .any(|row| row["session_id"] == "unrelated-9"));
+    db.execute("DELETE FROM threads WHERE id!=?", &[json!(sid)])
+        .unwrap();
+    let again = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
+    );
+    assert_eq!(again["sessions"][0]["session_id"], sid, "{again}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(cursor).unwrap()).unwrap(),
+        checkpoint
+    );
+}
+
+#[test]
+fn codex_checkpoint_interruption_preserves_cursor_and_effect_consumption() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)", &[]).unwrap();
+    let rollout = f.dir.join("rollout.jsonl");
+    let event = |timestamp| {
+        format!(
+            "{}\n",
+            json!({"timestamp":timestamp,"payload":{"type":"user_message","message":"Identical text"}})
+        )
+    };
+    fs::write(&rollout, event("2026-01-01T00:00:00.000Z")).unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES('thread','/repo',0,1,?)",
+        &[json!(rollout)],
+    )
+    .unwrap();
+    let checkpoint = f
+        .state
+        .join("activity/codex")
+        .join(format!("{:x}.json", Sha256::digest(b"thread")));
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    let effects = json!([format!("{:x}", Sha256::digest(b"Identical text"))]);
+    // Legacy state migrates on the next successful atomic publication.
+    fs::write(&checkpoint, json!({"effects":effects}).to_string()).unwrap();
+    fs::write(checkpoint.with_extension("source.json"), "{}").unwrap();
+    // Fail the real atomic publication primitive after staging the complete
+    // checkpoint but before rename, as when a process exits at this boundary.
+    let metadata = fs::metadata(&rollout).unwrap();
+    let prior = fs::read(&checkpoint).unwrap();
+    let next = json!({"effects":[],"cursor":{"offset":metadata.len(),"device":metadata.dev(),"inode":metadata.ino(),"saw_effect":true,"revision":1}});
+    let failed = cito_native::support::atomic_write_checked(
+        &checkpoint,
+        next.to_string().as_bytes(),
+        None,
+        || Err("Interrupted before checkpoint publication".into()),
+    );
+    assert!(failed.is_err());
+    assert_eq!(fs::read(&checkpoint).unwrap(), prior);
+    assert_eq!(
+        fs::read(checkpoint.with_extension("source.json")).unwrap(),
+        b"{}"
+    );
+    let discover = || {
+        let response = f.plugin(CODEX, json!({"op":"discover_sessions"}));
+        assert_eq!(response["ok"], true, "{response}");
+        response["sessions"][0]["activity"].clone()
+    };
+    assert_eq!(discover()["kind"], "cito_effect");
+    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(saved["effects"], json!([]));
+    assert_eq!(saved["cursor"]["offset"], metadata.len());
+    let inode = fs::metadata(&checkpoint).unwrap().ino();
+    assert_eq!(
+        discover()["kind"],
+        "cito_effect",
+        "Consumed effects must not replay"
+    );
+    assert_eq!(
+        fs::metadata(&checkpoint).unwrap().ino(),
+        inode,
+        "No-op scan must not rewrite checkpoint"
+    );
+    // Each invocation restarts the provider; an identical genuine user message
+    // after the consumed wake must receive user attribution.
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout).unwrap();
+    write!(file, "{}", event("2026-01-01T00:01:00.000Z")).unwrap();
+    let user = discover();
+    assert_eq!(user["kind"], "user_turn");
+    assert_eq!(user["at_ms"], 1_767_225_660_000u64);
+    assert_eq!(discover(), user);
+    f.stop(process);
+}
+
 #[test]
 fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     let _lock = serial();
@@ -1919,7 +2384,7 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         let mut rows: Vec<_> = fs::read_dir(f.state.join("activity/codex"))
             .unwrap()
             .flatten()
-            .filter(|entry| entry.path().to_string_lossy().ends_with(".source.json"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
             .map(|entry| {
                 let m = entry.metadata().unwrap();
                 (entry.path(), m.ino(), m.mtime(), m.mtime_nsec())
@@ -1960,7 +2425,7 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         before,
         "Cito effects cannot renew qualifying user activity"
     );
-    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":"Next user turn"}})).unwrap();
+    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":wake}})).unwrap();
     // Tool output after a user turn can exceed a fixed tail slice. It must not
     // hide the qualifying turn or become new activity on subsequent refreshes.
     writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:03:00.000Z","payload":{"type":"tool_output","text":"x".repeat(300_000)}})).unwrap();
@@ -2054,6 +2519,22 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
         json!({"op":"wake","session_id":"thread","text":"Wake","checkpoint_only":true}),
     );
     assert_eq!(sent["queue_confirmed"], true, "{sent}");
+    let repeated = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"Wake","checkpoint_only":true}),
+    );
+    assert_eq!(repeated["queue_confirmed"], true, "{repeated}");
+    let ledger = fs::read_dir(f.state.join("activity/codex"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    assert_eq!(
+        ledger["effects"].as_array().unwrap().len(),
+        2,
+        "Two distinct insertions with identical text retain two effects"
+    );
     let effect = activity(&f);
     assert_eq!(effect["kind"], "cito_effect");
     assert_eq!(activity(&f), effect, "Refresh cannot invent activity");
@@ -2097,12 +2578,13 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
 #[test]
 fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
     let _lock = serial();
-    for (with_rollout, prior_effect, deliver) in [
-        (false, false, true),
-        (false, true, true),
-        (true, false, true),
-        (false, false, false),
-        (true, false, false),
+    for (with_rollout, prior_effect, deliver, interrupted) in [
+        (false, false, true, false),
+        (false, true, true, false),
+        (true, false, true, false),
+        (false, false, false, false),
+        (true, false, false, false),
+        (true, false, true, true),
     ] {
         let mut f = Fixture::new(json!({}));
         let source =
@@ -2161,9 +2643,9 @@ fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
         let cursor = fs::read_dir(f.state.join("activity/codex"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| path.to_string_lossy().ends_with(".source.json"))
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
             .unwrap();
-        let checkpoint = fs::read(&cursor).unwrap();
+        let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
         let marker = f.dir.join("published");
         let release = f.dir.join("release");
         script(
@@ -2177,12 +2659,14 @@ if os.environ["DELIVER"] == "1":
     if os.environ["WITH_ROLLOUT"] == "1":
         with (root / "rollout.jsonl").open("a") as file:
             file.write(json.dumps({"timestamp":"2026-01-01T00:01:00.000Z", "payload":{"type":"user_message", "message":sys.argv[-1]}}) + "\n")
+            file.write(json.dumps({"timestamp":"2026-01-01T00:01:00.001Z", "payload":{"type":"message", "role":"user", "content":[{"text":sys.argv[-1]}]}}) + "\n")
 (root / "published").touch()
 deadline = time.monotonic() + 8
 while not (root / "release").exists():
     if time.monotonic() >= deadline:
         sys.exit(2)
     time.sleep(0.01)
+(root / "finished").touch()
 sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
 "#,
         );
@@ -2207,16 +2691,37 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
             inflight["revision"],
             if deliver { now + 2 } else { now + 1 }
         );
+        let inflight_ledger: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
         assert_eq!(
-            fs::read(&cursor).unwrap(),
-            checkpoint,
+            inflight_ledger["cursor"], checkpoint["cursor"],
             "In-flight discovery must not checkpoint a queue record"
+        );
+        assert!(
+            inflight_ledger["effects"]
+                .as_array()
+                .is_some_and(|effects| !effects.is_empty()),
+            "Pending attribution must precede the queue effect"
         );
         assert!(
             !f.exited(wake),
             "Discovery must run before queue completion"
         );
         assert!(f.frames(wake).is_empty());
+        if interrupted {
+            // The queue has published both carriers, while its caller loses the insertion receipt.
+            f.signal(wake, libc::SIGKILL);
+            fs::write(&release, "").unwrap();
+            wait(|| f.exited(wake));
+            wait(|| f.dir.join("finished").exists());
+            assert!(f.frames(wake).is_empty());
+            let recovered = discover(&f);
+            assert_eq!(recovered["kind"], "user_turn");
+            assert_eq!(
+                recovered["at_ms"], before["at_ms"],
+                "An insertion with no receipt remains attributable to Cito across both carriers"
+            );
+            continue;
+        }
         fs::write(&release, "").unwrap();
         wait(|| f.exited(wake));
         let response = f.frames(wake).pop().unwrap();
@@ -2239,7 +2744,7 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
                 before,
                 "Failed delivery must release the guard without adding an effect"
             );
-            let ledger = cursor.with_extension("").with_extension("json");
+            let ledger = cursor.clone();
             if ledger.exists() {
                 let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
                 assert!(ledger["effects"].as_array().is_none_or(Vec::is_empty));
@@ -2374,6 +2879,11 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
     assert!(failed_process["sessions"].is_null());
     let discover = || f.plugin(CODEX, json!({"op":"discover_sessions"}));
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+    let forwarded = f.plugin(
+        CODEX,
+        json!({"op":"probe","session_id":"active","_meta":{"_stdio":{"endpoint_pid":i32::MAX}}}),
+    );
+    assert_eq!(forwarded["status"], "alive", "{forwarded}");
     db.execute("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE", &[])
         .unwrap();
     let started = std::time::Instant::now();
@@ -2515,15 +3025,31 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
     );
     f.env
         .insert("CITO_CODEX_BIN".into(), queue.display().to_string());
-    let request = json!({"op":"wake","session_id":"thread-a","text":"a message with spaces"});
+    let request = json!({"op":"wake","session_id":"thread/a?# b","text":"a message with spaces"});
     assert_eq!(f.plugin(CODEX, request.clone())["outcome"], "delivered");
     assert_eq!(
         fs::read_to_string(f.home.join("queue-args")).unwrap(),
-        "queue\n--resume\n--thread\nthread-a\n--message\na message with spaces\n"
+        "queue\n--resume\n--thread\nthread/a?# b\n--message\na message with spaces\n"
     );
     assert!(fs::read_to_string(f.home.join("mock-calls"))
         .unwrap()
-        .contains("codex://threads/wake/thread-a"));
+        .contains("codex://threads/wake/thread%2Fa%3F%23%20b"));
+    // The queue command is authoritative for insertion. An unreadable activity
+    // database can degrade the post-queue attribution, but must not veto the command.
+    fs::create_dir_all(f.home.join(".codex")).unwrap();
+    fs::write(f.home.join(".codex/state_5.sqlite"), b"invalid database").unwrap();
+    let mut checkpoint = request.clone();
+    checkpoint["checkpoint_only"] = json!(true);
+    let receipt = f.plugin(CODEX, checkpoint);
+    assert_eq!(receipt["queue_confirmed"], true, "{receipt}");
+    assert!(receipt["reason"].is_string(), "{receipt}");
+    assert_eq!(
+        fs::read_to_string(f.home.join("queue-args"))
+            .unwrap()
+            .lines()
+            .count(),
+        12
+    );
     let mut retry = request;
     retry["queue_written"] = json!(true);
     let result = f.plugin(CODEX, retry.clone());
@@ -2541,7 +3067,7 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
             .unwrap()
             .lines()
             .count(),
-        6
+        12
     );
 }
 #[test]
@@ -2571,6 +3097,20 @@ fn setup_remove_dry_run_preserves_live_plugin_runtime() {
         assert!(!socket.exists());
     }
     assert!(!queue.exists());
+    let ledger = f.state.join("activity/codex/thread.json");
+    let sibling = f.state.join("activity/sample/thread.json");
+    for path in [&ledger, &sibling] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "retained").unwrap();
+    }
+    for dry_run in [true, false] {
+        assert_eq!(
+            f.plugin(CODEX, json!({"op":"setup_remove","dry_run":dry_run}))["ok"],
+            true
+        );
+        assert_eq!(ledger.exists(), dry_run);
+        assert!(sibling.exists());
+    }
 }
 #[test]
 fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_alias() {
@@ -2580,7 +3120,11 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
     let transcripts = f.home.join(".claude/projects/-repo");
     fs::create_dir_all(&transcripts).unwrap();
     let sid = "11111111-1111-1111-1111-111111111111";
-    fs::write(transcripts.join(format!("{sid}.jsonl")), b"").unwrap();
+    fs::write(
+        transcripts.join(format!("{sid}.jsonl")),
+        b"{\"type\":\"custom-title\",\"customTitle\":\"Hook transcript title\"}\n",
+    )
+    .unwrap();
     parent_hook(
         &f,
         endpoint,
@@ -2601,6 +3145,22 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
     fs::create_dir_all(&wakes).unwrap();
     fs::create_dir_all(f.state.join("claude/aliases")).unwrap();
     fs::write(f.state.join("claude/aliases").join(sid), b"claude-123").unwrap();
+    let aliased = f.plugin(CLAUDE, json!({"op":"probe","session_id":"claude-123","cwd":"/repo","endpoint_pid":f.pid(endpoint)}));
+    assert_eq!(aliased["status"], "alive", "{aliased}");
+    let mut request = json!({"op":"resolve_caller","require_open":false,"endpoint_pid":f.pid(endpoint),"cwd":"/repo","explicit_session_id":sid,"meta":{"expected_harness":"claude","expected_session_id":"claude-123"}});
+    let resolved = f.plugin(CLAUDE, request.clone());
+    assert_eq!(resolved["caller"]["session_id"], "claude-123", "{resolved}");
+    assert_eq!(resolved["caller"]["title"], "Hook transcript title");
+    request["cached_caller"] = resolved["caller"].clone();
+    // A fresh resolution would now observe a different title.
+    fs::remove_file(transcripts.join(format!("{sid}.jsonl"))).unwrap();
+    request["meta"] = json!({"expected_session_id":sid});
+    assert_eq!(
+        f.plugin(CLAUDE, request.clone())["caller"],
+        resolved["caller"]
+    );
+    request["meta"]["expected_session_id"] = json!("different-session");
+    assert_eq!(f.plugin(CLAUDE, request)["error_code"], "INVALID_INPUT");
     let alias = wakes.join("claude-123.jsonl");
     fs::write(
         &alias,
@@ -2748,7 +3308,7 @@ fn claude_offline_hook_retires_output_only_after_identity_bound_durable_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
-    local.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES('work','c_offline','none#alice','alice','host','laptop','claude','session-a','/repo','Work','','workspace','ACTIVE','https://hub.example.com'); INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,batch_id,queue_written,queue_confirmed,hub_url,principal_id) VALUES('work','offline-signal','c_offline',1,1,'bob','desktop','','Delivered exactly once','now',9999999999999,'DISPATCHED','offline-batch',1,1,'https://hub.example.com','none#alice'); UPDATE local_listeners SET hub_url='https://replacement.example.com',principal_id='none#bob' WHERE listener_id='c_offline'",&[]).unwrap();
+    local.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES('work','c_offline','none#alice','alice','host','laptop','claude','session-a','/repo','Work','','workspace','ACTIVE','https://hub.example.com'); INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,batch_id,queue_written,queue_confirmed,hub_url,principal_id) VALUES('work','offline-signal','c_offline',1,1,'bob','desktop','','Delivered exactly once','now',9999999999999,'DISPATCHED','offline-batch',1,1,'https://hub.example.com','none#alice')",&[]).unwrap();
     f.plugin(CLAUDE,json!({"op":"wake","session_id":"session-a","batch_id":"offline-batch","text":"Delivered exactly once","wake":false}));
     let output = f.plugin(
         HOOK,
@@ -2805,6 +3365,7 @@ fn claude_hook_routes_alias_and_session_acks_and_requires_confirmed_counts() {
         );
         f.eof(hook);
         for (sid, batch) in [("claude-42", "alias-batch"), ("session-a", "sid-batch")] {
+            wait_for_connection(&listener);
             let (stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -2885,6 +3446,8 @@ fn claude_hook_ack_prefers_environment_daemon_port_over_config() {
         Err(e) => panic!("environment listener: {e}"),
     });
     let stream = connection.unwrap();
+    // Darwin inherits O_NONBLOCK from the listener; accept can precede the HTTP bytes.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -2959,9 +3522,29 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
         &path,
         json!({"op":"status","session_id":"session-a","badge":"badge"}),
     );
-    let frame = json!({"op":"deliver","session_id":"session-a","batch_id":"batch","content":"literal <card>","wake":true});
+    let frame = json!({"op":"deliver","session_id":"session-a","batch_id":"batch","content":"literal <card>","wake":true,"signals":[{"signal_id":"a"},{"signal_id":"b"}]});
     assert_eq!(socket(&path, frame.clone())["deduplicated"], false);
     assert_eq!(socket(&path, frame)["deduplicated"], true);
+    let queued: Value = serde_json::from_str(
+        fs::read_to_string(f.state.join("claude/wakes/session-a.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(queued["expected_ack_count"], 2);
+    let wake=f.plugin(CLAUDE,json!({"op":"wake","endpoint_pid":endpoint,"session_id":"session-a","batch_id":"host-batch","text":"Host batch","signals":[{"signal_id":"c"},{"signal_id":"d"},{"signal_id":"e"}]}));
+    assert_eq!(wake["outcome"], "delivered_unconfirmed", "{wake}");
+    let queued: Value = serde_json::from_str(
+        fs::read_to_string(f.state.join("claude/wakes/session-a.jsonl"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(queued["expected_ack_count"], 3);
     assert_eq!(
         socket(
             &path,
@@ -2974,25 +3557,372 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
             .unwrap()
             .lines()
             .count(),
-        1
+        2
     );
+    // Cleanup cannot remove a badge generation published by a different writer.
+    let badge = f.state.join("claude/badges/session-a");
+    fs::write(badge.with_extension("replacement"), "new badge").unwrap();
+    fs::rename(badge.with_extension("replacement"), &badge).unwrap();
     f.eof(p);
     wait(|| f.exited(p));
     assert!(!path.exists());
-    assert!(!f.state.join("claude/badges/session-a").exists());
+    assert_eq!(fs::read_to_string(&badge).unwrap(), "new badge");
     for signal in [libc::SIGINT, libc::SIGTERM] {
         let p = f.spawn(CLAUDE, &[], &[]);
         let mut env = f.env.clone();
         env.insert("CLAUDE_SESSION_ID".into(), "signal-session".into());
         f.send(p,json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":endpoint,"cwd":"/repo"}));
         wait(|| f.frames(p).iter().any(|frame| frame["op"] == "ready"));
+        socket(
+            &path,
+            json!({"op":"status","session_id":"signal-session","badge":"owned"}),
+        );
+        let owned = f.state.join("claude/badges/signal-session");
+        assert!(owned.exists());
         let started = std::time::Instant::now();
         f.signal(p, signal);
         wait(|| f.exited(p));
         assert!(started.elapsed() < std::time::Duration::from_millis(250));
         assert!(!path.exists());
+        assert!(!owned.exists());
+        assert_eq!(fs::read_to_string(&badge).unwrap(), "new badge");
     }
 }
+#[test]
+fn desktop_entrypoints_are_harness_boundaries_only_for_the_executable() {
+    for app in ["Codex", "ChatGPT"] {
+        let entry = format!("/Applications/{app}.app/Contents/MacOS/{app}");
+        assert!(cito_native::support::is_agent_harness(&entry));
+        assert!(!cito_native::support::is_agent_harness(&format!(
+            "/usr/bin/echo\0{entry}"
+        )));
+        assert!(!cito_native::support::is_agent_harness(&format!(
+            "/opt/local/{app}"
+        )));
+    }
+}
+
+#[test]
+fn mcp_stdio_reports_invalid_frames_and_reaps_its_daemon_while_idle() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let mcp = f.spawn(NATIVE, &["mcp-stdio"], &[]);
+    f.send_raw(mcp, b"{\nnull\n");
+    wait(|| f.frames(mcp).len() == 2);
+    for (frame, code) in f.frames(mcp).iter().zip([-32700, -32600]) {
+        assert_eq!(frame["error"]["code"], code);
+        assert_eq!(frame.get("id"), Some(&Value::Null));
+    }
+    let (_, health) = http(f.port, "/health", None);
+    assert_eq!(health["stateDir"], json!(f.state));
+    let daemon = health["pid"].as_u64().unwrap() as u32;
+    assert_eq!(
+        cito_native::support::process_parent(daemon),
+        Some(f.pid(mcp))
+    );
+    // SAFETY: the sandbox health and process parent identify the daemon started by this client.
+    assert_eq!(unsafe { libc::kill(daemon as i32, libc::SIGTERM) }, 0);
+    wait(|| !cito_native::plugins::pid_alive(daemon as i32));
+    assert!(!f.exited(mcp));
+    f.eof(mcp);
+    wait(|| f.exited(mcp));
+
+    f.daemon(&[]);
+    for (input, broken_output) in [
+        (vec![0xff, b'\n'], false),
+        (vec![b'x'; 1_048_577], false),
+        (b"null\n".to_vec(), true),
+    ] {
+        let mut child = f
+            .command_builder(NATIVE, &["mcp-stdio"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        if broken_output {
+            drop(child.stdout.take());
+        }
+        child.stdin.take().unwrap().write_all(&input).unwrap();
+        assert_eq!(child.wait_with_output().unwrap().status.code(), Some(1));
+    }
+}
+
+#[test]
+fn setup_uses_republished_command_and_reports_skipped_inspection_failure() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    f.env.remove("CITO_BUILTIN_PLUGINS_DIR");
+    let stale = f.state.join("runtime/plugins/pi");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(
+        stale.join("plugin.json"),
+        json!({"id":"pi","displayName":"Old","command":["./retired-driver"]}).to_string(),
+    )
+    .unwrap();
+    let broken = f.state.join("plugins/sample");
+    script(&broken.join("driver"), "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"message\":\"SQLITE_ERROR: no such table: private_name\"}'\n");
+    fs::write(
+        broken.join("plugin.json"),
+        json!({"id":"sample","displayName":"Sample","command":["./driver"]}).to_string(),
+    )
+    .unwrap();
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--enable", "pi", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let settings: Value =
+        serde_json::from_slice(&fs::read(f.home.join(".pi/agent/settings.json")).unwrap()).unwrap();
+    assert!(settings["packages"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(stale)));
+    let receipt: Value = serde_json::from_str(&out).unwrap();
+    let action = receipt["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["target"] == "sample")
+        .unwrap();
+    assert_eq!(action["status"], "warning");
+    assert!(action["detail"]
+        .as_str()
+        .unwrap()
+        .contains("database is unavailable"));
+    assert!(!out.contains("private_name"));
+}
+
+#[test]
+fn setup_rejects_padded_inline_issuer_and_exits_on_remove_conflicts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let (ok, _, err) = f.command(
+        NATIVE,
+        &[
+            "setup",
+            "--dry-run",
+            "--hub",
+            "work",
+            "--url",
+            "local://",
+            "--issuer= https://id.example.com ",
+            "--client-id=client",
+        ],
+        "",
+    );
+    assert!(!ok && err.contains("OIDC"), "{err}");
+    let plugin = f.state.join("plugins/sample");
+    script(&plugin.join("driver"), "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"actions\":[{\"target\":\"sample\",\"path\":\"settings\",\"status\":\"conflict\",\"detail\":\"Settings changed\"}]}'\n");
+    fs::write(
+        plugin.join("plugin.json"),
+        json!({"id":"sample","displayName":"Sample","command":["./driver"]}).to_string(),
+    )
+    .unwrap();
+    for args in [
+        vec!["setup", "--disable", "sample", "--dry-run", "--json"],
+        vec!["setup", "--uninstall", "--json"],
+    ] {
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(!ok && err.contains("Settings changed"), "{out} {err}");
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["ok"], false);
+    }
+    let (ok, _, err) = f.command(NATIVE, &["SQLITE_ERROR: no such table: private_name"], "");
+    assert!(
+        !ok && err.contains("database is unavailable") && !err.contains("private_name"),
+        "{err}"
+    );
+}
+
+#[test]
+fn setup_status_exposes_top_level_inspection_failure_in_both_formats() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":[]}));
+    for json_output in [false, true] {
+        let mut args = vec!["setup", "--status"];
+        if json_output {
+            args.push("--json");
+        }
+        let output = f.command_builder(NATIVE, &args).output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        if json_output {
+            let failed: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(failed["ok"], false);
+            assert_eq!(failed["configPath"], json!(f.config));
+            assert_eq!(failed["error"], "Expected hubs object in config.json");
+            assert!(failed.get("defaultHub").is_none() && failed.get("hubs").is_none());
+        } else {
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("Expected hubs object in config.json"));
+        }
+    }
+}
+
+#[test]
+fn setup_reports_only_committed_config_on_disconnect_apply_and_login_failure() {
+    let _lock = serial();
+    let before = br#"{"host_hub":{"enabled":true,"port":4291}}"#;
+    let saved = format!("{}\n", serde_json::to_string_pretty(&json!({"default_hub":"local", "hubs":{"local":{"url":"local://","natsUrl":"local://","authMode":"none","enabled":true,"defaultScope":"workspace"}}, "host_hub":{"enabled":false,"port":4291}})).unwrap());
+    for (operation, failure) in [
+        ("--disable", "Invalid host-id UUID"),
+        ("--enable", "Sample setup refused"),
+        ("--login-item", "File exists"),
+    ] {
+        let f = Fixture::new(json!({}));
+        let mut args = vec!["setup", "--no-share-hub", operation];
+        if operation == "--login-item" {
+            fs::create_dir_all(f.home.join("Library")).unwrap();
+            fs::write(f.home.join("Library/LaunchAgents"), b"occupied").unwrap();
+        } else {
+            args.push("sample");
+            let plugin = install_builtin_override(
+                &f,
+                "sample",
+                json!({"id":"sample","displayName":"Sample","command":["./driver"]}),
+            );
+            script(
+                &plugin.join("driver"),
+                "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"message\":\"Sample setup refused\"}'\n",
+            );
+            if operation == "--disable" {
+                fs::write(f.state.join("host-id"), b"invalid").unwrap();
+            }
+        }
+        for state in ["created", "updated", "unchanged", "dry-run"] {
+            match state {
+                "created" => fs::remove_file(&f.config).unwrap(),
+                "updated" | "dry-run" => fs::write(&f.config, before).unwrap(),
+                _ => {} // Reuse the bytes committed by the previous invocation.
+            }
+            let mut args = args.clone();
+            if state == "dry-run" {
+                args.push("--dry-run");
+            }
+            let (ok, out, err) = f.command(NATIVE, &args, "");
+            assert_eq!(
+                fs::read(&f.config).unwrap(),
+                if state == "dry-run" {
+                    &before[..]
+                } else {
+                    saved.as_bytes()
+                },
+                "{operation}: {state}: {err}"
+            );
+            assert_eq!(
+                ok,
+                operation == "--login-item" && state == "dry-run",
+                "{operation}: {state}: {out} {err}"
+            );
+            if !ok {
+                let expected = if operation == "--disable" && state == "dry-run" {
+                    "Sample setup refused"
+                } else {
+                    failure
+                };
+                assert!(err.contains(expected), "{operation}: {state}: {err}");
+            }
+            if matches!(state, "created" | "updated") {
+                assert!(
+                    err.contains("Configuration saved; setup incomplete:"),
+                    "{err}"
+                );
+            } else {
+                assert!(!err.contains("Configuration saved"), "{err}");
+            }
+        }
+    }
+}
+
+#[test]
+fn setup_reports_committed_config_after_staging_failure() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    fs::write(f.state.join("runtime"), "not a directory").unwrap();
+    let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3421"], "");
+    assert!(!ok && err.contains("Configuration saved"), "{err}");
+    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    assert_eq!(config["host_hub"]["port"], 3421);
+    let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3421"], "");
+    assert!(!ok && !err.contains("Configuration saved"), "{err}");
+}
+
+#[test]
+fn setup_cli_exposes_removal_receipts_and_post_save_reload_errors() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}));
+    let daemon = f.spawn("python3", &["-c", r#"import http.server,json,os,sys
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def reply(self,status,obj):
+  raw=json.dumps(obj).encode();self.send_response(status);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+ def do_GET(self): self.reply(200,dict(ok=True,pid=os.getpid(),stateDir=os.environ['CITO_STATE_DIR'],version=sys.argv[1]))
+ def do_POST(self):
+  op=json.loads(self.rfile.read(int(self.headers['Content-Length'])))['op']
+  if op=='set_host_hub': self.reply(503,dict(ok=False,error='Reload refused'))
+  else: self.reply(200,dict(ok=True,warning=op+' incomplete',warnings=['Remote unavailable'],detach_status='pending'))
+s=http.server.HTTPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
+"#,env!("CARGO_PKG_VERSION")], &[]);
+    wait(|| f.output(daemon, false).contains("ready"));
+    for (flag, value, op) in [
+        ("--remove-hub", "work", "setup_remove_hub"),
+        ("--disable", "pi", "setup_remove_app"),
+    ] {
+        let (ok, out, err) = f.command(NATIVE, &["setup", flag, value, "--json"], "");
+        assert!(ok, "{out} {err}");
+        let receipt: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            receipt["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["status"] == "warning"
+                    && action["detail"].as_str().is_some_and(|s| s.contains(op)
+                        && s.contains("Remote unavailable")
+                        && s.contains("Detach status: pending"))),
+            "{receipt}"
+        );
+    }
+    let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3021"], "");
+    assert!(
+        !ok && err.contains("Configuration saved") && err.contains("Reload refused"),
+        "{err}"
+    );
+    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    assert_eq!(config["host_hub"]["port"], 3021);
+}
+
+#[test]
+fn purge_waits_for_config_and_staging_writers_and_preserves_lock_inodes() {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    let _lock = serial();
+    for (name, marker) in [
+        ("config.json.lock", "config.json"),
+        ("runtime/staging.lock", "runtime/staged"),
+    ] {
+        let f = Fixture::new(json!({}));
+        let lock_path = f.state.join(name);
+        let guard = cito_native::support::FileLock::acquire(&lock_path).unwrap();
+        let held = fs::File::open(&lock_path).unwrap();
+        let child = f.spawn(NATIVE, &["setup", "--uninstall", "--purge-data"], &[]);
+        wait(|| {
+            assert!(!f.exited(child), "Uninstall bypassed {name}");
+            fs::File::open(f.state.join("daemon.lock")).is_ok_and(|file| {
+                // SAFETY: closing this descriptor releases a successful probe lock.
+                (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }) != 0
+            })
+        });
+        fs::write(f.state.join(marker), "{}").unwrap();
+        drop(guard);
+        wait(|| f.exited(child));
+        assert!(
+            f.output(child, true).is_empty(),
+            "{}",
+            f.output(child, true)
+        );
+        assert!(!f.state.join(marker).exists());
+        assert_eq!(
+            held.metadata().unwrap().ino(),
+            fs::metadata(lock_path).unwrap().ino()
+        );
+    }
+}
+
 #[test]
 fn pi_bridge_real_typescript_host_contract_without_npm() {
     let _lock = serial();
@@ -3005,6 +3935,56 @@ fn pi_bridge_real_typescript_host_contract_without_npm() {
     );
     assert!(ok, "{out}\n{err}");
 }
+#[test]
+fn pi_bridge_rejects_invalid_config_and_ignores_settlement_after_shutdown() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let module = root().join("plugins/pi/cito-bridge.ts");
+    let probe = r#"
+import assert from 'node:assert/strict';
+import {writeFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const {default:bridge} = await import(pathToFileURL(process.argv[1]));
+delete process.env.CITO_DAEMON_PORT;
+process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='0';
+const originalState=process.env.CITO_STATE_DIR;
+for (const [path, prefix] of [['~',process.env.HOME],['~/custom',`${process.env.HOME}/custom`],['relative',`${process.cwd()}/relative`]]) {
+  process.env.CITO_STATE_DIR=path;
+  let shim, shutdown;
+  bridge({on:(name,fn)=>{if(name==='session_shutdown') shutdown=fn},registerMcpServer:(_,server)=>shim=server.command});
+  assert.equal(shim,`${prefix}/bin/cito-mcp`); await shutdown();
+}
+process.env.CITO_STATE_DIR=originalState;
+for (const reject of [false,true]) {
+  let run, shutdown, settle, urls=[], ui=[];
+  bridge({on:(name,fn)=>{if(name==='session_shutdown') shutdown=fn},registerCommand:(_,cmd)=>run=cmd.handler});
+  const ctx={cwd:'/repo',sessionManager:{getSessionId:()=>'test',getSessionName:()=>'Test'},ui:{notify:(...v)=>ui.push(v),setStatus:(...v)=>ui.push(v)}};
+  globalThis.fetch=(url)=>{urls.push(url);return new Promise((yes,no)=>{settle=()=>reject?no(Error('late failure')):yes(new Response(JSON.stringify({result:{content:[]}})))})};
+  for (const invalid of [null,[],0,'text',{daemonPort:0},{daemon_port:65536},{daemonPort:null},{daemon_port:'1234'},{daemonPort:4321,daemon_port:false}]) {
+    writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify(invalid));
+    const result=run('on',ctx);
+    assert.equal(urls.length,0,'Invalid config reached the transport');
+    await result; assert.equal(ui.at(-1)[1],'error');
+  }
+  writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify({daemon_port:4321}));
+  const pending=run('on',ctx); assert.deepEqual(urls,['http://127.0.0.1:4321/mcp']);
+  await shutdown(); const before=ui.length; settle(); await pending; assert.equal(ui.length,before);
+}
+"#;
+    let (ok, out, err) = f.command(
+        "node",
+        &[
+            "--experimental-strip-types",
+            "--input-type=module",
+            "-e",
+            probe,
+            module.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+}
+
 #[test]
 fn empty_and_unbound_hooks_are_silent_and_malformed_input_preserves_queue() {
     let _lock = serial();
@@ -3036,18 +4016,17 @@ fn explicit_pid_claims_reject_invalid_conflicting_and_unreachable_endpoints() {
             json!({"pi_pid":"12"}),
             json!({"pi_pid":123,"caller_pid":124}),
         ] {
-            assert_ne!(
-                f.plugin(bin, json!({"op":"resolve_caller","meta":meta}))["ok"],
-                true
-            );
+            let result = f.plugin(bin, json!({"op":"resolve_caller","meta":meta}));
+            assert_eq!(result["ok"], false);
+            assert_eq!(result["error_code"], "INVALID_INPUT", "{result}");
         }
     }
     assert_eq!(
         f.plugin(
             PI,
             json!({"op":"resolve_caller","meta":{"pi_pid":2147483647}})
-        )["ok"],
-        false
+        )["error_code"],
+        "BINDING_REQUIRED"
     );
 }
 
@@ -3056,6 +4035,22 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
     use std::time::{Duration, Instant};
     let _lock = serial();
     let f = Fixture::new(json!({}));
+    let child = f
+        .command_builder("/bin/sh", &["-c", "printf out; printf err >&2"])
+        .spawn()
+        .unwrap();
+    wait(|| {
+        cito_native::plugins::peek_plugin_exit(child.id())
+            .unwrap()
+            .is_some()
+    });
+    let ready = cito_native::support::wait_child_exit(&child, Duration::from_millis(100));
+    let drained = child.wait_with_output().unwrap();
+    assert_eq!(ready, Ok(true));
+    assert_eq!(
+        (drained.stdout, drained.stderr),
+        (b"out".to_vec(), b"err".to_vec())
+    );
     let command = f.command_builder(
         "python3",
         &[
@@ -3080,18 +4075,25 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
             .is_none()
     );
     assert!(started.elapsed() < Duration::from_millis(500));
-    // The parent exits successfully but a descendant retains both inherited
-    // pipes. EOF must share the command deadline, with no unbounded reader join.
+    // Parent exit must kill its owned group, including inherited-pipe holders,
+    // so a successful result settles promptly without waiting for the deadline.
     let inherited =
-        "import subprocess; subprocess.Popen(['python3','-c','import time; time.sleep(10)'])";
+        "import subprocess,pathlib; p=subprocess.Popen(['python3','-c','import time; time.sleep(10)']); pathlib.Path('grandchild.pid').write_text(str(p.pid))";
     let command = f.command_builder("python3", &["-c", inherited]);
     let started = Instant::now();
     assert!(
         cito_native::support::run_command_with_timeout(command, Duration::from_millis(200))
             .unwrap()
-            .is_none()
+            .unwrap()
+            .status
+            .success()
     );
     assert!(started.elapsed() < Duration::from_millis(700));
+    let grandchild: u32 = fs::read_to_string(f.dir.join("grandchild.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(|| !cito_native::support::alive(grandchild));
 
     let dir = f.state.join("plugins/inherited");
     fs::create_dir_all(&dir).unwrap();
@@ -3099,7 +4101,7 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
     let plugin = cito_native::plugins::parse_manifest_dir(&dir, false).unwrap();
     let mut iterations = 0;
     let started = Instant::now();
-    let error = cito_native::plugins::plugin_request_with_progress(
+    let reply = cito_native::plugins::plugin_request_with_progress(
         &plugin,
         &json!({}),
         Duration::from_millis(600),
@@ -3108,8 +4110,13 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
             Ok(())
         },
     )
-    .unwrap_err();
-    assert!(error.contains("timed out"), "{error}");
+    .unwrap();
+    assert_eq!(reply, json!({}));
+    let grandchild: u32 = fs::read_to_string(f.dir.join("grandchild.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(|| !cito_native::support::alive(grandchild));
     assert!(started.elapsed() < Duration::from_millis(1100));
     assert!(
         iterations <= 12,
@@ -3201,7 +4208,14 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
         // Exercise a command barrier while polling is paused, then cross the minimum
         // retry interval: no additional getUpdates request may run without configure.
         f.send(p, json!({"op":"on_acked"}));
-        std::thread::sleep(std::time::Duration::from_millis(550));
+        let quiet_until = Instant::now() + Duration::from_millis(1100);
+        wait(|| {
+            let count = fs::read_to_string(f.home.join("api-methods.jsonl"))
+                .unwrap()
+                .lines()
+                .count();
+            count != before + 1 || Instant::now() >= quiet_until
+        });
         let after = fs::read_to_string(f.home.join("api-methods.jsonl"))
             .unwrap()
             .lines()
@@ -3257,8 +4271,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     count=1 if payload.get('limit')==1 else 2
     result=[{'update_id':41+i,'message':{'chat':{'id':1},'text':'x'*(1100000 if count==1 else 600000)}} for i in range(count)]
    else:
-    threading.Event().wait(.02)
-    result=[]
+    result=[{'message':{'text':'x'*1100000}}]
   else: result={'id':1,'username':'sample_bot'}
   raw=json.dumps({'ok':True,'result':result}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers()
@@ -3292,14 +4305,40 @@ server.serve_forever()
                 .is_some_and(|offset| offset >= 42)
         })
     });
+    wait(|| {
+        f.frames(plugin).iter().any(|row| {
+            row["op"] == "health"
+                && row["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("no parseable update_id"))
+        })
+    });
+    assert!(f
+        .frames(plugin)
+        .iter()
+        .filter(|row| row["op"] == "cursor_save")
+        .all(|row| row["cursor"]
+            .as_str()
+            .and_then(|cursor| cursor.parse::<u64>().ok())
+            .is_some_and(|cursor| cursor <= 42)));
     let polls: Vec<_> = f
         .frames(server)
         .into_iter()
         .filter(|row| row["method"] == "getUpdates")
         .collect();
+    assert!(polls.iter().all(|row| row["payload"]["offset"]
+        .as_u64()
+        .is_none_or(|offset| offset <= 42)));
     assert_eq!(polls[0]["payload"]["limit"], 25);
     assert_eq!(polls[1]["payload"]["limit"], 25);
     assert_eq!(polls[1]["payload"]["offset"], polls[0]["payload"]["offset"]);
+    assert_eq!(
+        f.frames(plugin)
+            .iter()
+            .filter(|row| row["op"] == "health" && row["error"].is_null())
+            .count(),
+        1
+    );
     assert_eq!(polls[2]["payload"]["offset"], 41);
     assert_eq!(polls[2]["payload"]["limit"], 25);
     assert_eq!(polls[3]["payload"]["limit"], 1);

@@ -193,7 +193,6 @@ fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
     for key in [
         "tight_padding",
         "non_anchored_action_bars",
-        "overlapping_views",
         "low_contrast_labels",
         "jargon_leaks",
         "address_mismatches",
@@ -259,6 +258,7 @@ mod capabilities;
 mod directory;
 mod lazy_rendering;
 mod menu;
+mod oidc_settlement;
 mod oracle_e2e;
 mod render_stability;
 mod settings_channels;

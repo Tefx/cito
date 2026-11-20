@@ -22,14 +22,21 @@ pub fn sync_custom_title(
     host_id: &str,
     row: &Value,
 ) -> Result<(), String> {
-    let Some(title) = state.custom_title(string(row, "harness"), string(row, "session_id"))? else {
-        return Ok(());
-    };
     let registration = state.registration_lock(&client.name)?;
     let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-    state.db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+    if client.closed.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("STALE_GENERATION: Hub changed before title maintenance".into());
+    }
+    let Some(title) = state.custom_title(string(row, "harness"), string(row, "session_id"))? else {
+        return Ok(());
+    };
+    state.db.transaction(|db| {
+        if client.closed.load(std::sync::atomic::Ordering::Acquire) { return Err("STALE_GENERATION: Hub changed before title maintenance".into()); }
+        db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+        Ok(())
+    })?;
     let channel = format!("{host_id}:{}", string(row, "harness"));
     for _ in 0..3 {
         let Some((mut remote, revision)) = client.kv_get(string(row, "listener_id"))? else {
@@ -61,7 +68,7 @@ pub fn local_node(
     Ok(state.db.query(
         "SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY status='ACTIVE' DESC,binding_generation DESC",
         &[json!(client.name), json!(harness), json!(session)],
-    )?.into_iter().find(|row| principal_matches(string(row,"principal_id"), &client.identity)))
+    )?.into_iter().find(|row| (row["hub_url"].is_null() || row["hub_url"] == client.config["url"]) && principal_matches(string(row,"principal_id"), &client.identity)))
 }
 
 pub fn local_node_id(
@@ -100,6 +107,69 @@ pub fn register_listener(
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
     register_locked(state, client, host_id, args, caller)
+}
+
+/// Endpoint switch settlement shares the enrollment lock with registration.
+/// A failed secondary retirement must preserve the already committed binding.
+/// Only token-fenced remote detaches can outlive this exclusion interval.
+pub(super) fn register_endpoint(
+    state: &LocalState,
+    client: &HubClient,
+    host: &str,
+    args: &Value,
+    caller: &Value,
+) -> Result<Value, String> {
+    let lock = state.registration_lock(&client.name)?;
+    let _guard = lock
+        .lock()
+        .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+    register_endpoint_locked(state, client, host, args, caller)
+}
+
+pub(super) fn register_endpoint_locked(
+    state: &LocalState,
+    client: &HubClient,
+    host: &str,
+    args: &Value,
+    caller: &Value,
+) -> Result<Value, String> {
+    let mut result = register_locked(state, client, host, args, caller)?;
+    if caller["endpoint_pid"].as_u64().is_none() || caller["harness"] == "human" {
+        return Ok(result);
+    }
+    let retirement = state.db.transaction(|c| {
+        if client.closed.load(std::sync::atomic::Ordering::Acquire) || c.query("SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND binding_generation=? AND endpoint_pid=? AND session_id=? AND status='ACTIVE' AND hub_url=?", &[json!(client.name),result["canonical_listener_id"].clone(),result["binding_generation"].clone(),caller["endpoint_pid"].clone(),caller["session_id"].clone(),client.config["url"].clone()])?.is_empty() { return Err("STALE_GENERATION: Endpoint registration replaced".into()); }
+        retire_previous_endpoints(c,client,caller)
+    }).and_then(|changed| if changed { state.invalidate_discovery(string(caller,"harness")).map(|_| ()) } else { Ok(()) });
+    if let Err(error) = retirement {
+        result["committed"] = json!(true);
+        result["warning"] = json!(match result["warning"].as_str() {
+            Some(existing) => format!("{existing}; {error}"),
+            None => error,
+        });
+    }
+    Ok(result)
+}
+
+fn retire_previous_endpoints(
+    c: &super::database::Connection,
+    client: &HubClient,
+    caller: &Value,
+) -> Result<bool, String> {
+    let Some(pid) = caller["endpoint_pid"].as_u64() else {
+        return Ok(false);
+    };
+    let previous = c.query("SELECT hub,listener_id,hub_url,principal_id FROM local_listeners WHERE hub=? AND harness=? AND session_id<>? AND endpoint_pid=? AND status='ACTIVE' AND hub_url=?", &[json!(client.name),caller["harness"].clone(),caller["session_id"].clone(),json!(pid),client.config["url"].clone()])?;
+    let mut changed = false;
+    for row in previous
+        .iter()
+        .filter(|r| principal_matches(string(r, "principal_id"), &client.identity))
+    {
+        c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',dispatcher_token=NULL,lease_until_ms=0,updated_at=? WHERE hub=? AND listener_id=?", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone()])?;
+        super::receiver::settle_hard_exit(c, row, "unlistened")?;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 pub(super) fn is_generic_session_label(label: &str, user: &str, home_basename: &str) -> bool {
@@ -151,6 +221,16 @@ pub fn register_automatic_human(
     let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+    register_automatic_human_locked(state, client, host_id, args, caller)
+}
+
+pub(super) fn register_automatic_human_locked(
+    state: &LocalState,
+    client: &HubClient,
+    host_id: &str,
+    args: &Value,
+    caller: &Value,
+) -> Result<Value, String> {
     if local_node(state, client, "human", "default")?
         .is_some_and(|row| row["status"] == "UNLISTENED")
     {
@@ -167,15 +247,29 @@ fn register_human_device(
 ) -> Result<Value, String> {
     let previous = local_node(state, client, "human", "default")?;
     // The Hub owns Human identity, including retained keys and verified aliases.
-    let remote = client
-        .directory()?
-        .into_iter()
-        .find(|record| {
-            record["harness"] == "human"
-                && record["session_id"] == "default"
-                && principal_matches(string(record, "principal_id"), &client.identity)
-        })
-        .unwrap_or(Value::Null);
+    let matches = |record: &Value| {
+        record["harness"] == "human"
+            && record["session_id"] == "default"
+            && principal_matches(string(record, "principal_id"), &client.identity)
+    };
+    let known_id = previous
+        .as_ref()
+        .map(|row| string(row, "listener_id").to_owned())
+        .unwrap_or_else(|| {
+            listener_id(string(&client.identity, "principal_id"), "human", "default")
+        });
+    let remote = match client
+        .kv_get(&known_id)?
+        .map(|(record, _)| record)
+        .filter(matches)
+    {
+        Some(record) => record,
+        None => client
+            .directory()?
+            .into_iter()
+            .find(matches)
+            .unwrap_or(Value::Null),
+    };
     let channel = format!("{host}:human");
     let reuse = previous
         .as_ref()
@@ -216,6 +310,10 @@ fn register_human_device(
         c.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token,hub_url,updated_at) VALUES(?,?,?,?,?,?,?,'human','default','','Human',?,?,'ACTIVE',?,?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET public_id=excluded.public_id,principal_id=excluded.principal_id,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token,hub_url=excluded.hub_url,updated_at=excluded.updated_at", &[json!(client.name),json!(id),public.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host),json!(local_host_name()),record["about"].clone(),record["scope"].clone(),json!(generation),json!(token),client.config["url"].clone(),json!(now_ms())])?;
         c.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(client.name),json!(id)])?;
         Ok(())
+    }).inspect_err(|_| {
+        if reuse.is_none() {
+            let _ = super::receiver::detach_channel_expected(client, id, &channel, &json!({"binding_generation":generation,"owner_token":token}));
+        }
     })?;
     let _ = caller;
     Ok(
@@ -256,24 +354,40 @@ fn register_locked(
     }
     let harness = string(caller, "harness");
     let session = string(caller, "session_id");
-    if harness.is_empty() || session.is_empty() || (harness == "human" && session != "default") {
+    if harness.is_empty()
+        || harness.contains('|')
+        || session.trim().is_empty()
+        || (harness == "human" && session != "default")
+    {
         return Err("INVALID_INPUT: Invalid Node session identity".into());
     }
     if harness == "human" {
         return register_human_device(state, client, host_id, caller);
     }
-    if let Some(title) = args.get("title") {
-        let title = title
-            .as_str()
-            .ok_or("INVALID_INPUT: title must be a string")?;
-        state.set_custom_title(harness, session, title)?;
-    }
-    let custom_title = state.custom_title(harness, session)?;
+    let requested_title = args
+        .get("title")
+        .map(|title| {
+            let title = title
+                .as_str()
+                .ok_or("INVALID_INPUT: title must be a string")?;
+            validate_title(title)?;
+            Ok::<_, String>(title)
+        })
+        .transpose()?;
+    let custom_title = requested_title
+        .map(str::to_owned)
+        .or(state.custom_title(harness, session)?);
     let title = custom_title
         .as_deref()
         .unwrap_or_else(|| string(caller, "title"));
     let initial_local = local_node(state, client, harness, session)?;
     let automatic = args["_auto"] == true;
+    let revision = state.discovery_revision(harness)?;
+    let revoked = || {
+        args["_expected_revision"]
+            .as_u64()
+            .is_some_and(|v| revision.load(std::sync::atomic::Ordering::Acquire) != v)
+    };
     let restoring = args["_restore"] == true;
     if automatic
         && initial_local
@@ -420,16 +534,17 @@ fn register_locked(
         value["custom_title"] = json!(custom_title.is_some());
         value["listen_mode"] = json!(listen_mode);
         super::lease::reconcile_registration_state(&mut value, client.server_now());
-        if discovered_at > 0
-            && state
-                .db
-                .query(
-                    DISCOVERY_CUTOFF_SQL,
-                    &[json!(harness), json!(session), json!(candidate_pid)],
-                )?
-                .first()
-                .and_then(|row| row["revoked_at"].as_u64())
-                .is_some_and(|revoked| revoked > 0 && discovered_at <= revoked)
+        if revoked()
+            || discovered_at > 0
+                && state
+                    .db
+                    .query(
+                        DISCOVERY_CUTOFF_SQL,
+                        &[json!(harness), json!(session), json!(candidate_pid)],
+                    )?
+                    .first()
+                    .and_then(|row| row["revoked_at"].as_u64())
+                    .is_some_and(|revoked| revoked > 0 && discovered_at <= revoked)
         {
             return Err("STALE_DISCOVERY: Candidate was revoked before registration".into());
         }
@@ -447,7 +562,7 @@ fn register_locked(
             let cutoff = if discovered_at > 0 { connection.query(
                 DISCOVERY_CUTOFF_SQL, &[json!(harness),json!(session),json!(candidate_pid)],
             )?.first().and_then(|row|row["revoked_at"].as_u64()).unwrap_or(0) } else { 0 };
-            let stale = cutoff > 0 && discovered_at <= cutoff;
+            let stale = revoked() || cutoff > 0 && discovered_at <= cutoff;
             // The remote CAS cannot authorize reuse after a concurrent local revocation.
             if !stale && same_binding.is_some() && connection.query(
                 "SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?",
@@ -458,6 +573,18 @@ fn register_locked(
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(if stale { "UNLISTENED" } else { "ACTIVE" }),json!(generation),json!(owner),json!(now_ms().max(cutoff))],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
+            if let Some(previous) = local.as_ref().filter(|row| {
+                !stale && row["status"] == "UNLISTENED" && row["user_stopped"] == 0
+                    && row["retirement_reason"] == "hard_exit"
+                    && row["hub_url"] == client.config["url"]
+                    && principal_ids_equal(string(row, "principal_id"), string(&client.identity, "principal_id"))
+            }) {
+                let unread = connection.query("SELECT signal_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation<=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND expires_at_ms>? AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?) AND COALESCE(held_reason,'') IN ('','driver_unavailable','unlistened','session_switched')", &[json!(hub),json!(id),previous["binding_generation"].clone(),json!(now_ms()),json!(now_ms())])?;
+                for signal in unread.iter().filter(|signal| super::state::signal_matches_listener(signal, previous)) {
+                    // Retain batch identity and insertion checkpoints; only dispatch authority changes.
+                    connection.execute("UPDATE local_signals SET binding_generation=?,state='RECEIVED',held_reason=NULL,dispatcher_token=NULL WHERE hub=? AND signal_id=?", &[json!(generation),json!(hub),signal["signal_id"].clone()])?;
+                }
+            }
             let source = super::state::qualifying_activity(caller);
             let seeded = source.map(|(_, at)| at.min(now_ms())).unwrap_or_else(now_ms);
             let advancing = source.filter(|(revision,_)| local.as_ref().and_then(|r|super::state::activity_revision(r,"last_activity_revision")).is_none_or(|old|*revision>old));
@@ -474,7 +601,14 @@ fn register_locked(
                 Ok(RegistrationCommit::StaleDiscovery)
             } else {
                 connection.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+                if super::state::reconcile_wake_retry(connection, hub, &id)? {
+                    connection.execute("INSERT OR IGNORE INTO wake_retries(hub,listener_id,retry_at_ms) VALUES(?,?,?)", &[json!(hub),json!(id),json!(now_ms())])?;
+                }
                 Ok(RegistrationCommit::Committed)
+            }
+        }).inspect_err(|_| {
+            if same_binding.is_none() {
+                let _ = super::receiver::detach_channel_expected(client, &id, &channel, &json!({"binding_generation":generation,"owner_token":owner}));
             }
         })?;
         match committed {
@@ -504,9 +638,16 @@ fn register_locked(
                 }
             }
         }
-        return Ok(
-            json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
-        );
+        let mut result = json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60});
+        if let Some(title) = requested_title {
+            if state.set_custom_title(harness, session, title).is_err() {
+                let warning = "Listening committed; session title maintenance is incomplete";
+                result["committed"] = json!(true);
+                result["warning"] = json!(warning);
+                result["maintenance_warning"] = json!(warning);
+            }
+        }
+        return Ok(result);
     }
     Err("STALE_GENERATION: Listener CAS retries exhausted".into())
 }
@@ -536,6 +677,11 @@ mod tests {
                 local_node(&state, &client, "human", "default")?.ok_or("Missing paused row")?;
             assert_eq!(row["listener_id"], "c_2222222222222222");
             assert_eq!(row["status"], "UNLISTENED");
+            state.db.execute("UPDATE local_listeners SET hub_url='https://old.example.com',status='ACTIVE' WHERE listener_id=?", &[row["listener_id"].clone()])?;
+            assert_eq!(
+                local_node(&state, &client, "human", "default")?.unwrap()["listener_id"],
+                "c_1111111111111111"
+            );
             state.db.execute("UPDATE local_listeners SET status='FENCED_INACTIVE' WHERE principal_id='none#alice'", &[])?;
             assert!(local_node(&state, &client, "human", "default")?.is_none());
             for (label, generic) in [
@@ -733,6 +879,55 @@ mod tests {
         engine.shutdown();
         fs::remove_dir_all(root).map_err(|e| e.to_string())?;
         result
+    }
+
+    #[test]
+    fn delayed_endpoint_detach_preserves_the_latest_registration() -> Result<(), String> {
+        let root = crate::core::hub::TestDirectory(
+            std::env::temp_dir().join(format!("cito-endpoint-switch-{}", random_uuid_v4())),
+        );
+        let engine = Arc::new(HubEngine::open(&root.join("hub"))?);
+        let state = LocalState::open(&root.join("state"))?;
+        let client = HubClient::new(
+            "work".into(),
+            json!({"url":"local://"}),
+            "alice",
+            Some(engine.clone()),
+        );
+        let enroll = |session: &str| {
+            register_endpoint(
+                &state,
+                &client,
+                "host",
+                &json!({"about":"Review"}),
+                &json!({"session_id":session,"harness":"fixture","endpoint_pid":42}),
+            )
+        };
+        let old_a = enroll("a")?;
+        let a = string(&old_a, "canonical_listener_id");
+        let b = enroll("b")?;
+        let b = string(&b, "canonical_listener_id");
+        assert_eq!(state.listener("work", a)?.unwrap()["status"], "UNLISTENED");
+        // Delay B's remote settlement until A has reclaimed the same endpoint.
+        let new_a = enroll("a")?;
+        assert_ne!(old_a["binding_generation"], new_a["binding_generation"]);
+        crate::core::daemon::DaemonService::reconcile_unlistened(&state, &client, "host")?;
+        assert_eq!(state.listener("work", a)?.unwrap()["status"], "ACTIVE");
+        assert_eq!(state.listener("work", b)?.unwrap()["status"], "UNLISTENED");
+        assert_eq!(
+            client.kv_get(a)?.unwrap().0["channels"]["host:fixture"]["state"],
+            "ACTIVE"
+        );
+        assert_ne!(
+            client.kv_get(b)?.unwrap().0["channels"]["host:fixture"]["state"],
+            "ACTIVE"
+        );
+        assert!(state
+            .db
+            .query("SELECT 1 FROM pending_hub_detaches", &[])?
+            .is_empty());
+        engine.shutdown();
+        Ok(())
     }
 
     #[test]

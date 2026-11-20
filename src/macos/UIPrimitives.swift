@@ -48,17 +48,19 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     let leftItems = leading.filter { !$0.isHidden }
     let rightItems = trailing.filter { !$0.isHidden }
     for case let control as MenuControl in leftItems + rightItems where !control.label.isHidden
-        && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.leadingDotView || $0 === control.centerSymbolView }) {
+        && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.centerSymbolView }) {
         let id = control.identifier?.rawValue ?? ""
-        // Timed feedback retains the resting width so its label fits after expiry.
         // Address chips reserve copy feedback space; scope toggles keep a uniform width.
-        let reservedWidth = control.feedbackTimer?.isValid == true || id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
-        let pairedWidth = MenuControl.toggleWidth(id, title:control.label.stringValue, font: control.label.font ?? .systemFont(ofSize:11,weight:.medium))
-        control.frame.size.width = min(control.maximumWidth, max(reservedWidth, pairedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
-            font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
-            leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
-            leadingDot:control.leadingDotView?.isHidden == false,
-            paddingX: id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") ? 3 : (id == "open_settings" ? 6 : (id.hasPrefix("scope:") ? 9 : (id == "open_uninstall_confirm" ? 12 : 11))))))
+        let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
+        let font = control.label.font ?? .systemFont(ofSize:11,weight:.medium)
+        let resting = control.restingTitle
+        let currentWidth = MenuControl.intrinsicWidth(control.label.stringValue, font: font,
+            leadingSymbol: control.leadingSymbolView?.isHidden == false ? control.symbolName : nil, paddingX: control.paddingX)
+        let restingWidth = resting.map {
+            MenuControl.intrinsicWidth($0, font: font, leadingSymbol: control.leadingSymbolView == nil ? nil : control.symbolName, paddingX: control.paddingX)
+        } ?? 0
+        let pairedWidth = MenuControl.toggleWidth(id, title: resting ?? control.label.stringValue, font: font, paddingX: control.paddingX)
+        control.frame.size.width = min(control.maximumWidth, max(control.pendingWidth, reservedWidth, pairedWidth, currentWidth, restingWidth))
         control.layoutContents()
     }
     var left = insetLeft
@@ -74,10 +76,15 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     }
 }
 
+func makePillTrack(_ frame: NSRect, radius: CGFloat, bordered: Bool = true) -> SurfaceView {
+    roundedView(frame, radius: radius, color: .labelColor.withAppearanceAlpha(0.06),
+                border: bordered ? .labelColor.withAppearanceAlpha(0.08) : nil)
+}
+
 enum PillAlignment { case leading, trailing }
 @discardableResult
 func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,
-                    spacing: CGFloat = 4, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
+                    spacing: CGFloat = 4, trackRadius: CGFloat? = nil, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
     let visible = pills.filter { !$0.isHidden }
     let totalWidth = visible.isEmpty ? 0 : visible.enumerated().reduce(CGFloat(4)) {
         $0 + $1.element.frame.width + ($1.offset > 0 ? spacing : 0)
@@ -89,6 +96,13 @@ func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: 
     scroll.identifier = NSUserInterfaceItemIdentifier(id)
     scroll.scrollerStyle = .overlay; scroll.drawsBackground = false
     scroll.hasHorizontalScroller = false; scroll.hasVerticalScroller = false
+    if let radius = trackRadius {
+        scroll.wantsLayer = true
+        scroll.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
+        scroll.drawsBackground = true
+        scroll.layer?.cornerRadius = radius
+        scroll.layer?.masksToBounds = true
+    }
     let doc = NSView(frame: NSRect(x: 0, y: 0, width: max(trackWidth, totalWidth), height: frame.height))
     var cursorX: CGFloat = 2
     for pill in visible {
@@ -106,6 +120,13 @@ func textLabel(_ title: String, _ frame: NSRect, size: CGFloat = 11, weight: NSF
     label.frame = frame; label.font = .systemFont(ofSize: size, weight: weight); label.textColor = color
     label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1
     return label
+}
+
+extension NSTextField {
+    var requiredSingleLineWidth: CGFloat {
+        // The native cell can retain a narrower cached width after an appearance update.
+        max(cell?.cellSize.width ?? 0, attributedStringValue.size().width)
+    }
 }
 
 class SurfaceView: NSView {
@@ -236,6 +257,26 @@ func panelShortcutKey(_ event: NSEvent) -> String? {
     return (flags.contains(.shift) ? "shift-command-" : "command-") + (character == "," ? "comma" : character)
 }
 
+func makeFloatingKeyPanel(width: CGFloat, height: CGFloat, appearance: NSAppearance?) -> KeyPanel {
+    let panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                         styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+    panel.titleVisibility = .hidden
+    panel.titlebarAppearsTransparent = true
+    for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+        panel.standardWindowButton(button)?.isHidden = true
+    }
+    panel.appearance = appearance
+    panel.level = .floating
+    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    panel.isFloatingPanel = true
+    panel.hidesOnDeactivate = false
+    panel.isOpaque = false
+    panel.backgroundColor = .clear
+    panel.hasShadow = true
+    panel.isMovableByWindowBackground = true
+    return panel
+}
+
 final class KeyPanel: NSPanel {
     var onKey: ((String) -> Void)?
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
@@ -285,35 +326,29 @@ final class MenuControl: NSControl {
     enum Style { case neutral, prominent, subtleHeader, destructiveHover, destructive }
     override var frame: NSRect { didSet { if oldValue.size != frame.size { layoutContents() } } }
     static func intrinsicWidth(_ title: String, font: NSFont = .systemFont(ofSize: 11, weight: .medium),
-                               leadingSymbol: String? = nil, leadingDot: Bool = false, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat {
-        max(minWidth, ceil(measureTextWidth(title, font: font)) + paddingX * 2 + (leadingSymbol == nil ? 0 : 17) + (leadingDot ? 12 : 0))
+                               leadingSymbol: String? = nil, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat {
+        max(minWidth, ceil(measureTextWidth(title, font: font)) + paddingX * 2 + (leadingSymbol == nil ? 0 : 17))
     }
-    static func toggleWidth(_ id: String, title: String, font: NSFont = .systemFont(ofSize:11,weight:.medium)) -> CGFloat {
+    static func toggleWidth(_ id: String, title: String, font: NSFont = .systemFont(ofSize:11,weight:.medium), paddingX: CGFloat = 11) -> CGFloat {
         let states: [(String,String?)]
-        let padding: CGFloat
-        if id.hasPrefix("scope:") { states = [("Self","lock.fill"),("Team","person.2.fill")]; padding = 9 }
-        else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)]; padding = 11 }
-        else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)]; padding = 11 }
-        else if id == "toggle_host_hub" { states = [("Start Sharing",nil),("Stop Sharing",nil)]; padding = 11 }
-        else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)]; padding = 11 }
+        if id.hasPrefix("scope:") { states = [("Self","lock.fill"),("Team","person.2.fill")] }
+        else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)] }
+        else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)] }
+        else if id == "toggle_host_hub" { states = [("Start Sharing",nil),("Stop Sharing",nil)] }
+        else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)] }
         else if id.hasPrefix("toggle_channel:") {
             let name=String(title.dropFirst(title.hasPrefix("Pause ") ? 6 : 7))
-            states = [("Pause " + name,nil),("Resume " + name,nil)]; padding = 11
+            states = [("Pause " + name,nil),("Resume " + name,nil)]
         }
         else { return 0 }
-        return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:padding) }.max() ?? 0
+        return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:paddingX) }.max() ?? 0
     }
     func layoutContents() {
         let font = label.font ?? .systemFont(ofSize: 11)
         let cellH = ceil(label.cell?.cellSize.height ?? (font.ascender - font.descender + font.leading))
         let labelY = floor((bounds.height - cellH) / 2)
         centerSymbolView?.frame = NSRect(x: floor((bounds.width - 12) / 2), y: floor((bounds.height - 12) / 2), width: 12, height: 12)
-        if !label.isHidden, let dot=leadingDotView, !dot.isHidden {
-            let textW=ceil(measureTextWidth(label.stringValue,font:font))+6
-            let start=max(6,floor((bounds.width-textW-12)/2))
-            dot.frame=NSRect(x:start,y:floor((bounds.height-6)/2),width:6,height:6)
-            label.frame=NSRect(x:start+12,y:labelY,width:max(0,bounds.width-start-16),height:cellH)
-        } else if !label.isHidden, let icon = leadingSymbolView, !icon.isHidden {
+        if !label.isHidden, let icon = leadingSymbolView, !icon.isHidden {
             // NSTextField needs its drawable insets beyond cellSize to avoid native ellipsis.
             let textW = max(0, min(bounds.width - 23, ceil(measureTextWidth(label.stringValue, font: font)) + 6))
             let id = identifier?.rawValue ?? ""
@@ -322,22 +357,12 @@ final class MenuControl: NSControl {
             icon.frame = NSRect(x: startX, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
             label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - (copyChip ? 17 : 27)) : textW, height: cellH)
         } else {
-            label.frame = NSRect(x: paddingX, y: labelY, width: max(0, bounds.width - 2 * paddingX), height: cellH)
+            // Leave room for the native cell's text insets, including in fixed-width controls.
+            let inset = min(paddingX, max(4, floor((bounds.width - label.requiredSingleLineWidth) / 2)))
+            label.frame = NSRect(x: inset, y: labelY, width: max(0, bounds.width - 2 * inset), height: cellH)
         }
     }
-    var paddingX: CGFloat = 4
-    var leadingDotView: SurfaceView?
-    private var dotColor: NSColor = CitoPalette.secondaryText
-    private var dotRing = false
-    func setLeadingDot(_ color: NSColor, ring: Bool = false) {
-        dotColor=color; dotRing=ring
-        if leadingDotView == nil {
-            let dot=roundedView(NSRect(x:6,y:6,width:6,height:6),radius:3,color:color)
-            addSubview(dot); leadingDotView=dot
-        }
-        setAccessibilityLabel(label.stringValue)
-        layoutContents(); applyVisualState()
-    }
+    let paddingX: CGFloat
     var leadingSymbolView: NSImageView?
     var centerSymbolView: NSImageView?
     var accessorySymbolView: NSImageView? { didSet { applyVisualState() } }
@@ -345,6 +370,8 @@ final class MenuControl: NSControl {
     var pressed: (() -> Void)?
     var style: Style = .neutral { didSet { layoutContents(); applyVisualState() } }
     var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
+    // Reserve the resting title while pending so draft edits can restore it in place.
+    var pendingWidth: CGFloat = 0
     var maximumWidth: CGFloat = .greatestFiniteMagnitude
     var feedbackTimer: Timer?
     var restingTitle: String?
@@ -358,7 +385,7 @@ final class MenuControl: NSControl {
     // Headless hooks exercise logical transitions without a visible window or physical pointer.
     static var tracksPhysicalPointer = true
     override var wantsUpdateLayer: Bool { true }
-    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6, paddingX: CGFloat = 4) {
+    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6, paddingX: CGFloat = 11) {
         self.paddingX = paddingX
         label = MenuTitleField(labelWithString:title)
         symbolName = leadingSymbol ?? symbol
@@ -493,8 +520,6 @@ final class MenuControl: NSControl {
             foreground = .white
             primarySymbol = foreground; accessorySymbol = foreground
         }
-        leadingDotView?.fillColor = dotRing ? .clear : (style == .prominent ? .white : dotColor)
-        leadingDotView?.strokeColor = dotRing ? (style == .prominent ? .white : dotColor) : nil
         let isCopied = feedbackTimer?.isValid == true
         label.textColor = isCopied ? CitoPalette.successText : foreground
         leadingSymbolView?.contentTintColor = primarySymbol
@@ -517,6 +542,17 @@ final class MenuControl: NSControl {
         super.viewDidChangeEffectiveAppearance()
         applyVisualState()
     }
+    func clearFeedback(title: String, accessibilityLabel: String?) {
+        if feedbackTimer != nil, symbolName != nil { leadingSymbolView?.isHidden = false }
+        feedbackTimer?.invalidate()
+        feedbackTimer = nil
+        restingTitle = nil
+        restingAccessibilityLabel = nil
+        label.stringValue = title
+        setAccessibilityLabel(accessibilityLabel)
+        layoutContents()
+        applyVisualState()
+    }
     func copied(_ message: String = "✓ Copied", for seconds: TimeInterval = 1.2) {
         if feedbackTimer == nil {
             restingTitle = label.stringValue
@@ -528,16 +564,7 @@ final class MenuControl: NSControl {
         layoutContents()
         let restore = Timer(timeInterval: max(0.001, seconds), repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            if self.leadingSymbolView != nil {
-                self.leadingSymbolView?.isHidden = false
-            }
-            self.feedbackTimer = nil
-            self.label.stringValue = self.restingTitle ?? self.accessibilityLabel() ?? ""
-            self.setAccessibilityLabel(self.restingAccessibilityLabel)
-            self.restingTitle = nil
-            self.restingAccessibilityLabel = nil
-            self.layoutContents()
-            self.applyVisualState()
+            self.clearFeedback(title: self.restingTitle ?? self.label.stringValue, accessibilityLabel: self.restingAccessibilityLabel)
         }
         feedbackTimer = restore
         applyVisualState()

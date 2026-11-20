@@ -6,59 +6,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
-#[link(name = "sqlite3")]
-extern "C" {
-    fn sqlite3_open_v2(
-        path: *const libc::c_char,
-        db: *mut *mut libc::c_void,
-        flags: i32,
-        vfs: *const libc::c_char,
-    ) -> i32;
-    fn sqlite3_close_v2(db: *mut libc::c_void) -> i32;
-    fn sqlite3_errmsg(db: *mut libc::c_void) -> *const libc::c_char;
-    fn sqlite3_exec(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        callback: Option<
-            unsafe extern "C" fn(
-                *mut libc::c_void,
-                i32,
-                *mut *mut libc::c_char,
-                *mut *mut libc::c_char,
-            ) -> i32,
-        >,
-        arg: *mut libc::c_void,
-        error: *mut *mut libc::c_char,
-    ) -> i32;
-    fn sqlite3_prepare_v2(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        n: i32,
-        statement: *mut *mut libc::c_void,
-        tail: *mut *const libc::c_char,
-    ) -> i32;
-    fn sqlite3_finalize(statement: *mut libc::c_void) -> i32;
-    fn sqlite3_step(statement: *mut libc::c_void) -> i32;
-    fn sqlite3_bind_null(statement: *mut libc::c_void, index: i32) -> i32;
-    fn sqlite3_bind_int64(statement: *mut libc::c_void, index: i32, value: i64) -> i32;
-    fn sqlite3_bind_double(statement: *mut libc::c_void, index: i32, value: f64) -> i32;
-    fn sqlite3_bind_text(
-        statement: *mut libc::c_void,
-        index: i32,
-        value: *const libc::c_char,
-        n: i32,
-        destructor: Option<unsafe extern "C" fn(*mut libc::c_void)>,
-    ) -> i32;
-    fn sqlite3_column_count(statement: *mut libc::c_void) -> i32;
-    fn sqlite3_column_name(statement: *mut libc::c_void, column: i32) -> *const libc::c_char;
-    fn sqlite3_column_type(statement: *mut libc::c_void, column: i32) -> i32;
-    fn sqlite3_column_int64(statement: *mut libc::c_void, column: i32) -> i64;
-    fn sqlite3_column_double(statement: *mut libc::c_void, column: i32) -> f64;
-    fn sqlite3_column_text(statement: *mut libc::c_void, column: i32) -> *const u8;
-    fn sqlite3_column_bytes(statement: *mut libc::c_void, column: i32) -> i32;
-    fn sqlite3_changes(db: *mut libc::c_void) -> i32;
-    fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
-}
+use crate::support::sqlite::*;
 
 pub struct Connection {
     raw: *mut libc::c_void,
@@ -330,14 +278,34 @@ impl Database {
         Ok(unsafe { sqlite3_total_changes(conn.raw) })
     }
     pub fn query(&self, sql: &str, values: &[Value]) -> Result<Vec<Value>, String> {
-        self.connection
-            .lock()
-            .map_err(|_| "SQLite lock poisoned")?
-            .query(sql, values)
+        self.read(|conn| conn.query(sql, values))
+    }
+    /// Serialize reads on this connection without reserving the SQLite writer.
+    /// The callback must only query and must not reenter this Database.
+    pub(crate) fn read<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        action(&conn)
     }
     pub fn transaction<T>(
         &self,
         action: impl FnOnce(&Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.transaction_notifying(action, true)
+    }
+    /// Persist diagnostics without scheduling more work from their own commit.
+    pub(super) fn diagnostic_transaction<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.transaction_notifying(action, false)
+    }
+    fn transaction_notifying<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> Result<T, String>,
+        notify: bool,
     ) -> Result<T, String> {
         let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
         // SAFETY: the connection lock keeps the SQLite handle exclusively owned.
@@ -358,7 +326,7 @@ impl Database {
         let changed = unsafe { sqlite3_total_changes(conn.raw) } != before;
         drop(rollback);
         drop(conn);
-        if changed {
+        if changed && notify {
             self.notify_committed();
         }
         Ok(result)

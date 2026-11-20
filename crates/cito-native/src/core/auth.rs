@@ -19,15 +19,11 @@ pub fn local_principal(user: &str) -> Value {
 }
 
 pub fn principal_ids_equal(a: &str, b: &str) -> bool {
-    fn current(id: &str) -> String {
-        if id.starts_with("https://") {
-            if let Some((issuer, sub)) = id.split_once('#') {
-                return format!("oidc:{issuer}|{sub}");
-            }
-        }
-        id.to_owned()
-    }
-    !a.is_empty() && current(a) == current(b)
+    use super::identity::normalize_legacy_principal;
+    !a.is_empty()
+        && (a == b
+            || normalize_legacy_principal(a).as_deref().unwrap_or(a)
+                == normalize_legacy_principal(b).as_deref().unwrap_or(b))
 }
 /// `principal` must come from verified authentication or the trusted local boundary.
 pub fn principal_matches(stored: &str, principal: &Value) -> bool {
@@ -53,6 +49,44 @@ fn validate_oidc_endpoint(value: &str, setting: &str, issuer: bool) -> Result<()
         })
 }
 
+fn signing_key(key: &jsonwebtoken::jwk::Jwk, algorithm: Algorithm) -> Result<(), &'static str> {
+    use jsonwebtoken::jwk::{
+        AlgorithmParameters as Key, EllipticCurve, KeyOperations, PublicKeyUse,
+    };
+    if key
+        .common
+        .public_key_use
+        .as_ref()
+        .is_some_and(|u| *u != PublicKeyUse::Signature)
+        || key
+            .common
+            .key_operations
+            .as_ref()
+            .is_some_and(|ops| !ops.contains(&KeyOperations::Verify))
+    {
+        return Err("AUTHORIZATION_VIOLATION: JWK is not a verification key");
+    }
+    let compatible = match (&key.algorithm, algorithm) {
+        (
+            Key::RSA(_),
+            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::PS256,
+        ) => true,
+        (Key::EllipticCurve(ec), Algorithm::ES256) => ec.curve == EllipticCurve::P256,
+        (Key::EllipticCurve(ec), Algorithm::ES384) => ec.curve == EllipticCurve::P384,
+        (Key::OctetKeyPair(key), Algorithm::EdDSA) => key.curve == EllipticCurve::Ed25519,
+        _ => false,
+    };
+    if !compatible
+        || key
+            .common
+            .key_algorithm
+            .is_some_and(|alg| format!("{alg:?}") != format!("{algorithm:?}"))
+    {
+        return Err("AUTHORIZATION_VIOLATION: JWT key algorithm mismatch");
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct KeyCache {
     keys: Option<JwkSet>,
@@ -60,6 +94,8 @@ struct KeyCache {
     loaded_at: Option<Instant>,
     refreshing: bool,
     unavailable: bool,
+    #[cfg(test)]
+    signature_miss_wait: Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
 }
 
 fn validate_token_times(claims: &Value, now: u64) -> Result<(), String> {
@@ -124,7 +160,7 @@ impl OidcVerifier {
             ))
             .timeout(Self::request_timeout(deadline)?)
             .call()
-            .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery: {e}"))?;
+            .map_err(|_| "AUTH_UNAVAILABLE: OIDC discovery request failed")?;
         if discovery_response.status() != 200 {
             return Err("AUTH_UNAVAILABLE: OIDC discovery did not return HTTP 200".into());
         }
@@ -136,7 +172,7 @@ impl OidcVerifier {
         .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
         let discovery: Value =
             serde_json::from_reader(discovery_response.into_reader().take(1_048_576))
-                .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery JSON: {e}"))?;
+                .map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC discovery JSON")?;
         if discovery
             .get("issuer")
             .is_some_and(|issuer| issuer.as_str() != Some(self.issuer.as_str()))
@@ -153,23 +189,23 @@ impl OidcVerifier {
             .get(uri)
             .timeout(Self::request_timeout(deadline)?)
             .call()
-            .map_err(|e| format!("AUTH_UNAVAILABLE: JWKS: {e}"))?;
+            .map_err(|_| "AUTH_UNAVAILABLE: JWKS request failed")?;
         if response.status() != 200 {
             return Err("AUTH_UNAVAILABLE: JWKS did not return HTTP 200".into());
         }
         validate_oidc_endpoint(response.get_url(), "OIDC JWKS response URL", false)
             .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
         let keys: JwkSet = serde_json::from_reader(response.into_reader().take(1_048_576))
-            .map_err(|e| format!("AUTH_UNAVAILABLE: JWKS JSON: {e}"))?;
+            .map_err(|_| "AUTH_UNAVAILABLE: Invalid JWKS JSON")?;
         Ok(keys)
     }
 
     fn verification_key(
         &self,
-        kid: &str,
+        header: &jsonwebtoken::Header,
         deadline: Option<Instant>,
-        mut force_refresh: bool,
-    ) -> Result<jsonwebtoken::jwk::Jwk, String> {
+        mut refresh_after: Option<Instant>,
+    ) -> Result<(jsonwebtoken::jwk::Jwk, Instant), String> {
         let cooldown = env_value("CITO_JWKS_COOLDOWN_MS")
             .and_then(|s| s.parse::<u64>().ok())
             .map(Duration::from_millis)
@@ -180,16 +216,36 @@ impl OidcVerifier {
             .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?;
         loop {
             Self::request_timeout(deadline)?;
-            if !force_refresh
-                && cache
-                    .loaded_at
-                    .is_some_and(|at| at.elapsed() < Duration::from_secs(300))
+            if let Some(at) = cache
+                .loaded_at
+                .filter(|at| Some(*at) > refresh_after && at.elapsed() < Duration::from_secs(300))
             {
-                if let Some(key) = cache.keys.as_ref().and_then(|keys| keys.find(kid)) {
-                    return Ok(key.clone());
+                if let Some(keys) = &cache.keys {
+                    let selected = match header.kid.as_deref() {
+                        Some(kid) => keys.find(kid),
+                        None => {
+                            let mut eligible = keys
+                                .keys
+                                .iter()
+                                .filter(|key| signing_key(key, header.alg).is_ok());
+                            let first = eligible.next();
+                            first.filter(|_| eligible.next().is_none())
+                        }
+                    };
+                    if let Some(key) = selected {
+                        return Ok((key.clone(), at));
+                    }
                 }
             }
             if cache.refreshing {
+                #[cfg(test)]
+                if let Some(observer) = cache
+                    .signature_miss_wait
+                    .as_ref()
+                    .filter(|_| refresh_after.is_some())
+                {
+                    let _ = observer.send(std::thread::current().id());
+                }
                 cache = if let Some(at) = deadline {
                     let remaining = at
                         .checked_duration_since(Instant::now())
@@ -233,7 +289,7 @@ impl OidcVerifier {
                 Ok(keys) => {
                     cache.keys = Some(keys);
                     cache.loaded_at = Some(Instant::now());
-                    force_refresh = false;
+                    refresh_after = None;
                     cache.unavailable = false;
                 }
                 Err(error) => {
@@ -272,33 +328,12 @@ impl OidcVerifier {
         ) {
             return Err("AUTHORIZATION_VIOLATION: unsupported JWT algorithm".into());
         }
-        let kid = header
-            .kid
-            .as_deref()
-            .filter(|kid| !kid.is_empty())
-            .ok_or("AUTHORIZATION_VIOLATION: JWT kid is required")?;
-        let jwk = self.verification_key(kid, deadline, false)?;
+        if header.kid.as_deref() == Some("") {
+            return Err("AUTHORIZATION_VIOLATION: empty JWT kid".into());
+        }
+        let (jwk, loaded_at) = self.verification_key(&header, deadline, None)?;
         let decoding_key = |jwk: &jsonwebtoken::jwk::Jwk| -> Result<DecodingKey, String> {
-            if jwk
-                .common
-                .public_key_use
-                .as_ref()
-                .is_some_and(|use_| *use_ != jsonwebtoken::jwk::PublicKeyUse::Signature)
-                || jwk
-                    .common
-                    .key_operations
-                    .as_ref()
-                    .is_some_and(|ops| !ops.contains(&jsonwebtoken::jwk::KeyOperations::Verify))
-            {
-                return Err("AUTHORIZATION_VIOLATION: JWK is not a verification key".into());
-            }
-            if jwk
-                .common
-                .key_algorithm
-                .is_some_and(|alg| format!("{alg:?}") != format!("{:?}", header.alg))
-            {
-                return Err("AUTHORIZATION_VIOLATION: JWT key algorithm mismatch".into());
-            }
+            signing_key(jwk, header.alg)?;
             DecodingKey::from_jwk(jwk)
                 .map_err(|_| "AUTHORIZATION_VIOLATION: invalid verification key".into())
         };
@@ -314,7 +349,7 @@ impl OidcVerifier {
             .as_ref()
             .is_err_and(|e| matches!(e.kind(), jsonwebtoken::errors::ErrorKind::InvalidSignature))
         {
-            let refreshed = self.verification_key(kid, deadline, true)?;
+            let (refreshed, _) = self.verification_key(&header, deadline, Some(loaded_at))?;
             let key = decoding_key(&refreshed)?;
             decode::<Value>(token, &key, &validation)
         } else {
@@ -341,31 +376,65 @@ impl OidcVerifier {
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .ok_or("AUTHORIZATION_VIOLATION: missing subject")?;
-        let owner = claims["preferred_username"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                claims[crate::oidc_constants::OIDC_EMAIL_CLAIM]
-                    .as_str()
-                    .and_then(|s| s.split_once('@').map(|x| x.0))
-            })
-            .unwrap_or(sub);
-        let owner: String = owner
-            .trim()
-            .to_lowercase()
-            .chars()
-            .take(64)
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || "._-".contains(c) {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let owner = owner_user(&claims, sub);
         Ok(
             json!({"principal_id": format!("oidc:{}|{}", self.issuer, sub), "owner_user": owner, "sub": sub, "oidc": true, "token_expires_at":claims["exp"], "legacy_principal_id":format!("{}#{}",self.issuer,sub)}),
         )
+    }
+}
+
+fn owner_user(claims: &Value, sub: &str) -> String {
+    let owner = claims["preferred_username"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            claims[crate::oidc_constants::OIDC_EMAIL_CLAIM]
+                .as_str()
+                .and_then(|s| s.split_once('@').map(|x| x.0))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(sub);
+    let owner: String = owner
+        .trim()
+        .to_lowercase()
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    owner
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    #[test]
+    fn blank_username_and_email_fall_back_to_nonempty_subject() {
+        assert_eq!(
+            owner_user(
+                &json!({"preferred_username":"  ","email":" @example.com"}),
+                " Subject "
+            ),
+            "subject"
+        );
+        assert_eq!(
+            owner_user(
+                &json!({"preferred_username":"  ","email":" Alice @example.com"}),
+                "subject"
+            ),
+            "alice"
+        );
+        assert_eq!(
+            owner_user(&json!({"preferred_username":" Bob "}), "subject"),
+            "bob"
+        );
     }
 }
 
@@ -375,6 +444,7 @@ mod tests;
 
 pub struct HubAuth {
     pub mode: String,
+    pub redirect_port: Option<u16>,
     token: Option<String>,
     verifier: Option<OidcVerifier>,
 }
@@ -405,9 +475,20 @@ impl HubAuth {
         };
         Ok(Self {
             mode: mode.into(),
+            redirect_port: None,
             token,
             verifier,
         })
+    }
+    pub fn health(&self) -> Value {
+        let mut health = json!({"ok":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"auth_mode":self.mode});
+        if let Some(verifier) = &self.verifier {
+            health["oidc"] = json!({"issuer":verifier.issuer,"client_id":verifier.client_id});
+            if let Some(port) = self.redirect_port.filter(|port| *port != 0) {
+                health["oidc"]["redirect_port"] = json!(port);
+            }
+        }
+        health
     }
     pub fn authenticate(&self, headers: &HashMap<String, String>) -> Result<Value, String> {
         let user = headers

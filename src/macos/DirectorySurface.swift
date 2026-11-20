@@ -67,27 +67,26 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         updateDirectoryWarnings()
     }
 
+    func showComposerDirectoryNotice(_ message: String) {
+        directoryActionError = message
+        directoryActionErrorSourceOp = "send_signal"
+        updateDirectoryWarnings()
+    }
+
+    func showComposerFailure(_ error: String?) {
+        if directoryComposerBar?.isHidden == false {
+            setComposerStatus(error ?? "Send failed. Your draft is preserved.")
+        } else {
+            showComposerDirectoryNotice(error ?? "Send failed.")
+        }
+    }
+
     // MARK: - Surface 2: Spotlight-Style Network Directory Panel (560 × 440 pt KeyPanel: NSPanel)
 
     func ensureDirectoryPanel() {
         ensureEditMainMenu()
         if directoryPanel != nil { return }
-        let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
-                              styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(button)?.isHidden = true
-        }
-        window.appearance = testAppearance
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.isFloatingPanel = true
-        window.hidesOnDeactivate = false
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.isMovableByWindowBackground = true
+        let window = makeFloatingKeyPanel(width: 560, height: 440, appearance: testAppearance)
 
         let root = SurfaceView(frame: NSRect(x: 0, y: 0, width: 560, height: 440), radius: 14,
             color: .clear, border: .labelColor.withAppearanceAlpha(0.15))
@@ -105,7 +104,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         // Top Search Bar (560 × 46 pt, y: 394)
         let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
         searchBar.identifier = NSUserInterfaceItemIdentifier("directory_search_bar")
-        let modeTrack = roundedView(NSRect(x:14,y:9,width:174,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
+        let modeTrack = makePillTrack(NSRect(x:14,y:9,width:174,height:28),radius:8)
         modeTrack.identifier = NSUserInterfaceItemIdentifier("directory_mode_track")
         searchBar.addSubview(modeTrack)
 
@@ -155,7 +154,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let facetSeparator = roundedView(NSRect(x: 151, y: 9, width: 1, height: 14), radius: 0, color: .separatorColor)
         facetSeparator.identifier = NSUserInterfaceItemIdentifier("directory_facet_separator")
         facetBar.addSubview(facetSeparator)
-        let scopeTrack = roundedView(NSRect(x:16,y:3,width:129,height:26),radius:13,color:.labelColor.withAppearanceAlpha(0.06))
+        let scopeTrack = makePillTrack(NSRect(x:16,y:3,width:129,height:26),radius:13,bordered:false)
         scopeTrack.identifier = NSUserInterfaceItemIdentifier("directory_scope_track")
         facetBar.addSubview(scopeTrack)
         let scopePills: [(String, String, CGFloat, CGFloat)] = [
@@ -190,7 +189,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
         directoryFacetControls["dir_harness:all"] = allHarnessesPill
 
-        let activityTrack = roundedView(NSRect(x:16,y:3,width:226,height:26),radius:13,color:.labelColor.withAppearanceAlpha(0.06))
+        let activityTrack = makePillTrack(NSRect(x:16,y:3,width:226,height:26),radius:13,bordered:false)
         activityTrack.identifier = NSUserInterfaceItemIdentifier("activity_filter_track")
         activityTrack.isHidden = true
         facetBar.addSubview(activityTrack)
@@ -228,18 +227,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             self.unreadCount = max(0,self.unreadCount-matchedUnread)
             self.activityUnreadCount = 0
             self.serverActivityFilter = nil
-            self.activityAllItems = self.activityAllItems.map { item in
-                if !matched.contains("\(item.hub):\(item.signal_id)") { return item }
-                return ActivityItem(
-                    hub: item.hub, signal_id: item.signal_id, listener_id: item.listener_id,
-                    from_user: item.from_user, from_host_name: item.from_host_name,
-                    from_harness: item.from_harness, from_title: item.from_title,
-                    from_scoped_id: item.from_scoped_id, from_display_address: item.from_display_address, target_display_address: item.target_display_address, message_truncated: item.message_truncated, target_harness: item.target_harness,
-                    target_title: item.target_title, target_scoped_id: item.target_scoped_id,
-                    message: item.message, held_reason: item.held_reason,
-                    in_reply_to: item.in_reply_to, created_at: item.created_at,
-                    unread: false, for_me: item.for_me, from_listener_id:item.from_listener_id, can_reply:item.can_reply
-                )
+            for index in self.activityAllItems.indices {
+                let item = self.activityAllItems[index]
+                if matched.contains("\(item.hub):\(item.signal_id)") { self.activityAllItems[index].unread = false }
             }
             self.updateDirectoryModePills()
             self.applyActivityFilter()
@@ -288,7 +278,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryScrollView = scroll
         root.addSubview(scroll)
         let warning = textLabel("",NSRect(x:16,y:338,width:528,height:20),size:11,color:CitoPalette.secondaryText)
-        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning")
+        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning_label")
         warning.isHidden = true
         root.addSubview(warning)
         directoryWarningLabel = warning
@@ -518,14 +508,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             harnessPills.append(pill); directoryFacetControls[id] = pill
         }
         let strip = mountPillStrip(in: facetBar, frame: NSRect(x: 157, y: 3, width: 387, height: 26),
-                                  id: "directory_harness_scroll", pills: harnessPills) {
+                                  id: "directory_harness_scroll", trackRadius: 13, pills: harnessPills) {
             $0.identifier?.rawValue == "dir_harness:\(directoryHarnessFilter)"
         }
-        strip.wantsLayer = true
-        strip.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
-        strip.drawsBackground = true
-        strip.layer?.cornerRadius = 13
-        strip.layer?.masksToBounds = true
         directoryDynamicHarnessViews.append(strip)
         updateDirectoryFacetStyles()
     }
@@ -632,12 +617,34 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         button.identifier=NSUserInterfaceItemIdentifier(id); button.pressed=action; box.addSubview(button)
         root.addSubview(box)
     }
+    private func captureScrollAnchor() -> (offset: NSPoint?, row: Int, deltaY: CGFloat) {
+        let offset = directoryScrollView?.contentView.bounds.origin
+        guard let table = directoryTableView else { return (offset, NSNotFound, 0) }
+        let row = table.rows(in: table.visibleRect).location
+        let deltaY = row == NSNotFound ? 0 : (offset?.y ?? 0) - table.rect(ofRow: row).minY
+        return (offset, row, deltaY)
+    }
+
+    func reloadTablePreservingAnchor(rowCount: Int, revealSelection: Bool, offset: NSPoint?, anchorIndex: Int?, deltaY: CGFloat) {
+        guard let table = directoryTableView else { return }
+        directoryReloadCount += 1
+        table.reloadData()
+        if rowCount > 0 {
+            table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
+            if revealSelection { table.scrollRowToVisible(directorySelectedIndex) }
+        }
+        table.layoutSubtreeIfNeeded()
+        if !revealSelection, let offset = offset {
+            let y = anchorIndex.map { table.rect(ofRow:$0).minY + deltaY } ?? offset.y
+            directoryScrollView?.contentView.scroll(to:NSPoint(x:offset.x,y:y))
+            if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
+        }
+    }
+
     func applyActivityFilter(revealSelection: Bool = false) {
         directoryDirty = true
-        let offset = directoryScrollView?.contentView.bounds.origin
-        let top = directoryTableView.map { $0.rows(in:$0.visibleRect).location } ?? NSNotFound
+        let (offset, top, deltaY) = captureScrollAnchor()
         let anchor = activityFilteredItems.indices.contains(top) ? activityFilteredItems[top] : nil
-        let deltaY = (offset?.y ?? 0) - (directoryTableView.flatMap { top == NSNotFound ? nil : $0.rect(ofRow:top).minY } ?? 0)
         let selected = activityFilteredItems.indices.contains(directorySelectedIndex) ? activityFilteredItems[directorySelectedIndex] : nil
         let q = directoryQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let serverMatches = serverActivityFilter == activityFilter && serverActivityQuery == directoryQuery
@@ -664,21 +671,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         updateDirectoryFacetStyles()
         let count = serverMatches ? max(activityTotal, activityFilteredItems.count) : activityFilteredItems.count
         directorySummaryLabel?.stringValue = "\(count) message\(count == 1 ? "" : "s") · \(serverMatches ? activityUnreadCount : activityFilteredItems.filter { $0.unread }.count) unread"
-        if let table = directoryTableView {
-            directoryReloadCount += 1
-            table.reloadData()
-            if !activityFilteredItems.isEmpty {
-                table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
-                if revealSelection || selectionChanged { table.scrollRowToVisible(directorySelectedIndex) }
-            }
-            table.layoutSubtreeIfNeeded()
-            if !revealSelection && !selectionChanged, let offset = offset {
-                let index = anchor.flatMap { previous in activityFilteredItems.firstIndex { $0.hub == previous.hub && $0.signal_id == previous.signal_id } }
-                let y = index.map { table.rect(ofRow:$0).minY + deltaY } ?? offset.y
-                directoryScrollView?.contentView.scroll(to:NSPoint(x:offset.x,y:y))
-                if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
-            }
-        }
+        reloadTablePreservingAnchor(rowCount: activityFilteredItems.count,
+            revealSelection: revealSelection || selectionChanged, offset: offset,
+            anchorIndex: anchor.flatMap { previous in activityFilteredItems.firstIndex { $0.hub == previous.hub && $0.signal_id == previous.signal_id } }, deltaY: deltaY)
     }
 
     func seedDirectoryPeersIfEmpty() {
@@ -746,10 +741,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
     func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
         directoryDirty = true
-        let offset = directoryScrollView?.contentView.bounds.origin
-        let top = directoryTableView.map { $0.rows(in:$0.visibleRect).location } ?? NSNotFound
+        let (offset, top, deltaY) = captureScrollAnchor()
         let anchorId = directoryFilteredPeers.indices.contains(top) ? directoryFilteredPeers[top].scoped_id : nil
-        let deltaY = (offset?.y ?? 0) - (directoryTableView.flatMap { top == NSNotFound ? nil : $0.rect(ofRow:top).minY } ?? 0)
         let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
         let sameServerQuery = serverDirectoryQuery == directoryQuery && serverDirectoryScope == directoryScopeFilter && serverDirectoryHarness == directoryHarnessFilter
         if serverDirectoryQuery == nil {
@@ -771,21 +764,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryDirty = false
         updateDirectoryEmptyState()
         directorySummaryLabel?.stringValue = "\(directoryMatchedCount) of \(directoryOnlineCount) online"
-        if let table = directoryTableView {
-            directoryReloadCount += 1
-            table.reloadData()
-            if !directoryFilteredPeers.isEmpty {
-                table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
-                if selectionChanged { table.scrollRowToVisible(directorySelectedIndex) }
-            }
-            table.layoutSubtreeIfNeeded()
-            if !selectionChanged, let offset = offset {
-                let index = anchorId.flatMap { id in directoryFilteredPeers.firstIndex { $0.scoped_id == id } }
-                let y = index.map { table.rect(ofRow:$0).minY + deltaY } ?? offset.y
-                directoryScrollView?.contentView.scroll(to:NSPoint(x:offset.x,y:y))
-                if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
-            }
-        }
+        reloadTablePreservingAnchor(rowCount: directoryFilteredPeers.count,
+            revealSelection: selectionChanged, offset: offset,
+            anchorIndex: anchorId.flatMap { id in directoryFilteredPeers.firstIndex { $0.scoped_id == id } }, deltaY: deltaY)
     }
 
     func deleteActivity(_ item: ActivityItem) {
@@ -795,7 +776,10 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func handleDirectoryKey(_ key: String) {
         if (directoryPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
         if handleTextEditShortcut(key, in: directoryPanel) { return }
-        switch key.lowercased() {
+        let key = key.lowercased()
+        if (key == "up" || key == "down"), let editor = composerInputField?.currentEditor(),
+           directoryPanel?.firstResponder === editor { return }
+        switch key {
         case "down":
             let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
             guard count > 0 else { return }
@@ -804,6 +788,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
             directoryTableView?.scrollRowToVisible(directorySelectedIndex)
             directoryTableView?.layoutSubtreeIfNeeded()
+            updateDirectoryShortcuts()
         case "up":
             let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
             guard count > 0 else { return }
@@ -812,6 +797,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
             directoryTableView?.scrollRowToVisible(directorySelectedIndex)
             directoryTableView?.layoutSubtreeIfNeeded()
+            updateDirectoryShortcuts()
         case "return":
             if !(directoryComposerBar?.isHidden ?? true) {
                 if composerInputField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true { setComposerStatus("Enter a message to send.") }
@@ -837,7 +823,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             openComposer(target:peer.display_address,hub:peer.hub ?? "")
         case "command-comma": openSettingsPanel()
         case "delete":
-            guard directoryMode == "activity", !(directoryPanel?.firstResponder is NSTextView),
+            guard directoryMode == "activity", !activityClearConfirm, !(directoryPanel?.firstResponder is NSTextView),
                   activityFilteredItems.indices.contains(directorySelectedIndex) else { return }
             deleteActivity(activityFilteredItems[directorySelectedIndex])
         case "command-w": closeDirectoryPanel(emitAction:true)
@@ -882,7 +868,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self = self else { return }
                 self.replyToActivity(item)
             }
-            restoreActivityCopyFeedback(item, cell: cell)
+            restoreCopyFeedback(until: activityCopiedUntil["\(item.hub)|\(item.signal_id)"], control: cell.copyControl)
             return cell
         }
         guard directoryFilteredPeers.indices.contains(row) else { return nil }
@@ -894,14 +880,13 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             guard let self = self else { return }
             self.openComposer(target: peer.display_address, hub: peer.hub ?? "", replySignalId: nil)
         }
-        let remaining = (directoryCopiedUntil[peer.scoped_id] ?? .distantPast).timeIntervalSinceNow
-        if remaining > 0 && cell.copyControl.feedbackTimer?.isValid != true { cell.copyControl.copied(for: remaining) }
+        restoreCopyFeedback(until: directoryCopiedUntil[peer.scoped_id], control: cell.copyControl)
         return cell
     }
 
-    func restoreActivityCopyFeedback(_ item: ActivityItem, cell: DirectoryPeerCellView) {
-        let remaining = (activityCopiedUntil["\(item.hub)|\(item.signal_id)"] ?? .distantPast).timeIntervalSinceNow
-        if remaining > 0 && cell.copyControl.feedbackTimer?.isValid != true { cell.copyControl.copied(for: remaining) }
+    private func restoreCopyFeedback(until: Date?, control: MenuControl) {
+        guard control.feedbackTimer?.isValid != true, let remaining = until?.timeIntervalSinceNow, remaining > 0 else { return }
+        control.copied(for: remaining)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -918,7 +903,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 if let cell = table.view(atColumn:0,row:index,makeIfNecessary:false) as? DirectoryPeerCellView {
                     let item = activityFilteredItems[index]
                     cell.configureActivity(with:item,selected:index==row,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
-                    restoreActivityCopyFeedback(item, cell: cell)
+                    restoreCopyFeedback(until: activityCopiedUntil["\(item.hub)|\(item.signal_id)"], control: cell.copyControl)
                 }
             }
         }
@@ -933,7 +918,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
     func replyToActivity(_ item: ActivityItem) {
         guard item.can_reply == true, let target = item.from_display_address ?? item.from_scoped_id, !target.isEmpty else { return }
-        if item.unread { emit(["op":"ack_signals","hub":item.hub,"signal_ids":[item.signal_id]]) }
+        if item.unread && item.target_harness == "human" { emit(["op":"ack_signals","hub":item.hub,"signal_ids":[item.signal_id]]) }
         openComposer(target: target, hub: item.hub, replySignalId: item.signal_id)
     }
 }

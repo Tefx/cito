@@ -59,7 +59,7 @@ commit on `main` updating:
 - `.agents/plugins/marketplace.json`, including its nested plugin version.
 - Distribution manifests in `plugins/`, including the Pi package manifest and the
   Codex/Claude marketplace manifests. `packaging/release.py check` lists drift.
-- The `application-version` metadata in the four website HTML pages, plus user
+- The `application-version` metadata in the five website HTML pages, plus user
   documentation and release notes where they describe the current version.
 
 Update the lockfile with Cargo after changing the package version; preserve

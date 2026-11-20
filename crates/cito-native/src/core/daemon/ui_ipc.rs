@@ -26,12 +26,22 @@ fn cap_text(s: &str, limit: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
+fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated: &mut bool) {
     match v {
         Value::String(s) => {
             if matches!(
                 key,
-                "request_id" | "url" | "issuer" | "client_id" | "clientId" | "value"
+                "request_id"
+                    | "url"
+                    | "issuer"
+                    | "client_id"
+                    | "clientId"
+                    | "value"
+                    | "cwd"
+                    | "token"
+                    | "invite_command"
+                    | "tailscale_invite_command"
+                    | "lan_invite_command"
             ) {
                 return;
             }
@@ -46,7 +56,7 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
             let cap = match key {
                 "message" => 512,
                 "about" | "from_about" => 256,
-                "cwd" | "summary" => 128,
+                "summary" => 128,
                 _ => 4096,
             };
             *s = cap_text(s, cap);
@@ -60,10 +70,11 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
                 _ => 128,
             };
             if !preserve_collections {
+                *truncated |= a.len() > cap;
                 a.truncate(cap);
             }
             for item in a {
-                bound_fields(item, "", preserve_collections);
+                bound_fields(item, "", preserve_collections, truncated);
             }
         }
         Value::Object(m) => {
@@ -71,10 +82,26 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
                 return;
             }
             for (k, v) in m {
-                bound_fields(v, k, preserve_collections)
+                bound_fields(v, k, preserve_collections, truncated)
             }
         }
         _ => {}
+    }
+}
+
+fn shed_large_strings(value: &mut Value) -> bool {
+    match value {
+        Value::String(s) if s.len() > 1024 => {
+            *s = cap_text(s, 1024);
+            true
+        }
+        Value::Array(rows) => rows
+            .iter_mut()
+            .fold(false, |changed, row| shed_large_strings(row) | changed),
+        Value::Object(obj) => obj
+            .values_mut()
+            .fold(false, |changed, field| shed_large_strings(field) | changed),
+        _ => false,
     }
 }
 
@@ -82,7 +109,11 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     // Full-message copy uses correlated bounded chunks rather than preview caps.
     if frame["op"] != "activity_message" {
         let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
-        bound_fields(&mut frame, "", correlated);
+        let mut truncated = false;
+        bound_fields(&mut frame, "", correlated, &mut truncated);
+        if truncated {
+            frame["truncated"] = json!(true);
+        }
     }
     let mut receipt_only = false;
     loop {
@@ -103,7 +134,8 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
                     "channel":frame["channel"],"channel_id":frame["channel_id"],
                     "action":frame["action"],"source_op":frame["source_op"],
                     "authority_changed":frame["authority_changed"],
-                    "warning":"Saved successfully; canonical settings exceed the UI frame budget"});
+                    "receipt_authority":frame["receipt_authority"],
+                    "warning":frame["warning"].as_str().unwrap_or("Saved successfully; canonical settings exceed the UI frame budget")});
                 continue;
             }
             if frame["op"] == "error" {
@@ -142,7 +174,7 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
                 }
             }
         }
-        if !removed {
+        if !removed && !shed_large_strings(&mut frame) {
             return Err("UI frame exceeds 256 KiB after collection shedding".into());
         }
         frame["truncated"] = json!(true);
@@ -157,7 +189,7 @@ pub(super) struct UiMailbox {
 }
 
 impl UiMailbox {
-    pub(super) fn emit(&self, frame: Value) {
+    pub(super) fn emit(&self, frame: Value) -> bool {
         // Passive snapshots coalesce; correlated command results stay ordered.
         let key = if string(&frame, "request_id").is_empty()
             && string(&frame, "source_op").is_empty()
@@ -171,22 +203,26 @@ impl UiMailbox {
         } else {
             None
         };
+        let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
         match bounded_frame(frame) {
             Ok(mut bytes) => {
                 bytes.push(b'\n');
-                self.push(key, bytes);
+                self.push(key, bytes)
             }
             Err(error) => {
-                eprintln!("cito-ui: {error}; closing the UI stream");
-                self.close();
+                eprintln!("cito-ui: {error}");
+                if correlated {
+                    self.close();
+                }
+                false
             }
         }
     }
-    fn push(&self, key: Option<String>, bytes: Vec<u8>) {
-        if self.closed.load(Ordering::SeqCst) {
-            return;
-        }
+    fn push(&self, key: Option<String>, bytes: Vec<u8>) -> bool {
         if let Ok(mut pending) = self.pending.lock() {
+            if self.closed.load(Ordering::SeqCst) {
+                return false;
+            }
             if let Some(key) = key.as_ref() {
                 pending.retain(|(old, _)| old.as_ref() != Some(key));
             }
@@ -199,12 +235,15 @@ impl UiMailbox {
                     // correlated results grow without bound or disappear silently.
                     self.closed.store(true, Ordering::SeqCst);
                     self.ready.notify_all();
-                    return;
+                    wake_daemon();
+                    return false;
                 }
             }
             pending.push_back((key, bytes));
             self.ready.notify_one();
+            return true;
         }
+        false
     }
     pub(super) fn next(&self) -> Option<Vec<u8>> {
         let mut pending = self.pending.lock().ok()?;
@@ -227,6 +266,7 @@ impl UiMailbox {
 }
 
 pub(super) struct UiChild {
+    pub(super) mailbox: Arc<UiMailbox>,
     pub(super) child: Child,
     pub(super) reader: thread::JoinHandle<()>,
     pub(super) writer: thread::JoinHandle<()>,
@@ -266,6 +306,8 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
     let writer = thread::spawn(move || {
         while let Some(bytes) = output_mailbox.next() {
             if input.write_all(&bytes).and_then(|_| input.flush()).is_err() {
+                output_mailbox.close();
+                wake_daemon();
                 break;
             }
         }
@@ -280,6 +322,7 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
         let _ = writer.join();
         return None;
     };
+    let child_mailbox = mailbox.clone();
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(output);
         let mut logins: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -347,6 +390,7 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
         }
     });
     Some(UiChild {
+        mailbox: child_mailbox,
         child,
         reader,
         writer,

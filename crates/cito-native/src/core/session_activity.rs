@@ -30,15 +30,19 @@ struct Discovery {
     cached: Vec<Value>,
     stale: bool,
     refreshed_at: u64,
-    started_at: u64,
     revision: Option<Arc<AtomicU64>>,
-    started_revision: u64,
     requested_generation: u64,
-    started_generation: u64,
     error: Option<String>,
     seen_revision: u64,
     refreshed_revision: u64,
     due: Instant,
+    flight: DiscoveryFlight,
+}
+
+struct DiscoveryFlight {
+    started_at: u64,
+    started_revision: u64,
+    started_generation: u64,
     worker: Option<Worker<Vec<Value>>>,
     complete: Arc<AtomicBool>,
 }
@@ -99,17 +103,20 @@ pub struct SessionActivity {
     configured: Option<HashSet<String>>,
     completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
 }
-struct DiscoveryFinished {
-    done: Arc<AtomicBool>,
-    completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+pub(super) struct CompletionNotice {
+    pub(super) done: Arc<AtomicBool>,
+    pub(super) completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
 }
-impl Drop for DiscoveryFinished {
+impl Drop for CompletionNotice {
     fn drop(&mut self) {
-        self.done.store(true, Ordering::Release);
-        if let Ok(mut version) = self.completion.0.lock() {
-            *version = version.wrapping_add(1);
-            self.completion.1.notify_all();
-        }
+        self.done.store(true, Ordering::SeqCst);
+        let mut version = self
+            .completion
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *version = version.wrapping_add(1);
+        self.completion.1.notify_all();
         super::daemon::wake_daemon();
     }
 }
@@ -128,17 +135,19 @@ impl SessionActivity {
                     cached: Vec::new(),
                     stale: false,
                     refreshed_at: 0,
-                    started_at: 0,
                     revision: None,
-                    started_revision: 0,
                     requested_generation: 0,
-                    started_generation: 0,
                     error: None,
                     seen_revision: 0,
                     refreshed_revision: 0,
                     due: Instant::now(),
-                    worker: None,
-                    complete: Arc::new(AtomicBool::new(false)),
+                    flight: DiscoveryFlight {
+                        started_at: 0,
+                        started_revision: 0,
+                        started_generation: 0,
+                        worker: None,
+                        complete: Arc::new(AtomicBool::new(false)),
+                    },
                 })
                 .collect(),
             badges: BTreeMap::new(),
@@ -148,6 +157,80 @@ impl SessionActivity {
             background_discovery: true,
             configured: None,
             completion: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+        }
+    }
+
+    /// Install current descriptor values without losing unrelated in-flight work.
+    /// Removed providers are drained outside the service lock by the caller.
+    pub(super) fn reload(
+        &mut self,
+        config: &NativeConfig,
+        plugins: &LoadedPlugins,
+        changed: &HashSet<String>,
+    ) -> Self {
+        let mut retired = Self::new(config, plugins);
+        let next = std::mem::take(&mut retired.discovery);
+        for fresh in next {
+            let id = &fresh.plugin.id;
+            if let Some(index) = self.discovery.iter().position(|p| &p.plugin.id == id) {
+                if changed.contains(id) {
+                    self.remove_candidates(id);
+                    let provider = &mut self.discovery[index];
+                    provider.requested_generation = provider.requested_generation.wrapping_add(1);
+                    for (target, badge) in &mut self.badges {
+                        if &target.harness == id {
+                            badge.plugin = fresh.plugin.clone();
+                            badge.sent = None;
+                            badge.attempted = None;
+                            badge.failures = 0;
+                            badge.retry_at = Instant::now();
+                        }
+                    }
+                }
+                self.discovery[index].plugin = fresh.plugin;
+            } else {
+                self.discovery.push(fresh);
+            }
+        }
+        let active: HashSet<_> = plugins
+            .agent_plugins()
+            .into_iter()
+            .filter(|p| !plugins.rejected_ids.contains(&p.id))
+            .map(|p| &p.id)
+            .collect();
+        let (kept, removed) = std::mem::take(&mut self.discovery)
+            .into_iter()
+            .partition(|p| active.contains(&p.plugin.id));
+        self.discovery = kept;
+        retired.discovery = removed;
+        for p in &retired.discovery {
+            if let Some(revision) = &p.revision {
+                revision.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        retired.badges = self
+            .badges
+            .extract_if(.., |target, _| !active.contains(&target.harness))
+            .collect();
+        if !changed.is_empty() {
+            self.badge_inputs = None;
+        }
+        retired
+    }
+
+    /// Targeted probes observe endpoint-local state even with discovery disabled.
+    pub(super) fn observe_badge(&mut self, observation: &Value) {
+        self.reap_badges();
+        let Some(observed) = observation.get("badge") else {
+            return;
+        };
+        if let Some(badge) = self.badges.get_mut(&Target::of(observation)) {
+            if badge.desired.session_id == string(observation, "session_id")
+                && *observed != json!(badge.desired.badge)
+            {
+                badge.sent = None;
+                badge.retry_at = Instant::now();
+            }
         }
     }
 
@@ -189,7 +272,7 @@ impl SessionActivity {
             .map(|p| {
                 let status = if p.error.is_some() {
                     "error"
-                } else if p.worker.is_some() && p.refreshed_at == 0 {
+                } else if p.flight.worker.is_some() && p.refreshed_at == 0 {
                     "scanning"
                 } else {
                     "ready"
@@ -213,7 +296,7 @@ impl SessionActivity {
     pub fn discovery_pending(&self) -> bool {
         self.discovery
             .iter()
-            .any(|provider| provider.worker.is_some())
+            .any(|provider| provider.flight.worker.is_some())
     }
 
     /// Freshly confirmed endpoints eligible for automatic enrollment. Retained
@@ -223,7 +306,7 @@ impl SessionActivity {
             .iter()
             .filter(|provider| {
                 !provider.stale
-                    && provider.worker.is_none()
+                    && provider.flight.worker.is_none()
                     && provider.revision.as_ref().is_none_or(|revision| {
                         revision.load(Ordering::SeqCst) == provider.refreshed_revision
                     })
@@ -232,6 +315,7 @@ impl SessionActivity {
                 provider.cached.iter().map(move |candidate| {
                     let mut candidate = candidate.clone();
                     candidate["discovered_at"] = json!(provider.refreshed_at);
+                    candidate["discovery_revision"] = json!(provider.refreshed_revision);
                     candidate
                 })
             })
@@ -363,6 +447,23 @@ impl SessionActivity {
             }
             for (target, intent) in desired {
                 if let Some(badge) = self.badges.get_mut(&target) {
+                    if changed
+                        && self
+                            .discovery
+                            .iter()
+                            .filter(|provider| provider.plugin.id == target.harness)
+                            .flat_map(|provider| &provider.cached)
+                            .any(|candidate| {
+                                Target::of(candidate) == target
+                                    && candidate["session_id"] == intent.session_id
+                                    && candidate
+                                        .get("badge")
+                                        .is_some_and(|observed| *observed != json!(intent.badge))
+                            })
+                    {
+                        badge.sent = None;
+                        badge.retry_at = Instant::now();
+                    }
                     if badge.desired != intent {
                         badge.desired = intent;
                         badge.failures = 0;
@@ -395,30 +496,34 @@ impl SessionActivity {
                     && badge.failures < INACTIVE_FAILURE_LIMIT)
         });
         self.start_badges()?;
-        let mut capacity = MAX_WORKERS
-            .saturating_sub(self.discovery.iter().filter(|p| p.worker.is_some()).count());
+        let mut capacity = MAX_WORKERS.saturating_sub(
+            self.discovery
+                .iter()
+                .filter(|p| p.flight.worker.is_some())
+                .count(),
+        );
         for provider in &mut self.discovery {
             if capacity == 0 {
                 break;
             }
-            if provider.worker.is_some()
+            if provider.flight.worker.is_some()
                 || provider.due > Instant::now()
                 || self
                     .configured
                     .as_ref()
                     .is_some_and(|ids| !ids.contains(&provider.plugin.id))
                 || (!self.background_discovery
-                    && provider.requested_generation == provider.started_generation)
+                    && provider.requested_generation == provider.flight.started_generation)
             {
                 continue;
             }
-            provider.started_revision = provider
+            provider.flight.started_revision = provider
                 .revision
                 .as_ref()
                 .map(|revision| revision.load(Ordering::SeqCst))
                 .unwrap_or(0);
-            provider.started_at = now_ms();
-            provider.started_generation = provider.requested_generation;
+            provider.flight.started_at = now_ms();
+            provider.flight.started_generation = provider.requested_generation;
             let plugin = provider.plugin.clone();
             // Restoration must not depend on a provider's recent/display slices.
             let retained: Vec<Value> = state.db.query(
@@ -429,12 +534,12 @@ impl SessionActivity {
                 "retained_session_ids":retained,
                 "recent_window_ms":plugin.auto_listen.recent_window_ms.unwrap_or(900_000),"plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
-            provider.complete.store(false, Ordering::Release);
-            let finished = DiscoveryFinished {
-                done: provider.complete.clone(),
+            provider.flight.complete.store(false, Ordering::Release);
+            let finished = CompletionNotice {
+                done: provider.flight.complete.clone(),
                 completion: self.completion.clone(),
             };
-            provider.worker = Some(
+            provider.flight.worker = Some(
                 thread::Builder::new()
                     .name("cito-discovery".into())
                     .spawn(move || {
@@ -460,8 +565,16 @@ impl SessionActivity {
                                 row.is_object()
                                     && string(row, "harness") == plugin.id
                                     && !string(row, "session_id").is_empty()
+                                    && !string(row, "cwd").trim().is_empty()
                             })
                             .cloned()
+                            .map(|mut row| {
+                                row["title"] = json!(row["title"]
+                                    .as_str()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or(&plugin.display_name));
+                                row
+                            })
                             .collect())
                     })
                     .map_err(|e| format!("Cannot start discovery worker: {e}"))?,
@@ -474,19 +587,28 @@ impl SessionActivity {
     fn reap_discovery(&mut self) -> bool {
         let mut changed = false;
         for provider in &mut self.discovery {
-            if provider.worker.is_none()
-                || (!provider.complete.load(Ordering::Acquire)
+            if provider.flight.worker.is_none()
+                || (!provider.flight.complete.load(Ordering::Acquire)
                     && !provider
+                        .flight
                         .worker
                         .as_ref()
                         .is_some_and(|worker| worker.is_finished()))
             {
                 continue;
             }
-            if let Some(worker) = provider.worker.take() {
+            if let Some(worker) = provider.flight.worker.take() {
                 provider.error = None;
                 changed = true;
-                let rows = match worker.join() {
+                let completion = worker.join();
+                if provider.revision.as_ref().is_some_and(|revision| {
+                    revision.load(Ordering::SeqCst) != provider.flight.started_revision
+                }) {
+                    provider.stale = true;
+                    provider.due = Instant::now();
+                    continue;
+                }
+                let rows = match completion {
                     Ok(Ok(rows)) => Some(rows),
                     Ok(Err(error)) => {
                         eprintln!("cito discovery {}: {error}", provider.plugin.id);
@@ -501,9 +623,10 @@ impl SessionActivity {
                 };
                 provider.stale = rows.is_none()
                     || provider.revision.as_ref().is_some_and(|revision| {
-                        revision.load(Ordering::SeqCst) != provider.started_revision
+                        revision.load(Ordering::SeqCst) != provider.flight.started_revision
                     });
-                let invalidated = provider.requested_generation != provider.started_generation
+                let invalidated = provider.requested_generation
+                    != provider.flight.started_generation
                     || (provider.stale && rows.is_some());
                 if rows.is_none() {
                     provider.cached.clear();
@@ -511,8 +634,8 @@ impl SessionActivity {
                 if let Some(rows) = rows {
                     // A refresh already in flight at revocation is not newer evidence,
                     // even if its result is joined after the revocation transaction.
-                    provider.refreshed_at = provider.started_at;
-                    provider.refreshed_revision = provider.started_revision;
+                    provider.refreshed_at = provider.flight.started_at;
+                    provider.refreshed_revision = provider.flight.started_revision;
                     if !provider.stale {
                         provider.cached = rows;
                     }
@@ -533,7 +656,12 @@ impl SessionActivity {
                 continue;
             }
             if let Some(worker) = badge.worker.take() {
-                match worker.join() {
+                let completion = worker.join();
+                // The sink was replaced during this call; only the new sink can acknowledge it.
+                if badge.attempted.is_none() {
+                    continue;
+                }
+                match completion {
                     Ok(Ok(sent)) => {
                         badge.sent = Some(sent);
                         badge.failures = 0;
@@ -595,13 +723,17 @@ impl SessionActivity {
         self.closed = true;
         self.stopping.store(true, Ordering::Release);
         for provider in &mut self.discovery {
-            if let Some(worker) = provider.worker.take() {
+            if let Some(worker) = provider.flight.worker.take() {
                 let _ = worker.join();
             }
         }
         for badge in self.badges.values_mut() {
             if let Some(worker) = badge.worker.take() {
-                badge.sent = worker.join().ok().and_then(Result::ok);
+                badge.sent = worker
+                    .join()
+                    .ok()
+                    .and_then(Result::ok)
+                    .filter(|_| badge.attempted.is_some());
             }
         }
         let clears: Vec<_> = self
@@ -690,7 +822,11 @@ fn desired_badges(
     state: &LocalState,
     live_active: &[Value],
 ) -> Result<BTreeMap<Target, Intent>, String> {
-    let rows = state.db.transaction(|db| db.query("SELECT l.*, (SELECT COUNT(*) FROM local_signals s WHERE s.hub=l.hub AND s.listener_id=l.listener_id AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>? AND s.state!='EXPIRED_UNSENT') AS badge_unread FROM local_listeners l ORDER BY (l.status='ACTIVE') DESC,l.binding_generation DESC,l.hub ASC,l.listener_id ASC", &[json!(now_ms())]))?;
+    let mut rows = state.db.query("SELECT * FROM local_listeners ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC", &[])?;
+    for row in &mut rows {
+        row["badge_unread"] =
+            json!(state.unread_count(string(row, "hub"), string(row, "listener_id"), true)?);
+    }
     let is_live = |row: &Value| {
         row["status"] == "ACTIVE"
             && live_active.iter().any(|live| {
@@ -944,7 +1080,7 @@ print(json.dumps(response), flush=True)
             pid: Option<u64>,
             generation: u64,
         ) -> Result<Value, String> {
-            self.state.db.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token) VALUES(?,'c_abcdefghijkl','abcdefghijk--more-abcdefghijkl','none#alice','alice','host','host','agent',?,?,'/workspace','Target','','workspace','ACTIVE',?,'owner')",&[json!(hub),json!(session),json!(pid),json!(generation)])?;
+            self.state.db.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token,hub_url) VALUES(?,'c_abcdefghijkl','abcdefghijk--more-abcdefghijkl','none#alice','alice','host','host','agent',?,?,'/workspace','Target','','workspace','ACTIVE',?,'owner','local://')",&[json!(hub),json!(session),json!(pid),json!(generation)])?;
             self.state
                 .listener(hub, "c_abcdefghijkl")?
                 .ok_or_else(|| "Missing listener".into())
@@ -957,7 +1093,7 @@ print(json.dumps(response), flush=True)
             acked: Value,
             expires: u64,
         ) -> Result<(), String> {
-            self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,acknowledged_at_ms) VALUES(?,?,'c_abcdefghijkl',1,1,'bob','remote','Sender','hello','2026-01-01T00:00:00.000Z',?,?,?)",&[json!(hub),json!(id),json!(expires),json!(state),acked])?;
+            self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,acknowledged_at_ms,hub_url,principal_id) VALUES(?,?,'c_abcdefghijkl',1,1,'bob','remote','Sender','hello','2026-01-01T00:00:00.000Z',?,?,?,'local://','none#alice')",&[json!(hub),json!(id),json!(expires),json!(state),acked])?;
             Ok(())
         }
     }
@@ -1060,17 +1196,45 @@ print(json.dumps(response), flush=True)
     }
 
     #[test]
+    fn discovery_badge_observation_repairs_a_reloaded_endpoint() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        let candidate = json!({"harness":"agent","session_id":"s","cwd":"/repo","endpoint_pid":42,"badge":"Cito · abcdefghijk"});
+        f.provider("agent", json!({"sessions":[candidate]}))?;
+        let live = vec![f.listener("local", "s", Some(42), 1)?];
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &live, |a| {
+            !a.discovery_pending()
+                && a.badges
+                    .values()
+                    .all(|badge| badge.sent.as_ref() == Some(&badge.desired))
+        })?;
+        let before = f.calls("agent", "update_badge").len();
+        fs::write(f.dir.join("agent/options.json"),json!({"sessions":[{"harness":"agent","session_id":"s","cwd":"/repo","endpoint_pid":42,"badge":null}]}).to_string()).map_err(|e|e.to_string())?;
+        activity.refresh_discovery();
+        pump(&mut activity, &f, &live, |a| {
+            !a.discovery_pending()
+                && f.calls("agent", "update_badge").len() > before
+                && a.badges
+                    .values()
+                    .all(|badge| badge.sent.as_ref() == Some(&badge.desired))
+        })?;
+        assert_eq!(f.effect("agent").unwrap()["badge"], "Cito · abcdefghijk");
+        activity.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
     fn discovery_concurrent_deadline_failure_isolation_and_cache_only_read() -> Result<(), String> {
         let mut f = Fixture::new()?;
         f.provider(
             "fast",
-            json!({"discovery_delay":0.2,"sessions":[{"harness":"fast","session_id":"one"}]}),
+            json!({"discovery_delay":0.2,"sessions":[{"harness":"fast","cwd":"/repo","session_id":"one"}]}),
         )?;
         f.provider("slow", json!({"discovery_delay":30,"descendant":true}))?;
         f.provider("invalid", json!({"malformed":true}))?;
         f.provider(
             "other",
-            json!({"discovery_delay":0.2,"sessions":[{"harness":"other","session_id":"two"}]}),
+            json!({"discovery_delay":0.2,"sessions":[{"harness":"other","cwd":"/repo","session_id":"two"}]}),
         )?;
         let mut activity = SessionActivity::new(&f.config, &f.plugins);
         let started = Instant::now();
@@ -1093,7 +1257,7 @@ print(json.dumps(response), flush=True)
         }
         assert!(read.elapsed() < Duration::from_millis(100));
         pump(&mut activity, &f, &[], |a| {
-            a.discovery.iter().all(|p| p.worker.is_none())
+            a.discovery.iter().all(|p| p.flight.worker.is_none())
         })?;
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(f.calls("fast", "discover_sessions").len(), 1);
@@ -1125,7 +1289,7 @@ print(json.dumps(response), flush=True)
         let mut activity = SessionActivity::new(&f.config, &f.plugins);
         activity.tick(&f.state, &[])?;
         assert_eq!(activity.discovery[0].refreshed_at, 0);
-        assert!(activity.discovery[0].worker.is_some());
+        assert!(activity.discovery[0].flight.worker.is_some());
         assert_eq!(activity.discovery_status()[0]["status"], "scanning");
         pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
         assert_eq!(activity.discovery[0].refreshed_at, 0);
@@ -1133,7 +1297,8 @@ print(json.dumps(response), flush=True)
         let error = activity.discovery_status()[0]["error"].clone();
         assert_eq!(error, "Provider unavailable");
 
-        let sessions = vec![json!({"harness":"agent","session_id":"one"})];
+        let sessions =
+            vec![json!({"harness":"agent","session_id":"one","cwd":"/repo","title":"Current"})];
         fs::write(
             f.dir.join("agent/options.json"),
             json!({"sessions":sessions}).to_string(),
@@ -1141,7 +1306,7 @@ print(json.dumps(response), flush=True)
         .map_err(|e| e.to_string())?;
         activity.refresh_discovery();
         activity.tick(&f.state, &[])?;
-        assert!(activity.discovery[0].worker.is_some());
+        assert!(activity.discovery[0].flight.worker.is_some());
         assert_eq!(activity.discovery_status()[0]["status"], "error");
         assert_eq!(activity.discovery_status()[0]["error"], error);
         pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
@@ -1158,7 +1323,7 @@ print(json.dumps(response), flush=True)
                 activity.discovery[0].due = Instant::now();
             }
             activity.tick(&f.state, &[])?;
-            assert!(activity.discovery[0].worker.is_some());
+            assert!(activity.discovery[0].flight.worker.is_some());
             assert_eq!(activity.discovery_status()[0]["status"], "ready");
             assert_eq!(activity.discovery[0].cached, sessions);
             assert_eq!(activity.available(&[], 1), sessions);
@@ -1171,7 +1336,7 @@ print(json.dumps(response), flush=True)
         assert!(activity.discovery[0].cached.is_empty());
         assert!(activity.discovery[0].error.is_none());
         activity.tick(&f.state, &[])?;
-        assert!(activity.discovery[0].worker.is_some());
+        assert!(activity.discovery[0].flight.worker.is_some());
         assert_eq!(activity.discovery_status()[0]["status"], "scanning");
         pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
         assert_eq!(activity.discovery_status()[0]["status"], "ready");
@@ -1297,7 +1462,7 @@ print(json.dumps(response), flush=True)
         activity.discovery[0].cached = confirmed.clone();
         assert_eq!(activity.candidates().count(), 1);
         for panic in [false, true] {
-            activity.discovery[0].worker = Some(std::thread::spawn(move || {
+            activity.discovery[0].flight.worker = Some(std::thread::spawn(move || {
                 if panic {
                     panic!("discovery fixture panic");
                 }
@@ -1308,7 +1473,9 @@ print(json.dumps(response), flush=True)
                 0,
                 "Do not enroll an identity while its refresh is unconfirmed"
             );
-            pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+            pump(&mut activity, &f, &[], |a| {
+                a.discovery[0].flight.worker.is_none()
+            })?;
             assert!(activity.discovery[0].cached.is_empty());
             assert!(activity.available(&[], 1).is_empty());
             assert_eq!(activity.discovery_status()[0]["status"], "error");
@@ -1321,9 +1488,11 @@ print(json.dumps(response), flush=True)
         let switched =
             vec![json!({"harness":"agent","session_id":"replacement","title":"New work"})];
         let fresh = switched.clone();
-        activity.discovery[0].started_at = 10;
-        activity.discovery[0].worker = Some(std::thread::spawn(move || Ok(fresh)));
-        pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+        activity.discovery[0].flight.started_at = 10;
+        activity.discovery[0].flight.worker = Some(std::thread::spawn(move || Ok(fresh)));
+        pump(&mut activity, &f, &[], |a| {
+            a.discovery[0].flight.worker.is_none()
+        })?;
         let candidates = activity.candidates().collect::<Vec<_>>();
         assert_eq!(candidates[0]["session_id"], switched[0]["session_id"]);
         assert_eq!(candidates[0]["discovered_at"], 10);
@@ -1339,10 +1508,10 @@ print(json.dumps(response), flush=True)
         assert_eq!(activity.available(&[], 1), switched);
         for invalidated in [true, false] {
             let revision = f.state.discovery_revision("agent")?;
-            activity.discovery[0].started_revision = revision.load(Ordering::SeqCst);
+            activity.discovery[0].flight.started_revision = revision.load(Ordering::SeqCst);
             let (release, wait) = std::sync::mpsc::channel();
             let rows = switched.clone();
-            activity.discovery[0].worker = Some(std::thread::spawn(move || {
+            activity.discovery[0].flight.worker = Some(std::thread::spawn(move || {
                 wait.recv_timeout(Duration::from_secs(3))
                     .map_err(|e| e.to_string())?;
                 Ok(rows)
@@ -1353,6 +1522,7 @@ print(json.dumps(response), flush=True)
             release.send(()).map_err(|e| e.to_string())?;
             let deadline = Instant::now() + Duration::from_secs(3);
             while !activity.discovery[0]
+                .flight
                 .worker
                 .as_ref()
                 .is_some_and(|worker| worker.is_finished())
@@ -1366,8 +1536,10 @@ print(json.dumps(response), flush=True)
             assert_eq!(activity.candidates().count(), usize::from(!invalidated));
             assert_eq!(activity.available(&[], 1), switched);
         }
-        activity.discovery[0].worker = Some(std::thread::spawn(|| Ok(vec![])));
-        pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+        activity.discovery[0].flight.worker = Some(std::thread::spawn(|| Ok(vec![])));
+        pump(&mut activity, &f, &[], |a| {
+            a.discovery[0].flight.worker.is_none()
+        })?;
         assert!(
             activity.discovery[0].cached.is_empty(),
             "A confirmed empty inventory replaces old candidates"
@@ -1387,15 +1559,17 @@ print(json.dumps(response), flush=True)
             activity
                 .discovery
                 .iter()
-                .filter(|p| p.worker.is_some())
+                .filter(|p| p.flight.worker.is_some())
                 .count(),
             MAX_WORKERS
         );
-        assert!(activity.discovery[4..].iter().all(|p| p.worker.is_none()));
+        assert!(activity.discovery[4..]
+            .iter()
+            .all(|p| p.flight.worker.is_none()));
         pump(&mut activity, &f, &[], |a| {
             a.discovery
                 .iter()
-                .all(|p| p.worker.is_none() && p.due > Instant::now())
+                .all(|p| p.flight.worker.is_none() && p.due > Instant::now())
         })?;
         for i in 0..6 {
             assert_eq!(f.calls(&format!("agent{i}"), "discover_sessions").len(), 1);
@@ -1404,7 +1578,7 @@ print(json.dumps(response), flush=True)
         pump(&mut activity, &f, &[], |a| {
             a.discovery
                 .iter()
-                .all(|p| p.worker.is_none() && p.due > Instant::now())
+                .all(|p| p.flight.worker.is_none() && p.due > Instant::now())
         })?;
         for i in 0..6 {
             assert_eq!(f.calls(&format!("agent{i}"), "discover_sessions").len(), 2);
@@ -1420,10 +1594,15 @@ print(json.dumps(response), flush=True)
         let mut sessions: Vec<_> = (0..14)
             .map(|i| {
                 json!({"harness":"agent","session_id":format!("s{i}"),
-            "endpoint_pid":100+i,"updated_at_ms":i,"listening_hubs":["forged"]})
+            "cwd":"/workspace","endpoint_pid":100+i,"updated_at_ms":i,"listening_hubs":["forged"]})
             })
             .collect();
         sessions.push(sessions[13].clone());
+        for invalid in [Value::Null, json!(4), json!(" \t")] {
+            sessions.push(
+                json!({"harness":"agent","session_id":"invalid","cwd":invalid,"updated_at_ms":999}),
+            );
+        }
         sessions.push(json!({"harness":"different","session_id":"forged"}));
         f.provider("agent", json!({"sessions":sessions}))?;
         f.provider("rejected", json!({"sessions":[]}))?;
@@ -1437,6 +1616,9 @@ print(json.dumps(response), flush=True)
         ];
         let available = activity.available(&live, 2);
         assert_eq!(available.len(), 8);
+        assert!(available
+            .iter()
+            .all(|row| row["title"].is_string() && row["cwd"] == "/workspace"));
         assert_eq!(available[0]["session_id"], "s12");
         assert_eq!(available[0]["listening_hubs"], json!(["east"]));
         assert!(available[1].get("listening_hubs").is_none());
@@ -1642,7 +1824,7 @@ print(json.dumps(response), flush=True)
         let started = Instant::now();
         activity.shutdown()?;
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(activity.discovery.iter().all(|p| p.worker.is_none()));
+        assert!(activity.discovery.iter().all(|p| p.flight.worker.is_none()));
         assert!(activity.badges.values().all(|p| p.worker.is_none()));
         assert_reaped(&f);
         Ok(())
@@ -1754,7 +1936,7 @@ print(json.dumps(response), flush=True)
         );
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(activity.badges.values().all(|b| b.worker.is_none()));
-        assert!(activity.discovery.iter().all(|p| p.worker.is_none()));
+        assert!(activity.discovery.iter().all(|p| p.flight.worker.is_none()));
         assert!(!f.records("agent").iter().any(|r| r["stage"] == "overlap"));
         assert_reaped(&f);
         let calls = f.calls("agent", "update_badge").len();

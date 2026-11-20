@@ -160,7 +160,7 @@ struct ActivityItem: Decodable, Equatable {
     let held_reason: String?
     let in_reply_to: String?
     let created_at: String
-    let unread: Bool
+    var unread: Bool
     let for_me: Bool
     var from_listener_id: String? = nil
     var can_reply: Bool? = nil
@@ -264,23 +264,50 @@ struct HubConfigItem: Decodable, Equatable {
     let client_id: String?
     var human_paused: Bool? = nil
     var human_about: String? = nil
+    var human_listener_id: String? = nil
+    var human_can_set_scope: Bool? = nil
+    var human_control_revision: Int? = nil
+    var human_scope: String? = nil
+    var human_availability: String? = nil
     var human_state_status: String? = nil
+    var attachments: [ChannelAttachment]? = nil
     var capabilities: HubCapabilities? = nil
     var is_builtin: Bool? = nil
     var supports_workspace_scope: Bool? = nil
     var can_login: Bool? = nil
+    var redirect_port: Int? = nil
 }
 struct SettingsPayload: Decodable, Equatable {
-    let apps: [AppSetupItem]
+    var apps: [AppSetupItem]
     let channel_hub: String?
     let settings_hub: String?
-    let channels: [ChannelSetupItem]?
+    var channels: [ChannelSetupItem]?
     var channel_inventory_error: String? = nil
-    let hubs: [HubConfigItem]
+    var hubs: [HubConfigItem]
     let host_hub: HostHubSummary
     let launch_at_login: Bool
 }
+// Invite ports accept both daemon numeric values and clipboard string aliases.
+enum InvitePort: Decodable {
+    case number(Int), string(String)
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if let port = try? value.decode(Int.self) { self = .number(port) }
+        else { self = .string(try value.decode(String.self)) }
+    }
+    var text: String {
+        switch self { case .number(let port): return String(port); case .string(let port): return port }
+    }
+}
+struct HubInviteConfig: Decodable {
+    let url: String?, name: String?, authMode: String?, auth_mode: String?
+    let token: String?, user: String?, issuer: String?, oidcIssuer: String?
+    let clientId: String?, client_id: String?, oidcClientId: String?
+    let redirect_port: InvitePort?, redirectPort: InvitePort?, oidcRedirectPort: InvitePort?
+}
 struct Frame: Decodable {
+    let config: HubInviteConfig?
+    let truncated: Bool?
     let op: String
     let hub: String?
     let ok: Bool?
@@ -293,7 +320,6 @@ struct Frame: Decodable {
     let warning: String?
     let authority_changed: Bool?
     let request_id: String?
-    let composer_error: String?
     let channel_id: String?
     let code: String?
     let instruction: String?
@@ -317,7 +343,6 @@ struct Frame: Decodable {
     let scope: String?
     let harness: String?
     let activity_total: Int?
-    let activity_all_total: Int?
     let activity_has_any: Bool?
     let activity_unread_count: Int?
     let activity_filter: String?

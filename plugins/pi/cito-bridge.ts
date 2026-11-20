@@ -81,11 +81,13 @@ const notificationRenderer: NotificationRenderer = (message, options, theme) => 
   invalidate() {}, // Rendering is stateless; colors are reapplied on every render.
 });
 
+function expandHome(path: string): string {
+  return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : resolve(path);
+}
+
 export default function citoBridge(pi: BridgeAPI): void {
   pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
-  const stateDir = process.env.CITO_STATE_DIR ?? join(homedir(), ".cito");
-  const resolvedStateDir = stateDir === "~" ? homedir() : stateDir.startsWith("~/")
-    ? join(homedir(), stateDir.slice(2)) : resolve(stateDir);
+  const resolvedStateDir = expandHome(process.env.CITO_STATE_DIR ?? "~/.cito");
   const shim = join(resolvedStateDir, "bin", "cito-mcp");
   let mcpRegistered = false;
   function registerMcpServer(): void {
@@ -106,6 +108,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   catch { /* session_start retries and surfaces any persistent failure. */ }
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
+  let commandGen = 0;
   let activeBadge: string | undefined;
   let lastActiveMs = Date.now();
   let context: BridgeContext | undefined;
@@ -114,8 +117,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   const connections = new Set<Socket>();
   const directory = join(resolvedStateDir, "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
-  const rawHome = process.env.CITO_PI_HOME ?? join(homedir(), ".pi", "agent");
-  const piHome = rawHome === "~" ? homedir() : rawHome.startsWith("~/") ? join(homedir(), rawHome.slice(2)) : resolve(rawHome);
+  const piHome = expandHome(process.env.CITO_PI_HOME ?? "~/.pi/agent");
   const subcommands = ["on", "team", "off"];
   const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
@@ -124,19 +126,28 @@ export default function citoBridge(pi: BridgeAPI): void {
   function defaultAbout(ctx: BridgeContext): string {
     return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
   }
-  async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    let configuredPort: unknown;
+  async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>, expectedSessionId: string | undefined): Promise<Record<string, unknown>> {
+    let config: unknown = {};
     const rawConfig = process.env.CITO_CONFIG_PATH ?? join(resolvedStateDir, "config.json");
-    const configPath = rawConfig === "~" ? homedir() : rawConfig.startsWith("~/")
-      ? join(homedir(), rawConfig.slice(2)) : resolve(rawConfig);
-    try { configuredPort = (JSON.parse(readFileSync(configPath, "utf8")) as { daemonPort?: unknown }).daemonPort; }
-    catch {} // A missing config falls back to the environment and default port.
-    const envPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
-    const candidatePorts = [
-      /^\+?\d+$/.test(envPort) ? Number(envPort) : undefined,
-      typeof configuredPort === "number" ? configuredPort : undefined,
-    ];
-    const port = candidatePorts.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
+    const configPath = expandHome(rawConfig);
+    try { config = JSON.parse(readFileSync(configPath, "utf8")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`Cannot read Cito config.json: ${error instanceof SyntaxError ? "Invalid JSON" : "Read failed"}`);
+      }
+    } // Only a missing config falls back to the environment and default port.
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Cito config.json must be an object");
+    const validPort = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535;
+    let configuredPort: number | undefined;
+    for (const key of ["daemonPort", "daemon_port"]) {
+      if (!Object.hasOwn(config, key)) continue;
+      const value = (config as Record<string, unknown>)[key];
+      if (!validPort(value)) throw new Error(`Invalid ${key} in Cito config.json`);
+      configuredPort ??= value;
+    }
+    const rawPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
+    const envPort = /^\+?\d+$/.test(rawPort) ? Number(rawPort) : undefined;
+    const port = validPort(envPort) ? envPort : configuredPort ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       signal: AbortSignal.timeout(15_000),
@@ -151,7 +162,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         params: {
           name,
           arguments: args,
-          _meta: { endpoint_pid: process.pid },
+          _meta: { endpoint_pid: process.pid, expected_session_id: expectedSessionId },
         },
       }),
     });
@@ -179,15 +190,31 @@ export default function citoBridge(pi: BridgeAPI): void {
   function setSession(nextSessionId: string | undefined): void {
     if (nextSessionId !== sessionId) {
       activeBadge = undefined;
+      commandGen++;
       lastActiveMs = Date.now();
     }
     sessionId = nextSessionId;
-    if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
+    if (sessionId) {
+      const delivered = sessions.get(sessionId) ?? new Set<string>();
+      sessions.delete(sessionId);
+      sessions.set(sessionId, delivered);
+      // Keep recent inactive sessions for deduplication without unbounded growth.
+      while (sessions.size > 128) sessions.delete(sessions.keys().next().value!);
+    }
+  }
+  let renderedBadge: string | undefined;
+  let renderedContext: BridgeContext | undefined;
+  function renderBadge(ctx: BridgeContext | undefined): void {
+    if (ctx && (ctx !== renderedContext || renderedBadge !== activeBadge)) {
+      ctx.ui.setStatus("cito", activeBadge);
+      renderedContext = ctx;
+      renderedBadge = activeBadge;
+    }
   }
   function update(ctx: BridgeContext): void {
-    setSession(ctx.sessionManager.getSessionId());
+    setSession(ctx.sessionManager.getSessionId() ?? sessionId ?? `pid-${process.pid}`);
     context = ctx;
-    ctx.ui.setStatus("cito", activeBadge);
+    renderBadge(ctx);
   }
   function unlinkSocket(): void {
     if (!ownsSocket) return;
@@ -211,12 +238,12 @@ export default function citoBridge(pi: BridgeAPI): void {
     setSession(identity.session_id);
     const currentId = identity.session_id;
     if (req.op === "identify") return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid,
-      ...identity, updated_at_ms: lastActiveMs };
+      ...identity, badge: activeBadge ?? null, updated_at_ms: lastActiveMs };
     if (!currentId || req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
       activeBadge = (req.badge as string | undefined) ?? undefined;
-      ctx?.ui.setStatus("cito", activeBadge);
+      renderBadge(ctx);
       return { ok: true };
     }
     const processedBatchIds = sessions.get(currentId)!;
@@ -232,15 +259,18 @@ export default function citoBridge(pi: BridgeAPI): void {
     return { ok: true, delivered: true, deduplicated: false };
   }
 
+  const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
+    || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
+  const discoveryAllowed = process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY === "1" || !headless && !!process.stdin.isTTY;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let repairing = false;
   let serverReady: Promise<void> | undefined;
   let shuttingDown = false;
   function ensureServer(): Promise<void> {
     return serverReady ??= startServer().catch(error => { serverReady = undefined; throw error; });
   }
   async function startServer(): Promise<void> {
-    const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
-      || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
-    if (server || shuttingDown || process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY !== "1" && (headless || !process.stdin.isTTY)) return;
+    if (server || shuttingDown || !discoveryAllowed) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     const instance = createServer(socket => {
@@ -324,17 +354,14 @@ export default function citoBridge(pi: BridgeAPI): void {
   process.once("exit", unlinkSocket);
   // Load-time startup also serves hosts that loaded the extension after session_start.
   void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
-  let repairing = false;
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const repairWatcher = watch(directory, { persistent: false }, () => {
+  function repairMissingSocket(): void {
     if (shuttingDown || repairing || existsSync(socketPath)) return;
     let configured = false;
     try {
       const settings = JSON.parse(readFileSync(join(piHome, "settings.json"), "utf8")) as { packages?: unknown[] };
       configured = settings.packages?.some(entry => {
         if (typeof entry !== "string") return false;
-        const directory = entry === "~" ? homedir() : entry.startsWith("~/")
-          ? join(homedir(), entry.slice(2)) : resolve(entry);
+        const directory = expandHome(entry);
         return directory === join(resolvedStateDir, "runtime", "plugins", "pi")
           || directory === join(resolvedStateDir, "plugins", "pi")
           || existsSync(join(directory, "cito-bridge.ts"));
@@ -350,11 +377,20 @@ export default function citoBridge(pi: BridgeAPI): void {
       ownsSocket = false;
       for (const socket of connections) socket.destroy();
       if (stale) await new Promise<void>(resolve => stale.close(() => resolve()));
+      if (shuttingDown) return;
       serverReady = undefined;
       await ensureServer();
-    })().catch(() => {}).finally(() => { repairing = false; }); // Retry transient bind failures on the next tick.
-  });
-  repairWatcher.on("error", () => {}); // Session lifecycle events can still retry failed recovery.
+    })().catch(() => {}).finally(() => {
+      repairing = false;
+      // Recheck even when the last unlink was delivered during bind/chmod.
+      // Back off on failed binds; no timer is armed for a healthy socket.
+      if (!shuttingDown && !existsSync(socketPath) && !retry) {
+        retry = setTimeout(() => { retry = undefined; repairMissingSocket(); }, 50).unref();
+      }
+    });
+  }
+  const repairWatcher = discoveryAllowed ? watch(directory, { persistent: false }, repairMissingSocket) : undefined;
+  repairWatcher?.on("error", repairMissingSocket);
   pi.on("session_start", async (_event, ctx) => {
     registerMcpServer();
     lastActiveMs = Date.now();
@@ -375,6 +411,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       return [];
     },
     async handler(args, ctx) {
+      if (shuttingDown) return;
       lastActiveMs = Date.now();
       update(ctx);
       const trimmed = args.trim();
@@ -434,11 +471,15 @@ export default function citoBridge(pi: BridgeAPI): void {
         }
       }
       const commandSessionId = sessionId;
+      const generation = ++commandGen;
       try {
-        const payload = await callMcpTool(tool, toolArgs);
-        if (sessionId !== commandSessionId) return;
+        const payload = await callMcpTool(tool, toolArgs, commandSessionId);
+        if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
         if (tool === "cito_listen") {
-          activeBadge ??= `Cito · ${String(payload.listener_id ?? "cito")}`;
+          const publicId = String(payload.listener_id ?? "cito").trim().split(":").at(-1)!;
+          const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
+          const short = Array.from(slug).slice(0, 12).join("").replace(/-+$/, "") || "cito";
+          activeBadge ??= `Cito · ${short}`;
           ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
         } else if (targetHub) {
           ctx.ui.notify?.(`Cito stopped listening on ${targetHub}`, "info");
@@ -447,17 +488,19 @@ export default function citoBridge(pi: BridgeAPI): void {
           ctx.ui.notify?.("Cito stopped listening", "info");
         }
       } catch (error) {
-        if (sessionId !== commandSessionId) return;
+        if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
-      ctx.ui.setStatus("cito", activeBadge);
+      renderBadge(ctx);
     },
   });
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
-    repairWatcher.close();
+    commandGen++;
+    repairWatcher?.close();
+    clearTimeout(retry);
     await serverReady?.catch(() => {});
     context = undefined;
     activeBadge = undefined;

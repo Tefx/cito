@@ -80,7 +80,8 @@ fn paused_cli_and_mcp_status_discover_sessions_started_after_idle() {
 fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let script = f.dir.join("endpoint.cjs");
+    // Discovery finds the live socket; subsequent probes also verify the process entrypoint.
+    let script = f.dir.join("pi.js");
     fs::write(&script, include_str!("../endpoint.cjs")).unwrap();
     let endpoint = f.spawn(
         "node",
@@ -234,17 +235,10 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let process = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     // Use this build's real provider, independently of checked-in release staging.
-    let plugin_dir = f.state.join("plugins/codex");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    let mut manifest: Value = serde_json::from_str(
-        &fs::read_to_string(root().join("plugins/codex/plugin.json")).unwrap(),
-    )
-    .unwrap();
-    manifest["command"] = json!([CODEX]);
-    fs::write(plugin_dir.join("plugin.json"), manifest.to_string()).unwrap();
+    install_provider_command(&f, "codex", json!([CODEX]));
     f.daemon(&[]);
     wait(|| {
         f.rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
@@ -285,7 +279,7 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
             )
             .unwrap();
     }
-    let reopened = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let reopened = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(reopened, false).contains("ready"));
     let sliced = f.plugin(
         CODEX,
@@ -407,11 +401,17 @@ fn daemon_plugins_strip_inherited_caller_identity_but_honor_explicit_request_env
 }
 #[test]
 fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
-    use std::os::fd::AsRawFd;
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let marker = f.state.join("retained-data");
     fs::write(&marker, "preserve").unwrap();
+    let runtime = f.state.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let staged = runtime.join("staged-data");
+    fs::write(&staged, "staged").unwrap();
+    let config_lock = fs::File::create(f.state.join("config.json.lock")).unwrap();
+    let staging_lock = fs::File::create(runtime.join("staging.lock")).unwrap();
     let owner = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -431,6 +431,7 @@ fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
     );
     assert!(!ok && error.contains("owner lock is held"), "{error}");
     assert_eq!(fs::read_to_string(&marker).unwrap(), "preserve");
+    assert_eq!(fs::read_to_string(&staged).unwrap(), "staged");
     assert!(f.config.exists());
     // SAFETY: release the same owned file descriptor; the lock inode stays stable.
     assert_eq!(unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_UN) }, 0);
@@ -442,9 +443,34 @@ fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
     assert!(ok, "{out} {error}");
     assert!(!marker.exists());
     assert!(!f.config.exists());
-    assert!(fs::read_dir(&f.state)
-        .unwrap()
-        .all(|entry| entry.unwrap().file_name() == "daemon.lock"));
+    let entries = |dir: &std::path::Path| {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        entries(&f.state),
+        ["config.json.lock", "daemon.lock", "runtime"]
+    );
+    assert_eq!(entries(&runtime), ["staging.lock"]);
+    // A recreated pathname would permit a second writer to lock a different inode.
+    for (file, path) in [
+        (owner, f.state.join("daemon.lock")),
+        (config_lock, f.state.join("config.json.lock")),
+        (staging_lock, runtime.join("staging.lock")),
+    ] {
+        let before = file.metadata().unwrap();
+        let after = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (after.dev(), after.ino()),
+            (before.dev(), before.ino()),
+            "{}",
+            path.display()
+        );
+    }
 }
 #[test]
 fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
@@ -606,6 +632,91 @@ fn setup_refresh_preserves_cached_settings_without_blocking_hub_or_mcp_and_fence
     );
 }
 #[test]
+fn setup_apply_uses_reloaded_command_and_leaves_snapshot_available() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    let dir = f.state.join("plugins/fixture");
+    let old = dir.join("driver.py");
+    let driver = r#"import json, pathlib, sys, time, os
+root = pathlib.Path(__file__).parent
+old = pathlib.Path(__file__).name == 'driver.py'
+request = json.loads(sys.stdin.readline())
+op = request['op']
+reply = dict(ok=True, installed=True, configured=True, paths=[], actions=[])
+def gate(entered, release):
+    (root/entered).touch()
+    deadline = time.monotonic() + 3
+    while not (root/release).exists():
+        if time.monotonic() >= deadline: sys.exit(1)
+        time.sleep(.005)
+if op == 'setup_apply' and not old: gate('entered','release')
+if op == 'resolve_caller': reply['caller'] = dict(harness='fixture',session_id='session-1',cwd=str(root),title='Current',endpoint_pid=os.getppid())
+if op == 'probe': reply.update(status='alive', current_session_id='session-1')
+if op == 'discover_sessions':
+    if old and (root/'arm').exists(): gate('old-flight','finish-old')
+    reply['sessions'] = [dict(harness='fixture',session_id='old-session' if old else 'new-session',cwd=str(root))]
+if op == 'update_badge' and request['badge']:
+    (root/('old-badge' if old else 'new-badge')).write_text(request['badge'])
+print(json.dumps(reply))
+"#;
+    fs::write(&old, driver).unwrap();
+    f.daemon(&[]);
+    assert_eq!(
+        f.tool("cito_listen", json!({"about":"Badge target"}), meta)["ok"],
+        true
+    );
+    wait(|| dir.join("old-badge").exists());
+    assert!(f.action(json!({"op":"get_snapshot"})).1["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["session_id"] == "old-session"));
+    fs::write(dir.join("arm"), b"").unwrap();
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
+    wait(|| dir.join("old-flight").exists());
+    let manifest = dir.join("plugin.json");
+    let mut changed: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    changed["command"] = json!(["python3", "./updated.py"]);
+    fs::write(dir.join("updated.py"), driver).unwrap();
+    fs::write(manifest, changed.to_string()).unwrap();
+    let port = f.port;
+    std::thread::scope(|scope| {
+        let pending = scope.spawn(move || {
+            http(
+                port,
+                "/ui",
+                Some(&json!({"op":"setup_apply","harness":"fixture"})),
+            )
+        });
+        wait(|| dir.join("entered").exists());
+        fs::remove_file(&old).unwrap();
+        fs::write(dir.join("finish-old"), b"").unwrap();
+        let snapshot = f.action(json!({"op":"get_snapshot"}));
+        fs::write(dir.join("release"), b"done").unwrap();
+        assert_eq!(snapshot.0, 200);
+        let available = snapshot.1["available"].as_array().unwrap();
+        assert!(
+            available.iter().any(|r| r["session_id"] == "new-session"),
+            "{available:?}"
+        );
+        assert!(available.iter().all(|r| r["session_id"] != "old-session"));
+        wait(|| dir.join("new-badge").exists());
+        assert_eq!(
+            fs::read(dir.join("old-badge")).unwrap(),
+            fs::read(dir.join("new-badge")).unwrap()
+        );
+        let receipt = pending.join().unwrap();
+        assert_eq!(receipt.0, 200, "{}", receipt.1);
+        assert_eq!(receipt.1["committed"], true);
+    });
+}
+
+#[test]
 fn setup_receipts_wait_for_post_mutation_inspections() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -621,13 +732,7 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", recorder.to_str().unwrap()),
     ]);
-    let frames = || {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .collect::<Vec<_>>()
-    };
+    let frames = || ui_frames(&f);
     let inspections = || {
         fs::read_to_string(&calls_path)
             .unwrap()
@@ -639,7 +744,7 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
     let configured = |frame: &Value| {
         frame["settings"]["apps"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("Missing settings apps in {frame}"))
             .iter()
             .find(|app| app["id"] == "fixture")
             .unwrap()["configured"]
@@ -1004,7 +1109,7 @@ fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
                     json!(fs::canonicalize(&dirs[index]).unwrap())
                 );
                 assert_eq!(
-                    cito_native::setup::inspect_plugin_setup(plugin),
+                    cito_native::setup::try_inspect_plugin_setup(plugin).unwrap(),
                     (true, true, vec![dirs[index].display().to_string()])
                 );
                 assert!(!config.state_dir.join("runtime/plugins/pi").exists());
@@ -1378,7 +1483,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         assert_eq!(response["cwd"], json!(cwd));
         assert_eq!(response["executable"], json!(custom_dir.join("./run.sh")));
         assert_eq!(
-            cito_native::setup::inspect_plugin_setup(custom),
+            cito_native::setup::try_inspect_plugin_setup(custom).unwrap(),
             (true, true, vec![cwd.display().to_string()])
         );
         assert!(plugins.find_by_id("pi").unwrap().is_builtin);
@@ -1573,17 +1678,13 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         ("setup_remove_app", "app-remove"),
     ] {
         wait(|| {
-            fs::read_to_string(f.home.join("ui-frames"))
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|frame| {
-                    frame["op"] == "settings"
-                        && frame["ok"] == true
-                        && frame["source_op"] == op
-                        && frame["request_id"] == request
-                        && frame["settings"]["apps"].is_array()
-                })
+            ui_frames(&f).into_iter().any(|frame| {
+                frame["op"] == "settings"
+                    && frame["ok"] == true
+                    && frame["source_op"] == op
+                    && frame["request_id"] == request
+                    && frame["settings"]["apps"].is_array()
+            })
         });
     }
     enroll(&f, meta);
@@ -1684,10 +1785,8 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
     f.action(json!({"op":"open_settings"}));
     let mut settings = Value::Null;
     wait(|| {
-        settings = fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        settings = ui_frames(&f)
+            .into_iter()
             .rfind(|v| v["op"] == "settings")
             .unwrap_or(Value::Null);
         settings.is_object()
@@ -1745,17 +1844,27 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
     fs::write(legacy.join("plugin.json"), &manifest).unwrap();
     fs::write(legacy.join("keep"), "legacy payload").unwrap();
     let before = fs::read(&f.config).unwrap();
-    for args in [
-        vec!["setup", "--bogus"],
-        vec!["setup", "--enable", "missing"],
-        vec!["setup", "--hub", "work", "--url", "invalid"],
-        vec!["setup", "--enable-hub", "missing"],
-        vec!["setup", "--share-port", "invalid"],
-        vec!["setup", "--invite"],
-        vec!["setup", "--invite", "invalid", "--disconnect-all"],
+    for (args, reason) in [
+        (vec!["setup", "--bogus"], "Unknown flag"),
+        (vec!["setup", "--enable", "missing"], "Unknown harness"),
+        (
+            vec!["setup", "--hub", "work", "--url", "invalid"],
+            "Enter a Hub URL using HTTP or HTTPS",
+        ),
+        (vec!["setup", "--enable-hub", "missing"], "Unknown hub"),
+        (
+            vec!["setup", "--share-port", "invalid"],
+            "port must be an integer",
+        ),
+        (vec!["setup", "--invite"], "Missing value"),
+        (
+            vec!["setup", "--invite", "invalid", "--disconnect-all"],
+            "must be used separately",
+        ),
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(!ok, "{args:?}: {out} {err}");
+        assert!(err.contains(reason), "{args:?}: {err}");
         assert_eq!(
             fs::read_to_string(legacy.join("plugin.json")).unwrap(),
             manifest
@@ -1832,10 +1941,16 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         .trim(),
         format!("cito v{}", env!("CARGO_PKG_VERSION"))
     );
-    for args in [
-        vec!["listen", "--session", "orphan"],
-        vec!["listen", "--harness", "missing"],
+    let before_invalid = fs::read(&f.config).unwrap();
+    for (args, reason) in [
+        (
+            vec!["listen", "--session", "orphan"],
+            "--session requires --harness",
+        ),
+        (vec!["listen", "--harness", "missing"], "Unknown harness"),
     ] {
-        assert!(!f.command(NATIVE, &args, "").0);
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(!ok && err.contains(reason), "{args:?}: {out} {err}");
+        assert_eq!(fs::read(&f.config).unwrap(), before_invalid);
     }
 }

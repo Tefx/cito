@@ -1,17 +1,17 @@
 use crate::plugins::{
-    expand_home_dir, is_staged_plugins_root, now_ms, random_hex, resolve_builtin_plugins_dir,
-    selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
-    validate_https_issuer, validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
-    CITO_VERSION,
+    expand_home_dir, selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
+    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
 };
+#[cfg(test)]
+use crate::plugins::{random_hex, CITO_VERSION};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::time::Duration;
 
@@ -80,14 +80,7 @@ pub fn resolve_bundled_plugin_dir(id: &str) -> PathBuf {
     bundled_plugin_dir(&resolve_package_root(), id)
 }
 
-fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
-    [
-        root.join("Resources/plugins"),
-        root.join("plugins"),
-        root.join("share/cito/plugins"),
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
-    ]
-}
+use super::plugins::bundled_plugin_roots;
 
 pub(super) fn resolve_bundled_plugins_root() -> Option<PathBuf> {
     bundled_plugin_roots(&resolve_package_root())
@@ -181,12 +174,6 @@ fn ensure_plugins_staged<'a>(
     super::plugins::cleanup_retired_companion(state_dir)?;
     let candidate = runtime.join(format!(".staging-{}", try_random_hex(12)?));
     fs::create_dir(&candidate).map_err(|e| e.to_string())?;
-    struct Candidate(PathBuf);
-    impl Drop for Candidate {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
     let _cleanup = Candidate(candidate.clone());
     let bin_dir = candidate.join("bin");
     if state_dir.join("bin").exists() {
@@ -198,6 +185,7 @@ fn ensure_plugins_staged<'a>(
     let exe_str = resolve_stable_package_root(&exe.to_string_lossy());
     let plugins_dir = staged_plugins_dir(state_dir);
     let mut written = Vec::new();
+    let mut publications = Vec::new();
     for plugin in plugins {
         let target = plugins_dir.join(&plugin.id);
         let bundled = resolve_bundled_plugin_dir(&plugin.id);
@@ -212,6 +200,9 @@ fn ensure_plugins_staged<'a>(
             // No packaged or staged source remains to reconstruct this plugin.
             continue;
         };
+        if same_tree(source, &target) && is_staged_plugin_intact(state_dir, plugin) {
+            continue;
+        }
         if !target.exists()
             || !is_staged_plugin_intact(state_dir, plugin)
             || fs::canonicalize(source).ok() != fs::canonicalize(&target).ok()
@@ -221,20 +212,21 @@ fn ensure_plugins_staged<'a>(
                 copy_dir_recursive(source, &staged)?;
                 let parsed = super::plugins::parse_manifest_dir(&staged, true)?;
                 let executable = staged.join(&parsed.command[0]);
-                if !executable.is_file()
-                    || fs::metadata(&executable)
-                        .map_err(|e| e.to_string())?
-                        .permissions()
-                        .mode()
-                        & 0o111
-                        == 0
+                if (parsed.command[0].starts_with("./") || parsed.command[0].starts_with("../"))
+                    && (!executable.is_file()
+                        || fs::metadata(&executable)
+                            .map_err(|e| e.to_string())?
+                            .permissions()
+                            .mode()
+                            & 0o111
+                            == 0)
                 {
                     return Err(format!(
                         "PLUGIN_LOAD_ERROR: Invalid staged executable for {}",
                         plugin.id
                     ));
                 }
-                publish_directory(&staged, &target)?;
+                publications.push((staged, target.clone()));
             }
             written.push(target);
         }
@@ -254,13 +246,96 @@ fn ensure_plugins_staged<'a>(
             shell_quote(&plugins_dir.to_string_lossy()),
             shell_quote(&exe_str)
         );
+        // Generated shims replace copied entries; resource symlinks stay untouched.
+        match fs::symlink_metadata(&shim_path) {
+            Ok(_) => fs::remove_file(&shim_path).map_err(|e| e.to_string())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
         fs::write(&shim_path, script).map_err(|e| e.to_string())?;
         fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
         written.push(state_dir.join("bin").join(bin_name));
     }
-    publish_directory(&bin_dir, &state_dir.join("bin"))?;
+    // Validate every candidate and shim before changing any published generation.
+    for (staged, target) in publications {
+        publish_directory(&staged, &target)?;
+    }
+    if !same_tree(&bin_dir, &state_dir.join("bin")) {
+        publish_directory(&bin_dir, &state_dir.join("bin"))?;
+    }
     Ok(written)
+}
+
+struct Candidate(PathBuf);
+impl Drop for Candidate {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&path).map_err(|e| e.to_string())?, &target)
+                .map_err(|e| e.to_string())?;
+        } else if metadata.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            fs::copy(&path, &target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn same_tree(source: &Path, target: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (fs::symlink_metadata(source), fs::symlink_metadata(target)) else {
+        return false;
+    };
+    if left.file_type() != right.file_type() {
+        return false;
+    }
+    if left.file_type().is_symlink() {
+        return fs::read_link(source).ok() == fs::read_link(target).ok();
+    }
+    if left.is_dir() {
+        let names = |path: &Path| -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
+            fs::read_dir(path)
+                .ok()?
+                .map(|entry| entry.ok().map(|entry| entry.file_name()))
+                .collect()
+        };
+        let Some(names) = names(source).filter(|left| Some(left.clone()) == names(target)) else {
+            return false;
+        };
+        return names
+            .into_iter()
+            .all(|name| same_tree(&source.join(&name), &target.join(&name)));
+    }
+    if left.len() != right.len() || left.permissions().mode() != right.permissions().mode() {
+        return false;
+    }
+    use std::io::Read;
+    let (Ok(mut left), Ok(mut right)) = (fs::File::open(source), fs::File::open(target)) else {
+        return false;
+    };
+    let (mut a, mut b) = ([0u8; 65536], [0u8; 65536]);
+    loop {
+        let Ok(count) = left.read(&mut a) else {
+            return false;
+        };
+        if right.read_exact(&mut b[..count]).is_err() || a[..count] != b[..count] {
+            return false;
+        }
+        if count == 0 {
+            return true;
+        }
+    }
 }
 
 /// Publish a validated directory generation without exposing a missing target.
@@ -391,12 +466,11 @@ pub fn set_launch_at_login(
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&plist_path, xml).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&plist_path, fs::Permissions::from_mode(0o644));
+    crate::support::atomic_write_with_mode(&plist_path, xml.as_bytes(), Some(0o644))?;
     Ok(plist_path)
 }
 
-fn mutate_file<F>(
+pub(crate) fn mutate_file<F>(
     target: &str,
     path: &Path,
     dry_run: bool,
@@ -406,86 +480,42 @@ fn mutate_file<F>(
 where
     F: FnOnce(Option<&str>) -> Result<(String, Option<String>, String), String>,
 {
-    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path = resolved.as_path();
-    // Reject malformed input before even creating a lockfile, then reread while locked.
+    // Validate before acquiring the shared mutation lock or creating directories.
     crate::plugins::read_config_text(path)?;
-    crate::plugins::with_config_lock_mode(path, dry_run, || {
-        let existing = crate::plugins::read_config_text(path)?;
-        let existing_mode = fs::metadata(path)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o777);
-        let (status, next_content, detail) = transform(existing.as_deref())?;
-        if status == "unchanged" || status == "conflict" {
-            return Ok(SetupAction {
-                target: target.to_string(),
-                path: path.to_string_lossy().to_string(),
-                status,
-                backup_path: None,
-                detail,
-            });
+    let mut detail = String::new();
+    let mut conflict = false;
+    let canonical = crate::support::publication_target(path)?;
+    // Share the daemon's canonical .lock while retaining plugin mutation's
+    // private backups and .cito.lock protocol inside this exclusion boundary.
+    let action = crate::plugins::with_config_lock_mode(&canonical, dry_run, || {
+        crate::support::mutate_with_mode(
+            &json!({"op":"setup_apply","dry_run":dry_run}),
+            target,
+            &canonical,
+            mode,
+            |old| {
+                let (status, next, description) = transform(old)?;
+                detail = description;
+                conflict = status == "conflict";
+                Ok(if status == "unchanged" || conflict {
+                    old.map(str::to_owned)
+                } else {
+                    next
+                })
+            },
+        )
+    })?;
+    Ok(SetupAction {
+        target: target.into(),
+        path: action["path"].as_str().unwrap_or("").into(),
+        status: if conflict {
+            "conflict"
+        } else {
+            action["status"].as_str().unwrap_or("unchanged")
         }
-        if let (Some(ref ex), Some(ref nx)) = (&existing, &next_content) {
-            if ex == nx {
-                return Ok(SetupAction {
-                    target: target.to_string(),
-                    path: path.to_string_lossy().to_string(),
-                    status: "unchanged".to_string(),
-                    backup_path: None,
-                    detail,
-                });
-            }
-        }
-        if dry_run {
-            return Ok(SetupAction {
-                target: target.to_string(),
-                path: path.to_string_lossy().to_string(),
-                status,
-                backup_path: None,
-                detail,
-            });
-        }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let target_mode = mode.or(existing_mode).unwrap_or(0o600);
-        let mut backup_path = None;
-        if let Some(ref ex) = existing {
-            let bak = format!("{}.bak.{}.{}", path.display(), now_ms(), random_hex(4));
-            let mut backup = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(target_mode)
-                .open(&bak)
-                .map_err(|e| e.to_string())?;
-            backup.write_all(ex.as_bytes()).map_err(|e| e.to_string())?;
-            backup_path = Some(bak);
-        }
-        if let Some(ref nx) = next_content {
-            let temporary = path.with_extension(format!("tmp.{}", random_hex(8)));
-            let result = (|| {
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(target_mode)
-                    .open(&temporary)
-                    .map_err(|e| e.to_string())?;
-                file.write_all(nx.as_bytes()).map_err(|e| e.to_string())?;
-                file.sync_all().map_err(|e| e.to_string())?;
-                fs::rename(&temporary, path).map_err(|e| e.to_string())
-            })();
-            if result.is_err() {
-                let _ = fs::remove_file(&temporary);
-            }
-            result?;
-        }
-        Ok(SetupAction {
-            target: target.to_string(),
-            path: path.to_string_lossy().to_string(),
-            status,
-            backup_path,
-            detail,
-        })
+        .into(),
+        backup_path: action["backupPath"].as_str().map(str::to_owned),
+        detail,
     })
 }
 
@@ -504,10 +534,6 @@ fn setup_request(
             "state_dir": state_dir, "plugin_dir": plugin_dir,
         }),
     )
-}
-
-pub fn inspect_plugin_setup(plugin: &PluginDescriptor) -> (bool, bool, Vec<String>) {
-    try_inspect_plugin_setup(plugin).unwrap_or((false, false, Vec::new()))
 }
 
 pub fn try_inspect_plugin_setup(
@@ -684,40 +710,10 @@ pub fn inspect_setup_json(
 
 use crate::plugins::try_normalize_existing_config;
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let target = dst.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive(&path, &target)?;
-        } else {
-            fs::copy(&path, &target).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn dir_bytes(path: &Path) -> u64 {
-    let Ok(meta) = fs::metadata(path) else {
-        return 0;
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    let Ok(rd) = fs::read_dir(path) else { return 0 };
-    rd.flatten().map(|e| dir_bytes(&e.path())).sum()
-}
-
-pub fn build_mac_app_bundle_native(
-    dest_dir: Option<&str>,
-    state_dir: &Path,
-    plugins: &LoadedPlugins,
-) -> Result<(PathBuf, u64), String> {
-    build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
-}
-
+mod app_bundle;
+#[cfg(test)]
+use app_bundle::build_mac_app_bundle_from_root;
+pub use app_bundle::build_mac_app_bundle_native;
 fn resolve_app_bundle_path(dest_dir: Option<&str>, state_dir: &Path) -> Result<PathBuf, String> {
     let base_dest = match dest_dir {
         Some(dest) => expand_home_dir(dest, "destDir", None)?,
@@ -730,209 +726,11 @@ fn resolve_app_bundle_path(dest_dir: Option<&str>, state_dir: &Path) -> Result<P
     })
 }
 
-fn build_mac_app_bundle_from_root(
-    dest_dir: Option<&str>,
-    state_dir: &Path,
-    plugins: &LoadedPlugins,
-    pkg_root: &Path,
-) -> Result<(PathBuf, u64), String> {
-    let destination = resolve_app_bundle_path(dest_dir, state_dir)?;
-    let app_path =
-        destination.with_file_name(format!(".Cito-{}.app", crate::plugins::random_hex(8)));
-    struct Candidate(PathBuf);
-    impl Drop for Candidate {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _candidate = Candidate(app_path.clone());
-    let contents_dir = app_path.join("Contents");
-    let macos_dir = contents_dir.join("MacOS");
-    let helpers_dir = contents_dir.join("Helpers");
-    let resources_dir = contents_dir.join("Resources");
-
-    let _ = fs::remove_dir_all(&app_path);
-    fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&helpers_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
-
-    let info_plist = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-           <key>CFBundleIdentifier</key>\n\
-           <string>one.tefx.cito</string>\n\
-           <key>CFBundleName</key>\n\
-           <string>Cito</string>\n\
-           <key>CFBundleDisplayName</key>\n\
-           <string>Cito</string>\n\
-           <key>CFBundleExecutable</key>\n\
-           <string>Cito</string>\n\
-           <key>CFBundleIconFile</key>\n\
-           <string>AppIcon</string>\n\
-           <key>CFBundleIconName</key>\n\
-           <string>AppIcon</string>\n\
-           <key>CFBundleShortVersionString</key>\n\
-           <string>{CITO_VERSION}</string>\n\
-           <key>CFBundleVersion</key>\n\
-           <string>{CITO_VERSION}</string>\n\
-           <key>CFBundlePackageType</key>\n\
-           <string>APPL</string>\n\
-           <key>LSUIElement</key>\n\
-           <true/>\n\
-           <key>LSMinimumSystemVersion</key>\n\
-           <string>13.0</string>\n\
-         </dict>\n\
-         </plist>\n"
-    );
-    fs::write(contents_dir.join("Info.plist"), info_plist).map_err(|e| e.to_string())?;
-
-    let launcher = r#"#!/bin/sh
-set -e
-INVOKED_AS="$(basename "$0")"
-SOURCE="$0"
-while [ -L "$SOURCE" ]; do
-  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-  TARGET="$(readlink "$SOURCE")"
-  case "$TARGET" in
-    /*) SOURCE="$TARGET" ;;
-    *) SOURCE="$DIR/$TARGET" ;;
-  esac
-done
-APP_CONTENTS="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}"
-if [ "$INVOKED_AS" = "cito-mcp" ]; then
-  export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
-  if [ "$#" -eq 0 ]; then
-    exec "$APP_CONTENTS/Helpers/cito-native" mcp-stdio
-  fi
-  exec "$APP_CONTENTS/Helpers/cito-native" "$@"
-fi
-if [ "$#" -eq 0 ]; then
-  exec "$APP_CONTENTS/Helpers/cito-native" daemon
-fi
-case "$1" in
-  -psn_*)
-    shift
-    exec "$APP_CONTENTS/Helpers/cito-native" daemon "$@"
-    ;;
-esac
-exec "$APP_CONTENTS/Helpers/cito-native" "$@"
-"#;
-    let launcher_path = macos_dir.join("Cito");
-    fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));
-
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let helper_native = helpers_dir.join("cito-native");
-    fs::copy(&exe, &helper_native).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&helper_native, fs::Permissions::from_mode(0o755));
-
-    for ui_cand in [
-        pkg_root.join("bin/cito-ui-darwin-arm64"),
-        pkg_root.join("Helpers/cito-ui"),
-    ] {
-        if ui_cand.is_file() {
-            let helper_ui = helpers_dir.join("cito-ui");
-            fs::copy(&ui_cand, &helper_ui).map_err(|e| e.to_string())?;
-            fs::set_permissions(&helper_ui, fs::Permissions::from_mode(0o755))
-                .map_err(|e| e.to_string())?;
-            break;
-        }
-    }
-
-    for icon_cand in [
-        pkg_root.join("bin/AppIcon.icns"),
-        pkg_root.join("Resources/AppIcon.icns"),
-    ] {
-        if icon_cand.is_file() {
-            let _ = fs::copy(&icon_cand, resources_dir.join("AppIcon.icns"));
-            break;
-        }
-    }
-
-    if let Some(mut plugins_src) = resolve_builtin_plugins_dir() {
-        if is_staged_plugins_root(&plugins_src, state_dir) {
-            // Runtime staging may omit overridden IDs; keep their bundled fallback in the App.
-            plugins_src = resolve_bundled_plugins_root().unwrap_or(plugins_src);
-        }
-        copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"))?;
-    }
-
-    let _ = ensure_cli_shims_native(state_dir, plugins);
-    let _ = Command::new("/usr/bin/xattr")
-        .args(["-cr", &app_path.to_string_lossy()])
-        .status();
-
-    let sign_id = env::var("CITO_CODESIGN_IDENTITY")
-        .or_else(|_| env::var("APPLE_SIGNING_IDENTITY"))
-        .unwrap_or_default();
-    let status = if !sign_id.trim().is_empty() {
-        Command::new("/usr/bin/codesign")
-            .args([
-                "--force",
-                "--options",
-                "runtime",
-                "--timestamp",
-                "--deep",
-                "--sign",
-                sign_id.trim(),
-                &app_path.to_string_lossy(),
-            ])
-            .status()
-    } else {
-        Command::new("/usr/bin/codesign")
-            .args(["-s", "-", "--force", "--deep", &app_path.to_string_lossy()])
-            .status()
-    }
-    .map_err(|e| format!("Cannot run codesign for {}: {e}", app_path.display()))?;
-    if !status.success() {
-        return Err(format!(
-            "codesign failed for {}: {status}",
-            app_path.display()
-        ));
-    }
-
-    let bytes = dir_bytes(&app_path);
-    let previous = destination.with_file_name(format!(
-        ".Cito-previous-{}.app",
-        crate::plugins::random_hex(8)
-    ));
-    if destination.exists() {
-        fs::rename(&destination, &previous).map_err(|e| e.to_string())?;
-    }
-    if let Err(error) = fs::rename(&app_path, &destination) {
-        if previous.exists() {
-            fs::rename(&previous, &destination).map_err(|restore| {
-                format!("Bundle replacement failed: {error}; restore failed: {restore}")
-            })?;
-        }
-        return Err(error.to_string());
-    }
-    if previous.exists() {
-        fs::remove_dir_all(&previous).map_err(|e| e.to_string())?;
-    }
-    Ok((destination, bytes))
-}
-
-pub fn uninstall_setup_native(
+fn daemon_control_config(
     state_dir: &Path,
     config_path: &Path,
     home_dir: &Path,
-    plugins: &LoadedPlugins,
-    purge_data: bool,
-) -> Result<(String, Vec<SetupAction>), String> {
-    uninstall_setup_with_owner(state_dir, config_path, home_dir, plugins, purge_data, None)
-}
-pub(crate) fn uninstall_setup_with_owner(
-    state_dir: &Path,
-    config_path: &Path,
-    home_dir: &Path,
-    plugins: &LoadedPlugins,
-    purge_data: bool,
-    owner: Option<&fs::File>,
-) -> Result<(String, Vec<SetupAction>), String> {
+) -> Result<crate::plugins::NativeConfig, String> {
     let raw = crate::plugins::read_config_text(config_path)?;
     let (default_hub, _, rest) = try_normalize_existing_config(raw.as_deref())?;
     let daemon_port = match env::var("CITO_DAEMON_PORT") {
@@ -954,14 +752,36 @@ pub(crate) fn uninstall_setup_with_owner(
             .transpose()?
             .unwrap_or(4290),
     };
-    let config = crate::plugins::NativeConfig {
+    Ok(crate::plugins::NativeConfig {
         state_dir: state_dir.to_path_buf(),
         config_path: config_path.to_path_buf(),
         home_dir: home_dir.to_path_buf(),
         daemon_port,
         user: String::new(),
-        default_hub: default_hub.clone(),
-    };
+        default_hub,
+    })
+}
+
+pub fn uninstall_setup_native(
+    state_dir: &Path,
+    config_path: &Path,
+    home_dir: &Path,
+    plugins: &LoadedPlugins,
+    purge_data: bool,
+) -> Result<(String, Vec<SetupAction>), String> {
+    uninstall_setup_with_owner(state_dir, config_path, home_dir, plugins, purge_data, None)
+}
+pub(crate) fn uninstall_setup_with_owner(
+    state_dir: &Path,
+    config_path: &Path,
+    home_dir: &Path,
+    plugins: &LoadedPlugins,
+    purge_data: bool,
+    owner: Option<&fs::File>,
+) -> Result<(String, Vec<SetupAction>), String> {
+    let config = daemon_control_config(state_dir, config_path, home_dir)?;
+    let daemon_port = config.daemon_port;
+    let default_hub = config.default_hub.clone();
     if let Some(health) = owner
         .is_none()
         .then(|| crate::plugins::probe_daemon_health(&config))
@@ -1005,133 +825,210 @@ pub(crate) fn uninstall_setup_with_owner(
         &acquired
     };
     let _owner = lock;
-    let mut actions = Vec::new();
-    for plugin in plugins.agent_plugins() {
-        actions.extend(remove_plugin_setup(plugin)?);
-    }
-
-    let plist_path = launch_agent_plist_path(home_dir);
-    if plist_path.exists() {
-        fs::remove_file(&plist_path).map_err(|e| e.to_string())?;
-        actions.push(SetupAction {
-            target: "cito".to_string(),
-            path: plist_path.to_string_lossy().to_string(),
-            status: "updated".to_string(),
-            backup_path: None,
-            detail: "Removed LaunchAgent plist".to_string(),
-        });
-    }
-
-    for (sub, label) in [
-        ("bin", "Removed CLI shims directory"),
-        ("runtime", "Removed staged runtime directory"),
-        ("sockets", "Removed local sockets directory"),
-    ] {
-        let dir = state_dir.join(sub);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: dir.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: label.to_string(),
-            });
-        }
-    }
-    for p in &plugins.plugins {
-        if matches!(p.id.as_str(), "plugins" | "bin" | "runtime" | "sockets") {
-            continue;
-        }
-        let dir = state_dir.join(&p.id);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-            actions.push(SetupAction {
-                target: p.id.clone(),
-                path: dir.to_string_lossy().into_owned(),
-                status: "updated".into(),
-                backup_path: None,
-                detail: "Removed plugin runtime data".into(),
-            });
-        }
-    }
-
-    let app_targets = [
-        resolve_app_bundle_path(None, state_dir)?,
-        resolve_app_bundle_path(None, home_dir)?,
-    ];
-    for (index, app_target) in app_targets.iter().enumerate() {
-        if app_targets[..index].contains(app_target) {
-            continue;
-        }
-        let is_symlink = fs::symlink_metadata(app_target)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if is_symlink {
-            let _ = fs::remove_file(app_target);
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: app_target.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: format!("Removed {} symlink", app_target.display()),
-            });
-        } else if purge_data && app_target.exists() {
-            let _ = fs::remove_dir_all(app_target);
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: app_target.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: format!("Removed {}", app_target.display()),
-            });
-        }
-    }
+    let state = fs::canonicalize(state_dir).map_err(|e| e.to_string())?;
+    let resolved_config = crate::support::publication_target(config_path)?;
+    let mut config_targets = vec![resolved_config.clone()];
     if purge_data {
-        if let Some(parent) = config_path.parent() {
-            if let Some(cname) = config_path.file_name().and_then(|s| s.to_str()) {
-                let lock_name = format!("{cname}.lock");
-                let bak_prefix = format!("{cname}.bak.");
-                if let Ok(entries) = fs::read_dir(parent) {
-                    for entry in entries.flatten() {
-                        let fname = entry.file_name().to_string_lossy().into_owned();
-                        if fname == lock_name || fname.starts_with(&bak_prefix) {
-                            let _ = fs::remove_file(entry.path());
+        let default = crate::support::publication_target(&state.join("config.json"))?;
+        if default.starts_with(&state) {
+            config_targets.push(default);
+        }
+        config_targets.sort();
+        config_targets.dedup();
+    }
+    let staging = state.join("runtime/staging.lock");
+    let mut keep = vec![state.join("daemon.lock"), staging.clone()];
+    for target in &config_targets {
+        let mut name = target.as_os_str().to_owned();
+        name.push(".lock");
+        let name = PathBuf::from(name);
+        if keep.contains(&name) || keep.contains(target) {
+            return Err("Config path conflicts with an ownership lock".into());
+        }
+        keep.push(name);
+    }
+    let remove = || {
+        let _staging = crate::support::FileLock::acquire(&staging)?;
+        let mut actions = Vec::new();
+        for plugin in plugins.agent_plugins() {
+            actions.extend(remove_plugin_setup(plugin)?);
+        }
+
+        let plist_path = launch_agent_plist_path(home_dir);
+        if plist_path.exists() {
+            fs::remove_file(&plist_path).map_err(|e| e.to_string())?;
+            actions.push(SetupAction {
+                target: "cito".to_string(),
+                path: plist_path.to_string_lossy().to_string(),
+                status: "updated".to_string(),
+                backup_path: None,
+                detail: "Removed LaunchAgent plist".to_string(),
+            });
+        }
+
+        for (sub, label) in [
+            ("bin", "Removed CLI shims directory"),
+            ("runtime", "Removed staged runtime files"),
+            ("sockets", "Removed local sockets directory"),
+        ] {
+            let dir = state.join(sub);
+            if dir.exists() && remove_except_locks(&dir, &keep).map_err(|e| e.to_string())? {
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: dir.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: label.to_string(),
+                });
+            }
+        }
+        for p in &plugins.plugins {
+            if matches!(p.id.as_str(), "plugins" | "bin" | "runtime" | "sockets") {
+                continue;
+            }
+            let dir = state.join(&p.id);
+            if dir.exists() && remove_except_locks(&dir, &keep).map_err(|e| e.to_string())? {
+                actions.push(SetupAction {
+                    target: p.id.clone(),
+                    path: dir.to_string_lossy().into_owned(),
+                    status: "updated".into(),
+                    backup_path: None,
+                    detail: "Removed plugin runtime data".into(),
+                });
+            }
+        }
+
+        let app_targets = [
+            resolve_app_bundle_path(None, state_dir)?,
+            resolve_app_bundle_path(None, home_dir)?,
+        ];
+        for (index, app_target) in app_targets.iter().enumerate() {
+            if app_targets[..index].contains(app_target) {
+                continue;
+            }
+            let is_symlink = fs::symlink_metadata(app_target)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_symlink {
+                fs::remove_file(app_target).map_err(|e| e.to_string())?;
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: app_target.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: format!("Removed {} symlink", app_target.display()),
+                });
+            } else if purge_data && app_target.exists() {
+                let parent = app_target.parent().ok_or("Missing application directory")?;
+                let path = fs::canonicalize(parent)
+                    .map_err(|e| e.to_string())?
+                    .join(app_target.file_name().ok_or("Missing application name")?);
+                if !remove_except_locks(&path, &keep).map_err(|e| e.to_string())? {
+                    continue;
+                }
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: app_target.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: format!("Removed {}", app_target.display()),
+                });
+            }
+        }
+        if purge_data {
+            let config_path = resolved_config.as_path();
+            if let Some(parent) = config_path.parent() {
+                if let Some(cname) = config_path.file_name().and_then(|s| s.to_str()) {
+                    let bak_prefix = format!("{cname}.bak.");
+                    if parent.exists() {
+                        for entry in fs::read_dir(parent).map_err(|e| e.to_string())? {
+                            let entry = entry.map_err(|e| e.to_string())?;
+                            let fname = entry.file_name().to_string_lossy().into_owned();
+                            if fname == format!("{cname}.cito.lock")
+                                || fname.starts_with(&bak_prefix)
+                            {
+                                fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+                            }
                         }
                     }
                 }
             }
-        }
-        if config_path.exists() && !config_path.starts_with(state_dir) {
-            let _ = fs::remove_file(config_path);
-        }
-        if state_dir.exists() {
-            // Keep the stable owner inode: unlinking it would admit a second
-            // daemon while this descriptor still owns the old inode.
-            for entry in fs::read_dir(state_dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if entry.file_name() == "daemon.lock" {
-                    continue;
-                }
-                let path = entry.path();
-                if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                    fs::remove_dir_all(path)
-                } else {
-                    fs::remove_file(path)
-                }
-                .map_err(|e| e.to_string())?;
+            if config_path.exists() && !config_path.starts_with(&state) {
+                fs::remove_file(config_path).map_err(|e| e.to_string())?;
             }
-            actions.push(SetupAction {
-                target: "cito".to_string(),
-                path: state_dir.to_string_lossy().to_string(),
-                status: "updated".to_string(),
-                backup_path: None,
-                detail: "Removed local data while retaining the daemon ownership lock".to_string(),
-            });
+            if state_dir.exists() {
+                remove_except_locks(&state, &keep).map_err(|e| e.to_string())?;
+                actions.push(SetupAction {
+                    target: "cito".to_string(),
+                    path: state_dir.to_string_lossy().to_string(),
+                    status: "updated".to_string(),
+                    backup_path: None,
+                    detail: "Removed local data while retaining ownership and writer locks"
+                        .to_string(),
+                });
+            }
+        }
+
+        Ok((default_hub, actions))
+    };
+    crate::plugins::with_config_lock_mode(&config_targets[0], false, || {
+        match config_targets.get(1) {
+            Some(other) => crate::plugins::with_config_lock_mode(other, false, remove),
+            None => remove(),
+        }
+    })
+}
+
+// Keep stable inodes for both queued and newly arriving writers. Descend only
+// into ancestors of a lock, and never follow a symlink during tree removal.
+fn remove_except_locks(path: &Path, keep: &[PathBuf]) -> std::io::Result<bool> {
+    if keep.iter().any(|p| p == path) {
+        return Ok(false);
+    }
+    if !fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_file(path)?;
+    } else if !keep.iter().any(|p| p.starts_with(path)) {
+        fs::remove_dir_all(path)?;
+    } else {
+        let mut removed = false;
+        for entry in fs::read_dir(path)? {
+            removed |= remove_except_locks(&entry?.path(), keep)?;
+        }
+        return Ok(removed);
+    }
+    Ok(true)
+}
+
+fn removal_action(target: &str, path: &Path, result: &Value, fallback: &str) -> SetupAction {
+    let mut details = vec![result["notice"].as_str().unwrap_or(fallback).to_owned()];
+    if let Some(status) = result["detach_status"].as_str() {
+        details.push(format!("Detach status: {status}"));
+    }
+    let warnings: Vec<_> = result["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let summary = warnings.join("; ");
+    let mut degraded = result["detach_status"] == "pending";
+    for warning in warnings
+        .into_iter()
+        .chain(result["warning"].as_str().filter(|s| *s != summary))
+    {
+        degraded = true;
+        let message = super::cli::presentation_error(warning);
+        if !details.contains(&message) {
+            details.push(message);
         }
     }
-
-    Ok((default_hub, actions))
+    SetupAction {
+        target: target.into(),
+        path: path.display().to_string(),
+        status: if degraded { "warning" } else { "updated" }.into(),
+        backup_path: None,
+        detail: details.join("; "),
+    }
 }
 
 fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<SetupAction>, String> {
@@ -1144,16 +1041,12 @@ fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<Set
         &config,
         &json!({"op":"setup_remove_app","harness":plugin.id}),
     )?;
-    Ok(vec![SetupAction {
-        target: plugin.id.clone(),
-        path: config.state_dir.to_string_lossy().into_owned(),
-        status: "updated".into(),
-        backup_path: None,
-        detail: result["notice"]
-            .as_str()
-            .unwrap_or("Disconnected and stopped active listeners")
-            .into(),
-    }])
+    Ok(vec![removal_action(
+        &plugin.id,
+        &config.state_dir,
+        &result,
+        "Disconnected integration",
+    )])
 }
 pub fn run_setup_cli(args: &[String]) {
     let run = || -> Result<Option<PathBuf>, String> {
@@ -1177,9 +1070,11 @@ pub fn run_setup_cli(args: &[String]) {
         let mut hub_name: Option<String> = None;
         let mut hub_url: Option<String> = None;
         let mut hub_auth: Option<String> = None;
+        let mut hub_user: Option<String> = None;
         let mut hub_token: Option<String> = None;
         let mut hub_issuer: Option<String> = None;
         let mut hub_client_id: Option<String> = None;
+        let mut hub_redirect_port: Option<Value> = None;
         let mut enable_hubs: Vec<String> = Vec::new();
         let mut disable_hubs: Vec<String> = Vec::new();
         let mut remove_hubs: Vec<String> = Vec::new();
@@ -1187,20 +1082,18 @@ pub fn run_setup_cli(args: &[String]) {
         let mut disable_harnesses: Vec<String> = Vec::new();
 
         let read_val = |arg: &str, idx: usize, flag: &str| -> Result<(String, usize), String> {
-            if let Some(rest) = arg.strip_prefix(&format!("{flag}=")) {
-                let v = rest.trim();
-                if v.is_empty() {
-                    return Err(format!("Missing value for {flag}"));
-                }
-                return Ok((v.to_string(), idx));
-            }
-            let next = args
-                .get(idx + 1)
-                .ok_or_else(|| format!("Missing value for {flag}"))?;
-            if next.starts_with('-') {
+            let mut next = idx;
+            let allow_empty = matches!(flag, "--issuer" | "--client-id" | "--redirect-port");
+            let value = super::cli_value::read(args, &mut next, flag, allow_empty)?;
+            let value = if arg.contains('=') && !matches!(flag, "--client-id" | "--issuer") {
+                value.trim()
+            } else {
+                value
+            };
+            if value.is_empty() && !allow_empty {
                 return Err(format!("Missing value for {flag}"));
             }
-            Ok((next.clone(), idx + 1))
+            Ok((value.to_owned(), next))
         };
 
         let mut i = 0;
@@ -1260,6 +1153,13 @@ pub fn run_setup_cli(args: &[String]) {
                 let (v, next_i) = read_val(arg, i, "--url")?;
                 hub_url = Some(v);
                 i = next_i;
+            } else if arg == "--user" || arg.starts_with("--user=") {
+                let (v, next_i) = read_val(arg, i, "--user")?;
+                if !crate::plugins::validate_user(&v) {
+                    return Err("INVALID_INPUT: Invalid user".into());
+                }
+                hub_user = Some(v);
+                i = next_i;
             } else if arg == "--auth" || arg.starts_with("--auth=") {
                 let (v, next_i) = read_val(arg, i, "--auth")?;
                 hub_auth = Some(crate::plugins::canonical_auth_mode(&v)?);
@@ -1275,6 +1175,16 @@ pub fn run_setup_cli(args: &[String]) {
             } else if arg == "--client-id" || arg.starts_with("--client-id=") {
                 let (v, next_i) = read_val(arg, i, "--client-id")?;
                 hub_client_id = Some(v);
+                i = next_i;
+            } else if arg == "--redirect-port" || arg.starts_with("--redirect-port=") {
+                let (v, next_i) = read_val(arg, i, "--redirect-port")?;
+                hub_redirect_port = Some(if v.is_empty() {
+                    Value::Null
+                } else {
+                    json!(v.parse::<u16>().map_err(|_| {
+                        "INVALID_INPUT: redirect port must be an integer from 0 to 65535"
+                    })?)
+                });
                 i = next_i;
             } else if arg == "--enable-hub" || arg.starts_with("--enable-hub=") {
                 let (v, next_i) = read_val(arg, i, "--enable-hub")?;
@@ -1304,6 +1214,9 @@ pub fn run_setup_cli(args: &[String]) {
             i += 1;
         }
 
+        if hub_user.is_some() && hub_name.is_none() {
+            return Err("--user requires --hub and --url".into());
+        }
         if hub_name.is_some() != hub_url.is_some() {
             return Err("--hub and --url must be specified together".to_string());
         }
@@ -1361,10 +1274,10 @@ pub fn run_setup_cli(args: &[String]) {
             }
             return Ok(None);
         }
-        let raw_config = crate::plugins::read_config_text(&config_path)?;
-        let (current_default, _, _) = try_normalize_existing_config(raw_config.as_deref())?;
         let plugins = crate::plugins::load_plugins_readonly(&state_dir);
         if dry_run && (build_app || uninstall) {
+            let raw_config = crate::plugins::read_config_text(&config_path)?;
+            let (current_default, _, _) = try_normalize_existing_config(raw_config.as_deref())?;
             let action = SetupAction {
                 target: "cito".to_string(),
                 path: if build_app {
@@ -1389,26 +1302,17 @@ pub fn run_setup_cli(args: &[String]) {
             return Ok(None);
         }
 
-        if build_app && !status_only {
-            let (app_path, bytes) =
-                build_mac_app_bundle_native(build_app_dest.as_deref(), &state_dir, &plugins)?;
-            if json_output {
-                let out = json!({
-                    "appPath": app_path.to_string_lossy(),
-                    "bytes": bytes,
-                });
-                println!("{}", serde_json::to_string_pretty(&out).unwrap());
-            } else {
-                println!("Built {} ({} bytes)", app_path.display(), bytes);
-            }
-            return Ok(Some(state_dir));
-        }
-
         if status_only {
             let inspection = inspect_setup_json(&state_dir, &config_path, &home_dir, &plugins);
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&inspection).unwrap());
             } else {
+                if inspection["ok"] == false {
+                    return Err(inspection["error"]
+                        .as_str()
+                        .unwrap_or("Configuration inspection failed")
+                        .into());
+                }
                 let exists_str = if config_path.exists() {
                     "exists"
                 } else {
@@ -1453,7 +1357,27 @@ pub fn run_setup_cli(args: &[String]) {
                     }
                 }
             }
+            if inspection["ok"] == false {
+                std::process::exit(1);
+            }
             return Ok(None);
+        }
+
+        let raw_config = crate::plugins::read_config_text(&config_path)?;
+        try_normalize_existing_config(raw_config.as_deref())?;
+        if build_app {
+            let (app_path, bytes) =
+                build_mac_app_bundle_native(build_app_dest.as_deref(), &state_dir, &plugins)?;
+            if json_output {
+                let out = json!({
+                    "appPath": app_path.to_string_lossy(),
+                    "bytes": bytes,
+                });
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            } else {
+                println!("Built {} ({} bytes)", app_path.display(), bytes);
+            }
+            return Ok(Some(state_dir));
         }
 
         if uninstall {
@@ -1518,24 +1442,11 @@ pub fn run_setup_cli(args: &[String]) {
                 return Err(format!("Invalid hub name: {name}"));
             }
             let url = validate_nats_url(url_raw)?;
-            let auth = hub_auth.clone().unwrap_or_else(|| "none".to_string());
-            if auth == "token" && hub_token.as_deref().unwrap_or("").trim().is_empty() {
-                return Err("Hub token is required when auth is token".to_string());
+            if name == "local" && url != "local://" {
+                return Err("INVALID_INPUT: The local hub must use local://".into());
             }
-            let mut iss_norm = None;
-            let mut cid_norm = None;
-            if auth == "oidc" || hub_issuer.is_some() {
-                let raw_iss = hub_issuer.as_deref().unwrap_or("").trim();
-                if raw_iss.is_empty() {
-                    return Err("Hub issuer is required when auth is oidc".to_string());
-                }
-                iss_norm = Some(validate_https_issuer(raw_iss)?);
-                let raw_cid = hub_client_id.as_deref().unwrap_or("").trim();
-                if raw_cid.is_empty() {
-                    return Err("Hub client-id is required when auth is oidc".to_string());
-                }
-                cid_norm = Some(raw_cid.to_string());
-            }
+            let (_, existing_hubs, _) = try_normalize_existing_config(raw_config.as_deref())?;
+            let base = existing_hubs.get(name).unwrap_or(&Value::Null);
             let def_scope = if url == "local://" {
                 "workspace"
             } else {
@@ -1543,20 +1454,53 @@ pub fn run_setup_cli(args: &[String]) {
             };
             let mut entry = Map::new();
             entry.insert("url".to_string(), json!(url));
-            entry.insert("natsUrl".to_string(), json!(url));
-            entry.insert("authMode".to_string(), json!(auth));
+            if let Some(ref user) = hub_user {
+                entry.insert("user".into(), json!(user));
+            }
+            if let Some(ref auth) = hub_auth {
+                entry.insert("authMode".into(), json!(auth));
+            } else if hub_issuer.as_deref().is_some_and(|value| !value.is_empty())
+                || hub_client_id
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+            {
+                entry.insert("authMode".into(), json!("oidc"));
+            } else if hub_token
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                entry.insert("authMode".into(), json!("token"));
+            }
             if let Some(ref t) = hub_token {
                 entry.insert("token".to_string(), json!(t.trim()));
             }
-            if let Some(ref iss) = iss_norm {
-                entry.insert("issuer".to_string(), json!(iss));
+            if let Some(ref iss) = hub_issuer {
+                entry.insert(
+                    "issuer".to_string(),
+                    if iss.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(iss)
+                    },
+                );
             }
-            if let Some(ref cid) = cid_norm {
-                entry.insert("clientId".to_string(), json!(cid));
+            if let Some(ref cid) = hub_client_id {
+                entry.insert(
+                    "clientId".to_string(),
+                    if cid.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(cid)
+                    },
+                );
             }
             entry.insert("enabled".to_string(), json!(true));
             entry.insert("defaultScope".to_string(), json!(def_scope));
-            validated_hub = Some((name.clone(), Value::Object(entry)));
+            if let Some(port) = hub_redirect_port {
+                entry.insert("redirectPort".into(), port);
+            }
+            let entry = super::config::merge_hub_config(base, &Value::Object(entry));
+            validated_hub = Some((name.clone(), super::config::discover_hub_config(entry)?));
         }
 
         let mut resolved_default_hub = "local".to_string();
@@ -1571,6 +1515,11 @@ pub fn run_setup_cli(args: &[String]) {
             });
 
             if let Some((ref hname, ref hentry)) = validated_hub {
+                if existing != raw_config.as_deref() {
+                    return Err(
+                        "INVALID_INPUT: Configuration changed during discovery; retry".into(),
+                    );
+                }
                 hubs.insert(hname.clone(), hentry.clone());
                 if set_default || (!had_remote_before && def_hub == "local" && hname != "local") {
                     def_hub = hname.clone();
@@ -1664,6 +1613,61 @@ pub fn run_setup_cli(args: &[String]) {
             }
         })?;
 
+        let committed = !dry_run && matches!(config_action.status.as_str(), "created" | "updated");
+        let setup_error = |error: String| {
+            if committed {
+                format!(
+                    "Configuration saved; setup incomplete: {}",
+                    super::cli::presentation_error(&error)
+                )
+            } else {
+                error
+            }
+        };
+        let saved_error = |error: String| {
+            format!(
+                "Configuration saved; daemon update incomplete: {}",
+                super::cli::presentation_error(&error)
+            )
+        };
+        if !dry_run
+            && (hub_name.is_some()
+                || !enable_hubs.is_empty()
+                || !disable_hubs.is_empty()
+                || share_hub.is_some()
+                || share_port.is_some())
+        {
+            let config =
+                daemon_control_config(&state_dir, &config_path, &home_dir).map_err(&saved_error)?;
+            if crate::plugins::probe_daemon_health(&config).is_some() {
+                let result = super::cli::control_request(&config, &json!({"op":"set_host_hub"}))
+                    .map_err(&saved_error)?;
+                if let Some(warning) = result["warning"]
+                    .as_str()
+                    .or_else(|| result["maintenance_warning"].as_str())
+                {
+                    return Err(format!(
+                        "Configuration saved; daemon reload incomplete: {}",
+                        super::cli::presentation_error(warning)
+                    ));
+                }
+            }
+        }
+
+        let mut actions = vec![config_action];
+        if !dry_run && !remove_hubs.is_empty() {
+            let (config, _) = crate::plugins::load_native_config().map_err(&saved_error)?;
+            crate::plugins::ensure_daemon(&config).map_err(&saved_error)?;
+            for hub in &remove_hubs {
+                let result = super::cli::control_request(
+                    &config,
+                    &json!({"op":"setup_remove_hub","hub":hub}),
+                )
+                .map_err(&saved_error)?;
+                actions.push(removal_action(hub, &config_path, &result, "Removed hub"));
+            }
+        }
+
         let bare_setup = enable_harnesses.is_empty()
             && disable_harnesses.is_empty()
             && hub_name.is_none()
@@ -1673,16 +1677,18 @@ pub fn run_setup_cli(args: &[String]) {
             && launch_at_login.is_none()
             && share_hub.is_none()
             && share_port.is_none();
-        let mut actions = vec![config_action];
-        if !dry_run {
-            ensure_cli_shims_native(&state_dir, &plugins)?;
-        }
+        let plugins = if dry_run {
+            plugins
+        } else {
+            ensure_cli_shims_native(&state_dir, &plugins).map_err(setup_error)?;
+            crate::plugins::load_plugins_readonly(&state_dir)
+        };
         let enabled_set: HashSet<String> = enable_harnesses.into_iter().collect();
         let disabled_set: HashSet<String> = disable_harnesses.into_iter().collect();
 
         for plugin in plugins.agent_plugins() {
             if disabled_set.contains(&plugin.id) {
-                actions.extend(disconnect_plugin(plugin, dry_run)?);
+                actions.extend(disconnect_plugin(plugin, dry_run).map_err(setup_error)?);
                 continue;
             }
             let should_cfg = should_setup_harness(plugin, &enabled_set, bare_setup);
@@ -1697,10 +1703,20 @@ pub fn run_setup_cli(args: &[String]) {
                 actions.push(SetupAction {
                     target: plugin.id.clone(),
                     path: paths.first().cloned().unwrap_or_else(|| plugin.id.clone()),
-                    status: "skipped".to_string(),
+                    status: if inspection_error.is_some() {
+                        "warning"
+                    } else {
+                        "skipped"
+                    }
+                    .into(),
                     backup_path: None,
                     detail: inspection_error
-                        .map(|error| format!("Plugin inspection failed: {error}"))
+                        .map(|error| {
+                            format!(
+                                "Plugin inspection failed: {}",
+                                super::cli::presentation_error(&error)
+                            )
+                        })
                         .unwrap_or_else(|| {
                             format!(
                                 "Skipped {} harness '{}' (pass --enable {} to configure)",
@@ -1710,25 +1726,22 @@ pub fn run_setup_cli(args: &[String]) {
                 });
                 continue;
             }
-            actions.extend(apply_plugin_setup(plugin, force, dry_run)?);
+            actions.extend(apply_plugin_setup(plugin, force, dry_run).map_err(setup_error)?);
         }
 
         if !dry_run {
             if let Some(en) = launch_at_login {
-                set_launch_at_login(en, &state_dir, &home_dir, &plugins)?;
+                set_launch_at_login(en, &state_dir, &home_dir, &plugins).map_err(setup_error)?;
             }
         }
 
-        let ok = emit_setup_result(
+        emit_setup_result(
             &config_path,
             &resolved_default_hub,
             dry_run,
             &actions,
             json_output,
         );
-        if !ok {
-            std::process::exit(1);
-        }
         Ok((!dry_run).then_some(state_dir))
     };
 
@@ -1738,10 +1751,7 @@ pub fn run_setup_cli(args: &[String]) {
             let _ = crate::plugins::load_native_config();
         }
         Ok(None) => {}
-        Err(err) => {
-            eprintln!("cito setup: {}", crate::core::cli::presentation_error(&err));
-            std::process::exit(1);
-        }
+        Err(err) => crate::plugins::exit_cli_error("cito setup", &err),
     }
 }
 
@@ -1760,7 +1770,7 @@ fn emit_setup_result(
     dry_run: bool,
     actions: &[SetupAction],
     json_output: bool,
-) -> bool {
+) {
     let ok = !actions.iter().any(|a| a.status == "conflict");
     if json_output {
         let out = json!({
@@ -1783,8 +1793,8 @@ fn emit_setup_result(
                 conflict.path, conflict.detail
             );
         }
+        std::process::exit(1);
     }
-    ok
 }
 
 #[cfg(test)]
@@ -1842,6 +1852,20 @@ mod tests {
     fn validated_plugin_and_shim_generations_preserve_working_files_on_failure() {
         let (root, mut plugins) = fixture();
         plugins.plugins[0].is_builtin = true;
+        let second = root.join("plugins/second");
+        fs::create_dir_all(second.join("bin")).unwrap();
+        fs::copy(
+            plugins.plugins[0].plugin_dir.join("bin/sample"),
+            second.join("bin/second"),
+        )
+        .unwrap();
+        fs::write(second.join("plugin.json"),r#"{"id":"second","kind":"agent-harness","displayName":"Second","command":["./bin/second"]}"#).unwrap();
+        let mut descriptor = crate::plugins::load_plugins(&root)
+            .find_by_id("second")
+            .unwrap()
+            .clone();
+        descriptor.is_builtin = true;
+        plugins.plugins.push(descriptor);
         let state = root.join("installed");
         ensure_cli_shims_native(&state, &plugins).unwrap();
         let staged = staged_plugins_dir(&state).join("sample");
@@ -1854,16 +1878,89 @@ mod tests {
         assert!(!staged.join("obsolete").exists());
         assert_ne!(fs::read(staged.join("bin/sample")).unwrap(), previous);
         let valid = fs::read(staged.join("bin/sample")).unwrap();
-        fs::remove_file(source.join("bin/sample")).unwrap();
+        fs::write(
+            source.join("bin/sample"),
+            "#!/bin/sh\necho must-not-publish\n",
+        )
+        .unwrap();
+        fs::remove_file(second.join("bin/second")).unwrap();
         assert!(ensure_cli_shims_native(&state, &plugins).is_err());
         assert_eq!(fs::read(staged.join("bin/sample")).unwrap(), valid);
         assert_eq!(fs::read(state.join("bin/cito")).unwrap(), shim);
+        plugins.plugins.pop();
+        fs::write(
+            plugins.plugins[0].plugin_dir.join("plugin.json"),
+            r#"{"id":"sample","kind":"agent-harness","displayName":"Sample","command":["sh"]}"#,
+        )
+        .unwrap();
+        ensure_cli_shims_native(&state, &plugins).unwrap();
         assert!(fs::read_dir(state.join("runtime"))
             .unwrap()
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")));
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn generated_shims_replace_symlinks_without_mutating_active_targets() {
+        use std::os::unix::fs::symlink;
+        let (root, mut plugins) = fixture();
+        plugins.plugins[0].is_builtin = true;
+        let source = &plugins.plugins[0].plugin_dir;
+        fs::write(source.join("resource"), "resource bytes").unwrap();
+        symlink("resource", source.join("resource-link")).unwrap();
+        let state = root.join("installed");
+        fs::create_dir_all(state.join("bin/cito-mcp")).unwrap();
+        let external = root.join("external-shim");
+        fs::write(&external, "external bytes").unwrap();
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&external, state.join("bin/cito")).unwrap();
+        fs::write(state.join("relative-shim"), "relative bytes").unwrap();
+        fs::set_permissions(
+            state.join("relative-shim"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let snapshot = |path: &Path| {
+            (
+                fs::read(path).unwrap(),
+                fs::metadata(path).unwrap().permissions().mode(),
+            )
+        };
+        let before = snapshot(&external);
+        // The second shim is a directory: fail after preparing the first shim.
+        assert!(ensure_cli_shims_native(&state, &plugins).is_err());
+        assert_eq!(snapshot(&external), before);
+        assert_eq!(snapshot(&state.join("bin/cito")), before);
+        assert_eq!(fs::read_link(state.join("bin/cito")).unwrap(), external);
+        assert!(state.join("bin/cito-mcp").is_dir());
+        fs::remove_dir(state.join("bin/cito-mcp")).unwrap();
+        symlink("../relative-shim", state.join("bin/cito-mcp")).unwrap();
+        symlink("../relative-shim", state.join("bin/resource-link")).unwrap();
+        let relative_before = snapshot(&state.join("relative-shim"));
+        ensure_cli_shims_native(&state, &plugins).unwrap();
+        assert_eq!(snapshot(&external), before);
+        assert_eq!(snapshot(&state.join("relative-shim")), relative_before);
+        for name in ["cito", "cito-mcp"] {
+            let path = state.join("bin").join(name);
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(metadata.is_file());
+            assert!(!metadata.file_type().is_symlink());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
+            // The generated shim executes this test binary with a harmless listing flag.
+            let output = Command::new(path).arg("--list").output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+        assert_eq!(
+            fs::read_link(state.join("bin/resource-link")).unwrap(),
+            Path::new("../relative-shim")
+        );
+        assert_eq!(
+            fs::read_link(staged_plugins_dir(&state).join("sample/resource-link")).unwrap(),
+            Path::new("resource")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn bundled_plugin_resolution_covers_distribution_layouts() {
         let (root, _) = fixture();
@@ -1902,7 +1999,13 @@ mod tests {
         } else if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
             let root = PathBuf::from(env::var("HOME").unwrap());
             let plugins = crate::plugins::load_plugins(&root);
+            use std::os::unix::fs::MetadataExt;
+            let path = set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
+            let previous = fs::File::open(&path).unwrap();
             set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            assert_ne!(previous.metadata().unwrap().ino(), metadata.ino());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
         } else if env::var("CITO_SETUP_TEST_LOAD_CONFIG").is_ok() {
             let (config, _) = crate::plugins::load_native_config().unwrap();
             assert_eq!(
@@ -2088,7 +2191,15 @@ mod tests {
                         root.join("state")
                     };
                     fs::create_dir_all(&state).unwrap();
-                    fs::write(state.join("config.json"), "{}").unwrap();
+                    let external_config = root.join("settings/config.json");
+                    fs::create_dir_all(external_config.parent().unwrap()).unwrap();
+                    fs::write(&external_config, "{}").unwrap();
+                    let backup = external_config.with_file_name("config.json.bak.fixture");
+                    let lock = external_config.with_file_name("config.json.lock");
+                    fs::write(&backup, "private backup").unwrap();
+                    fs::write(&lock, "").unwrap();
+                    std::os::unix::fs::symlink(&external_config, state.join("config.json"))
+                        .unwrap();
                     let outside = root.join("Applications/Cito.app");
                     fs::create_dir_all(&outside).unwrap();
                     fs::write(outside.join("sentinel"), "unrelated bundle").unwrap();
@@ -2122,6 +2233,9 @@ mod tests {
                     )
                     .unwrap();
                     let actions = result["actions"].as_array().unwrap();
+                    assert_eq!(external_config.exists(), !purge);
+                    assert_eq!(backup.exists(), !purge);
+                    assert!(lock.exists(), "Keep the config writer inode");
                     for target in &targets {
                         assert_eq!(fs::symlink_metadata(target).is_err(), symlink || purge);
                         assert_eq!(
@@ -2365,6 +2479,37 @@ mod tests {
     }
 
     #[test]
+    fn credential_save_restricts_existing_external_config_mode() {
+        let (root, _) = fixture();
+        let path = root.join("external/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"user":"alice"}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let next = r#"{"user":"alice","token":"secret"}"#;
+        let action = mutate_file("cito", &path, false, Some(0o600), |_| {
+            Ok((
+                "updated".into(),
+                Some(next.into()),
+                "Save credentials".into(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(action.status, "updated");
+        assert_eq!(fs::read_to_string(&path).unwrap(), next);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let backup = PathBuf::from(action.backup_path.unwrap());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), r#"{"user":"alice"}"#);
+        assert_eq!(
+            fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn malformed_mutation_preserves_original_bytes_and_dry_run_creates_nothing() {
         let (root, _) = fixture();
         let path = root.join("config.json");
@@ -2438,10 +2583,6 @@ mod tests {
             json!({"daemonPort":port,"hubs":{"local":{"url":"local://"}}}).to_string(),
         )
         .unwrap();
-        #[expect(
-            clippy::zombie_processes,
-            reason = "The production uninstall path reaps the verified daemon PID with waitpid."
-        )]
         let mut child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
         let pid = child.id();
         let server_state = state.clone();
@@ -2498,8 +2639,14 @@ mod tests {
         }
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            child.try_wait().unwrap().and_then(|s| s.signal()),
+            Some(libc::SIGTERM)
+        );
         assert!(!crate::plugins::pid_alive(pid as i32));
-        for sub in ["bin", "runtime", "sockets", "sample"] {
+        assert!(state.join("runtime/staging.lock").exists());
+        for sub in ["bin", "runtime/plugins", "sockets", "sample"] {
             assert!(
                 !state.join(sub).exists(),
                 "{sub} should be removed on uninstall"

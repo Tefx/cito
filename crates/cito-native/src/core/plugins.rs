@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const CITO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -107,50 +107,9 @@ impl NativeConfig {
     }
 }
 
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+pub use crate::support::now_ms;
 
-pub fn random_uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        let t = now_ms().to_le_bytes();
-        let p = std::process::id().to_le_bytes();
-        bytes[0..8].copy_from_slice(&t);
-        bytes[8..12].copy_from_slice(&p);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
-}
-
-/// Generates cryptographic tokens without masking an entropy-source failure.
-pub fn try_random_hex(bytes_len: usize) -> Result<String, String> {
-    let mut bytes = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// Best-effort identifiers for temporary paths; use try_random_hex for secrets.
-pub fn random_hex(bytes_len: usize) -> String {
-    try_random_hex(bytes_len).unwrap_or_else(|_| {
-        (0..bytes_len)
-            .map(|i| format!("{:02x}", ((now_ms() as usize).wrapping_add(i * 31)) as u8))
-            .collect()
-    })
-}
+pub use crate::support::{random_hex, random_uuid_v4, try_random_hex};
 
 pub fn system_home_dir() -> String {
     if let Ok(h) = env::var("HOME") {
@@ -184,13 +143,7 @@ pub fn expand_home_dir(
         Some(h) => h.to_string(),
         None => system_home_dir(),
     };
-    let expanded = if value == "~" {
-        PathBuf::from(&home)
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        PathBuf::from(&home).join(rest)
-    } else {
-        PathBuf::from(value)
-    };
+    let expanded = crate::support::expand_home_path(value, Path::new(&home));
     if expanded.is_absolute() {
         Ok(expanded)
     } else {
@@ -213,18 +166,7 @@ pub fn validate_harness_id(id: &str) -> bool {
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-pub fn validate_hub_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > 32 {
-        return false;
-    }
-    if !(bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit()) {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
+pub use validate_harness_id as validate_hub_name;
 
 pub fn validate_nats_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
@@ -258,9 +200,9 @@ pub fn validate_oidc_url(raw: &str, issuer: bool) -> Result<url::Url, String> {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || issuer && url.query().is_some()
+        || issuer && (url.query().is_some() || raw.contains(['#', '|']))
     {
-        return Err("OIDC URL must use HTTPS (HTTP 127.0.0.1 is allowed for tests), without credentials or fragment; issuers cannot contain a query".into());
+        return Err("OIDC URL must use HTTPS (HTTP 127.0.0.1 is allowed for tests), without credentials or fragment; issuers cannot contain a query or a vertical bar".into());
     }
     Ok(url)
 }
@@ -304,36 +246,37 @@ fn is_checked_cito_env_key(key: &str) -> bool {
 }
 
 pub fn resolve_builtin_plugins_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
-        let p = expand_home_dir(
-            explicit.trim(),
+    builtin_plugin_roots(None, env::current_exe().ok().as_deref())
+        .into_iter()
+        .find(|path| path.is_dir())
+}
+pub(super) fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
+    [
+        root.join("Resources/plugins"),
+        root.join("plugins"),
+        root.join("share/cito/plugins"),
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
+    ]
+}
+fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(dir) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
+        if let Ok(path) = expand_home_dir(
+            dir.trim(),
             "CITO_BUILTIN_PLUGINS_DIR",
             env::var("HOME").ok().as_deref(),
-        )
-        .ok()?;
-        if p.is_dir() {
-            return Some(p);
+        ) {
+            roots.push(path);
         }
     }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for rel in [
-                "../Resources/plugins",
-                "../plugins",
-                "../share/cito/plugins",
-            ] {
-                let cand = exe_dir.join(rel);
-                if cand.is_dir() {
-                    return Some(cand);
-                }
-            }
-        }
+    if let Some(state_dir) = state_dir {
+        roots.push(staged_plugins_dir(state_dir));
     }
-    let compile_fallback = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins"));
-    if compile_fallback.is_dir() {
-        return Some(compile_fallback);
+    if let Some(dir) = executable.and_then(Path::parent) {
+        roots.extend(bundled_plugin_roots(&dir.join("..")).into_iter().take(3));
     }
-    None
+    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
+    roots
 }
 
 pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescriptor, String> {
@@ -342,6 +285,41 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         dir,
         is_builtin,
         &serde_json::from_str(&raw).map_err(|e| e.to_string())?,
+    )
+}
+
+pub(super) fn reserved_cli_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "hub"
+            | "team"
+            | "scope"
+            | "tag"
+            | "title"
+            | "all"
+            | "json"
+            | "harness"
+            | "session"
+            | "help"
+            | "version"
+            | "setup"
+            | "to"
+            | "message"
+            | "reply-to"
+            | "in-reply-to"
+            | "idempotency-key"
+            | "wake"
+            | "user"
+            | "host"
+            | "repo"
+            | "query"
+            | "limit"
+            | "unread"
+            | "peek"
+            | "no-ack"
+            | "ack-all"
+            | "ack"
+            | "about"
     )
 }
 
@@ -414,15 +392,11 @@ pub(super) fn parse_manifest(
         .and_then(|v| v.as_str())
         .unwrap_or("indigo")
         .to_string();
-    let reserved_flags = [
-        "hub", "team", "scope", "tag", "title", "all", "json", "harness", "session", "help",
-        "version", "setup",
-    ];
     let mut cli_flag = map
         .get("cliFlag")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if cli_flag && reserved_flags.contains(&id.as_str()) {
+    if cli_flag && reserved_cli_flag(&id) {
         cli_flag = false;
     }
     let command = match map.get("command") {
@@ -638,29 +612,11 @@ pub fn plugin_roots_for_executable(
         roots.push((PathBuf::from(dir), false));
     }
     roots.push((state_dir.join("plugins"), false));
-    if let Ok(dir) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
-        if let Ok(path) = expand_home_dir(
-            &dir,
-            "CITO_BUILTIN_PLUGINS_DIR",
-            env::var("HOME").ok().as_deref(),
-        ) {
-            roots.push((path, true));
-        }
-    }
-    roots.push((staged_plugins_dir(state_dir), true));
-    if let Some(dir) = executable.and_then(Path::parent) {
-        for rel in [
-            "../Resources/plugins",
-            "../plugins",
-            "../share/cito/plugins",
-        ] {
-            roots.push((dir.join(rel), true));
-        }
-    }
-    roots.push((
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"),
-        true,
-    ));
+    roots.extend(
+        builtin_plugin_roots(Some(state_dir), executable)
+            .into_iter()
+            .map(|path| (path, true)),
+    );
     roots
 }
 
@@ -753,6 +709,11 @@ pub(super) fn load_plugins_from_roots(
         plugins,
         rejected_ids,
     }
+}
+
+pub fn exit_cli_error(command: &str, error: &str) -> ! {
+    eprintln!("{command}: {}", super::cli::presentation_error(error));
+    std::process::exit(1)
 }
 
 pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
@@ -1010,174 +971,43 @@ pub fn plugin_request_with_progress(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
-        let result = (|| {
-            let mut stdin = child.stdin.take();
-            let mut stdout = child.stdout.take().ok_or("Missing plugin stdout")?;
-            let mut stderr = child.stderr.take().ok_or("Missing plugin stderr")?;
-            for fd in [
-                stdin.as_ref().ok_or("Missing plugin stdin")?.as_raw_fd(),
-                stdout.as_raw_fd(),
-                stderr.as_raw_fd(),
-            ] {
-                // SAFETY: each fd is an owned pipe that remains open for this request.
-                unsafe {
-                    let flags = libc::fcntl(fd, libc::F_GETFL);
-                    if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                        return Err(std::io::Error::last_os_error().to_string());
-                    }
-                }
-            }
-            let exited = crate::support::child_exit_fd(child.id())?;
-            let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-            input.push(b'\n');
-            let mut written = 0;
-            let mut output = Vec::new();
-            let mut errors = Vec::new();
-            let mut out_eof = false;
-            let mut err_eof = false;
-            let mut child_exited = None;
-            let started = Instant::now();
-            let deadline = started + timeout;
-            loop {
-                if Instant::now() >= deadline {
-                    return Err("Plugin timed out".to_string());
-                }
-                progress(started.elapsed())?;
-                if let Some(pipe) = stdin.as_mut() {
-                    match pipe.write(&input[written..]) {
-                        Ok(0) => {
-                            return Err("Plugin closed stdin before request completed".to_string())
-                        }
-                        Ok(n) => written += n,
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Err(e) => return Err(e.to_string()),
-                    }
-                    if written == input.len() {
-                        stdin.take();
-                    }
-                }
-                for (pipe, buffer, eof, limit) in [
-                    (
-                        &mut stdout as &mut dyn Read,
-                        &mut output,
-                        &mut out_eof,
-                        1_048_576usize,
-                    ),
-                    (
-                        &mut stderr as &mut dyn Read,
-                        &mut errors,
-                        &mut err_eof,
-                        65_536usize,
-                    ),
-                ] {
-                    let mut bytes = [0u8; 8192];
-                    loop {
-                        match pipe.read(&mut bytes) {
-                            Ok(0) => {
-                                *eof = true;
-                                break;
-                            }
-                            Ok(n) => {
-                                if buffer.len() + n > limit {
-                                    return Err("Plugin output exceeds limit".to_string());
-                                }
-                                buffer.extend_from_slice(&bytes[..n]);
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                            Err(e) => return Err(e.to_string()),
-                        }
-                    }
-                }
-                if child_exited.is_none() {
-                    child_exited = peek_plugin_exit(child.id())?;
-                }
-                if let Some((success, code)) = child_exited {
-                    if out_eof && err_eof {
-                        if !success {
-                            return Err(format!(
-                                "Plugin exited {code}: {}",
-                                crate::support::bounded_diagnostic(
-                                    &String::from_utf8_lossy(&errors),
-                                    "Plugin process failed"
-                                )
-                            ));
-                        }
-                        let output = std::str::from_utf8(&output).map_err(|e| e.to_string())?;
-                        let mut lines = output.lines();
-                        let line = lines.next().ok_or("Plugin produced no response")?;
-                        if lines.any(|line| !line.trim().is_empty()) {
-                            return Err("Plugin produced more than one response line".to_string());
-                        }
-                        let response: Value = serde_json::from_str(line)
-                            .map_err(|e| format!("Invalid plugin JSON: {e}"))?;
-                        if !response.is_object() {
-                            return Err("Plugin response must be a JSON object".to_string());
-                        }
-                        return Ok(response);
-                    }
-                }
-                let mut fds = [
-                    libc::pollfd {
-                        fd: stdin.as_ref().map(|p| p.as_raw_fd()).unwrap_or(-1),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: if out_eof { -1 } else { stdout.as_raw_fd() },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: if err_eof { -1 } else { stderr.as_raw_fd() },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: if child_exited.is_some() {
-                            -1
-                        } else {
-                            exited.as_raw_fd()
-                        },
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                ];
-                // Progress checks enforce generation fencing and dispatch lease renewal.
-                crate::support::poll_until(
-                    &mut fds,
-                    Some(deadline.min(Instant::now() + Duration::from_millis(250))),
-                )?;
-            }
-        })();
-        if result.is_err() {
-            // SAFETY: WNOWAIT keeps the child PID reserved until the final wait below.
-            // Its process-group ID therefore cannot be reused during graceful cleanup.
-            let group = -(child.id() as i32);
-            unsafe {
-                libc::kill(group, libc::SIGTERM);
-            }
-            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(50));
-            // SAFETY: the child remains unreaped, preserving group ownership on escalation.
-            unsafe {
-                libc::kill(group, libc::SIGKILL);
-            }
+        let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        input.push(b'\n');
+        let output = crate::support::run_piped_command(
+            command,
+            Some(&input),
+            timeout,
+            [1_048_576, 65_536],
+            Some(&mut progress),
+        )?
+        .ok_or("Plugin timed out")?;
+        if !output.status.success() {
+            return Err(format!(
+                "Plugin exited {}: {}",
+                output.status.code().unwrap_or(-1),
+                crate::support::bounded_diagnostic(
+                    &String::from_utf8_lossy(&output.stderr),
+                    "Plugin process failed"
+                )
+            ));
         }
-        let waited = child.wait().map_err(|error| error.to_string());
-        match result {
-            Ok(value) => waited.map(|_| value),
-            Err(error) => Err(error),
+        let output = std::str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+        let mut lines = output.lines();
+        let line = lines.next().ok_or("Plugin produced no response")?;
+        if lines.any(|line| !line.trim().is_empty()) {
+            return Err("Plugin produced more than one response line".into());
         }
+        let response: Value =
+            serde_json::from_str(line).map_err(|_| "Invalid plugin JSON".to_owned())?;
+        if !response.is_object() {
+            return Err("Plugin response must be a JSON object".into());
+        }
+        Ok(response)
     };
     execute().map_err(|e| format!("PLUGIN_EXEC_FAILED: {}: {e}", plugin.id))
 }
 
-fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
+pub fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
     // SAFETY: siginfo is writable, pid belongs to an unreaped Child, and WNOWAIT
     // observes completion without releasing its PID or process-group ownership.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -1207,13 +1037,6 @@ fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
         info.si_code == libc::CLD_EXITED && status == 0,
         status,
     )))
-}
-
-#[cfg(test)]
-pub fn plugin_call(plugin: &PluginDescriptor, request: &Value) -> Value {
-    plugin_request(plugin, request).unwrap_or_else(
-        |message| json!({"ok":false,"error_code":"PLUGIN_EXEC_FAILED","message":message}),
-    )
 }
 
 pub struct HttpResponse {
@@ -1314,6 +1137,26 @@ pub fn read_http_response(stream: &mut impl Read) -> Result<HttpResponse, String
     })
 }
 
+/// Socket reads share one budget, including reads inside BufReader and read_exact.
+fn read_http_until(stream: &mut TcpStream, deadline: Instant) -> Result<HttpResponse, String> {
+    struct SocketReader<'a>(&'a mut TcpStream, Instant);
+    impl Read for SocketReader<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.1.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.0.set_read_timeout(Some(remaining))?;
+            self.0.read(bytes)
+        }
+    }
+    let response = read_http_response(&mut SocketReader(stream, deadline))?;
+    if Instant::now() >= deadline {
+        return Err("HTTP response timed out".into());
+    }
+    Ok(response)
+}
+
 pub fn http_post_mcp(port: u16, body: &str, timeout: Duration) -> Result<HttpResponse, String> {
     http_post_json(port, "/mcp", body, timeout)
 }
@@ -1324,10 +1167,12 @@ pub fn http_post_json(
     body: &str,
     timeout: Duration,
 ) -> Result<HttpResponse, String> {
+    let deadline = Instant::now() + timeout;
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
     let req = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: 127.0.0.1:{port}\r\n\
@@ -1342,7 +1187,7 @@ pub fn http_post_json(
         .write_all(req.as_bytes())
         .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
-    read_http_response(&mut stream)
+    read_http_until(&mut stream, deadline)
 }
 
 #[derive(Debug)]
@@ -1354,15 +1199,15 @@ pub struct DaemonHealth {
 pub fn probe_daemon_health(config: &NativeConfig) -> Option<DaemonHealth> {
     let addr = SocketAddr::from(([127, 0, 0, 1], config.daemon_port));
     let timeout = Duration::from_millis(500);
+    let deadline = Instant::now() + timeout;
     let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    stream.set_write_timeout(Some(timeout)).ok()?;
     let req = format!(
         "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
         config.daemon_port
     );
     stream.write_all(req.as_bytes()).ok()?;
-    let resp = read_http_response(&mut stream).ok()?;
+    let resp = read_http_until(&mut stream, deadline).ok()?;
     if resp.status != 200 {
         return None;
     }
@@ -1402,14 +1247,7 @@ fn pid_alive_rejects_non_process_ids() {
 }
 
 pub fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: signal zero checks existence without signaling the process.
-    unsafe {
-        libc::kill(pid, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
+    crate::support::alive(pid as u32)
 }
 
 pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), String> {
@@ -1436,10 +1274,7 @@ pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), S
     if !ready {
         return Err("Daemon did not stop within 5000ms".into());
     }
-    // SAFETY: reap only if this process is the daemon's parent; otherwise ECHILD is harmless.
-    unsafe {
-        libc::waitpid(health.pid, std::ptr::null_mut(), libc::WNOHANG);
-    }
+    // Only the Child owner reaps. A health response does not convey waitpid ownership.
     Ok(())
 }
 
@@ -1456,11 +1291,8 @@ pub fn handover_stale_daemon(config: &NativeConfig) -> Result<bool, String> {
 }
 
 pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
-    if let Some(existing) = probe_daemon_health(config) {
-        if existing.version.as_deref() == Some(CITO_VERSION) {
-            return Ok(());
-        }
-        stop_daemon(config, &existing)?;
+    if handover_stale_daemon(config)? {
+        return Ok(());
     }
 
     let exe = env::current_exe().map_err(|e| e.to_string())?;
@@ -1475,39 +1307,107 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
             Ok(())
         });
     }
+    // Reserve a waiter before spawning so a thread allocation failure cannot orphan a child.
+    let (handoff, receiver) = std::sync::mpsc::channel::<std::process::Child>();
+    std::thread::Builder::new()
+        .name("daemon-reaper".into())
+        .spawn(move || {
+            if let Ok(mut child) = receiver.recv() {
+                let _ = child.wait();
+            }
+        })
+        .map_err(|e| format!("Cannot start daemon waiter: {e}"))?;
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
-    let exited = crate::support::child_exit_fd(child.id())?;
-    let mut retry = crate::support::RetryBackoff::default();
-    let deadline = Instant::now() + Duration::from_millis(5000);
-    while Instant::now() < deadline {
-        if let Some(h) = probe_daemon_health(config) {
-            if h.version.as_deref() == Some(CITO_VERSION) {
-                return Ok(());
+    let result = (|| {
+        let exited = crate::support::child_exit_fd(child.id())?;
+        let mut retry = crate::support::RetryBackoff::default();
+        let deadline = Instant::now() + Duration::from_millis(5000);
+        while Instant::now() < deadline {
+            if let Some(h) = probe_daemon_health(config) {
+                if h.version.as_deref() == Some(CITO_VERSION) {
+                    return Ok(());
+                }
+            }
+            if crate::support::poll_until(
+                &mut [libc::pollfd {
+                    fd: exited.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                Some(deadline.min(Instant::now() + retry.failed())),
+            )? {
+                if probe_daemon_health(config)
+                    .is_some_and(|h| h.version.as_deref() == Some(CITO_VERSION))
+                {
+                    return Ok(());
+                }
+                return Err("Daemon exited before becoming healthy".into());
             }
         }
-        if crate::support::poll_until(
-            &mut [libc::pollfd {
-                fd: exited.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            }],
-            Some(deadline.min(Instant::now() + retry.failed())),
-        )? {
-            let _ = child.wait();
-            return Err("Daemon exited before becoming healthy".into());
-        }
-    }
-    Err(format!(
-        "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
-        config.daemon_port,
-        config.state_dir.display()
-    ))
+        Err(format!(
+            "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
+            config.daemon_port,
+            config.state_dir.display()
+        ))
+    })();
+    let error = match result {
+        Err(error) => error,
+        Ok(()) => match handoff.send(child) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                child = e.0;
+                "Daemon waiter is unavailable".into()
+            }
+        },
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(error)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn builtin_cli_flags_cannot_be_claimed_by_plugin_manifests() {
+        for id in [
+            "hub",
+            "team",
+            "scope",
+            "tag",
+            "title",
+            "all",
+            "json",
+            "harness",
+            "session",
+            "help",
+            "version",
+            "setup",
+            "to",
+            "message",
+            "reply-to",
+            "in-reply-to",
+            "idempotency-key",
+            "wake",
+            "user",
+            "host",
+            "repo",
+            "query",
+            "limit",
+            "unread",
+            "peek",
+            "no-ack",
+            "ack-all",
+            "ack",
+            "about",
+            "fixture",
+        ] {
+            let manifest = serde_json::json!({"id":id,"kind":"agent","displayName":"Fixture","cliFlag":true,"command":["fixture"]});
+            let plugin = super::parse_manifest(std::path::Path::new(id), false, &manifest).unwrap();
+            assert_eq!(plugin.cli_flag, id == "fixture", "{id}");
+        }
+    }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1527,6 +1427,10 @@ mod tests {
         ] {
             assert!(validate_oidc_url(endpoint, false).is_ok());
             assert!(validate_oidc_url(endpoint, true).is_err());
+        }
+        for issuer in ["https://identity/tenant|user", "http://127.0.0.1/path|user"] {
+            assert!(validate_oidc_url(issuer, false).is_ok());
+            assert!(validate_oidc_url(issuer, true).is_err());
         }
         for bad in [
             "https://alice@id.example.com",
@@ -1711,9 +1615,7 @@ mod tests {
             "printf '{}\\n{}\\n'",
         ] {
             let (root, plugin) = fixture(script);
-            let result = plugin_call(&plugin, &json!({"op":"probe"}));
-            assert_eq!(result["ok"], false);
-            assert_eq!(result["error_code"], "PLUGIN_EXEC_FAILED");
+            assert!(plugin_request(&plugin, &json!({"op":"probe"})).is_err());
             fs::remove_dir_all(root).unwrap();
         }
         let (root, plugin) = fixture("printf '%06000d\\n' 1 >&2; exit 4");
@@ -1857,16 +1759,12 @@ mod tests {
     }
 
     #[test]
-    fn handover_preserves_current_and_reaps_stale_or_legacy_daemons() {
+    fn handover_preserves_current_and_stops_stale_or_legacy_daemons() {
         use std::net::TcpListener;
         for version in [Some(CITO_VERSION), Some("0.0.0"), None] {
             let (root, _) = fixture("/bin/cat");
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
-            #[expect(
-                clippy::zombie_processes,
-                reason = "Stale handover reaps the verified PID with waitpid; the current-version branch waits below."
-            )]
             let mut child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
             let pid = child.id();
             let config = NativeConfig {
@@ -1914,15 +1812,58 @@ mod tests {
             }
             assert_eq!(result.unwrap(), expected_current);
             server.join().unwrap();
-            assert_eq!(pid_alive(pid as i32), expected_current);
             if expected_current {
+                assert!(child.try_wait().unwrap().is_none());
                 child.kill().unwrap();
-                child.wait().unwrap();
             }
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                child.wait().unwrap().signal(),
+                Some(if expected_current {
+                    libc::SIGKILL
+                } else {
+                    libc::SIGTERM
+                })
+            );
             fs::remove_dir_all(root).unwrap();
         }
     }
 
+    #[test]
+    fn http_response_deadline_applies_to_progressing_headers_and_body() {
+        for (prefix, suffix) in [
+            (
+                "HTTP/1.1 200 OK\r\nX-Slow: ",
+                "abcdefghi\r\nContent-Length: 0\r\n\r\n",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n",
+                "abcdefghijkl",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nc\r\n",
+                "abcdefghijkl\r\n0\r\n\r\n",
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            server.write_all(prefix.as_bytes()).unwrap();
+            let writer = thread::spawn(move || {
+                for b in suffix.bytes() {
+                    if server.write_all(&[b]).is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+            });
+            assert!(
+                read_http_until(&mut client, Instant::now() + Duration::from_millis(45)).is_err()
+            );
+            drop(client);
+            writer.join().unwrap();
+        }
+    }
     #[test]
     fn http_response_bounds_and_malformed_framing_are_errors() {
         for response in [

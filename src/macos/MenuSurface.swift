@@ -24,13 +24,16 @@ extension Companion: NSMenuDelegate {
             cardMenu.removeItem(item)
         }
         guard let error = menuBannerError else { return }
-        let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
+        let message = presentationError(error)
+        let labelHeight = max(30, ceil((message as NSString).boundingRect(with:NSSize(width:320,height:CGFloat.greatestFiniteMagnitude),
+            options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:10)]).height) + 2)
+        let row = NSView(frame:NSRect(x:0,y:0,width:380,height:labelHeight+6))
         row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
         row.appearance = testAppearance
-        let label = textLabel(presentationError(error),NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
-        label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=label.stringValue
+        let label = textLabel(message,NSRect(x:12,y:3,width:320,height:labelHeight),size:10,color:CitoPalette.dangerText)
+        label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = message
         row.addSubview(label)
-        let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
+        let dismiss = MenuControl("", frame:NSRect(x:340,y:row.bounds.midY-11,width:26,height:22), symbol:"xmark")
         dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
         dismiss.style = .subtleHeader
         dismiss.toolTip = "Dismiss error"; dismiss.setAccessibilityLabel("Dismiss error")
@@ -92,8 +95,12 @@ extension Companion: NSMenuDelegate {
             ? authority.human_can_set_scope == true
             : listeners.first(where: { $0.hub == hub && ($0.scoped_id == id || $0.listener_id == id) })?.can_set_scope == true
         guard allowed else { return nil }
+        return makeScopeControl(hub:hub,user:user,scope:scope,id:id,y:y)
+    }
+
+    func makeScopeControl(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl {
         let team = scope == "workspace"
-        let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill")
+        let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill", paddingX:9)
         control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
         updateScopeControl(control, scope:scope, hub:hub, user:user)
         return control
@@ -108,6 +115,20 @@ extension Companion: NSMenuDelegate {
         control.toolTip = team
             ? "Visibility: Team — anyone connected to '\(hub)' can discover and message this node. Click to restrict to Only Me."
             : "Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(hub)' can message this node. Click to share with Team."
+    }
+
+    private func makeAddressCopyControl(_ address: String, id: String, height: CGFloat) -> MenuControl {
+        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        let title = compactAddressLabel(address,maxWidth:220,font:font,paddingX:3)
+        let width = min(220, max(MenuControl.intrinsicWidth("✓ Copied",font:font,leadingSymbol:"doc.on.doc",paddingX:3),
+                                MenuControl.intrinsicWidth(title,font:font,leadingSymbol:"doc.on.doc",paddingX:3)))
+        let copy = MenuControl(title,frame:NSRect(x:0,y:7,width:width,height:height),leadingSymbol:"doc.on.doc",paddingX:3)
+        copy.identifier = NSUserInterfaceItemIdentifier(id)
+        copy.label.font = font; copy.label.alignment = .left
+        copy.toolTip = address; copy.setAccessibilityLabel(address)
+        copy.layoutContents()
+        copy.pressed = { [weak self, weak copy] in self?.copyText(address,control:copy) }
+        return copy
     }
 
     func rebuild() {
@@ -211,7 +232,7 @@ extension Companion: NSMenuDelegate {
             }
             var drawerControls: [NSView] = []
             for (title, action, primary, run) in buttons {
-                let width = measureTextWidth(title, font: btnFont) + 16
+                let width = MenuControl.intrinsicWidth(title, font: btnFont)
                 let control = MenuControl(title, frame: NSRect(x: 0, y: 5, width: width, height: 22))
                 control.label.font = btnFont
                 control.style = primary ? .prominent : .neutral
@@ -228,8 +249,10 @@ extension Companion: NSMenuDelegate {
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = statusText; drawer.addSubview(detail)
-            layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
-            if hub.error != nil || measureTextWidth(statusText,font:detail.font ?? .systemFont(ofSize:11)) > detail.frame.width {
+            let detailWidth = drawer.bounds.width - 24 - drawerControls.reduce(CGFloat(0)) { $0 + $1.frame.width + 4 }
+            let detailBounds = NSRect(x: 0, y: 0, width: max(0, detailWidth), height: detail.bounds.height)
+            let drawingWidth = detail.cell?.drawingRect(forBounds: detailBounds).width ?? detailBounds.width
+            if hub.error != nil || detail.requiredSingleLineWidth > drawingWidth {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
@@ -265,9 +288,10 @@ extension Companion: NSMenuDelegate {
             } else {
                 title = hub.name
             }
-            let compactChips = hubs.count > 2 && totalHubPillsWidth > stripWidth
-            let chipCap = stripWidth >= 92 ? floor((stripWidth-4)/2) : stripWidth
-            let width: CGFloat = isCompactIcon ? 44 : (compactChips ? chipCap : min(180, measureTextWidth(title, font: btnFont) + 26))
+            let compactChips = totalHubPillsWidth + 4 > stripWidth
+            let fullCap = stripWidth - 4
+            let chipCap = hubs.count > 1 && stripWidth >= 92 ? floor((stripWidth-8)/2) : fullCap
+            let width: CGFloat = isCompactIcon ? 44 : min(compactChips ? chipCap : fullCap, 180, measureTextWidth(title, font: btnFont) + 26)
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
             pill.style = hub.name == effectiveTargetHub
@@ -310,21 +334,13 @@ extension Companion: NSMenuDelegate {
             hubPills.append(pill)
         }
         if showHubControls {
-            let strip = mountPillStrip(in: header, frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22),
-                           id: "header_hub_strip", alignment: .trailing, pills: hubPills) { view in
+            mountPillStrip(in: header, frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22),
+                           id: "header_hub_strip", alignment: .trailing, trackRadius: hubs.count > 1 ? 11 : nil, pills: hubPills) { view in
                 let id = view.identifier?.rawValue ?? ""
                 return id == "hub:\(effectiveTargetHub)"
             }
-            if hubs.count > 1 {
-                strip.wantsLayer = true
-                strip.backgroundColor = NSColor.labelColor.withAppearanceAlpha(0.06)
-                strip.drawsBackground = true
-                strip.layer?.cornerRadius = 11
-                strip.layer?.masksToBounds = true
-            }
         }
         var activeRows: [(id: String, view: NSView)] = []
-        let home = NSHomeDirectory()
         let map = harnessMap
         let targetHub = effectiveTargetHub
         let listeners = self.listeners.filter { targetHub.isEmpty || $0.hub == targetHub }
@@ -377,22 +393,12 @@ extension Companion: NSMenuDelegate {
                 aboutLabel.lineBreakMode = .byTruncatingMiddle
                 aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
             }
-            let short = listener.display_address
-            let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-            let shownAddress = compactAddressLabel(short,maxWidth:220,font:copyFont,paddingX:3)
-            let copyWidth = min(220,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3)))
-            let copy = MenuControl(shownAddress, frame: NSRect(x: titleX, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
-            copy.label.font = copyFont
+            let copy = makeAddressCopyControl(listener.display_address,id:"copy:\(listener.scoped_id)",height:19)
+            let copyWidth = copy.frame.width
+            copy.frame.origin.x = titleX
             copy.style = .subtleHeader
-            copy.toolTip = short; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
-            copy.setAccessibilityLabel(short)
-            copy.label.alignment = .left
-            copy.layoutContents()
-            copy.pressed = { [weak self, weak copy] in
-                self?.copyText(listener.display_address, control: copy)
-            }
             card.addSubview(copy)
-            let cwd = listener.cwd == home ? "~" : listener.cwd.hasPrefix(home + "/") ? "~" + listener.cwd.dropFirst(home.count) : listener.cwd
+            let cwd = compactHomePath(listener.cwd)
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText: String
             pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
@@ -437,7 +443,7 @@ extension Companion: NSMenuDelegate {
                 let field = existingRenameField ?? NSTextField(string: renameDraft ?? listener.title)
                 field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
                 field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(listener.scoped_id)")
-                field.setAccessibilityLabel("Session title")
+                field.setAccessibilityLabel("Conversation title")
                 field.delegate = self; field.font = .systemFont(ofSize: 13)
                 if let draft = renameDraft, field.stringValue != draft { field.stringValue = draft }
                 card.addSubview(field); renameField = field
@@ -450,7 +456,9 @@ extension Companion: NSMenuDelegate {
                     }
                 }
             } else {
-                let titleW = max(122, min(rightEdge - titleX - 28, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
+                let maxTitleW = max(0, rightEdge - titleX - 28)
+                let measuredW = measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))
+                let titleW = min(maxTitleW, max(44, ceil(measuredW) + 4))
                 title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
                 let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 6, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
                 renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")
@@ -518,7 +526,6 @@ extension Companion: NSMenuDelegate {
             _ = host(remoteHeader, id: "my_remote_header")
             if !myRemoteCollapsed {
                 var remoteRows: [(id: String, view: NSView)] = []
-                let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
                 for peer in myRemote {
                     let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 34))
                     let rowId = "remote:\(peer.scoped_id)"
@@ -527,19 +534,9 @@ extension Companion: NSMenuDelegate {
                     hostIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Remote host")
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
-                    let short = peer.display_address
-                    let shownAddress = compactAddressLabel(short,maxWidth:220,font:copyFont,paddingX:3)
-                    let copyWidth = min(220,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3)))
-                    let copy = MenuControl(shownAddress, frame: NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20), leadingSymbol: "doc.on.doc")
-                    copy.label.font = copyFont
-                    copy.label.alignment = .left
-                    copy.toolTip = short
-                    copy.setAccessibilityLabel(short)
-                    copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
-                    copy.layoutContents()
-                    copy.pressed = { [weak self, weak copy] in
-                        self?.copyText(peer.display_address, control: copy)
-                    }
+                    let copy = makeAddressCopyControl(peer.display_address,id:"copy_remote:\(peer.scoped_id)",height:20)
+                    let copyWidth = copy.frame.width
+                    copy.frame.origin.x = 368 - copyWidth
                     row.addSubview(copy)
                     let cleanHost = cleanHostDisplay(peer.host_name)
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
@@ -675,17 +672,20 @@ extension Companion: NSMenuDelegate {
                     var candidateRows: [(id: String, view: NSView)] = []
                     for c in items {
                         let needsReload = c.needs_reload == true
-                        let rowHeight: CGFloat = needsReload ? 58 : 44
+                        let hintText = c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen"
+                        let hintHeight = needsReload ? max(14, ceil((hintText as NSString).boundingRect(with:NSSize(width:244,height:CGFloat.greatestFiniteMagnitude),
+                            options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:10)]).height) + 2) : 0
+                        let rowHeight: CGFloat = needsReload ? 44+hintHeight : 44
                         let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
                         let rowId = "candidate:\(c.harness):\(c.session_id)"
                         row.identifier = NSUserInterfaceItemIdentifier(rowId)
-                        let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
+                        let shortCwd = compactHomePath(c.cwd)
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
                         let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, harnessName: visual.name, customTitle: c.custom_title == true)
                         let info = textLabel(candidateTitle, NSRect(x:46,y:rowHeight-21,width:244,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
-                        let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix, maxWidth:244),NSRect(x:46,y:needsReload ? 21 : 6,width:244,height:14),size:10.5,color:CitoPalette.secondaryText)
+                        let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix, maxWidth:244),NSRect(x:46,y:needsReload ? hintHeight+7 : 6,width:244,height:14),size:10.5,color:CitoPalette.secondaryText)
                         location.lineBreakMode = .byTruncatingMiddle
                         location.toolTip = "\(shortCwd)\(branchSuffix)"
                         location.identifier = NSUserInterfaceItemIdentifier("candidate_cwd:\(c.harness):\(c.session_id)")
@@ -694,7 +694,8 @@ extension Companion: NSMenuDelegate {
                         info.identifier=NSUserInterfaceItemIdentifier("candidate_title:\(c.harness):\(c.session_id)")
                         row.addSubview(info)
                         if needsReload {
-                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:46,y:5,width:244,height:14),size:10,color:CitoPalette.warningText)
+                            let hint=textLabel(hintText,NSRect(x:46,y:5,width:244,height:hintHeight),size:10,color:CitoPalette.warningText)
+                            hint.maximumNumberOfLines = 0; hint.lineBreakMode = .byWordWrapping; hint.cell?.wraps = true
                             hint.toolTip=hint.stringValue
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
@@ -714,12 +715,16 @@ extension Companion: NSMenuDelegate {
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
                         listenBtn.toolTip = "Start listening in \(candidateTitle)"
                         listenBtn.isEnabled = !targetHub.isEmpty
+                        pendingLabel(listenBtn,isPending("listen_session",hub:targetHub,target:"\(c.harness):\(c.session_id)"),"Listening…")
+                        info.frame.size.width = min(info.frame.width, listenBtn.frame.minX - 54)
+                        location.frame.size.width = info.frame.width
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
                             self.pendingMutation = true
                             listenBtn?.setLeadingSymbol(nil)
                             listenBtn?.label.stringValue = "…"
-                            listenBtn?.setAccessibilityLabel("…")
+                            listenBtn?.isEnabled = false
+                            listenBtn?.setAccessibilityLabel("Listening…")
                             var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.custom_title == true ? c.title : candidateTitle]
                             if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
                             action["hub"] = targetHub
@@ -793,7 +798,7 @@ extension Companion: NSMenuDelegate {
             stopAll.pressed = { self.emit(["op": "unlisten_all", "hub":targetHub]) }
             footer.addSubview(stopAll)
         }
-        let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: MenuControl.intrinsicWidth("Settings…", leadingSymbol: "gearshape", paddingX: 6), height: 24), leadingSymbol: "gearshape")
+        let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: MenuControl.intrinsicWidth("Settings…", leadingSymbol: "gearshape", paddingX: 6), height: 24), leadingSymbol: "gearshape", paddingX: 6)
         openSettings.identifier = NSUserInterfaceItemIdentifier("open_settings")
         openSettings.style = .subtleHeader
         openSettings.toolTip = "Settings… (⌘,)"

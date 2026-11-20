@@ -10,7 +10,7 @@ impl Fixture {
         let dir =
             std::env::temp_dir().join(format!("cito-state-{}", crate::plugins::random_uuid_v4()));
         let state = LocalState::open(&dir)?;
-        state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token) VALUES('local','c_1','none#alice','alice','host','host','agent','s','','Target','','workspace','ACTIVE',1,'owner')", &[])?;
+        state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token,hub_url) VALUES('local','c_1','none#alice','alice','host','host','agent','s','','Target','','workspace','ACTIVE',1,'owner','local://')", &[])?;
         Ok(Self { state, dir })
     }
     fn listener(&self) -> Result<Value, String> {
@@ -19,7 +19,7 @@ impl Fixture {
             .ok_or_else(|| "Missing fixture listener".into())
     }
     fn seed(&self, id: &str, seq: usize) -> Result<(), String> {
-        self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,'c_1',?,1,'alice','host.local','','message','2026-01-01T00:00:00.000Z',?,'RECEIVED')", &[json!(id), json!(seq), json!(now_ms()+60_000)])?;
+        self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'c_1',?,1,'alice','host.local','','message','2026-01-01T00:00:00.000Z',?,'RECEIVED','local://','none#alice')", &[json!(id), json!(seq), json!(now_ms()+60_000)])?;
         Ok(())
     }
     fn rows(&self) -> Result<Vec<Value>, String> {
@@ -33,6 +33,183 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+#[test]
+fn passive_restore_and_claim_fence_foreign_rows_before_freezing_a_card() -> Result<(), String> {
+    let f = Fixture::new()?;
+    let l = f.listener()?;
+    for (i, id) in [
+        "active-foreign",
+        "passive-foreign",
+        "driver-foreign",
+        "local",
+    ]
+    .iter()
+    .enumerate()
+    {
+        f.seed(id, i)?;
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET hub_url='other' WHERE signal_id LIKE '%-foreign'",
+        &[],
+    )?;
+    f.state.db.execute("UPDATE local_signals SET state='STORED_PASSIVE' WHERE signal_id IN ('passive-foreign','driver-foreign','local')",&[])?;
+    f.state.db.execute("UPDATE local_signals SET held_reason='driver_unavailable' WHERE signal_id='driver-foreign'",&[])?;
+    f.state.restore_passive("local", &l)?;
+    assert!(f.rows()?[..3]
+        .iter()
+        .all(|r| r["held_reason"] == "authority_mismatch"));
+    f.seed("after-restore", 4)?;
+    f.state.db.execute(
+        "UPDATE local_signals SET principal_id='none#bob' WHERE signal_id='after-restore'",
+        &[],
+    )?;
+    let rows = f.state.claim_wake_batch_for("local", &l, false)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["signal_id"], "local");
+    Ok(())
+}
+
+#[test]
+fn partially_read_batch_stops_before_new_effect_and_releases_unread_survivor() -> Result<(), String>
+{
+    let f = Fixture::new()?;
+    let l = f.listener()?;
+    f.seed("read", 1)?;
+    f.seed("unread", 2)?;
+    let old = f.state.claim_wake_batch_for("local", &l, false)?;
+    f.state
+        .acknowledge("local", "c_1", &[json!("read")], "host:agent")?;
+    f.state.check_dispatch_in_flight(&l, &old[0], false)?;
+    assert!(f
+        .state
+        .check_dispatch(&l, &old[0], false)
+        .unwrap_err()
+        .starts_with("DISPATCH_STOPPED:"));
+    let new = f.state.claim_wake_batch_for("local", &l, false)?;
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0]["signal_id"], "unread");
+    assert_ne!(new[0]["batch_id"], old[0]["batch_id"]);
+    Ok(())
+}
+
+#[test]
+fn unread_metadata_is_bounded_ordered_payload_free_and_authority_scoped() -> Result<(), String> {
+    let f = Fixture::new()?;
+    for index in 0..140 {
+        f.seed(&format!("signal-{index:03}"), index / 2)?;
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET message=?,batch_card=?,batch_id='batch'",
+        &[json!("x".repeat(100_000)), json!("y".repeat(100_000))],
+    )?;
+    f.state.db.execute(
+        "UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='signal-001'",
+        &[],
+    )?;
+    let rows = f
+        .state
+        .current_signal_metadata("local", "c_1", 0, 128, None)?;
+    assert_eq!(rows.len(), 128);
+    assert_eq!(rows[0]["signal_id"], "signal-000");
+    assert_eq!(rows[1]["signal_id"], "signal-002");
+    for row in &rows {
+        assert_eq!(row.as_object().unwrap().len(), 9);
+        assert!(row.get("message").is_none() && row.get("batch_card").is_none());
+    }
+    let remaining = f
+        .state
+        .current_signal_metadata("local", "c_1", 64, 128, None)?;
+    assert_eq!(remaining.len(), 10);
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 139);
+    f.state.db.execute(
+        "UPDATE local_signals SET expires_at_ms=0 WHERE signal_id='signal-002'",
+        &[],
+    )?;
+    assert_eq!(f.state.unread_count("local", "c_1", true)?, 138);
+    assert_eq!(
+        f.state
+            .current_signal_metadata("local", "c_1", 0, 128, Some("signal-139"))?
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .current_signal_metadata("local", "c_1", 0, usize::MAX, Some("batch"))?
+            .len(),
+        139
+    );
+    f.state
+        .db
+        .execute("UPDATE local_listeners SET status='FENCED_INACTIVE'", &[])?;
+    assert!(f
+        .state
+        .current_signal_metadata("local", "c_1", 0, 128, None)?
+        .is_empty());
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 0);
+    Ok(())
+}
+
+#[test]
+fn signal_reads_and_acknowledgments_isolate_origin_and_accept_principal_aliases(
+) -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.state.db.execute(
+        "UPDATE local_listeners SET principal_id='oidc:https://id.example.com|alice'",
+        &[],
+    )?;
+    for id in [
+        "current",
+        "legacy-principal",
+        "other-principal",
+        "other-url",
+        "unbound",
+    ] {
+        f.seed(id, 1)?;
+    }
+    f.state.db.execute("UPDATE local_signals SET principal_id='oidc:https://id.example.com|alice'; UPDATE local_signals SET principal_id='https://id.example.com#alice' WHERE signal_id='legacy-principal'; UPDATE local_signals SET principal_id='none#other' WHERE signal_id='other-principal'; UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='other-url'; UPDATE local_signals SET hub_url=NULL,principal_id=NULL WHERE signal_id='unbound'",&[])?;
+    let (rows, total, unread) = f.state.query_activity("all", "")?;
+    assert_eq!((rows.len(), total, unread), (2, 2, 2));
+    assert_eq!(f.state.current_signals("local", "c_1", 1)?.len(), 1);
+    f.state.schedule_wake_retry_for(&f.listener()?, 5000)?;
+    f.state.isolate_stale_signals(&f.listener()?)?;
+    for row in f.rows()? {
+        if !["current", "legacy-principal"].contains(&string(&row, "signal_id")) {
+            assert_eq!(row["state"], "STORED_PASSIVE");
+            assert_eq!(row["held_reason"], "authority_mismatch");
+        }
+    }
+    f.state.acknowledge(
+        "local",
+        "c_1",
+        &[
+            json!("current"),
+            json!("legacy-principal"),
+            json!("other-principal"),
+            json!("other-url"),
+            json!("unbound"),
+        ],
+        "host:agent",
+    )?;
+    let acks = f.state.db.query(
+        "SELECT signal_id FROM pending_hub_acks ORDER BY signal_id",
+        &[],
+    )?;
+    assert_eq!(
+        acks,
+        vec![
+            json!({"signal_id":"current"}),
+            json!({"signal_id":"legacy-principal"})
+        ]
+    );
+    assert!(f
+        .state
+        .db
+        .query("SELECT * FROM wake_retries", &[])?
+        .is_empty());
+    assert_eq!(f.state.query_activity("all", "")?.2, 0);
+    Ok(())
+}
+
 #[test]
 fn hub_clock_remaining_lifetime_survives_client_skew_at_admission() -> Result<(), String> {
     for skew in [-1_860_000i64, 1_860_000] {
@@ -63,6 +240,33 @@ fn hub_clock_remaining_lifetime_survives_client_skew_at_admission() -> Result<()
     }
     Ok(())
 }
+#[test]
+fn streaming_state_reads_see_committed_rows_while_another_connection_writes() -> Result<(), String>
+{
+    let f = Fixture::new()?;
+    f.seed("visible", 1)?;
+    let writer = Database::open(&f.dir.join("state.sqlite"))?;
+    f.state.db.execute("PRAGMA busy_timeout=0", &[])?;
+    writer.transaction(|connection| {
+        connection.execute("UPDATE local_signals SET acknowledged_at_ms=1", &[])?;
+        let metadata = f
+            .state
+            .current_signal_metadata("local", "c_1", 0, 1, None)?;
+        assert_eq!(metadata[0]["signal_id"], "visible");
+        assert_eq!(f.state.unread_count("local", "c_1", false)?, 1);
+        assert_eq!(
+            f.state.current_signals("local", "c_1", 1)?[0]["signal_id"],
+            "visible"
+        );
+        let (page, total, unread) = f.state.query_activity("unread", "")?;
+        assert_eq!((total, unread), (1, 1));
+        assert_eq!(page[0]["signal_id"], "visible");
+        Ok(())
+    })?;
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 0);
+    Ok(())
+}
+
 #[test]
 fn current_schema_open_does_not_acquire_a_write_transaction() -> Result<(), String> {
     let f = Fixture::new()?;
@@ -247,9 +451,19 @@ fn signal_origin_upgrade_leaves_legacy_rows_unbound_and_new_admissions_immutable
     let rows = state
         .db
         .query("SELECT * FROM pending_hub_acks ORDER BY signal_id", &[])?;
-    assert!(rows[0]["hub_url"].is_null() && rows[0]["principal_id"].is_null());
-    assert_eq!(rows[1]["hub_url"], "local://");
-    assert_eq!(rows[1]["principal_id"], "none#alice");
+    assert!(
+        rows.is_empty(),
+        "A changed principal cannot acknowledge retained or legacy signals"
+    );
+    let signals = state
+        .db
+        .query("SELECT * FROM local_signals ORDER BY signal_id", &[])?;
+    assert!(signals[0]["hub_url"].is_null() && signals[0]["principal_id"].is_null());
+    assert_eq!(signals[1]["hub_url"], "local://");
+    assert_eq!(signals[1]["principal_id"], "none#alice");
+    assert!(signals
+        .iter()
+        .all(|signal| signal["acknowledged_at_ms"].is_null()));
     Ok(())
 }
 #[test]
@@ -285,7 +499,7 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
     ] {
         assert_eq!(f.state.query_activity("all", query)?.1, 1, "{query}");
     }
-    f.state.db.execute("UPDATE local_signals SET hub='work',from_user='Alice.Smith',from_harness='fixture',from_listener_id='alice-smith-abcdef1234567890'", &[])?;
+    f.state.db.execute("UPDATE local_listeners SET hub='work'; UPDATE local_signals SET hub='work',from_user='Alice.Smith',from_harness='fixture',from_listener_id='alice-smith-abcdef1234567890'", &[])?;
     for query in [
         "alice-smith/fixture#abcd",
         "work:alice-smith/fixture#abcd",
@@ -294,9 +508,10 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
         let (rows, total, unread) = f.state.query_activity("all", query)?;
         assert_eq!((rows.len(), total, unread), (1, 1, 1), "{query}");
     }
-    f.state
-        .db
-        .execute("UPDATE local_signals SET hub='local'", &[])?;
+    f.state.db.execute(
+        "UPDATE local_listeners SET hub='local'; UPDATE local_signals SET hub='local'",
+        &[],
+    )?;
     let batch = f.state.claim_wake_batch("local", "c_1")?;
     f.state.finish_wake_batch(
         &f.listener()?,

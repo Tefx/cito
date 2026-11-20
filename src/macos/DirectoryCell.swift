@@ -104,13 +104,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
         let shownAddress = compactAddressLabel(short,maxWidth:190,font:copyFont,paddingX:11)
         let copyWidth = min(190,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc")))
-        if !keepCopyFeedback {
-            copyControl.feedbackTimer?.invalidate()
-            copyControl.feedbackTimer = nil
-            copyControl.restingTitle = nil
-            copyControl.restingAccessibilityLabel = nil
-            copyControl.label.stringValue = shownAddress
-        }
+        if !keepCopyFeedback { copyControl.clearFeedback(title: shownAddress, accessibilityLabel: short) }
         copyControl.isHidden = false
         copyControl.frame = NSRect(x: 544 - MenuControl.intrinsicWidth("Message", leadingSymbol:"bubble.left") - 6 - copyWidth, y: 15, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
@@ -118,7 +112,6 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
         copyControl.applyVisualState()
         if keepCopyFeedback { copyControl.restingTitle = shownAddress; copyControl.restingAccessibilityLabel = short }
-        else { copyControl.setAccessibilityLabel(short) }
         copyControl.toolTip = short
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
         copyControl.pressed = { [weak copyControl] in
@@ -148,8 +141,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
         let cwd = peer.cwd ?? ""
-        let home = NSHomeDirectory()
-        let shortCwd = cwd == home ? "~" : cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd
+        let shortCwd = compactHomePath(cwd)
         let context = (peer.repo ?? "").isEmpty ? (peer.harness == "human" ? "" : shortCwd) : peer.repo ?? ""
         let repoText = (context.isEmpty ? "" : " · \(context)") + branchSuffix
         line1RepoLabel.font = .systemFont(ofSize:11)
@@ -226,24 +218,19 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.identifier = NSUserInterfaceItemIdentifier("reply_activity:\(item.signal_id)")
         msgControl.pressed = canReply ? onReply : nil
         copyControl.isHidden = false
-        if !keepCopyFeedback {
-            copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
-            copyControl.restingTitle = nil
-            copyControl.restingAccessibilityLabel = nil
-            copyControl.label.stringValue = "Copy"
-        }
+        if !keepCopyFeedback { copyControl.clearFeedback(title: "Copy", accessibilityLabel: "Copy message") }
+        else { copyControl.restingTitle = "Copy"; copyControl.restingAccessibilityLabel = "Copy message" }
         copyControl.style = .neutral
         copyControl.frame = NSRect(x:copyX,y:rowHeight-30,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
         copyControl.label.font = copyFont
-        if !keepCopyFeedback { copyControl.setAccessibilityLabel("Copy message") }
         copyControl.toolTip = "Copy message"
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_activity_msg:\(item.signal_id)")
         copyControl.pressed = { [weak copyControl] in if let c = copyControl { onCopy(c) } }
         copyControl.applyVisualState()
-        let held = ["stale_generation":"Session reloaded","driver_unavailable":"App unavailable",
-            "session_switched":"Session changed","unlistened":"Listening paused",
+        let held = ["stale_generation":"App reloaded","driver_unavailable":"App unavailable",
+            "session_switched":"Conversation changed","unlistened":"Listening paused",
             "unlistened_before_dispatch":"Listening paused","fenced_before_dispatch":"Connection changed",
             "sender_ack_timeout":"Awaiting acknowledgment"][item.held_reason ?? ""]
         let senderTitle = distinctAbout(item.from_title,title:"",user:item.from_user)

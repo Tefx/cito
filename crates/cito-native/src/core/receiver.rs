@@ -8,6 +8,47 @@ use crate::plugins::{now_ms, PluginDescriptor};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+// LocalState operations such as admit and finish_wake_batch own their SQLite
+// transactions. Fence those short commits against slot retirement without ever
+// draining the network registration lock. ':' cannot occur in a Hub name.
+impl HubClient {
+    fn commit_gate(
+        &self,
+        state: &LocalState,
+    ) -> Result<std::sync::Arc<std::sync::Mutex<()>>, String> {
+        state.registration_lock(&format!("commit:{}", self.name))
+    }
+    pub(super) fn with_current_state<T>(
+        &self,
+        state: &LocalState,
+        f: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let gate = self.commit_gate(state)?;
+        let _guard = gate
+            .lock()
+            .map_err(|_| "STATE_ERROR: Local commit lock poisoned")?;
+        self.check_current()?;
+        f()
+    }
+    pub(super) fn check_current(&self) -> Result<(), String> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            Err("STALE_GENERATION: Hub authority replaced".into())
+        } else {
+            Ok(())
+        }
+    }
+    pub(super) fn close_for_state(&self, state: &LocalState) -> Result<(), String> {
+        self.close();
+        // A writer admitted before close must finish before replacement/purge.
+        let gate = self.commit_gate(state)?;
+        drop(
+            gate.lock()
+                .map_err(|_| "STATE_ERROR: Local commit lock poisoned")?,
+        );
+        Ok(())
+    }
+}
+
 pub fn plugin_request(
     plugin: &PluginDescriptor,
     request: &Value,
@@ -70,12 +111,12 @@ fn plugin_request_owned(
                             r.is_object()
                                 && r["state"] == "ACTIVE"
                                 && remote_matches_listener(r, row, channel)
-                                && r["channels"]
-                                    .get(channel)
-                                    .is_none_or(|ch| ch["state"] == "ACTIVE")
+                                && r["channels"][channel]["state"] == "ACTIVE"
                         })
                     else {
-                        state.fence_listener_for(row, "fenced_before_dispatch")?;
+                        client.with_current_state(state, || {
+                            state.fence_listener_for(row, "fenced_before_dispatch")
+                        })?;
                         return Err("STALE_GENERATION: Remote listener changed during wake".into());
                     };
                     if renewal_due {
@@ -99,12 +140,14 @@ fn plugin_request_owned(
                             if let (Some((state, row)), Some(acked)) =
                                 (fence, v["acked_ids"].as_array())
                             {
-                                state.acknowledge(
-                                    string(row, "hub"),
-                                    string(row, "listener_id"),
-                                    acked,
-                                    string(claim, "channel_id"),
-                                )?;
+                                client.with_current_state(state, || {
+                                    state.acknowledge(
+                                        string(row, "hub"),
+                                        string(row, "listener_id"),
+                                        acked,
+                                        string(claim, "channel_id"),
+                                    )
+                                })?;
                             }
                             claim_loss = Some(if v["reason"] == "already_acked" {
                                 ClaimLoss::AlreadyAcked
@@ -124,7 +167,13 @@ fn plugin_request_owned(
                 }
                 if let Some((state, row)) = fence {
                     if let Some(batch) = row.get("wake_batch") {
-                        state.check_dispatch_in_flight(row, batch, true)?;
+                        if let Some((client, _)) = renew {
+                            client.with_current_state(state, || {
+                                state.check_dispatch_in_flight(row, batch, true)
+                            })?;
+                        } else {
+                            state.check_dispatch_in_flight(row, batch, true)?;
+                        }
                     }
                 }
                 last_renew = elapsed;
@@ -174,6 +223,15 @@ pub fn poll_listener(
 ) -> Result<(), String> {
     let id = string(row, "listener_id");
     let hub = &client.name;
+    if row["hub_url"] != client.config["url"]
+        || !super::auth::principal_ids_equal(
+            string(row, "principal_id"),
+            string(&client.identity, "principal_id"),
+        )
+    {
+        return Err("STALE_GENERATION: Listener authority changed".into());
+    }
+    client.with_current_state(local, || local.isolate_stale_signals(row))?;
     let name = format!("{}_{}", string(row, "host_id"), id);
     let added=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
     // A fallback response keeps its own clock observation, including time spent
@@ -198,8 +256,12 @@ pub fn poll_listener(
             .kv_get(id)?
             .ok_or("LISTENER_NOT_FOUND: Human inbox missing")?;
         let channel = format!("{}:human", string(row, "host_id"));
-        if !remote_matches_listener(&remote, row, &channel) {
-            local.fence_listener_for(row, "fenced_before_dispatch")?;
+        if !remote_matches_listener(&remote, row, &channel)
+            || remote["channels"][&channel]["state"] != "ACTIVE"
+        {
+            client.with_current_state(local, || {
+                local.fence_listener_for(row, "fenced_before_dispatch")
+            })?;
             return Err("STALE_GENERATION: Human attachment superseded".into());
         }
         super::daemon::DaemonService::reconcile_human_scope(
@@ -210,6 +272,19 @@ pub fn poll_listener(
         )?;
         Some(guard)
     } else {
+        let remote = client
+            .kv_get(id)?
+            .ok_or("LISTENER_NOT_FOUND: Listener missing")?
+            .0;
+        let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
+        if !remote_matches_listener(&remote, row, &channel)
+            || remote["channels"][&channel]["state"] != "ACTIVE"
+        {
+            client.with_current_state(local, || {
+                local.fence_listener_for(row, "fenced_before_dispatch")
+            })?;
+            return Err("STALE_GENERATION: Listener attachment superseded".into());
+        }
         None
     };
     for item in backlog["backlog"].as_array().into_iter().flatten() {
@@ -234,15 +309,17 @@ pub fn poll_listener(
             .filter(|v| v.is_number())
             .or_else(|| signal.get("acked_at_ms"))
             .unwrap_or(&Value::Null);
-        let admitted = local.admit(
-            hub,
-            row,
-            &signal,
-            item["seq"].as_u64().unwrap_or(0),
-            &iso(created),
-            LocalState::signal_deadline(created, admission_hub_now, now_ms()),
-            acked,
-        )?;
+        let admitted = client.with_current_state(local, || {
+            local.admit(
+                hub,
+                row,
+                &signal,
+                item["seq"].as_u64().unwrap_or(0),
+                &iso(created),
+                LocalState::signal_deadline(created, admission_hub_now, now_ms()),
+                acked,
+            )
+        })?;
         if admitted && !acked.is_number() {
             on_admit(&signal);
         }
@@ -258,16 +335,18 @@ pub fn poll_listener(
         .listener(hub, id)?
         .map(|r| r["ack_scan_seq"].as_u64().unwrap_or(0))
         .unwrap_or(0);
-    let mut pending = local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND seq>? ORDER BY seq LIMIT 128",&[json!(hub),json!(id),json!(cursor)])?;
+    let mut pending = local.current_signal_metadata(hub, id, cursor, 128, None)?;
     if pending.is_empty() && cursor > 0 {
-        pending = local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY seq LIMIT 128",&[json!(hub),json!(id)])?;
+        pending = local.current_signal_metadata(hub, id, 0, 128, None)?;
     }
     if !pending.is_empty() {
         if let Ok(remote) = client.rpc("stream_get_message",&json!({"stream":"CITO_SIGNALS","seqs":pending.iter().map(|r|r["seq"].clone()).collect::<Vec<_>>()})) {
             local.db.transaction(|db| {
+                client.check_current()?;
                 for message in remote["messages"].as_array().into_iter().flatten() {
                     if !message["acked_at_ms"].is_null() && pending.iter().any(|p|p["seq"] == message["seq"] && p["signal_id"] == message["signal_id"]) {
                         db.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[message["acked_at_ms"].clone(),json!(hub),json!(id),message["signal_id"].clone()])?;
+                        super::state::reconcile_wake_retry(db, hub, id)?;
                     }
                 }
                 db.execute("UPDATE local_listeners SET ack_scan_seq=? WHERE hub=? AND listener_id=?",&[pending.last().map(|r|r["seq"].clone()).unwrap_or(json!(0)),json!(hub),json!(id)])?;
@@ -289,7 +368,7 @@ pub fn poll_listener(
         return Ok(());
     }
     // A losing channel retries after the remote claim lease, preserving unread state.
-    local.restore_passive(hub, row)?;
+    client.with_current_state(local, || local.restore_passive(hub, row))?;
     if string(row, "harness") == "human" {
         return Ok(());
     }
@@ -318,8 +397,23 @@ pub fn probe_listener(
         &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"cwd":row["cwd"],"state_dir":state_dir}),
         None,
         Some((local, row)),
-    )?;
+    ).unwrap_or_else(|error| json!({"ok":false,"error":error}));
     apply_probe(local, client, row, &result)
+}
+
+pub(super) fn settle_hard_exit(
+    c: &super::database::Connection,
+    row: &Value,
+    reason: &str,
+) -> Result<(), String> {
+    let target = [row["hub"].clone(), row["listener_id"].clone()];
+    c.execute(
+        "DELETE FROM wake_retries WHERE hub=? AND listener_id=?",
+        &target,
+    )?;
+    c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?,dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING')", &[json!(reason),target[0].clone(),target[1].clone()])?;
+    c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[target[0].clone(),target[1].clone(),row["hub_url"].clone()])?;
+    Ok(())
 }
 
 pub(super) fn apply_probe(
@@ -328,22 +422,21 @@ pub(super) fn apply_probe(
     row: &Value,
     result: &Value,
 ) -> Result<(), String> {
-    if result["ok"] != true {
-        return Err(crate::support::response_diagnostic(
-            result,
-            "Session probe failed",
-        ));
-    }
-    let status = string(result, "status");
+    let status = if result["ok"] == true {
+        string(result, "status")
+    } else {
+        "unknown"
+    };
     let failures = if status == "alive" {
         0
     } else {
         row["consecutive_probe_failures"].as_u64().unwrap_or(0) + 1
     };
-    let revoke = matches!(
+    let definitive = matches!(
         status,
         "switched" | "closed_definitive" | "session_switched"
-    ) || failures >= 3;
+    );
+    let revoke = definitive || failures >= 3;
     // Never hold the local database mutex while waiting for registration authority.
     let registration = local.registration_lock(&client.name)?;
     let _registration = if revoke {
@@ -356,12 +449,12 @@ pub(super) fn apply_probe(
         None
     };
     let revoked = local.db.transaction(|c| {
+        client.check_current()?;
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
-            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',dispatcher_token=NULL,lease_until_ms=0,updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND binding_generation=?4 AND owner_token=?5 AND status='ACTIVE' AND (?6 OR (lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND s.state='DISPATCHING' AND s.dispatcher_token IS NOT NULL AND s.acknowledged_at_ms IS NULL)))", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone(),json!(definitive)])?;
             if changed > 0 {
-                c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
-                c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[row["hub"].clone(),row["listener_id"].clone(),client.config["url"].clone()])?;
+                settle_hard_exit(c,row,"unlistened")?;
             }
             return Ok(changed > 0);
         }
@@ -393,7 +486,9 @@ fn dispatch_listener(
     let id = string(row, "listener_id");
     let hub = &client.name;
     let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
-    let batch = local.claim_wake_batch_for(hub, row, qualify_reply_ids(state_dir, hub))?;
+    let qualify = qualify_reply_ids(state_dir, hub);
+    let batch =
+        client.with_current_state(local, || local.claim_wake_batch_for(hub, row, qualify))?;
     if batch.is_empty() {
         return Ok(());
     }
@@ -404,32 +499,36 @@ fn dispatch_listener(
     let claimed = match client.rpc("signal_claim_dispatch", &claim) {
         Ok(v) => v,
         Err(e) => {
-            local.finish_wake_batch(row, first, "RECEIVED", None, false, false, false, false)?;
-            local.schedule_wake_retry_for(row, 1500)?;
+            client.with_current_state(local, || {
+                local
+                    .finish_wake_batch(row, first, "RECEIVED", None, false, false, false, false)?;
+                local.schedule_wake_retry_for(row, 1500)
+            })?;
             return Err(e);
         }
     };
     if claimed["claimed"] != true {
-        if let Some(acked) = claimed["acked_ids"].as_array() {
-            local.acknowledge(hub, id, acked, &channel)?;
-        }
-        let re_batch = claimed["reason"] == "already_acked";
-        local.finish_wake_batch(
-            row,
-            first,
-            if re_batch {
-                "RECEIVED"
-            } else {
-                "STORED_PASSIVE"
-            },
-            None,
-            false,
-            false,
-            false,
-            re_batch,
-        )?;
-        local.schedule_wake_retry_for(row, if re_batch { 0 } else { 30_500 })?;
-        return Ok(());
+        return client.with_current_state(local, || {
+            if let Some(acked) = claimed["acked_ids"].as_array() {
+                local.acknowledge(hub, id, acked, &channel)?;
+            }
+            let re_batch = claimed["reason"] == "already_acked";
+            local.finish_wake_batch(
+                row,
+                first,
+                if re_batch {
+                    "RECEIVED"
+                } else {
+                    "STORED_PASSIVE"
+                },
+                None,
+                false,
+                false,
+                false,
+                re_batch,
+            )?;
+            local.schedule_wake_retry_for(row, if re_batch { 0 } else { 30_500 })
+        });
     }
     let queued = batch
         .iter()
@@ -460,13 +559,19 @@ fn dispatch_listener(
     let request = json!({"op":"wake","session_id":row["session_id"],"cwd":row["cwd"],"endpoint_pid":row["endpoint_pid"],"batch_id":first["batch_id"],"wake":true,"checkpoint_only":true,"text":first["batch_card"],"signals":payloads,"queue_written":queued,"queue_confirmed":confirmed,"state_dir":state_dir,"env":{}});
     let mut fenced = row.clone();
     fenced["wake_batch"] = first.clone();
-    match plugin_request_owned(
+    let delivery = plugin_request_owned(
         plugin,
         &request,
         Some((client, &claim)),
         Some((local, &fenced)),
         renewal_interval,
-    ) {
+    );
+    let commit_gate = client.commit_gate(local)?;
+    let commit = commit_gate
+        .lock()
+        .map_err(|_| "STATE_ERROR: Local commit lock poisoned")?;
+    client.check_current()?;
+    match delivery {
         Ok(result) if result["ok"] == true => {
             // One request produces one final response. These checkpoints cannot
             // cover a process death between queue insertion and that response.
@@ -508,6 +613,7 @@ fn dispatch_listener(
                         false,
                     )? && delivered
                     {
+                        drop(commit);
                         // The same transaction as completion persists pending_hub_acks.
                         // Leave them for the daemon's durable flush if the Hub is offline.
                         let _ = client.rpc(
@@ -517,25 +623,18 @@ fn dispatch_listener(
                     }
                 }
                 "session_switched" => {
+                    drop(commit);
                     // Serialize terminal revocation and detach with registration.
                     let registration = local.registration_lock(&client.name)?;
                     let _registration = registration
                         .lock()
                         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-                    local.finish_wake_batch(
-                        row,
-                        first,
-                        "STORED_PASSIVE",
-                        Some("session_switched"),
-                        written,
-                        insertion_confirmed,
-                        false,
-                        false,
-                    )?;
                     let changed=local.db.transaction(|c| {
-                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
+                        client.check_current()?;
+                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',dispatcher_token=NULL,lease_until_ms=0,updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=? AND dispatcher_token=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone(),first["dispatcher_token"].clone()])?;
                         if changed>0 {
-                            c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
+                            c.execute("UPDATE local_signals SET queue_written=MAX(queue_written,?),queue_confirmed=MAX(queue_confirmed,?) WHERE hub=? AND batch_id=? AND dispatcher_token=?", &[json!(written),json!(insertion_confirmed),json!(hub),first["batch_id"].clone(),first["dispatcher_token"].clone()])?;
+                            settle_hard_exit(c,row,"session_switched")?;
                         }
                         Ok(changed)
                     })?;
@@ -678,16 +777,23 @@ pub fn detach_channel_expected(
 }
 
 fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
-    let path = std::env::var("CITO_CONFIG_PATH")
-        .ok()
-        .and_then(|raw| {
-            crate::plugins::expand_home_dir(
-                &raw,
-                "CITO_CONFIG_PATH",
-                std::env::var("HOME").ok().as_deref(),
-            )
-            .ok()
-        })
+    qualify_reply_ids_with_options(
+        state_dir,
+        hub,
+        std::env::var("CITO_CONFIG_PATH").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("CITO_HUB").ok().as_deref(),
+    )
+}
+fn qualify_reply_ids_with_options(
+    state_dir: &std::path::Path,
+    hub: &str,
+    config_path: Option<&str>,
+    home: Option<&str>,
+    default: Option<&str>,
+) -> bool {
+    let path = config_path
+        .and_then(|raw| crate::plugins::expand_home_dir(raw, "CITO_CONFIG_PATH", home).ok())
         .unwrap_or_else(|| state_dir.join("config.json"));
     let config = std::fs::read_to_string(path).ok();
     let Some((configured_default, hubs, _)) = config
@@ -698,10 +804,9 @@ fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
     };
     let enabled = hubs.values().filter(|h| h["enabled"] != false).count();
     let count = if enabled == 0 { hubs.len() } else { enabled };
-    let default = std::env::var("CITO_HUB")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let default = default.as_deref().unwrap_or(&configured_default);
+    let default = default
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&configured_default);
     count != 1 || !matches!(default, "local" | "default")
 }
 

@@ -1,6 +1,6 @@
 use super::{
     projection::{directory_identity, wire_status},
-    shutdown_requested, DaemonService,
+    shutdown_requested, DaemonService, HubAccess,
 };
 use crate::core::{
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
@@ -14,6 +14,420 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+const STALE_HUB: &str = "STALE_GENERATION: Hub authority changed during request";
+
+#[derive(Clone, Default)]
+pub(super) struct Stops {
+    removed: usize,
+    errors: Vec<String>,
+}
+impl Stops {
+    fn apply(&mut self, access: &HubAccess, hubs: &[String], caller: &Value) {
+        for hub in hubs {
+            match access
+                .ensure_agent_stop_row(hub, string(caller, "harness"), string(caller, "session_id"))
+                .and_then(|id| access.retire_captured(hub, &id, "user"))
+            {
+                Ok(active) => self.removed += usize::from(active),
+                Err(e) => self.errors.push(format!("{hub}: {e}")),
+            }
+        }
+    }
+    fn result(self) -> Result<Value, String> {
+        if !self.errors.is_empty() {
+            return Err(format!("DETACH_PENDING: {}", self.errors.join("; ")));
+        }
+        Ok(
+            json!({"ok":true,"status":if self.removed>0 {"unlistened"} else {"not_listening"},"removed":self.removed}),
+        )
+    }
+}
+
+/// A batch action commits local stop intent first. Drain each remote Hub once,
+/// outside service, before reporting its existing pending/error contract.
+#[derive(Default)]
+pub(super) struct Detaches(std::collections::BTreeSet<String>);
+impl Detaches {
+    pub(super) fn retire(
+        &mut self,
+        s: &DaemonService,
+        hub: &str,
+        id: &str,
+        reason: &str,
+    ) -> Result<bool, String> {
+        let active = s.retire_local_locked(hub, id, reason, None, None)?;
+        if s.slots.contains_key(hub) {
+            self.0.insert(hub.into());
+        }
+        Ok(active)
+    }
+    pub(super) fn settle(self, value: Value, pending_is_error: bool) -> ToolCall {
+        if self.0.is_empty() {
+            ToolCall::Ready(value)
+        } else {
+            ToolCall::Drain {
+                batch: self,
+                value,
+                pending_is_error,
+            }
+        }
+    }
+}
+
+pub(super) enum ToolCall {
+    Ready(Value),
+    RegistrationEdit {
+        action: Value,
+        hubs: Vec<String>,
+        ui_generation: Option<u64>,
+    },
+    Drain {
+        batch: Detaches,
+        value: Value,
+        pending_is_error: bool,
+    },
+    Find {
+        args: Value,
+        harness: Option<String>,
+        mine: bool,
+    },
+    Listen {
+        hub: String,
+        args: Value,
+        caller: Value,
+    },
+    Send {
+        hub: String,
+        args: Value,
+        caller: Option<Value>,
+    },
+    Retire {
+        hub: String,
+        id: String,
+        agent: Option<Value>,
+    },
+    Rename {
+        caller: Value,
+        title: String,
+    },
+    Switch {
+        from: String,
+        to: String,
+        row: Value,
+    },
+    Unlisten {
+        hubs: Vec<String>,
+        caller: Value,
+        stops: Stops,
+    },
+}
+impl ToolCall {
+    pub(super) fn execute(&self, snapshot: &HubAccess) -> Result<Value, String> {
+        match self {
+            Self::Ready(v) => Ok(v.clone()),
+            Self::RegistrationEdit { .. } => {
+                Err("STATE_ERROR: Registration edit requires a service owner".into())
+            }
+            Self::Drain {
+                batch,
+                value,
+                pending_is_error,
+            } => {
+                let mut result = value.clone();
+                let errors: Vec<_> = batch
+                    .0
+                    .iter()
+                    .filter_map(|hub| {
+                        snapshot
+                            .slot(hub)
+                            .and_then(|slot| {
+                                DaemonService::reconcile_unlistened(
+                                    &snapshot.state,
+                                    slot,
+                                    &snapshot.host_id,
+                                )
+                            })
+                            .err()
+                            .map(|e| format!("{hub}: {e}"))
+                    })
+                    .collect();
+                if !errors.is_empty() {
+                    let error = format!("DETACH_PENDING: {}", errors.join("; "));
+                    if *pending_is_error {
+                        return Err(error);
+                    }
+                    add_warning(&mut result, "warning", &error);
+                    if result.get("detach_status").is_some() {
+                        result["detach_status"] = json!("pending");
+                        if let Some(w) = result["warnings"].as_array_mut() {
+                            w.extend(errors.into_iter().map(Value::String));
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            Self::Find {
+                args,
+                harness,
+                mine,
+            } => snapshot.find_listeners(args, |row| {
+                harness.as_ref().is_none_or(|id| row["harness"] == *id)
+                    && (!mine || row["is_self_principal"] == true)
+            }),
+            Self::Listen { hub, args, caller } => snapshot.listen(hub, args, caller),
+            Self::Send { hub, args, caller } => snapshot.send_from(hub, args, caller.clone()),
+            Self::Rename { caller, title } => snapshot.rename_session(
+                string(caller, "harness"),
+                string(caller, "session_id"),
+                title,
+            ),
+            Self::Retire { hub, id, agent } => {
+                if let Some(agent) = agent {
+                    snapshot.ensure_agent_stop_row(
+                        hub,
+                        string(agent, "harness"),
+                        string(agent, "session_id"),
+                    )?;
+                }
+                let removed = snapshot.retire_captured(hub, id, "user")?;
+                Ok(json!({"ok":true,"removed":u8::from(removed)}))
+            }
+            Self::Switch { from, to, row } => snapshot.switch_binding(from, to, row),
+            Self::Unlisten {
+                hubs,
+                caller,
+                stops,
+            } => {
+                let mut stops = stops.clone();
+                stops.apply(snapshot, hubs, caller);
+                stops.result()
+            }
+        }
+    }
+    fn degraded(&self, result: Result<Value, String>, reason: &str) -> Result<Value, String> {
+        match result {
+            Ok(mut value) if !matches!(self, Self::Find { .. } | Self::Ready(_)) => {
+                value["committed"] = json!(true);
+                let warning = if matches!(self, Self::Send { .. }) {
+                    value["receipt_status"] = json!("unknown");
+                    "maintenance_warning"
+                } else {
+                    "warning"
+                };
+                add_warning(&mut value, warning, reason);
+                Ok(value)
+            }
+            Err(e) if e.starts_with("DETACH_PENDING:") => Err(e),
+            _ => Err(reason.to_owned()),
+        }
+    }
+    pub(super) fn current(&self, s: &DaemonService, access: &HubAccess) -> bool {
+        !s.closing
+            && !s.purging
+            && !shutdown_requested()
+            && s.slots
+                .keys()
+                .filter(|hub| self.targets(hub))
+                .all(|hub| access.slots.contains_key(hub))
+            && access
+                .slots
+                .iter()
+                .filter(|(hub, _)| self.targets(hub))
+                .all(|(hub, old)| {
+                    !old.closed.load(Ordering::Acquire)
+                        && s.slots
+                            .get(hub)
+                            .is_some_and(|live| Arc::ptr_eq(&old.closed, &live.closed))
+                })
+    }
+    fn targets(&self, name: &str) -> bool {
+        match self {
+            Self::Ready(_) => false,
+            Self::RegistrationEdit { hubs, .. } => hubs.iter().any(|hub| hub == name),
+            Self::Drain { batch, .. } => batch.0.contains(name),
+            Self::Find { args, .. } => args["hub"].as_str().is_none_or(|hub| hub == name),
+            Self::Listen { hub, .. } | Self::Retire { hub, .. } => hub == name,
+            Self::Rename { .. } => true,
+            Self::Switch { from, to, .. } => from == name || to == name,
+            Self::Send { hub, args, .. } => {
+                string(args, "to")
+                    .split_once(':')
+                    .map_or(hub.as_str(), |(prefix, _)| prefix)
+                    == name
+            }
+            Self::Unlisten { hubs, .. } => hubs.iter().any(|hub| hub == name),
+        }
+    }
+}
+pub(super) fn add_warning(value: &mut Value, key: &str, message: &str) {
+    value[key] = json!(value[key]
+        .as_str()
+        .filter(|old| !old.is_empty())
+        .map_or_else(|| message.to_owned(), |old| format!("{old}; {message}")));
+}
+
+pub(super) fn dispatch_tool<S: std::borrow::BorrowMut<DaemonService>>(
+    service: &Mutex<S>,
+    name: &str,
+    args: &Value,
+    meta: &Value,
+) -> Result<Value, String> {
+    let (access, work) = {
+        let mut guard = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        let s = (*guard).borrow_mut();
+        if s.closing || shutdown_requested() {
+            return Err("Shutting down".into());
+        }
+        let work = s.prepare_tool(name, args, meta)?;
+        if let ToolCall::Ready(value) = work {
+            return Ok(value);
+        }
+        (s.access.clone(), work)
+    };
+    run_captured(service, access, &work)
+}
+
+pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
+    service: &Mutex<S>,
+    mut access: HubAccess,
+    work: &ToolCall,
+) -> Result<Value, String> {
+    if let ToolCall::RegistrationEdit {
+        action,
+        hubs,
+        ui_generation,
+    } = work
+    {
+        // Take the per-hub guards in sorted order, outside service. Only local
+        // intent/config commits run under both; detach I/O follows their release.
+        let locks = hubs
+            .iter()
+            .map(|hub| access.state.registration_lock(hub))
+            .collect::<Result<Vec<_>, _>>()?;
+        let drain = 'commit: loop {
+            let mut guards = Vec::with_capacity(locks.len());
+            for lock in &locks {
+                if let Some(guard) = super::try_registration(lock)? {
+                    guards.push(guard);
+                } else {
+                    drop(guards);
+                    drop(
+                        lock.lock()
+                            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?,
+                    );
+                    continue 'commit;
+                }
+            }
+            let mut guard = match service.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // A reload may be reaping an old worker. Never wait for it
+                    // while owning a lock that worker needs to finish.
+                    drop(guards);
+                    drop(service.lock().map_err(|_| "Daemon lock poisoned")?);
+                    continue;
+                }
+                Err(_) => return Err("Daemon lock poisoned".into()),
+            };
+            let s = (*guard).borrow_mut();
+            s.validate_ui_generation(*ui_generation)?;
+            if !work.current(s, &access) || s.registration_targets(action)? != *hubs {
+                return Err(STALE_HUB.into());
+            }
+            break s.apply_action(action, &mut None, None)?;
+        };
+        let result = drain.execute(&access);
+        let mut guard = match service.lock() {
+            Ok(guard) => guard,
+            Err(_) => return work.degraded(result, "Daemon lock poisoned during settlement"),
+        };
+        let value = result?;
+        let s = (*guard).borrow_mut();
+        if !work.current(s, &access) {
+            return work.degraded(Ok(value), STALE_HUB);
+        }
+        let mut value = value;
+        let projection = (|| {
+            if action["op"] == "set_auto_listen" && action["enabled"] == true {
+                s.auto_listen()?;
+            }
+            s.reload_slots()
+        })();
+        if let Err(error) = projection {
+            value["committed"] = json!(true);
+            add_warning(&mut value, "warning", &error);
+        }
+        return Ok(value);
+    }
+    let mut retried = false;
+    loop {
+        let result = work.execute(&access);
+        let mut guard = match service.lock() {
+            Ok(guard) => guard,
+            Err(_) => return work.degraded(result, "Daemon lock poisoned during settlement"),
+        };
+        let s = (*guard).borrow_mut();
+        let same = |s: &DaemonService| work.current(s, &access);
+        let stale = |result| work.degraded(result, STALE_HUB);
+        if !same(s) {
+            return stale(result);
+        }
+        let unauthorized =
+            |e: &str| e.starts_with("UNAUTHORIZED:") || e.starts_with("AUTHORIZATION_VIOLATION:");
+        if !retried
+            && match (work, &result) {
+                (ToolCall::Send { .. }, Err(e)) => unauthorized(e),
+                (ToolCall::Find { .. }, Ok(value)) => {
+                    value["warnings"].as_array().is_some_and(|ws| {
+                        ws.iter().any(|w| {
+                            access
+                                .slots
+                                .get(string(w, "hub"))
+                                .is_some_and(|slot| slot.config["authMode"] == "oidc")
+                                && unauthorized(string(w, "message"))
+                        })
+                    })
+                }
+                _ => false,
+            }
+        {
+            retried = true;
+            s.reload_slots()?;
+            if !same(s) {
+                return stale(result);
+            }
+            access = s.access.clone();
+            continue;
+        }
+        let mut value = result?;
+        if let ToolCall::Send { hub, args, .. } = work {
+            if let Err(error) = s.poll() {
+                add_warning(&mut value, "maintenance_warning", &error);
+            }
+            if !same(s) {
+                return stale(Ok(value));
+            }
+            drop(guard);
+            let target = string(args, "to")
+                .split_once(':')
+                .map_or(hub.as_str(), |(prefix, _)| prefix);
+            let slot = access.slot(target)?;
+            wait_send_receipt(slot, &mut value);
+            let mut guard = match service.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return work
+                        .degraded(Ok(value), "Daemon lock poisoned during receipt settlement")
+                }
+            };
+            if !same((*guard).borrow_mut()) {
+                return stale(Ok(value));
+            }
+        }
+        return Ok(value);
+    }
+}
 
 pub(super) fn default_session_title(
     caller: &Value,
@@ -59,7 +473,7 @@ pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String
             "limit" => value
                 .as_u64()
                 .is_some_and(|n| n > 0 && n <= if name == "cito_find" { 50 } else { 1000 }),
-            "ack_all" | "wake" => value.is_boolean(),
+            "ack_all" => value.is_boolean(),
             "ack_ids" => value.as_array().is_some_and(|a| {
                 a.len() <= 1000
                     && a.iter()
@@ -148,7 +562,7 @@ pub(super) fn tools_list() -> Value {
      {"name":"cito_unlisten","description":"Revoke this session on one or all hubs.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
      {"name":"cito_find","description":"Find opted-in active nodes.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"query":{"type":"string","maxLength":200},"user":{"type":"string","maxLength":64},"host":{"type":"string","maxLength":128},"harness":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,31}$"},"repo":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":50}}}},
      {"name":"cito_send","description":"Send a lightweight control plane signal of 1..65,536 Unicode code points. Prefer external channels for long debates or large artifacts.","inputSchema":{"type":"object","properties":{"to":{"type":"string","pattern":"^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_(?:[a-f0-9]{16}|[a-z2-7]{12})|[a-z0-9]+(?:-[a-z0-9]+)*-(?:[a-f0-9]{16}|[a-z2-7]{12})|@[a-zA-Z0-9._-]{1,64}|[a-zA-Z0-9._-]{1,64}(?:/[a-z0-9][a-z0-9_-]{0,31})?#[a-z0-9]{1,16})$"},"message":{"type":"string","minLength":1,"maxLength":65536},"hub":{"type":"string"},"in_reply_to":{"type":"string","minLength":1,"maxLength":161},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["to","message"]}},
-     {"name":"cito_inbox","description":"Read and acknowledge this node's inbox.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"ack_all":{"type":"boolean"},"ack_ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":161}},"limit":{"type":"integer","minimum":1,"maximum":1000}}}}
+     {"name":"cito_inbox","description":"Read and acknowledge this node's inbox.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"ack_all":{"type":"boolean"},"ack_ids":{"type":"array","maxItems":1000,"items":{"type":"string","minLength":1,"maxLength":161}},"limit":{"type":"integer","minimum":1,"maximum":1000}}}}
     ]});
     if let Some(list) = tools["tools"].as_array_mut() {
         for tool in list {
@@ -158,26 +572,22 @@ pub(super) fn tools_list() -> Value {
     tools
 }
 
-pub(super) fn wait_send_receipt(service: &Arc<Mutex<DaemonService>>, payload: &mut Value) {
-    if let Err(error) = read_send_receipt(service, payload) {
+pub(super) fn wait_send_receipt(slot: &crate::core::transport::HubClient, payload: &mut Value) {
+    if let Err(error) = read_send_receipt(slot, payload) {
         payload["receipt_status"] = json!("unknown");
         payload["receipt_warning"] = json!(error);
     }
 }
 
 fn read_send_receipt(
-    service: &Arc<Mutex<DaemonService>>,
+    slot: &crate::core::transport::HubClient,
     payload: &mut Value,
 ) -> Result<(), String> {
     if payload["status"] == "PENDING_PUBLISH" {
         return Ok(());
     }
-    let (state, slot, signal) = {
-        let s = service.lock().map_err(|_| "Service lock poisoned")?;
-        let raw = string(payload, "signal_id");
-        let (hub, signal) = raw.split_once(':').unwrap_or((&s.config.default_hub, raw));
-        (s.state.clone(), s.slot(hub)?.clone(), signal.to_string())
-    };
+    let raw = string(payload, "signal_id");
+    let signal = raw.rsplit(':').next().unwrap_or(raw);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if shutdown_requested() || slot.closed.load(Ordering::SeqCst) {
@@ -188,25 +598,23 @@ fn read_send_receipt(
             "stream_get_message",
             &json!({"stream":"CITO_SIGNALS","seq":payload["seq"]}),
         )?;
+        let wire = STANDARD
+            .decode(string(&remote, "data_b64"))
+            .map_err(|e| e.to_string())?;
+        let observed: Value = serde_json::from_slice(&wire).map_err(|e| e.to_string())?;
+        if observed["signal_id"] != signal {
+            return Err("Send receipt authority changed".into());
+        }
         if remote["received"] == true {
+            payload["receipt_status"] = json!("received");
             break;
         }
         if Instant::now() >= deadline {
-            payload["status"] = json!("stored_passive");
-            payload["held_reason"] = json!("sender_ack_timeout");
+            payload["receipt_status"] = json!("pending");
             break;
         }
         slot.wait_for_event(revision, deadline);
     }
-    state.db.execute(
-        "UPDATE local_sent_idempotency SET status=?,held_reason=? WHERE hub=? AND signal_id=?",
-        &[
-            payload["status"].clone(),
-            payload["held_reason"].clone(),
-            json!(slot.name),
-            json!(signal),
-        ],
-    )?;
     Ok(())
 }
 
@@ -224,7 +632,7 @@ impl DaemonService {
         let pid_hint = crate::support::caller_pid_hint(meta, true)?.map(u64::from);
         let requested_pid = pid_hint.or_else(|| meta["_http_client"].as_u64());
         let explicit_pid = pid_hint.is_some();
-        let expected = string(meta, "expected_harness");
+        let expected = string(meta, "expected_harness").trim();
         if expected == "human" {
             return Err("FORBIDDEN: MCP callers must be agent sessions".into());
         }
@@ -351,7 +759,8 @@ impl DaemonService {
         }
         Ok(None)
     }
-
+}
+impl HubAccess {
     pub(super) fn rename_session(
         &self,
         harness: &str,
@@ -362,6 +771,15 @@ impl DaemonService {
             return Err("INVALID_INPUT: An agent session is required".into());
         }
         self.state.set_custom_title(harness, session, title)?;
+        Ok(self.propagate_session_title(harness,session,title).unwrap_or_else(|error|json!({"ok":true,"committed":true,"title":title,"warning":error,"warnings":[{"message":error}]})))
+    }
+
+    fn propagate_session_title(
+        &self,
+        harness: &str,
+        session: &str,
+        title: &str,
+    ) -> Result<Value, String> {
         let mut warnings = Vec::new();
         for row in self
             .state
@@ -380,7 +798,14 @@ impl DaemonService {
                 }
             }
         }
-        Ok(json!({"ok":true,"title":title,"warnings":warnings}))
+        let warning = (!warnings.is_empty()).then(|| {
+            warnings
+                .iter()
+                .map(|w| string(w, "message"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
+        Ok(json!({"ok":true,"title":title,"warning":warning,"warnings":warnings}))
     }
 
     pub(super) fn listen(&self, hub: &str, args: &Value, caller: &Value) -> Result<Value, String> {
@@ -406,19 +831,7 @@ impl DaemonService {
             ));
         }
         let caller = &caller;
-        let previous: Vec<Value> = self
-            .state
-            .active()?
-            .into_iter()
-            .filter(|row| {
-                row["hub"] == hub
-                    && row["harness"] == caller["harness"]
-                    && row["session_id"] != caller["session_id"]
-                    && caller["endpoint_pid"].is_number()
-                    && row["endpoint_pid"] == caller["endpoint_pid"]
-            })
-            .collect();
-        let mut result = crate::core::registration::register_listener(
+        let mut result = crate::core::registration::register_endpoint(
             &self.state,
             self.slot(hub)?,
             &self.host_id,
@@ -426,14 +839,65 @@ impl DaemonService {
             caller,
         )?;
         // The new remote/local binding commits before the previous endpoint is revoked.
-        for row in previous {
-            self.retire_id(hub, string(&row, "listener_id"), "hard_exit")?;
+        let mut warnings = Vec::new();
+        if caller["endpoint_pid"].is_number() {
+            if let Err(error) =
+                DaemonService::reconcile_unlistened(&self.state, self.slot(hub)?, &self.host_id)
+            {
+                warnings.push(error);
+            }
+        }
+        if caller["harness"] != "human" && result["maintenance_warning"].is_null() {
+            if let Some(title) = args["title"].as_str() {
+                let propagated = self.propagate_session_title(
+                    string(caller, "harness"),
+                    string(caller, "session_id"),
+                    title,
+                );
+                if propagated
+                    .as_ref()
+                    .ok()
+                    .is_none_or(|value| value["warning"].is_string())
+                {
+                    let warning = "Listening committed; session title maintenance is incomplete";
+                    result["maintenance_warning"] = json!(warning);
+                    warnings.push(warning.to_owned());
+                }
+            }
+        }
+        if !warnings.is_empty() {
+            if let Some(previous) = result["warning"].as_str() {
+                warnings.insert(0, previous.to_owned());
+            }
+            result["committed"] = json!(true);
+            result["warning"] = json!(warnings.join("; "));
+            result["warnings"] = json!(warnings);
         }
         // Registration commits the Hub-scoped PID and transition timestamp together.
         // Do not rewrite binding metadata after releasing registration authority.
         let _ = self.slot(hub)?.directory();
         result["listener_id"] = json!(self.scoped(hub, string(&result, "listener_id")));
         Ok(result)
+    }
+
+    pub(super) fn session_hubs(&self, harness: &str, session: &str) -> Result<Vec<String>, String> {
+        let mut hubs: Vec<_> = self.slots.keys().cloned().collect();
+        hubs.extend(self.state.db.query("SELECT DISTINCT hub FROM local_listeners WHERE harness=? AND session_id=? AND status!='FENCED_INACTIVE'", &[json!(harness),json!(session)])?.iter().map(|row| string(row,"hub").to_owned()));
+        hubs.sort();
+        hubs.dedup();
+        Ok(hubs)
+    }
+    /// Resolve retirement from live identity or the durable offline binding.
+    pub(super) fn session_node_id(
+        &self,
+        hub: &str,
+        harness: &str,
+        session: &str,
+    ) -> Result<String, String> {
+        match self.slot(hub) {
+            Ok(slot) => super::super::registration::local_node_id(&self.state, slot, harness, session),
+            Err(error) => self.state.db.query("SELECT listener_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY binding_generation DESC LIMIT 1", &[json!(hub),json!(harness),json!(session)])?.first().map(|row| string(row,"listener_id").to_owned()).ok_or(error),
+        }
     }
 
     /// Stop intent exists even if this session has never been enrolled.
@@ -446,21 +910,98 @@ impl DaemonService {
         if harness.is_empty() || harness == "human" || session.is_empty() {
             return Err("INVALID_INPUT: An agent session is required".into());
         }
-        let slot = self.slot(hub)?;
+        match self.slot(hub) {
+            Err(_) => return self.session_node_id(hub, harness, session),
+            Ok(slot) if slot.closed.load(Ordering::Acquire) => return Err(STALE_HUB.into()),
+            _ => {}
+        }
         let lock = self.state.registration_lock(hub)?;
         let _guard = lock
             .lock()
             .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        self.ensure_agent_stop_row_locked(hub, harness, session)
+    }
+    pub(super) fn ensure_agent_stop_row_locked(
+        &self,
+        hub: &str,
+        harness: &str,
+        session: &str,
+    ) -> Result<String, String> {
+        if harness.is_empty() || harness == "human" || session.is_empty() {
+            return Err("INVALID_INPUT: An agent session is required".into());
+        }
+        let Ok(slot) = self.slot(hub) else {
+            return self.session_node_id(hub, harness, session);
+        };
         let id = super::super::registration::local_node_id(&self.state, slot, harness, session)?;
-        self.state.db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,user_stopped,retirement_reason,hub_url) VALUES(?,?,?,?,?,?,?,?,?,'','','','self','UNLISTENED',1,'user',?)", &[json!(hub),json!(id),json!(crate::core::identity::public_listener_id(string(&slot.identity,"owner_user"),&id)),slot.identity["principal_id"].clone(),slot.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name()),json!(harness),json!(session),slot.config["url"].clone()])?;
+        self.state.db.transaction(|db| {
+        if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
+        db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,user_stopped,retirement_reason,hub_url) VALUES(?,?,?,?,?,?,?,?,?,'','','','self','UNLISTENED',1,'user',?)", &[json!(hub),json!(id),json!(crate::core::identity::public_listener_id(string(&slot.identity,"owner_user"),&id)),slot.identity["principal_id"].clone(),slot.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name()),json!(harness),json!(session),slot.config["url"].clone()])?;
+        Ok(()) })?;
         Ok(id)
     }
-
+}
+impl DaemonService {
     pub(super) fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
         self.retire_id(hub, id, "user")
     }
 
     pub(super) fn retire_id(&self, hub: &str, id: &str, reason: &str) -> Result<bool, String> {
+        // The service owner can persist stop intent even for an offline transport.
+        self.access.retire_binding(hub, id, reason, None, None)
+    }
+}
+impl HubAccess {
+    pub(super) fn retire_captured(
+        &self,
+        hub: &str,
+        id: &str,
+        reason: &str,
+    ) -> Result<bool, String> {
+        self.retire_binding(
+            hub,
+            id,
+            reason,
+            self.slots.get(hub).map(|slot| slot.closed.as_ref()),
+            None,
+        )
+    }
+    pub(super) fn retire_binding(
+        &self,
+        hub: &str,
+        id: &str,
+        reason: &str,
+        replaced: Option<&std::sync::atomic::AtomicBool>,
+        expected: Option<&Value>,
+    ) -> Result<bool, String> {
+        let lock = self.state.registration_lock(hub)?;
+        let guard = self
+            .slots
+            .get(hub)
+            .filter(|s| !s.closed.load(Ordering::Acquire))
+            .map(|_| {
+                lock.lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")
+            })
+            .transpose()?;
+        let active = self.retire_local_locked(hub, id, reason, replaced, expected)?;
+        drop(guard);
+        if let Some(client) = self.slots.get(hub) {
+            if client.closed.load(Ordering::Acquire) {
+                return Err("DETACH_PENDING: Hub changed before detach".into());
+            }
+            DaemonService::reconcile_unlistened(&self.state, client, &self.host_id)?;
+        }
+        Ok(active)
+    }
+    fn retire_local_locked(
+        &self,
+        hub: &str,
+        id: &str,
+        reason: &str,
+        replaced: Option<&std::sync::atomic::AtomicBool>,
+        expected: Option<&Value>,
+    ) -> Result<bool, String> {
         let client = self.slots.get(hub);
         let hub_url = if let Some(client) = client {
             Some(string(&client.config, "url").to_owned())
@@ -472,13 +1013,14 @@ impl DaemonService {
                 crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
             hubs.get(hub).map(|config| string(config, "url").to_owned())
         };
-        let registration_lock = self.state.registration_lock(hub)?;
-        let registration = registration_lock
-            .lock()
-            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
         let row = self.state.listener(hub, id)?;
         let active = row.as_ref().is_some_and(|row| row["status"] == "ACTIVE");
         self.state.db.transaction(|c| {
+            if replaced.is_some_and(|closed| closed.load(Ordering::Acquire)) { return Err(STALE_HUB.into()); }
+            if let Some(old)=expected {
+                if c.query("SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'",&[json!(hub),json!(id),old["binding_generation"].clone(),old["owner_token"].clone()])?.is_empty(){return Err("STALE_GENERATION: Source binding changed before retirement".into());}
+            }
+            c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
             if row.is_some() {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
                 c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=?,user_stopped=CASE WHEN harness!='human' AND ?='user' THEN 1 ELSE user_stopped END,retirement_reason=CASE WHEN harness!='human' THEN ? ELSE NULL END,retired_activity_revision=CASE WHEN ?='idle' THEN last_activity_revision ELSE retired_activity_revision END,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(reason),json!(reason),json!(reason),json!(hub),json!(id)])?;
@@ -497,18 +1039,16 @@ impl DaemonService {
         if let Some(row) = &row {
             self.state.invalidate_discovery(string(row, "harness"))?;
         }
-        drop(registration);
         // A failed Hub write leaves durable pending work; poll/reconnect retries it.
-        if let Some(client) = client {
-            Self::reconcile_unlistened(&self.state, client, &self.host_id)?;
-        } else if !self
-            .state
-            .db
-            .query(
-                "SELECT 1 FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
-                &[json!(hub), json!(id)],
-            )?
-            .is_empty()
+        if client.is_none()
+            && !self
+                .state
+                .db
+                .query(
+                    "SELECT 1 FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
+                    &[json!(hub), json!(id)],
+                )?
+                .is_empty()
         {
             return Err("DETACH_PENDING: Hub is disabled; remote detach remains pending".into());
         }
@@ -516,7 +1056,7 @@ impl DaemonService {
     }
 
     pub(super) fn find_listeners(
-        &mut self,
+        &self,
         args: &Value,
         include: impl Fn(&Value) -> bool,
     ) -> Result<Value, String> {
@@ -531,56 +1071,41 @@ impl DaemonService {
         let query = string(args, "query").to_lowercase();
         let mut rows = Vec::new();
         let mut warnings = Vec::new();
-        let mut retried = false;
-        let snapshots = loop {
-            let snapshots = thread::scope(|scope| {
-                let workers: Vec<_> = self
-                    .slots
-                    .iter()
-                    .filter(|(name, _)| !args["hub"].is_string() || *name == &hub)
-                    .map(|(name, slot)| {
-                        let worker = scope.spawn(move || slot.directory());
-                        (name.clone(), slot.clone(), worker)
-                    })
-                    .collect();
-                workers
-                    .into_iter()
-                    .map(|(name, slot, worker)| {
-                        (
-                            name,
-                            slot,
-                            worker.join().unwrap_or_else(|_| {
-                                Err("NATS_UNAVAILABLE: Directory worker failed".into())
-                            }),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            });
-            if !retried
-                && snapshots.iter().any(|(_, slot, result)| {
-                    slot.config["authMode"] == "oidc"
-                        && result.as_ref().is_err_and(|e| {
-                            e.starts_with("UNAUTHORIZED:")
-                                || e.starts_with("AUTHORIZATION_VIOLATION:")
-                        })
+        let snapshots = thread::scope(|scope| {
+            let workers: Vec<_> = self
+                .slots
+                .iter()
+                .filter(|(name, _)| !args["hub"].is_string() || *name == &hub)
+                .map(|(name, slot)| {
+                    let worker = scope.spawn(move || slot.directory());
+                    (name.clone(), slot.clone(), worker)
                 })
-            {
-                retried = true;
-                self.reload_slots()?;
-                continue;
-            }
-            break snapshots;
-        };
+                .collect();
+            workers
+                .into_iter()
+                .map(|(name, slot, worker)| {
+                    (
+                        name,
+                        slot,
+                        worker.join().unwrap_or_else(|_| {
+                            Err("NATS_UNAVAILABLE: Directory worker failed".into())
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
         for (name, slot, snapshot) in snapshots {
             match snapshot {
                 Ok(directory) => {
-                    for row in directory {
+                    let peers = super::projection::address_peers(&self.state, &slot);
+                    let sample = super::projection::HubSample::capture(&slot, directory);
+                    for row in &sample.directory {
                         if !matches!(
-                            crate::core::lease::evaluate_node_lease(&row, now_ms()),
+                            crate::core::lease::evaluate_node_lease(row, now_ms()),
                             "ACTIVE" | "DISCONNECTED_RETAINED"
                         ) || (row["scope"] == "self"
                             && !crate::core::auth::principal_ids_equal(
-                                string(&row, "principal_id"),
+                                string(row, "principal_id"),
                                 string(&slot.identity, "principal_id"),
                             ))
                         {
@@ -589,17 +1114,25 @@ impl DaemonService {
                         let host_matches = |term: &str| {
                             let term = term.to_lowercase();
                             (row["channels"].as_object().is_none_or(|c| c.is_empty())
-                                && (string(&row, "host_name").to_lowercase().contains(&term)
-                                    || string(&row, "host_id").to_lowercase().contains(&term)))
-                                || crate::core::lease::attachments(&row, &self.host_id, now_ms())
-                                    .iter()
-                                    .any(|attachment| {
-                                        string(attachment, "display_name")
-                                            .to_lowercase()
-                                            .contains(&term)
-                                            || string(attachment, "host_id")
-                                                .to_lowercase()
-                                                .contains(&term)
+                                && (string(row, "host_name").to_lowercase().contains(&term)
+                                    || string(row, "host_id").to_lowercase().contains(&term)))
+                                || row["channels"]
+                                    .as_object()
+                                    .into_iter()
+                                    .flat_map(|channels| channels.values())
+                                    .filter(|channel| {
+                                        matches!(
+                                            crate::core::lease::attachment_availability(
+                                                channel,
+                                                crate::core::lease::registration_now(row, now_ms())
+                                            ),
+                                            "ACTIVE" | "DISCONNECTED_RETAINED"
+                                        )
+                                    })
+                                    .any(|channel| {
+                                        ["display_name", "host_name", "host_id"].iter().any(|key| {
+                                            string(channel, key).to_lowercase().contains(&term)
+                                        })
                                     })
                         };
                         if ["user", "harness", "repo", "host"].iter().any(|key| {
@@ -613,22 +1146,27 @@ impl DaemonService {
                                 other => other,
                             };
                             !filter.is_empty()
-                                && !string(&row, field)
+                                && !string(row, field)
                                     .to_ascii_lowercase()
                                     .contains(&filter.to_ascii_lowercase())
                         }) {
                             continue;
                         }
-                        let scoped_id = self.scoped(&name, string(&row, "public_id"));
-                        let display_address = self.display_address(&name, &row);
+                        let scoped_id = self.scoped(&name, string(row, "public_id"));
+                        let display_address = crate::core::identity::display_address(
+                            &name,
+                            &self.config.default_hub,
+                            row,
+                            &peers,
+                        );
                         let full_alias = format!(
                             "{}/{}#{}",
-                            normalize_slug(string(&row, "owner_user")),
-                            string(&row, "harness"),
-                            string(&row, "listener_id").strip_prefix("c_").unwrap_or("")
+                            normalize_slug(string(row, "owner_user")),
+                            string(row, "harness"),
+                            string(row, "listener_id").strip_prefix("c_").unwrap_or("")
                         );
                         let attachment_names =
-                            crate::core::lease::attachments(&row, &self.host_id, now_ms())
+                            crate::core::lease::attachments(row, &self.host_id, now_ms())
                                 .iter()
                                 .map(|a| {
                                     format!(
@@ -641,31 +1179,31 @@ impl DaemonService {
                                 .join(" ");
                         let legacy_host =
                             if row["channels"].as_object().is_none_or(|c| c.is_empty()) {
-                                format!("{} {}", string(&row, "host_name"), string(&row, "host_id"))
+                                format!("{} {}", string(row, "host_name"), string(row, "host_id"))
                             } else {
                                 String::new()
                             };
                         let haystack = [
                             full_alias.as_str(),
-                            string(&row, "title"),
-                            string(&row, "about"),
-                            string(&row, "repo"),
-                            string(&row, "cwd"),
-                            string(&row, "branch"),
-                            string(&row, "owner_user"),
+                            string(row, "title"),
+                            string(row, "about"),
+                            string(row, "repo"),
+                            string(row, "cwd"),
+                            string(row, "branch"),
+                            string(row, "owner_user"),
                             &legacy_host,
                             &attachment_names,
-                            string(&row, "harness"),
-                            string(&row, "public_id"),
+                            string(row, "harness"),
+                            string(row, "public_id"),
                             &scoped_id,
                             &display_address,
-                            string(&row, "listener_id"),
+                            string(row, "listener_id"),
                         ]
                         .join(" ")
                         .to_lowercase();
                         if !query.split_whitespace().all(|token| {
                             let contains =
-                                |field, value| string(&row, field).to_lowercase().contains(value);
+                                |field, value| string(row, field).to_lowercase().contains(value);
                             if let Some(user) = token.strip_prefix('@').filter(|s| !s.is_empty()) {
                                 contains("owner_user", user)
                             } else if let Some(user) =
@@ -683,7 +1221,7 @@ impl DaemonService {
                             } else if let Some(harness) =
                                 token.strip_prefix("is:").filter(|s| !s.is_empty())
                             {
-                                string(&row, "harness").to_lowercase() == harness
+                                string(row, "harness").to_lowercase() == harness
                             } else if let Some(harness) =
                                 token.strip_prefix("harness:").filter(|s| !s.is_empty())
                             {
@@ -700,7 +1238,7 @@ impl DaemonService {
                         }) {
                             continue;
                         }
-                        rows.push(self.peer_dto(&name, &row));
+                        rows.push(self.peer_dto(&name, row, &display_address, &sample));
                     }
                 }
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
@@ -717,17 +1255,22 @@ impl DaemonService {
             json!({"ok":true,"listeners":rows,"warnings":warnings,"matched_count":matched_count,"online_count":online_count}),
         )
     }
-
+}
+impl DaemonService {
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
+        dispatch_tool(&Mutex::new(self), name, args, meta)
+    }
+
+    fn prepare_tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<ToolCall, String> {
         if (name != "cito_find" && args["harness"] == "human")
-            || meta["expected_harness"] == "human"
+            || string(meta, "expected_harness").trim() == "human"
         {
             return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
         }
         validate_tool_input(name, args)?;
         if meta
             .get("expected_session_id")
-            .is_some_and(|v| v.as_str().is_none_or(str::is_empty))
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.trim().is_empty()))
         {
             return Err("INVALID_INPUT: expected_session_id must be nonempty".into());
         }
@@ -739,7 +1282,9 @@ impl DaemonService {
             .as_str()
             .unwrap_or(&self.config.default_hub)
             .to_string();
-        self.slot(&hub)?;
+        if name != "cito_unlisten" {
+            self.slot(&hub)?;
+        }
         match name {
             "cito_listen" => {
                 let caller = self
@@ -766,15 +1311,7 @@ impl DaemonService {
                 {
                     args["title"] = json!(about);
                 }
-                let result = self.listen(&hub, &args, &caller)?;
-                if let Some(title) = args["title"].as_str() {
-                    self.rename_session(
-                        string(&caller, "harness"),
-                        string(&caller, "session_id"),
-                        title,
-                    )?;
-                }
-                Ok(result)
+                Ok(ToolCall::Listen { hub, args, caller })
             }
             "cito_status" => {
                 let deadline = Instant::now() + Duration::from_millis(1500);
@@ -788,15 +1325,17 @@ impl DaemonService {
                         && r["session_id"] == caller["session_id"]
                 });
                 let unread = if let Some(row) = &row {
-                    self.state.db.query("SELECT COUNT(*) AS n FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL", &[json!(hub), row["listener_id"].clone()])?.first().map(|r|r["n"].clone()).unwrap_or(json!(0))
+                    json!(self
+                        .state
+                        .unread_count(&hub, string(row, "listener_id"), false)?)
                 } else {
                     json!(0)
                 };
                 let mut hubs: Vec<_> = self.slots.iter().map(|(name, slot)|json!({"name":name,"status":wire_status(&slot.connection_status()),"is_default":name == &self.config.default_hub})).collect();
                 hubs.sort_by(|a, b| string(a, "name").cmp(string(b, "name")));
-                Ok(
+                Ok(ToolCall::Ready(
                     json!({"ok":true,"registered":row.is_some(),"display_address":row.as_ref().map(|r| self.display_address(&hub,r)),"title":row.as_ref().map(|r|r["title"].clone()),"about":row.as_ref().map(|r|r["about"].clone()),"scope":row.as_ref().map(|r|r["scope"].clone()),"unread_count":unread,"hubs":hubs}),
-                )
+                ))
             }
             "cito_unlisten" => {
                 let caller = self
@@ -808,62 +1347,45 @@ impl DaemonService {
                 let hubs: Vec<String> = if args["hub"].is_string() {
                     vec![hub]
                 } else {
-                    self.slots.keys().cloned().collect()
+                    self.session_hubs(string(&caller, "harness"), string(&caller, "session_id"))?
                 };
-                let mut removed = 0;
-                let mut detach_errors = Vec::new();
-                for hub in hubs {
-                    let id = self.ensure_agent_stop_row(
-                        &hub,
-                        string(&caller, "harness"),
-                        string(&caller, "session_id"),
-                    )?;
-                    match self.unlisten_id(&hub, &id) {
-                        Ok(true) => removed += 1,
-                        Ok(false) => {}
-                        Err(error) => detach_errors.push(format!("{hub}: {error}")),
-                    }
-                }
-                if !detach_errors.is_empty() {
-                    return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
-                }
-                Ok(
-                    json!({"ok":true,"status":if removed>0{"unlistened"}else{"not_listening"},"removed":removed}),
-                )
+                // A disabled Hub has no live generation to capture. Settle its
+                // local intent here while it cannot be re-enabled.
+                let (live, offline): (Vec<_>, _) =
+                    hubs.into_iter().partition(|h| self.slots.contains_key(h));
+                let mut stops = Stops::default();
+                stops.apply(&self.access, &offline, &caller);
+                Ok(ToolCall::Unlisten {
+                    hubs: live,
+                    caller,
+                    stops,
+                })
             }
             "cito_find" => {
                 let _ = crate::support::caller_pid_hint(meta, true)?;
-                self.find_listeners(args, |_| true)
-            }
-            "cito_send" => {
-                let result = match self.send(&hub, args, meta) {
-                    Err(e)
-                        if e.starts_with("UNAUTHORIZED:")
-                            || e.starts_with("AUTHORIZATION_VIOLATION:") =>
-                    {
-                        self.reload_slots()?;
-                        self.send(&hub, args, meta)
-                    }
-                    result => result,
-                };
-                let maintenance = self.poll();
-                result.map(|mut value| {
-                    if let Err(error) = maintenance {
-                        value["maintenance_warning"] = json!(error);
-                    }
-                    value
+                Ok(ToolCall::Find {
+                    args: args.clone(),
+                    harness: None,
+                    mine: false,
                 })
             }
-            "cito_inbox" => self.inbox(&hub, args, meta),
+            "cito_send" => Ok(ToolCall::Send {
+                hub,
+                args: args.clone(),
+                caller: self.caller(meta, false)?,
+            }),
+            "cito_inbox" => self.inbox(&hub, args, meta).map(ToolCall::Ready),
             _ => Err(format!("INVALID_INPUT: Unknown tool: {name}")),
         }
     }
 
+    #[cfg(test)]
     pub(super) fn send(&self, default: &str, args: &Value, meta: &Value) -> Result<Value, String> {
         let caller = self.caller(meta, false)?;
         self.send_from(default, args, caller)
     }
-
+}
+impl HubAccess {
     /// The UI action boundary supplies Human authority directly, never through MCP metadata.
     pub(super) fn send_from(
         &self,
@@ -1117,10 +1639,9 @@ impl DaemonService {
         {
             return Err("SELF_SEND_FORBIDDEN: Cannot send to your own session".into());
         }
-        let endpoint = format!(
-            "{}|{}|{}|{}",
+        let fields = [
             string(&slot.identity, "principal_id"),
-            self.host_id,
+            self.host_id.as_str(),
             caller
                 .as_ref()
                 .map(|c| string(c, "harness"))
@@ -1128,26 +1649,79 @@ impl DaemonService {
             caller
                 .as_ref()
                 .map(|c| string(c, "session_id"))
-                .unwrap_or("default")
-        );
+                .unwrap_or("default"),
+        ];
+        let endpoint = fields.join("|");
+        let [principal, host, harness, session] = fields;
         let key = args["idempotency_key"]
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(random_uuid_v4);
-        let dedup = hash(&format!(
+        let dedup = hash(
+            &json!([
+                principal,
+                host,
+                harness,
+                session,
+                string(&slot.config, "url"),
+                canonical,
+                key
+            ])
+            .to_string(),
+        );
+        let endpoint_dedup =
+            hash(&json!([endpoint, string(&slot.config, "url"), canonical, key]).to_string());
+        let request_hash = hash(&json!([message, reply_to]).to_string());
+        let legacy_dedup = hash(&format!(
             "{endpoint}|{}|{canonical}|{key}",
             string(&slot.config, "url")
         ));
-        let request_hash = hash(&format!("{message}|{}", reply_to));
+        let legacy_request_hash = hash(&format!("{message}|{reply_to}"));
+        // Unlike Hub publications, legacy reservations do not retain structured
+        // sender/key metadata. Do not guess their identity when delimiters can
+        // move tuple boundaries (or message/reply boundaries in the old hash).
+        let ambiguous_endpoint = fields.iter().any(|field| field.contains('|'));
+        let ambiguous_legacy = ambiguous_endpoint
+            || [
+                string(&slot.config, "url"),
+                canonical,
+                &key,
+                &message,
+                reply_to.as_str().unwrap_or(""),
+            ]
+            .iter()
+            .any(|part| part.contains('|'));
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
+            if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
             if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
+            if !ambiguous_endpoint {
+                if let Some(old) = c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?", &[json!(hub), json!(endpoint_dedup)])?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
+                    if old["request_hash"] != request_hash { return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into()); }
+                    return Ok(old);
+                }
+            }
+            if let Some(old) = c.query(
+                "SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",
+                &[json!(hub), json!(legacy_dedup)],
+            )?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
+                if ambiguous_legacy {
+                    return Err("IDEMPOTENCY_KEY_INDETERMINATE: Legacy reservation lacks tuple identity".into());
+                }
+                if old["request_hash"] != legacy_request_hash {
+                    return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());
+                }
+                return Ok(old);
+            }
             let id=format!("sig_{}",random_uuid_v4().replace('-',""));c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?)",&[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(now+1_800_000)),json!(now+1_800_000)])?;
             c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next().ok_or("Sent reservation missing".into())
         })?;
+        // Pending legacy reservations must retry their original Hub publication key.
+        let dedup = string(&reservation, "dedup_id");
         let mut signal_id = string(&reservation, "signal_id").to_owned();
         let mut seq = reservation["seq"].as_u64().unwrap_or(0);
+        let mut maintenance_warning = None;
         if reservation["status"] == "PENDING_PUBLISH" {
             let human = caller.as_ref().is_some_and(|c| c["harness"] == "human");
             let published = if human {
@@ -1183,21 +1757,29 @@ impl DaemonService {
                     .ok_or("Published reply ID missing")?
                     .to_owned();
             }
-            // Commit local read state with the sent reservation. If this fails after
-            // the Hub commits, retry the RPC with the same key and committed signal ID.
-            self.state.db.transaction(|c| {
+            // Publication is committed. Local maintenance must not invite duplicate retries.
+            if self.state.db.transaction(|c| {
+                if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
                 if human && reply_to.is_string() {
-                    c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?", &[published["acked_at_ms"].clone(),json!(hub),json!(from_id),reply_to.clone()])?;
+                    let rows = c.query("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status FROM local_signals s JOIN local_listeners l ON s.hub=l.hub AND s.listener_id=l.listener_id WHERE s.hub=? AND s.listener_id=? AND s.signal_id=?", &[json!(hub),json!(from_id),reply_to.clone()])?;
+                    if rows.first().is_some_and(super::super::state::joined_signal_is_current) {
+                        c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?", &[published["acked_at_ms"].clone(),json!(hub),json!(from_id),reply_to.clone()])?;
+                        c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub),json!(from_id)])?;
+                    }
                 }
                 c.execute("UPDATE local_sent_idempotency SET signal_id=?,seq=?,status='wake_accepted' WHERE hub=? AND dedup_id=?",&[json!(signal_id),json!(seq),json!(hub),json!(dedup)])?;
                 Ok(())
-            })?;
+            }).is_err() {
+                maintenance_warning = Some("Message sent; local sent history could not be refreshed");
+            }
         }
         Ok(
-            json!({"ok":true,"signal_id":self.scoped(hub,&signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"]}),
+            json!({"ok":true,"signal_id":self.scoped(hub,&signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"],"maintenance_warning":maintenance_warning}),
         )
     }
-    fn inbox(&self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {
+}
+impl DaemonService {
+    fn inbox(&mut self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {
         let caller = self
             .caller(meta, false)?
             .ok_or("BINDING_REQUIRED: Caller required")?;
@@ -1223,7 +1805,7 @@ impl DaemonService {
                 string(&caller, "harness"),
                 string(&caller, "session_id"),
             )?;
-            rows.extend(self.state.db.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY created_at,seq LIMIT ?",&[json!(name),json!(id),json!(limit)])?);
+            rows.extend(self.state.current_signals(name, &id, limit as usize)?);
             bindings.push((name.clone(), id));
         }
         rows.sort_by_key(|r| {
@@ -1260,7 +1842,12 @@ impl DaemonService {
                 if scoped_hub.is_some_and(|hub| hub != name) {
                     continue;
                 }
-                matches.extend(self.state.db.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (signal_id=? OR batch_id=?)",&[json!(name),json!(node),json!(id),json!(id)])?);
+                matches.extend(
+                    self.state
+                        .current_signal_metadata(name, node, 0, usize::MAX, Some(id))?
+                        .into_iter()
+                        .filter(|row| row["signal_id"] == *id || row["batch_id"] == *id),
+                );
             }
             if scoped_hub.is_none()
                 && matches
@@ -1295,8 +1882,8 @@ impl DaemonService {
             json!({"ok":true,"signals":signals,"acknowledged_count":selected.len(),"replay_gap_detected":false,"replay_gap_range":null}),
         )
     }
-    pub(super) fn flush_acks(&self) {
-        for (hub, slot) in &self.slots {
+    pub(super) fn flush_acks(&mut self) {
+        for (hub, slot) in &self.access.slots {
             let key = json!([hub, slot.config["url"], slot.identity["principal_id"]]).to_string();
             if self.ack_backoff.lock().is_ok_and(|retries| {
                 retries
@@ -1308,21 +1895,46 @@ impl DaemonService {
             // Identity filtering precedes the page limit: retained rows for an
             // unavailable/replaced profile must not starve this profile's ACKs.
             let Ok(rows) = self.state.db.query("SELECT * FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?,?) ORDER BY acked_at_ms LIMIT 256",&[json!(hub),slot.config["url"].clone(),slot.identity["principal_id"].clone(),slot.identity["legacy_principal_id"].clone(),slot.identity["canonical_principal_id"].clone()]) else { continue; };
-            let mut failed = false;
-            for row in rows {
-                if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok() {
-                    let _=self.state.db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone()]);
-                } else { failed = true; break; }
+            if rows.is_empty() {
+                continue;
             }
-            if let Ok(mut retries) = self.ack_backoff.lock() {
-                if failed {
-                    let retry = retries.entry(key).or_insert_with(|| {
-                        (Instant::now(), crate::support::RetryBackoff::default())
-                    });
-                    retry.0 = Instant::now() + retry.1.failed();
-                } else {
-                    retries.remove(&key);
+            let worker_key = format!("acks:{hub}");
+            if self
+                .receivers
+                .get(&worker_key)
+                .is_some_and(|w| !w.is_finished())
+            {
+                continue;
+            }
+            let local = slot.local.is_some();
+            let slot = slot.clone();
+            let db = self.state.db.clone();
+            let backoff = self.ack_backoff.clone();
+            let flush = move || {
+                let mut failed = false;
+                for row in rows {
+                    if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok() {
+                    let _=db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=? AND hub_url=? AND principal_id=? AND acked_at_ms=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone(),row["hub_url"].clone(),row["principal_id"].clone(),row["acked_at_ms"].clone()]);
+                } else { failed = true; break; }
                 }
+                if let Ok(mut retries) = backoff.lock() {
+                    if slot.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if failed {
+                        let retry = retries.entry(key).or_insert_with(|| {
+                            (Instant::now(), crate::support::RetryBackoff::default())
+                        });
+                        retry.0 = Instant::now() + retry.1.failed();
+                    } else {
+                        retries.remove(&key);
+                    }
+                }
+            };
+            if local {
+                flush();
+            } else {
+                self.receivers.insert(worker_key, thread::spawn(flush));
             }
         }
     }

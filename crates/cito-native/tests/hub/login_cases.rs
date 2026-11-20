@@ -185,6 +185,7 @@ impl Provider {
         let token = sign(&self.issuer, "subject", "", false);
         let cache = json!({"issuer":self.issuer,"client_id":"client","id_token":token,"refresh_token":"refresh-old","token_sha256":hash(&token),"expires_at":expires,"verified_principal_id":format!("{}#subject",self.issuer),"verified_user":"alice"});
         let deadline = Deadline {
+            cancellation_fd: None,
             at: Instant::now() + LOGIN_TIMEOUT,
             cancelled: &|| false,
         };
@@ -235,7 +236,19 @@ fn worker(dir: &Path, config: &Value, rejected: Option<&str>, timeout: u64) -> C
     } else {
         command.env_remove("CITO_LOGIN_TEST_REJECTED");
     }
-    command.spawn().unwrap()
+    let _ = fs::remove_file(dir.join("cancel.sock"));
+    let _ = fs::remove_file(dir.join("result.json"));
+    let _ = fs::remove_file(dir.join("cancel.ready"));
+    let process = command.spawn().unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while !dir.join("cancel.ready").exists() {
+        assert!(
+            Instant::now() < until,
+            "Worker cancellation endpoint missing"
+        );
+        std::thread::yield_now();
+    }
+    process
 }
 fn result(dir: &Path, process: Child) -> Value {
     let Output {
@@ -262,8 +275,20 @@ fn login_worker() {
         .unwrap()
         .parse::<u64>()
         .unwrap();
-    let cancelled = || dir.join("cancel").exists();
+    let cancel_socket = std::os::unix::net::UnixDatagram::bind(dir.join("cancel.sock")).unwrap();
+    cancel_socket.set_nonblocking(true).unwrap();
+    fs::write(dir.join("cancel.ready"), b"").unwrap();
+    let is_cancelled = std::cell::Cell::new(false);
+    let cancellation_checks = std::cell::Cell::new(0u64);
+    let cancelled = || {
+        cancellation_checks.set(cancellation_checks.get() + 1);
+        if cancel_socket.recv(&mut [0u8; 1]).is_ok() {
+            is_cancelled.set(true);
+        }
+        is_cancelled.get()
+    };
     let deadline = Deadline {
+        cancellation_fd: Some(cancel_socket.as_raw_fd()),
         at: Instant::now() + Duration::from_millis(timeout),
         cancelled: &cancelled,
     };
@@ -287,10 +312,11 @@ fn login_worker() {
         config["force_account_select"] == true,
         &deadline,
     );
-    let value = match outcome {
+    let mut value = match outcome {
         Ok((token, identity)) => json!({"token":token,"identity":identity}),
         Err(error) => json!({"error":error}),
     };
+    value["cancellation_checks"] = json!(cancellation_checks.get());
     fs::write(dir.join("result.json"), value.to_string()).unwrap();
 }
 
@@ -584,6 +610,7 @@ fn cache_lock_deadline_and_cancellation_do_not_open_a_browser() {
     let dir = Temp::new();
     let provider = Provider::new();
     let deadline = Deadline {
+        cancellation_fd: None,
         at: Instant::now() + LOGIN_TIMEOUT,
         cancelled: &|| false,
     };
@@ -594,13 +621,20 @@ fn cache_lock_deadline_and_cancellation_do_not_open_a_browser() {
         &deadline,
     )
     .unwrap();
-    let value = result(&dir.0, worker(&dir.0, &provider.config(), None, 100));
+    let value = result(&dir.0, worker(&dir.0, &provider.config(), None, 600));
     assert!(value["error"]
         .as_str()
         .unwrap()
         .contains("OIDC_LOGIN_TIMEOUT"));
+    assert!(
+        value["cancellation_checks"].as_u64().unwrap() < 30,
+        "Lock contention must back off rather than poll cancellation at 50 Hz: {value}"
+    );
     let process = worker(&dir.0, &provider.config(), None, 3000);
-    fs::write(dir.0.join("cancel"), "").unwrap();
+    std::os::unix::net::UnixDatagram::unbound()
+        .unwrap()
+        .send_to(b"x", dir.0.join("cancel.sock"))
+        .unwrap();
     let value = result(&dir.0, process);
     assert!(value["error"].as_str().unwrap().contains("cancelled"));
     assert_eq!(provider.state.lock().unwrap().authorization_requests, 0);
@@ -616,6 +650,7 @@ fn queued_fixed_port_cancellation_opens_no_browser() {
         .unwrap()
         .port();
     let deadline = Deadline {
+        cancellation_fd: None,
         at: Instant::now() + LOGIN_TIMEOUT,
         cancelled: &|| false,
     };
@@ -628,7 +663,10 @@ fn queued_fixed_port_cancellation_opens_no_browser() {
     let process = worker(&dir.0, &config, None, 3000);
     // Cancel while the callback-port owner still holds the lock.
     std::thread::sleep(Duration::from_millis(100));
-    fs::write(dir.0.join("cancel"), "").unwrap();
+    std::os::unix::net::UnixDatagram::unbound()
+        .unwrap()
+        .send_to(b"x", dir.0.join("cancel.sock"))
+        .unwrap();
     let value = result(&dir.0, process);
     assert!(value["error"].as_str().unwrap().contains("cancelled"));
     assert_eq!(provider.state.lock().unwrap().authorization_requests, 0);
@@ -657,7 +695,10 @@ fn cancellation_kills_and_reaps_the_owned_opener() {
         );
         std::thread::sleep(Duration::from_millis(5));
     };
-    fs::write(dir.0.join("cancel"), "").unwrap();
+    std::os::unix::net::UnixDatagram::unbound()
+        .unwrap()
+        .send_to(b"x", dir.0.join("cancel.sock"))
+        .unwrap();
     let value = result(&dir.0, process);
     assert!(value["error"].as_str().unwrap().contains("cancelled"));
     // SAFETY: signal zero only inspects the known test-owned opener PID.

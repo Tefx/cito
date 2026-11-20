@@ -1,7 +1,6 @@
 #[path = "../../../../plugins/pi/native.rs"]
 mod plugin;
-#[path = "../plugin_support.rs"]
-mod support;
+use cito_native::support;
 fn main() {
     support::one_shot(plugin::handle);
 }

@@ -15,6 +15,8 @@ use std::{
     },
 };
 
+mod activity;
+
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod tests;
@@ -280,7 +282,10 @@ impl LocalState {
             }
             // Only wakeable duplicates recover scheduling. A redelivery must not
             // shorten a losing channel's 30.5-second passive fallback.
-            c.execute("INSERT INTO wake_retries(hub,listener_id,retry_at_ms) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM local_signals WHERE hub=? AND signal_id=? AND state='RECEIVED' AND acknowledged_at_ms IS NULL AND held_reason IS NULL) ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=MIN(retry_at_ms,excluded.retry_at_ms)", &[json!(hub), listener["listener_id"].clone(), json!(now_ms()+1500), json!(hub), signal["signal_id"].clone()])?;
+            if current["harness"] != "human" {
+                c.execute("INSERT INTO wake_retries(hub,listener_id,retry_at_ms) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM local_signals WHERE hub=? AND signal_id=? AND state='RECEIVED' AND acknowledged_at_ms IS NULL AND held_reason IS NULL) ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=MIN(retry_at_ms,excluded.retry_at_ms)", &[json!(hub), listener["listener_id"].clone(), json!(now_ms()+1500), json!(hub), signal["signal_id"].clone()])?;
+            }
+            reconcile_wake_retry(c, hub, string(listener, "listener_id"))?;
             Ok(changed > 0)
         })
     }
@@ -312,8 +317,10 @@ impl LocalState {
             check_listener(&listener, captured)?;
             let now = now_ms();
             if !listener["dispatcher_token"].is_null() && listener["lease_until_ms"].as_u64().unwrap_or(0) > now {
+                reconcile_wake_retry(c, hub, id)?;
                 return Ok(Vec::new());
             }
+            isolate_foreign_work(c, &listener)?;
             // Batch expiry is the minimum member expiry. Never partially deliver
             // a recovered batch merely because another member lives longer.
             c.execute("UPDATE local_signals SET state='EXPIRED_UNSENT',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE') AND batch_id IS NOT NULL AND batch_expires_at_ms<=?", &[json!(hub), json!(id), json!(now)])?;
@@ -325,7 +332,7 @@ impl LocalState {
             c.execute("UPDATE local_signals SET state='RECEIVED',batch_id=NULL,batch_card=NULL,batch_expires_at_ms=NULL,dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL AND batch_id IN (SELECT batch_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NOT NULL)", &[json!(hub), json!(id), json!(hub), json!(id)])?;
             let old = c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND state IN ('DISPATCHING','RECEIVED') AND batch_id IS NOT NULL AND acknowledged_at_ms IS NULL AND held_reason IS NULL ORDER BY seq LIMIT 1", &[json!(hub), json!(id), listener["binding_generation"].clone()])?.into_iter().next();
             let (rows, batch, expires, card) = if let Some(old) = old {
-                let rows = c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND batch_id=? AND acknowledged_at_ms IS NULL ORDER BY seq", &[json!(hub), json!(id), old["batch_id"].clone()])?;
+                let rows = c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND batch_id=? AND state IN ('DISPATCHING','RECEIVED') AND held_reason IS NULL AND acknowledged_at_ms IS NULL ORDER BY seq", &[json!(hub), json!(id), old["batch_id"].clone()])?;
                 let card = old["batch_card"].as_str().map(str::to_owned).unwrap_or_else(|| format_wake_card(&listener, &rows, hub, qualify_ids));
                 let expires = old["batch_expires_at_ms"].as_u64().unwrap_or_else(|| earliest_expiry(&rows));
                 (rows, old["batch_id"].clone(), expires, card)
@@ -345,7 +352,10 @@ impl LocalState {
                     }
                     rows.pop();
                 }
-                let Some(first) = rows.first() else { return Ok(Vec::new()); };
+                let Some(first) = rows.first() else {
+                    reconcile_wake_retry(c, hub, id)?;
+                    return Ok(Vec::new());
+                };
                 let card = format_wake_card(&listener, &rows, hub, qualify_ids);
                 // A middle-member acknowledgment can leave first/last seq intact.
                 // Include all members and the card so that re-batching cannot reuse
@@ -397,14 +407,20 @@ impl LocalState {
             if current["dispatcher_token"] != batch["dispatcher_token"]
                 || current["lease_until_ms"].as_u64().unwrap_or(0) <= now_ms()
                 || batch["batch_expires_at_ms"].as_u64().unwrap_or(0) <= now_ms()
-                || c.query("SELECT 1 FROM local_signals WHERE hub=? AND batch_id=? AND dispatcher_token=? AND state='DISPATCHING' AND (?=0 OR acknowledged_at_ms IS NULL) LIMIT 1", &[json!(hub), batch["batch_id"].clone(), batch["dispatcher_token"].clone(), json!(require_unread)])?.is_empty() {
+                || c.query("SELECT 1 FROM local_signals WHERE hub=? AND batch_id=? AND dispatcher_token=? AND state='DISPATCHING' LIMIT 1", &[json!(hub), batch["batch_id"].clone(), batch["dispatcher_token"].clone()])?.is_empty() {
                 return Err("DISPATCH_STOPPED: Batch expired, acknowledged or ownership lost".into());
+            }
+            if require_unread && !c.query("SELECT 1 FROM local_signals WHERE hub=? AND batch_id=? AND acknowledged_at_ms IS NOT NULL LIMIT 1", &[json!(hub),batch["batch_id"].clone()])?.is_empty() {
+                c.execute("UPDATE local_signals SET state=CASE WHEN acknowledged_at_ms IS NULL THEN 'RECEIVED' ELSE 'STORED_PASSIVE' END,batch_id=NULL,batch_card=NULL,batch_expires_at_ms=NULL,dispatcher_token=NULL WHERE hub=? AND batch_id=? AND dispatcher_token=? AND state='DISPATCHING'", &[json!(hub),batch["batch_id"].clone(),batch["dispatcher_token"].clone()])?;
+                c.execute("UPDATE local_listeners SET dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=?", &[json!(hub),listener["listener_id"].clone()])?;
+                reconcile_wake_retry(c, hub, string(listener,"listener_id"))?;
+                return Ok(false);
             }
             if renew {
                 c.execute("UPDATE local_listeners SET lease_until_ms=? WHERE hub=? AND listener_id=? AND dispatcher_token=?", &[json!(now_ms()+30_000), json!(hub), listener["listener_id"].clone(), batch["dispatcher_token"].clone()])?;
             }
-            Ok(())
-        })
+            Ok(true)
+        })?.then_some(()).ok_or_else(|| "DISPATCH_STOPPED: Batch acknowledged before dispatch".into())
     }
     /// Commit only the owning dispatch's result. A stale child cannot mutate its
     /// successor's rows or clear its lease. Acks always survive completion.
@@ -426,15 +442,15 @@ impl LocalState {
         self.db.transaction(|c| {
             let hub = string(listener, "hub");
             let current = current_listener(c, hub, string(listener, "listener_id"))?;
-            if current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] || current["dispatcher_token"] != batch["dispatcher_token"] {
+            if !batch["dispatcher_token"].is_string() || !batch["batch_id"].is_string() || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] || current["dispatcher_token"] != batch["dispatcher_token"] {
                 return Ok(false);
             }
-            let accepted = state != "DISPATCHED" || current["status"] == "ACTIVE";
+            let accepted = current["status"] == "ACTIVE";
             let reason = if !accepted { Some(if current["status"] == "UNLISTENED" { "unlistened_before_dispatch" } else { "fenced_before_dispatch" }) } else { reason };
             let state = if accepted { state } else { "STORED_PASSIVE" };
-            let delivered = delivered && accepted;
+            let delivered = delivered && state == "DISPATCHED";
             c.execute("UPDATE local_signals SET state=CASE WHEN batch_expires_at_ms<=? AND ?<>'DISPATCHED' THEN 'EXPIRED_UNSENT' WHEN acknowledged_at_ms IS NOT NULL AND ?<>'DISPATCHED' THEN 'STORED_PASSIVE' ELSE ? END,held_reason=?,queue_written=MAX(queue_written,?),queue_confirmed=MAX(queue_confirmed,?),acknowledged_at_ms=CASE WHEN ? THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END,dispatcher_token=NULL WHERE hub=? AND batch_id=? AND dispatcher_token=? AND state='DISPATCHING'", &[json!(now_ms()), json!(state), json!(state), json!(state), json!(reason), json!(queue_written), json!(queue_confirmed), json!(delivered), json!(now_ms()), json!(hub), batch["batch_id"].clone(), batch["dispatcher_token"].clone()])?;
-            if accepted && state == "DISPATCHED" {
+            if state == "DISPATCHED" {
                 // COALESCE makes post-delivery grace a one-time credit per signal.
                 c.execute("UPDATE local_signals SET delivered_at_ms=COALESCE(delivered_at_ms,?) WHERE hub=? AND batch_id=? AND state='DISPATCHED'", &[json!(now_ms()),json!(hub),batch["batch_id"].clone()])?;
             }
@@ -445,6 +461,7 @@ impl LocalState {
                 c.execute("UPDATE local_signals SET batch_id=NULL,batch_card=NULL,batch_expires_at_ms=NULL WHERE hub=? AND batch_id=? AND state='RECEIVED' AND acknowledged_at_ms IS NULL", &[json!(hub), batch["batch_id"].clone()])?;
             }
             c.execute("UPDATE local_listeners SET dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND dispatcher_token=?", &[json!(hub), listener["listener_id"].clone(), batch["dispatcher_token"].clone()])?;
+            reconcile_wake_retry(c, hub, string(listener, "listener_id"))?;
             Ok(accepted)
         })
     }
@@ -471,6 +488,7 @@ impl LocalState {
             if current["status"] != listener["status"] || current["status"] == "FENCED_INACTIVE" || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] { return Ok(false); }
             c.execute("UPDATE local_listeners SET status=?,updated_at=?,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND binding_generation=? AND COALESCE(owner_token,'')=? AND status=?", &[json!(status),json!(now_ms()),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone(),listener["owner_token"].clone(),listener["status"].clone()])?;
             c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?,dispatcher_token=NULL WHERE hub=? AND listener_id=? AND binding_generation<=? AND state IN ('RECEIVED','DISPATCHING')", &[json!(reason),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone()])?;
+            c.execute("DELETE FROM wake_retries WHERE hub=? AND listener_id=?", &[json!(hub), listener["listener_id"].clone()])?;
             Ok(true)
         })?;
         if changed {
@@ -479,12 +497,21 @@ impl LocalState {
         Ok(changed)
     }
     pub fn restore_passive(&self, hub: &str, listener: &Value) -> Result<(), String> {
-        self.db.execute("UPDATE local_signals SET state='RECEIVED',held_reason=NULL WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND (held_reason IS NULL OR (held_reason='driver_unavailable' AND NOT EXISTS(SELECT 1 FROM wake_retries w WHERE w.hub=local_signals.hub AND w.listener_id=local_signals.listener_id AND w.retry_at_ms>?))) AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(now_ms()), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
+        self.db.transaction(|c| {
+        let current = current_listener(c,hub,string(listener,"listener_id"))?;
+        check_listener(&current,listener)?;
+        isolate_foreign_work(c,&current)?;
+        c.execute("UPDATE local_signals SET state='RECEIVED',held_reason=NULL WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND (COALESCE(held_reason,'')='' OR (held_reason='driver_unavailable' AND NOT EXISTS(SELECT 1 FROM wake_retries w WHERE w.hub=local_signals.hub AND w.listener_id=local_signals.listener_id AND w.retry_at_ms>?))) AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(now_ms()), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
         Ok(())
+        })
     }
     pub fn schedule_wake_retry_for(&self, listener: &Value, delay: u64) -> Result<(), String> {
-        self.db.execute("INSERT INTO wake_retries(hub,listener_id,retry_at_ms) SELECT hub,listener_id,? FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=? ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=excluded.retry_at_ms", &[json!(now_ms()+delay), listener["hub"].clone(), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
-        Ok(())
+        self.db.transaction(|c| {
+            if reconcile_wake_retry(c, string(listener, "hub"), string(listener, "listener_id"))? {
+                c.execute("INSERT INTO wake_retries(hub,listener_id,retry_at_ms) SELECT hub,listener_id,? FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND harness<>'human' AND binding_generation=? AND owner_token=? ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=excluded.retry_at_ms", &[json!(now_ms()+delay), listener["hub"].clone(), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
+            }
+            Ok(())
+        })
     }
     pub fn acknowledge(
         &self,
@@ -493,14 +520,95 @@ impl LocalState {
         ids: &[Value],
         channel: &str,
     ) -> Result<(), String> {
-        self.db.transaction(|c| { for id in ids {
-            c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(now_ms()),json!(hub),json!(node),id.clone()])?;
-            c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?,?,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(channel),json!(now_ms()),json!(hub),json!(node),id.clone()])?;
-        } Ok(()) })
+        self.db.transaction(|c| {
+            let listener = current_listener(c, hub, node)?;
+            for id in ids {
+            let rows = c.query("SELECT hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?", &[json!(hub),json!(node),id.clone()])?;
+            if !rows.first().is_some_and(|signal| signal_matches_listener(signal, &listener)) { continue; }
+            acknowledge_current(c, hub, node, id, channel)?;
+        }
+        reconcile_wake_retry(c, hub, node)?;
+        Ok(()) })
+    }
+    pub fn isolate_stale_signals(&self, listener: &Value) -> Result<(), String> {
+        self.db.transaction(|db| {
+            let current =
+                current_listener(db, string(listener, "hub"), string(listener, "listener_id"))?;
+            isolate_foreign_work(db, &current)
+        })
+    }
+    /// Unread identity and dispatch metadata; payloads stay in paginated inbox reads.
+    pub fn current_signal_metadata(
+        &self,
+        hub: &str,
+        node: &str,
+        after_seq: u64,
+        limit: usize,
+        match_id: Option<&str>,
+    ) -> Result<Vec<Value>, String> {
+        let Some(listener) = self.listener(hub, node)? else {
+            return Ok(Vec::new());
+        };
+        let mut rows = Vec::new();
+        self.db.read(|db| db.query_while(
+            "SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (?=0 OR seq>?) AND (? IS NULL OR signal_id=? OR batch_id=?) ORDER BY seq,signal_id",
+            &[json!(hub),json!(node),json!(after_seq),json!(after_seq),json!(match_id),json!(match_id),json!(match_id)],
+            |row| {
+                if signal_matches_listener(&row, &listener) { rows.push(row); }
+                Ok(rows.len() < limit)
+            },
+        ))?;
+        Ok(rows)
+    }
+
+    pub fn unread_count(&self, hub: &str, node: &str, live_only: bool) -> Result<u64, String> {
+        let Some(listener) = self.listener(hub, node)? else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        self.db.read(|db| db.query_each(
+            "SELECT hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (?=0 OR (expires_at_ms>? AND state!='EXPIRED_UNSENT'))",
+            &[json!(hub),json!(node),json!(live_only),json!(now_ms())],
+            |row| { if signal_matches_listener(&row, &listener) { count += 1; } },
+        ))?;
+        Ok(count)
+    }
+
+    pub fn current_signals(
+        &self,
+        hub: &str,
+        node: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>, String> {
+        let Some(listener) = self.listener(hub, node)? else {
+            return Ok(Vec::new());
+        };
+        let limit = limit.clamp(1, 1000);
+        let mut rows = Vec::new();
+        self.db.read(|db| db.query_while("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY created_at,seq", &[json!(hub),json!(node)], |row| {
+            if signal_matches_listener(&row, &listener) { rows.push(row); }
+            Ok(rows.len() < limit)
+        }))?;
+        Ok(rows)
     }
     pub fn activity(&self) -> Result<(Vec<Value>, u64), String> {
         let (rows, _, unread) = self.query_activity("all", "")?;
         Ok((rows, unread))
+    }
+    /// Count visible current history without loading message payloads.
+    pub fn activity_counts(&self) -> Result<(u64, u64), String> {
+        let rows = self.db.query("SELECT s.principal_id AS source,l.principal_id AS target,count(*) AS total,sum(s.acknowledged_at_ms IS NULL) AS unread FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND l.status!='FENCED_INACTIVE' AND l.hub_url!='' AND s.hub_url=l.hub_url GROUP BY s.principal_id,l.principal_id", &[])?;
+        Ok(rows
+            .iter()
+            .filter(|row| {
+                super::auth::principal_ids_equal(string(row, "source"), string(row, "target"))
+            })
+            .fold((0, 0), |(total, unread), row| {
+                (
+                    total + row["total"].as_u64().unwrap_or(0),
+                    unread + row["unread"].as_u64().unwrap_or(0),
+                )
+            }))
     }
     pub fn query_activity(
         &self,
@@ -510,23 +618,18 @@ impl LocalState {
         let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)";
         let query = query.trim().to_lowercase();
         let params = [json!(filter), json!(filter)];
-        self.db.transaction(|c| {
-            if query.is_empty() {
-                let counts = c.query(&format!("SELECT COUNT(*) AS total,COUNT(CASE WHEN s.acknowledged_at_ms IS NULL THEN 1 END) AS unread{predicate}"), &params)?;
-                let rows = c.query(&format!("SELECT s.*{predicate} ORDER BY s.created_at DESC,s.signal_id ASC LIMIT 80"), &params)?;
-                return Ok((rows, counts[0]["total"].as_u64().unwrap_or(0), counts[0]["unread"].as_u64().unwrap_or(0)));
-            }
+        self.db.read(|c| {
             let mut rows = Vec::new();
             let (mut total, mut unread) = (0, 0);
             // Apply address normalization before pagination and counts, streaming
             // history so a broad search retains at most the visible page in memory.
-            c.query_each(&format!("SELECT s.*, l.owner_user AS target_user, l.harness AS target_harness, l.title AS target_title{predicate} ORDER BY s.created_at DESC,s.signal_id ASC"), &params, |mut row| {
-                if !matches_activity(&row, &query) { return; }
+            c.query_each(&format!("SELECT s.*, l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.owner_user AS target_user, l.harness AS target_harness, l.title AS target_title{predicate} ORDER BY s.created_at DESC,s.signal_id ASC"), &params, |mut row| {
+                if !joined_signal_is_current(&row) || !matches_activity(&row, &query) { return; }
                 total += 1;
                 unread += u64::from(row["acknowledged_at_ms"].is_null());
                 if rows.len() < 80 {
                     if let Some(fields) = row.as_object_mut() {
-                        for key in ["target_user", "target_harness", "target_title"] { fields.remove(key); }
+                        for key in ["target_user", "target_harness", "target_title", "target_hub_url", "target_principal_id", "target_status"] { fields.remove(key); }
                     }
                     rows.push(row);
                 }
@@ -534,6 +637,64 @@ impl LocalState {
             Ok((rows, total, unread))
         })
     }
+}
+
+/// A retry belongs to current, unexpired, wakeable unread work, never merely
+/// to a previous attempt. Use inside the same transaction as terminal updates.
+pub(super) fn reconcile_wake_retry(c: &Connection, hub: &str, id: &str) -> Result<bool, String> {
+    let listener = c
+        .query(
+            "SELECT * FROM local_listeners WHERE hub=? AND listener_id=?",
+            &[json!(hub), json!(id)],
+        )?
+        .into_iter()
+        .next();
+    let retryable = if let Some(listener) =
+        listener.filter(|row| row["status"] == "ACTIVE" && row["harness"] != "human")
+    {
+        c.query("SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE') AND COALESCE(held_reason,'') IN ('','driver_unavailable') AND expires_at_ms>? AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?)",
+            &[json!(hub), json!(id), listener["binding_generation"].clone(), json!(now_ms()), json!(now_ms())])?
+            .iter().any(|signal| signal_matches_listener(signal, &listener))
+    } else {
+        false
+    };
+    if !retryable {
+        c.execute(
+            "DELETE FROM wake_retries WHERE hub=? AND listener_id=?",
+            &[json!(hub), json!(id)],
+        )?;
+    }
+    Ok(retryable)
+}
+
+fn isolate_foreign_work(c: &Connection, listener: &Value) -> Result<(), String> {
+    for row in c.query("SELECT signal_id,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND (state IN ('RECEIVED','DISPATCHING') OR state='STORED_PASSIVE' AND COALESCE(held_reason,'') IN ('','stale_generation','driver_unavailable'))", &[listener["hub"].clone(),listener["listener_id"].clone()])? {
+        if signal_matches_listener(&row, listener) {continue;}
+        c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='authority_mismatch',dispatcher_token=NULL WHERE hub=? AND signal_id=?", &[listener["hub"].clone(),row["signal_id"].clone()])?;
+        if !row["batch_id"].is_null() {
+            c.execute("UPDATE local_signals SET state=CASE WHEN state='DISPATCHING' AND acknowledged_at_ms IS NULL THEN 'RECEIVED' WHEN state='DISPATCHING' THEN 'STORED_PASSIVE' ELSE state END,dispatcher_token=NULL,batch_id=NULL,batch_card=NULL,batch_expires_at_ms=NULL WHERE hub=? AND batch_id=?", &[listener["hub"].clone(),row["batch_id"].clone()])?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn signal_matches_listener(signal: &Value, listener: &Value) -> bool {
+    listener["status"] != "FENCED_INACTIVE"
+        && !string(listener, "hub_url").is_empty()
+        && signal["hub_url"] == listener["hub_url"]
+        && !string(signal, "principal_id").is_empty()
+        && !string(listener, "principal_id").is_empty()
+        && super::auth::principal_ids_equal(
+            string(signal, "principal_id"),
+            string(listener, "principal_id"),
+        )
+}
+
+pub(super) fn joined_signal_is_current(row: &Value) -> bool {
+    signal_matches_listener(
+        row,
+        &json!({"hub_url":row["target_hub_url"],"principal_id":row["target_principal_id"],"status":row["target_status"]}),
+    )
 }
 
 pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
@@ -586,6 +747,19 @@ pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
     searchable
         .to_lowercase()
         .contains(&query.trim().to_lowercase())
+}
+
+fn acknowledge_current(
+    c: &Connection,
+    hub: &str,
+    node: &str,
+    id: &Value,
+    channel: &str,
+) -> Result<(), String> {
+    let at = json!(now_ms());
+    c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[at.clone(),json!(hub),json!(node),id.clone()])?;
+    c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?,?,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(channel),at,json!(hub),json!(node),id.clone()])?;
+    Ok(())
 }
 
 fn current_listener(c: &Connection, hub: &str, id: &str) -> Result<Value, String> {

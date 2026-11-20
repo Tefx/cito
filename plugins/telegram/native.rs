@@ -143,7 +143,12 @@ fn api_with_timeout(
                         .collect::<String>()
                 })
                 .and_then(|id| id.parse::<u64>().ok())
-                .unwrap_or_else(|| body["offset"].as_u64().unwrap_or(0));
+                .ok_or_else(|| ApiFailure {
+                    message: "Telegram getUpdates response has no parseable update_id".into(),
+                    retryable: true,
+                    effect_unknown: false,
+                    retry_after: None,
+                })?;
             eprintln!(
                 "Telegram getUpdates: skipping oversized or malformed single update {update}"
             );
@@ -190,10 +195,22 @@ fn chunks(text: &str) -> Vec<&str> {
     }
     chunks
 }
-fn send(config: &Value, chat: &str, text: &str) -> Result<Vec<String>> {
+fn control_budget(deadline: u64) -> Result<Duration> {
+    let remaining = deadline.saturating_sub(now_ms());
+    if remaining == 0 {
+        return Err("Control request deadline exceeded".into());
+    }
+    Ok(Duration::from_millis(remaining))
+}
+fn send(config: &Value, chat: &str, text: &str, deadline: u64) -> Result<Vec<String>> {
     let mut ids = vec![];
     for text in chunks(text) {
-        let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
+        let r = api_with_timeout(
+            config,
+            "sendMessage",
+            json!({"chat_id":chat,"text":text}),
+            control_budget(deadline)?,
+        )?;
         ids.push(id(&r["message_id"]).ok_or("Telegram message_id is missing")?);
     }
     Ok(ids)
@@ -270,7 +287,10 @@ fn rpc(config: &Value, req: &Value) -> Value {
         config
     };
     let result = (|| -> Result<Value> {
-        let me = api(c, "getMe", json!({}))?;
+        let deadline = req["control_deadline_ms"]
+            .as_u64()
+            .unwrap_or_else(|| now_ms() + 8000);
+        let me = api_with_timeout(c, "getMe", json!({}), control_budget(deadline)?)?;
         let username = str_at(&me, "username").ok_or("Bot username is unavailable")?;
         if req["op"] == "format_pair" {
             return Ok(
@@ -285,6 +305,7 @@ fn rpc(config: &Value, req: &Value) -> Value {
                     "Cito channel connected for @{}",
                     str_at(req, "user").unwrap_or("user")
                 ),
+                deadline,
             )?;
             format!("Sent test message to chat {chat}")
         } else {
@@ -303,6 +324,87 @@ fn rpc(config: &Value, req: &Value) -> Value {
         Err(e) => json!({"op":"rpc_result","req_id":req["req_id"],"ok":false,"error":e}),
     }
 }
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    #[test]
+    fn rpc_shares_one_deadline_and_skips_expired_queue_work() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = json!({"botToken":"test-token","apiBaseUrl":format!("http://{}",listener.local_addr().unwrap())});
+        let worker = std::thread::spawn(move || {
+            use std::os::fd::AsRawFd;
+            for method in ["getMe", "sendMessage"] {
+                assert!(crate::support::poll_until(
+                    &mut [libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0
+                    }],
+                    Some(std::time::Instant::now() + Duration::from_secs(2))
+                )
+                .unwrap());
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.contains(method));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                // Each call fits the original budget on its own; together they
+                // exceed it. A per-call reset would incorrectly report success.
+                std::thread::sleep(Duration::from_millis(if method == "getMe" {
+                    350
+                } else {
+                    300
+                }));
+                let body = if method == "getMe" {
+                    json!({"ok":true,"result":{"username":"sample_bot"}})
+                } else {
+                    json!({"ok":true,"result":{"message_id":42}})
+                }
+                .to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let started = std::time::Instant::now();
+        let reply = rpc(
+            &config,
+            &json!({"op":"test","req_id":"bounded","user_config":{"chatId":"123"},"control_deadline_ms":now_ms()+500}),
+        );
+        worker.join().unwrap();
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["req_id"], "bounded");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let expired = rpc(
+            &config,
+            &json!({"op":"test","control_deadline_ms":now_ms()-1}),
+        );
+        assert_eq!(expired["ok"], false);
+        assert_eq!(expired["error"], "Control request deadline exceeded");
+    }
+}
+
 struct Pending {
     cursor: u64,
     key: Option<String>,
@@ -325,6 +427,7 @@ impl Outbound {
                                 &config,
                                 str_at(&request, "chat").unwrap_or(""),
                                 str_at(&request, "text").unwrap_or(""),
+                                request["control_deadline_ms"].as_u64().unwrap_or(0),
                             ) {
                                 eprintln!("Telegram confirmation: {error}");
                             }
@@ -340,7 +443,8 @@ impl Outbound {
             control: worker(),
         }
     }
-    fn submit(&self, config: &Value, request: Value) {
+    fn submit(&self, config: &Value, mut request: Value) {
+        request["control_deadline_ms"] = json!(now_ms() + 8000);
         let tx = if request["op"] == "deliver" {
             &self.deliveries
         } else {
@@ -465,9 +569,18 @@ impl Runtime {
         match str_at(&r, "op").unwrap_or("") {
             "shutdown" => return false,
             "configure" => {
-                let old_token = str_at(&self.config, "botToken").unwrap_or("");
-                let token_changed = !old_token.is_empty()
-                    && Some(old_token) != str_at(&r["hub_config"], "botToken");
+                let identity = |config: &Value| {
+                    str_at(config, "botToken").map(|token| {
+                        token
+                            .split_once(':')
+                            .map(|(id, _)| id)
+                            .unwrap_or(token)
+                            .to_owned()
+                    })
+                };
+                let old_identity = identity(&self.config);
+                let token_changed =
+                    old_identity.is_some() && old_identity != identity(&r["hub_config"]);
                 self.config = r["hub_config"].clone();
                 if token_changed {
                     self.cursor = 0;
@@ -529,6 +642,14 @@ impl Runtime {
         true
     }
 }
+const PERMANENT_POLL_ERRORS: [&str; 6] = [
+    "HTTP 401:",
+    "HTTP 403:",
+    "HTTP 409:",
+    "API 401:",
+    "API 403:",
+    "API 409:",
+];
 #[derive(Default)]
 struct PollBackoff {
     failures: u32,
@@ -536,16 +657,9 @@ struct PollBackoff {
 impl PollBackoff {
     fn failed(&mut self, error: &ApiFailure, jitter_ms: u64) -> (bool, Duration) {
         self.failures = self.failures.saturating_add(1);
-        let permanent = [
-            "HTTP 401:",
-            "HTTP 403:",
-            "HTTP 409:",
-            "API 401:",
-            "API 403:",
-            "API 409:",
-        ]
-        .iter()
-        .any(|code| error.message.contains(code));
+        let permanent = PERMANENT_POLL_ERRORS
+            .iter()
+            .any(|code| error.message.contains(code));
         let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
         (
             permanent || self.failures >= 3,
@@ -576,6 +690,7 @@ pub fn main() {
     let mut polling = false;
     let mut backoff = PollBackoff::default();
     let mut next_poll = std::time::Instant::now();
+    let mut healthy_reported = false;
     let mut paused = false;
     loop {
         let can_poll = !polling
@@ -596,6 +711,9 @@ pub fn main() {
         };
         if let Some(Event::Request(req)) = event.as_ref() {
             let configured = req["op"] == "configure";
+            if configured && req["hub_config"] != runtime.config {
+                healthy_reported = false;
+            }
             if !runtime.request(req.clone()) {
                 return;
             }
@@ -611,7 +729,10 @@ pub fn main() {
                 match result {
                     Ok(updates) => {
                         backoff.succeeded();
-                        emit(&json!({"op":"health","error":null}));
+                        if !healthy_reported {
+                            emit(&json!({"op":"health","error":null}));
+                            healthy_reported = true;
+                        }
                         runtime.updates(updates);
                     }
                     Err(e) => {
@@ -630,20 +751,14 @@ pub fn main() {
                             % 500;
                         let (report, delay) = backoff.failed(&e, jitter);
                         if report {
+                            healthy_reported = false;
                             emit(
                                 &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
                             );
                         }
-                        paused = [
-                            "HTTP 401:",
-                            "HTTP 403:",
-                            "HTTP 409:",
-                            "API 401:",
-                            "API 403:",
-                            "API 409:",
-                        ]
-                        .iter()
-                        .any(|code| e.message.contains(code));
+                        paused = PERMANENT_POLL_ERRORS
+                            .iter()
+                            .any(|code| e.message.contains(code));
                         next_poll = std::time::Instant::now() + delay;
                     }
                 }

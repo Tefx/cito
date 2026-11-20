@@ -1,4 +1,4 @@
-use cito_native::database::Database;
+use cito_native::{database::Database, support::wait_child_exit};
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,
@@ -8,7 +8,7 @@ use std::{
     net::{TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
@@ -57,6 +57,10 @@ pub fn script(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
+    try_http(port, path, body).unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_http(port: u16, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
     let url = format!("http://127.0.0.1:{port}{path}");
     let a = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(10))
@@ -68,10 +72,12 @@ pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
     let response = match result {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
-        Err(e) => panic!("{url}: {e}"),
+        Err(e) => return Err(format!("{url}: {e}")),
     };
     let status = response.status();
-    let text = response.into_string().unwrap();
+    let text = response
+        .into_string()
+        .map_err(|error| format!("{url}: {error}"))?;
     let value = serde_json::from_str(&text)
         .or_else(|_| {
             serde_json::from_str(
@@ -80,36 +86,107 @@ pub fn http(port: u16, path: &str, body: Option<&Value>) -> (u16, Value) {
                     .unwrap_or(""),
             )
         })
-        .unwrap_or_else(|_| panic!("{url}: {text}"));
-    (status, value)
+        .map_err(|_| format!("{url}: {text}"))?;
+    Ok((status, value))
 }
+// Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
+pub fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
+    let mut command = vec!["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp(sys.argv[1],sys.argv[1:])", bin];
+    command.extend_from_slice(args);
+    f.spawn("python3", &command, extra)
+}
+
+pub fn ui_frames(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.home.join("ui-frames"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+pub fn install_builtin_override(f: &Fixture, id: &str, manifest: Value) -> PathBuf {
+    let path = f.state.join("plugins").join(id);
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("plugin.json"), manifest.to_string()).unwrap();
+    path
+}
+pub fn install_provider_command(f: &Fixture, id: &str, command: Value) -> PathBuf {
+    let mut manifest: Value = serde_json::from_slice(
+        &fs::read(root().join("plugins").join(id).join("plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manifest["command"] = command;
+    install_builtin_override(f, id, manifest)
+}
+pub fn channel_provider(f: &Fixture, id: &str, fields: Value) -> PathBuf {
+    install_builtin_override(
+        f,
+        id,
+        json!({"id":id,"kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"fields":fields}),
+    )
+}
+
 struct Process {
     child: Child,
+    stopped: Option<Result<ExitStatus, String>>,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     readers: Vec<std::thread::JoinHandle<()>>,
 }
 impl Process {
-    fn stop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
-            // SAFETY: each owned child leads its own process group. Reap before its ID can be reused.
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGTERM);
-            }
-            let until = Instant::now() + Duration::from_secs(2);
-            while self.child.try_wait().unwrap().is_none() && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if self.child.try_wait().unwrap().is_none() {
-                unsafe {
-                    libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+    fn stop(&mut self) -> Result<ExitStatus, String> {
+        if let Some(result) = &self.stopped {
+            return result.clone();
+        }
+        let mut errors = Vec::new();
+        let signal_group = |signal| {
+            // SAFETY: process_group(0) gives the child its own group. Only wait() below
+            // releases its PID, so even an already-exited leader still reserves the ID.
+            if unsafe { libc::kill(-(self.child.id() as i32), signal) } < 0 {
+                let error = std::io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::ESRCH) => {}
+                    // macOS can return EPERM when only the zombie leader remains.
+                    Some(libc::EPERM)
+                        if wait_child_exit(&self.child, Duration::ZERO) == Ok(true) => {}
+                    _ => return Err(format!("Cannot signal child group: {error}")),
                 }
             }
-        }
-        self.child.wait().unwrap();
+            Ok(())
+        };
+        let graceful = wait_child_exit(&self.child, Duration::ZERO).and_then(|exited| {
+            if !exited {
+                signal_group(libc::SIGTERM)?;
+                wait_child_exit(&self.child, Duration::from_secs(2))?;
+            }
+            Ok(())
+        });
+        errors.extend(graceful.err());
+        errors.extend(signal_group(libc::SIGKILL).err());
+        let status = self
+            .child
+            .wait()
+            .map_err(|e| format!("Cannot reap child: {e}"));
+
+        let until = Instant::now() + Duration::from_secs(2);
         for reader in self.readers.drain(..) {
-            reader.join().unwrap();
+            while !reader.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !reader.is_finished() {
+                errors.push("Process output reader timed out".into());
+            } else if reader.join().is_err() {
+                errors.push("Process output reader panicked".into());
+            }
         }
+        let result = if errors.is_empty() {
+            status
+        } else {
+            errors.extend(status.err());
+            Err(errors.join("; "))
+        };
+        self.stopped = Some(result.clone());
+        result
     }
 }
 pub struct Fixture {
@@ -162,7 +239,7 @@ impl Fixture {
         ] {
             env.insert(k.into(), v);
         }
-        for key in ["CITO_OPEN_BIN", "CITO_BROWSER_BIN", "CITO_LAUNCHCTL_BIN"] {
+        for key in ["CITO_OPEN_BIN", "CITO_BROWSER_BIN"] {
             env.insert(key.into(), mock.display().to_string());
         }
         Self {
@@ -204,6 +281,7 @@ impl Fixture {
         let index = children.len();
         children.push(Process {
             child,
+            stopped: None,
             stdout,
             stderr,
             readers,
@@ -252,19 +330,26 @@ impl Fixture {
         self.children.borrow()[index].child.id()
     }
     pub fn signal(&self, index: usize, signal: i32) {
-        unsafe {
-            libc::kill(self.pid(index) as i32, signal);
+        let children = self.children.borrow();
+        let p = &children[index];
+        if p.stopped.is_none() {
+            // SAFETY: the fixture still owns this unreaped PID.
+            unsafe { libc::kill(p.child.id() as i32, signal) };
         }
     }
     pub fn exited(&self, index: usize) -> bool {
-        self.children.borrow_mut()[index]
-            .child
-            .try_wait()
-            .unwrap()
-            .is_some()
+        let children = self.children.borrow();
+        let p = &children[index];
+        match &p.stopped {
+            Some(Ok(_)) => true,
+            Some(Err(error)) => panic!("Process cleanup failed: {error}"),
+            None => wait_child_exit(&p.child, Duration::ZERO).unwrap(),
+        }
     }
     pub fn stop(&self, index: usize) {
-        self.children.borrow_mut()[index].stop();
+        self.children.borrow_mut()[index]
+            .stop()
+            .unwrap_or_else(|error| panic!("Process cleanup failed: {error}"));
     }
     pub fn command(&self, bin: &str, args: &[&str], input: &str) -> (bool, String, String) {
         let i = self.spawn(bin, args, &[]);
@@ -273,11 +358,9 @@ impl Fixture {
         }
         self.eof(i);
         wait(|| self.exited(i));
-        self.stop(i);
         let success = self.children.borrow_mut()[i]
-            .child
-            .wait()
-            .unwrap()
+            .stop()
+            .unwrap_or_else(|error| panic!("Process cleanup failed: {error}"))
             .success();
         (success, self.output(i, false), self.output(i, true))
     }
@@ -358,26 +441,204 @@ impl Fixture {
         path
     }
     pub fn provider(&self, outcome: &str) -> Value {
-        let d = self.state.join("plugins/fixture");
-        fs::create_dir_all(&d).unwrap();
+        let d = install_builtin_override(
+            self,
+            "fixture",
+            json!({"id":"fixture","kind":"agent-harness","displayName":"Fixture","tier":"experimental","command":["python3","./driver.py"]}),
+        );
         fs::write(
             d.join("options.json"),
             json!({"session_id":"session-1","status":"alive","outcome":outcome}).to_string(),
         )
         .unwrap();
         fs::write(d.join("driver.py"), include_str!("provider.py")).unwrap();
-        fs::write(d.join("plugin.json"),json!({"id":"fixture","kind":"agent-harness","displayName":"Fixture","tier":"experimental","command":["python3","./driver.py"]}).to_string()).unwrap();
         json!({"expected_harness":"fixture","expected_session_id":"session-1"})
     }
 }
+#[test]
+#[ignore = "subprocess worker for teardown regression"]
+fn fixture_teardown_failure_worker() {
+    let mode = std::env::var("CITO_TEARDOWN_CASE").unwrap();
+    let fixture = Fixture::new(json!({}));
+    fs::write(
+        std::env::var("CITO_TEARDOWN_PATH").unwrap(),
+        fixture.dir.to_str().unwrap(),
+    )
+    .unwrap();
+    if mode == "command-fast-exit" {
+        assert!(fixture.command("/bin/sh", &["-c", "exit 0"], "").0);
+        return;
+    }
+    if mode == "drop-fast-exit" {
+        let i = fixture.spawn("/bin/sh", &["-c", "exit 0"], &[]);
+        wait(|| fixture.exited(i));
+        return;
+    }
+    if mode.ends_with("-descendant") {
+        // The sleep inherits both output pipes. Its PID is recorded outside the
+        // worker's sandbox so the caller can check liveness even after a panic.
+        let pid_file = std::env::var("CITO_TEARDOWN_PID").unwrap();
+        let args = [
+            "-c",
+            "sleep 30 & echo $! > \"$1\"; echo out; echo err >&2; exit 23",
+            "sh",
+            &pid_file,
+        ];
+        if mode == "command-descendant" {
+            assert_eq!(
+                fixture.command("/bin/sh", &args, ""),
+                (false, "out\n".into(), "err\n".into())
+            );
+            assert!(fixture.exited(0));
+            fixture.stop(0);
+            return;
+        }
+        let i = fixture.spawn("/bin/sh", &args, &[]);
+        wait(|| fixture.exited(i));
+        if mode == "drop-descendant" {
+            return;
+        }
+        // Continue into the failing health probe during primary panic cleanup.
+    }
+    if matches!(mode.as_str(), "ordinary-reader" | "ordinary-reader-timeout") {
+        let i = fixture.spawn("/bin/sh", &["-c", "exit 0"], &[]);
+        fixture.children.borrow_mut()[i]
+            .readers
+            .push(std::thread::spawn(move || {
+                if mode == "ordinary-reader" {
+                    panic!("fixture reader failed");
+                }
+                loop {
+                    std::thread::park();
+                }
+            }));
+        return;
+    }
+    let listener = TcpListener::bind(("127.0.0.1", fixture.port)).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            if mode.contains("malformed") {
+                let mut reader = BufReader::new(&mut stream);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if line == "\r\n" => {
+                            let _ = reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ninvalid");
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            }
+            // Closing immediately also covers a successful TCP preflight followed by EOF.
+        }
+    });
+    if std::env::var("CITO_TEARDOWN_CASE")
+        .unwrap()
+        .starts_with("panic")
+    {
+        panic!("primary assertion failure");
+    }
+    drop(fixture);
+}
+
+#[test]
+fn fixture_teardown_settles_children_and_preserves_primary_failures() {
+    use std::os::unix::process::ExitStatusExt;
+    let _lock = serial();
+    let parent = Fixture::new(json!({}));
+    let marker = parent.dir.join("child-directory");
+    for mode in [
+        "panic-closed",
+        "panic-malformed",
+        "ordinary-closed",
+        "ordinary-malformed",
+        "ordinary-reader",
+        "ordinary-reader-timeout",
+        "command-fast-exit",
+        "drop-fast-exit",
+        "command-descendant",
+        "drop-descendant",
+        "panic-descendant",
+    ] {
+        let pid_file = parent.dir.join(format!("{mode}.pid"));
+        let mut command = parent.command_builder(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            &[
+                "--exact",
+                "support::fixture_teardown_failure_worker",
+                "--ignored",
+                "--nocapture",
+            ],
+        );
+        command
+            .env("CITO_TEARDOWN_CASE", mode)
+            .env("CITO_TEARDOWN_PATH", &marker)
+            .env("CITO_TEARDOWN_PID", &pid_file);
+        let output =
+            cito_native::support::run_command_with_timeout(command, Duration::from_secs(8))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{mode}: teardown timed out"));
+        assert_eq!(output.status.signal(), None, "{mode}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if mode.starts_with("command-") || mode.starts_with("drop-") {
+            assert!(output.status.success(), "{mode}: {output:?}");
+        } else {
+            assert_eq!(output.status.code(), Some(101), "{mode}: {output:?}");
+            assert!(
+                stderr.contains(if mode.starts_with("panic") {
+                    "primary assertion failure"
+                } else {
+                    "Fixture teardown failed"
+                }),
+                "{mode}: {stderr}"
+            );
+        }
+        if mode.ends_with("-descendant") {
+            let pid = fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            assert!(pid > 1);
+            wait(|| !cito_native::support::alive(pid));
+        }
+        if mode == "ordinary-reader-timeout" {
+            assert!(
+                stderr.contains("Process output reader timed out"),
+                "{stderr}"
+            );
+        }
+        if mode == "ordinary-reader" {
+            assert!(
+                stderr.contains("Process output reader panicked"),
+                "{stderr}"
+            );
+        }
+        let child_dir = fs::read_to_string(&marker).unwrap();
+        fs::remove_file(&marker).unwrap();
+        assert!(
+            !Path::new(&child_dir).exists(),
+            "Fixture directory survived: {child_dir}"
+        );
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let mut failures = Vec::new();
         for p in self.children.get_mut().iter_mut().rev() {
-            p.stop();
+            failures.extend(p.stop().err());
         }
         // CLI auto-starts a detached daemon. Only stop a health-verified sandbox owner.
         if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-            let (_, h) = http(self.port, "/health", None);
+            let health = try_http(self.port, "/health", None);
+            if let Err(error) = &health {
+                failures.push(error.clone());
+            }
+            let h = health.map(|(_, value)| value).unwrap_or(Value::Null);
             if h["stateDir"] == json!(self.state) {
                 if let Some(pid) = h["pid"].as_i64().filter(|p| *p > 1) {
                     unsafe {
@@ -389,13 +650,16 @@ impl Drop for Fixture {
                     {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    assert!(
-                        TcpStream::connect(("127.0.0.1", self.port)).is_err(),
-                        "detached daemon did not stop"
-                    );
+                    if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+                        failures.push("detached daemon did not stop".into());
+                    }
                 }
             }
         }
-        fs::remove_dir_all(&self.dir).unwrap();
+        let removed = fs::remove_dir_all(&self.dir);
+        assert!(
+            std::thread::panicking() || (removed.is_ok() && failures.is_empty()),
+            "Fixture teardown failed: errors={failures:?}, removal={removed:?}"
+        );
     }
 }

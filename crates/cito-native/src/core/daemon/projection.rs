@@ -14,7 +14,7 @@ use crate::core::{
 use crate::plugins::now_ms;
 use crate::setup::inspect_launch_at_login;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 const SESSION_FIELDS: &[&str] = &[
@@ -41,7 +41,6 @@ const SESSION_FIELDS: &[&str] = &[
     "scoped_id",
     "display_address",
     "channels",
-    "attachments",
 ];
 const ACTIVITY_FIELDS: &[&str] = &[
     "hub",
@@ -91,7 +90,9 @@ pub(super) fn wire_status(raw: &str) -> &str {
 // Presentation must cover local registrations before the asynchronous directory
 // cache catches up. Cached Hub rows retain their lease and attachment metadata.
 pub(super) fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
-    let mut peers = slot.cached_directory();
+    include_local_peers(state, slot, slot.cached_directory())
+}
+fn include_local_peers(state: &LocalState, slot: &HubClient, mut peers: Vec<Value>) -> Vec<Value> {
     let now = now_ms();
     if let Ok(rows) = state.db.query(
         "SELECT * FROM local_listeners WHERE hub=? AND status='ACTIVE'",
@@ -165,17 +166,69 @@ pub(super) fn sender_display_address(
     })
 }
 
+pub(super) struct HubSample {
+    pub(super) directory: Vec<Value>,
+    capabilities: Value,
+    human_current: bool,
+}
+impl HubSample {
+    pub(super) fn capture(slot: &HubClient, directory: Vec<Value>) -> Self {
+        Self {
+            directory,
+            capabilities: slot.capabilities(),
+            human_current: slot.human_observation_current(),
+        }
+    }
+}
+
 impl DaemonService {
     pub fn settings(&self) -> Value {
-        let hub = self
-            .active_settings_hub
+        self.settings_for_hub(self.selected_settings_hub())
+    }
+    fn selected_settings_hub(&self) -> &str {
+        self.active_settings_hub
             .as_deref()
             .filter(|h| self.slots.contains_key(*h))
-            .unwrap_or(&self.config.default_hub);
-        self.settings_for_hub(hub)
+            .unwrap_or(&self.config.default_hub)
     }
 
+    fn enabled_hub_dto(&self, name: &str, slot: &HubClient, sample: &HubSample) -> Value {
+        let capabilities = &sample.capabilities;
+        let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
+            "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(capabilities,"status")),
+            "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==self.config.default_hub,
+            "is_builtin":slot.config["url"] == "local://","supports_workspace_scope":slot.config["url"] != "local://",
+            "can_login":slot.config["authMode"] == "oidc" && capabilities["status"] != "connected",
+            "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
+        let record = sample.directory.iter().find(|row| {
+            row["harness"] == "human"
+                && crate::core::auth::principal_matches(string(row, "principal_id"), &slot.identity)
+        });
+        let projection = self.project_human(
+            record,
+            sample.human_current,
+            capabilities["auth_valid"] == true && slot.config["url"] != "local://",
+        );
+        if let (Some(out), Some(fields)) = (hub.as_object_mut(), projection.as_object()) {
+            out.extend(fields.clone());
+        }
+        hub["attachments"] = json!(record
+            .as_ref()
+            .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
+            .unwrap_or_default());
+        hub
+    }
+
+    pub(super) fn hub_samples(&self) -> HashMap<&str, HubSample> {
+        self.slots
+            .iter()
+            .map(|(h, s)| (h.as_str(), HubSample::capture(s, s.cached_directory())))
+            .collect()
+    }
     pub(super) fn settings_for_hub(&self, channel_hub: &str) -> Value {
+        self.settings_sample(channel_hub, &self.hub_samples())
+    }
+    fn settings_sample(&self, channel_hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
         let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p| {
             let inspection = self.inspect_setup(p);
             if let Err(error) = &inspection {
@@ -195,32 +248,7 @@ impl DaemonService {
         let mut channels = Vec::new();
         let mut channel_inventory_error: Option<String> = None;
         for (name, slot) in &self.slots {
-            let capabilities = slot.capabilities();
-            hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),"capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
-            if let Some(item) = hubs.last_mut().and_then(Value::as_object_mut) {
-                let record = slot.cached_directory().into_iter().find(|row| {
-                    row["harness"] == "human"
-                        && crate::core::auth::principal_matches(
-                            string(row, "principal_id"),
-                            &slot.identity,
-                        )
-                });
-                let projection = self.project_human(
-                    record.as_ref(),
-                    capabilities["observation_current"] == true,
-                    capabilities["auth_valid"] == true && slot.config["url"] != "local://",
-                );
-                if let Some(fields) = projection.as_object() {
-                    item.extend(fields.clone());
-                }
-                item.insert(
-                    "attachments".into(),
-                    json!(record
-                        .as_ref()
-                        .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
-                        .unwrap_or_default()),
-                );
-            }
+            hubs.push(self.enabled_hub_dto(name, slot, &samples[name.as_str()]));
             if name == channel_hub {
                 let inventory = if slot.local.is_some() {
                     slot.rpc("human_channels_list", &json!({}))
@@ -289,33 +317,41 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
+        let host = if self.host_server.is_some() {
+            self.applied_host_config.as_ref().unwrap_or(host)
+        } else {
+            host
+        };
         let port = self
             .host_server
             .as_ref()
             .map(|server| u64::from(server.port()))
             .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
         for item in &mut hubs {
-            item["error"] = json!(self
-                .last_hub_errors
-                .get(string(item, "name"))
-                .map(|(error, _)| error));
+            if item.get("capabilities").is_none() {
+                item["error"] = json!(self
+                    .last_hub_errors
+                    .get(string(item, "name"))
+                    .map(|(error, _)| error));
+                item["is_builtin"] = json!(item["url"] == "local://");
+                item["supports_workspace_scope"] = json!(item["url"] != "local://");
+                item["can_login"] = json!(
+                    item["enabled"] != false
+                        && item["auth_mode"] == "oidc"
+                        && item["status"] != "connected"
+                );
+            }
             let cfg = self
                 .slots
                 .get(string(item, "name"))
                 .map(|s| &s.config)
                 .or_else(|| raw["hubs"].get(string(item, "name")));
             if let Some(cfg) = cfg {
-                item["issuer"] = cfg
-                    .get("issuer")
-                    .or_else(|| cfg.get("oidcIssuer"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                item["client_id"] = cfg
-                    .get("clientId")
-                    .or_else(|| cfg.get("client_id"))
-                    .or_else(|| cfg.get("oidcClientId"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let mut cfg = cfg.clone();
+                crate::core::config::canonicalize_hub_aliases(&mut cfg);
+                item["redirect_port"] = cfg["redirectPort"].clone();
+                item["issuer"] = cfg["issuer"].clone();
+                item["client_id"] = cfg["clientId"].clone();
             }
             if item.get("human_state_status").is_none() {
                 let projection = self.human_projection(string(item, "name"));
@@ -323,13 +359,7 @@ impl DaemonService {
                     item.extend(fields.clone());
                 }
             }
-            item["is_builtin"] = json!(item["url"] == "local://");
-            item["supports_workspace_scope"] = json!(item["url"] != "local://");
-            item["can_login"] = json!(
-                item["enabled"] != false
-                    && item["auth_mode"] == "oidc"
-                    && item["status"] != "connected"
-            );
+
             item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
         }
         let token = string(host, "token");
@@ -346,6 +376,13 @@ impl DaemonService {
             let name = hub_name_from_url(url);
             let mut command = format!("cito setup --hub {name} --url {url}");
             if host_hub_auth_mode(host) == "token" && !token.is_empty() {
+                if token.starts_with("--")
+                    || !token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-/=".contains(&b))
+                {
+                    return json!({"name":name,"url":url,"auth_mode":"token","token":token,"set_default":true}).to_string();
+                }
                 command.push_str(&format!(" --auth token --token {token}"));
             }
             command.push_str(" --default");
@@ -362,7 +399,7 @@ impl DaemonService {
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.host_hub_error.as_ref().map(super::HostHubError::message)},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
     }
 
     pub(super) fn display_address(&self, hub: &str, row: &Value) -> String {
@@ -374,7 +411,18 @@ impl DaemonService {
         crate::core::identity::display_address(hub, &self.config.default_hub, row, &peers)
     }
 
-    pub(super) fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
+    pub(super) fn address_book(&self) -> HashMap<&str, Vec<Value>> {
+        self.slots
+            .iter()
+            .map(|(name, slot)| (name.as_str(), address_peers(&self.state, slot)))
+            .collect()
+    }
+
+    pub(super) fn activity_dto(
+        &self,
+        rows: Vec<Value>,
+        addresses: &HashMap<&str, Vec<Value>>,
+    ) -> Vec<Value> {
         rows.into_iter()
             .map(|mut row| {
                 let target = self
@@ -391,7 +439,15 @@ impl DaemonService {
                 row["target_display_address"] = if target.is_null() {
                     Value::Null
                 } else {
-                    json!(self.display_address(string(&row, "hub"), &target))
+                    json!(crate::core::identity::display_address(
+                        string(&row, "hub"),
+                        &self.config.default_hub,
+                        &target,
+                        addresses
+                            .get(string(&row, "hub"))
+                            .map(Vec::as_slice)
+                            .unwrap_or_default()
+                    ))
                 };
                 let source = row["from_listener_id"]
                     .as_str()
@@ -410,10 +466,9 @@ impl DaemonService {
                             Value::Null
                         }
                     });
-                let peers = self
-                    .slots
+                let peers = addresses
                     .get(string(&row, "hub"))
-                    .map(|slot| address_peers(&self.state, slot))
+                    .map(Vec::as_slice)
                     .unwrap_or_default();
                 row["from_display_address"] = json!(sender_display_address(
                     string(&row, "hub"),
@@ -421,7 +476,7 @@ impl DaemonService {
                     source.as_deref(),
                     string(&row, "from_user"),
                     string(&row, "from_harness"),
-                    &peers
+                    peers
                 ));
                 row["message_truncated"] = json!(string(&row, "message").len() > 512);
                 row["for_me"] = json!(target["harness"] == "human");
@@ -443,20 +498,28 @@ impl DaemonService {
             .active()?
             .into_iter()
             .filter(|row| {
-                self.slots
-                    .get(string(row, "hub"))
-                    .is_some_and(|slot| !slot.closed.load(Ordering::SeqCst))
-                    && self.receivers.contains_key(&format!(
-                        "{}:{}",
-                        string(row, "hub"),
-                        string(row, "listener_id")
-                    ))
+                self.slots.get(string(row, "hub")).is_some_and(|slot| {
+                    !slot.closed.load(Ordering::SeqCst)
+                        && slot.capabilities()["auth_valid"] == true
+                        && row["hub_url"] == slot.config["url"]
+                        && crate::core::auth::principal_ids_equal(
+                            string(row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        )
+                })
             })
             .collect())
     }
 
     pub fn snapshot(&self) -> Result<Value, String> {
-        let settings = self.settings();
+        self.snapshot_from(&self.hub_samples())
+    }
+
+    pub(super) fn snapshot_from(
+        &self,
+        samples: &HashMap<&str, HubSample>,
+    ) -> Result<Value, String> {
+        let settings = self.settings_sample(self.selected_settings_hub(), samples);
         let unconfigured_harnesses: HashSet<&str> = settings["apps"]
             .as_array()
             .into_iter()
@@ -467,22 +530,24 @@ impl DaemonService {
         let (activity, activity_total, activity_unread) = self
             .state
             .query_activity(&self.activity_filter, &self.activity_query)?;
-        let (_, activity_all_total, unread) = self.state.query_activity("all", "")?;
+        let (activity_all_total, unread) =
+            if self.activity_filter == "all" && self.activity_query.trim().is_empty() {
+                (activity_total, activity_unread)
+            } else {
+                let (_, total, unread) = self.state.query_activity("all", "")?;
+                (total, unread)
+            };
         let mut sessions: Vec<Value> = self
             .state
             .active()?
             .into_iter()
             .filter(|row| self.slots.contains_key(string(row, "hub")))
             .collect();
+        let addresses = self.sample_addresses(samples);
         for row in &mut sessions {
-            *row = project_fields(row, SESSION_FIELDS);
-            self.project_session_controls(row);
+            self.project_local_session(row, &addresses, &samples[string(row, "hub")].capabilities)?;
             if row["harness"] == "human" {
-                let directory = self
-                    .slots
-                    .get(string(row, "hub"))
-                    .map(|slot| slot.cached_directory())
-                    .unwrap_or_default();
+                let directory = &samples[string(row, "hub")].directory;
                 if let Some(peer) = directory
                     .iter()
                     .find(|peer| peer["listener_id"] == row["listener_id"])
@@ -500,12 +565,6 @@ impl DaemonService {
                         );
                 }
             }
-            row["custom_title"] = json!(self
-                .state
-                .custom_title(string(row, "harness"), string(row, "session_id"))?
-                .is_some());
-            row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
-            row["display_address"] = json!(self.display_address(string(row, "hub"), row));
         }
         let mut available = self
             .session_activity
@@ -525,42 +584,8 @@ impl DaemonService {
                 row["custom_title"] = json!(true);
             }
         }
-        let activity = self.activity_dto(activity);
-        let mut remote = Vec::new();
-        let mut online = 0;
-        let now = now_ms();
-        for (hub, slot) in &self.slots {
-            for row in slot.cached_directory() {
-                let own_principal = crate::core::auth::principal_ids_equal(
-                    string(&row, "principal_id"),
-                    string(&slot.identity, "principal_id"),
-                );
-                if !matches!(
-                    crate::core::lease::evaluate_node_lease(&row, now),
-                    "ACTIVE" | "DISCONNECTED_RETAINED"
-                ) || (row["scope"] == "self" && !own_principal)
-                {
-                    continue;
-                }
-                online += 1;
-                if own_principal
-                    && !sessions
-                        .iter()
-                        .any(|s| s["hub"] == *hub && s["listener_id"] == row["listener_id"])
-                {
-                    let mut peer = self.peer_dto(hub, &row);
-                    if row["harness"] == "human" {
-                        if let Some(sample) = settings["hubs"]
-                            .as_array()
-                            .and_then(|hubs| hubs.iter().find(|item| item["name"] == *hub))
-                        {
-                            peer["human_state_status"] = sample["human_state_status"].clone();
-                        }
-                    }
-                    remote.push(peer);
-                }
-            }
-        }
+        let activity = self.activity_dto(activity, &addresses);
+        let (remote, online) = self.remote_listeners(samples, &sessions, &addresses);
         let harnesses:Vec<Value>=self.plugins.agent_plugins().into_iter().enumerate().map(|(order,p)|json!({"kind":"agent","id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order,"pid_bound":p.pid_bound,"idle_timeout_ms":p.auto_listen.idle_timeout_ms})).collect();
 
         let enabled_hubs: Vec<Value> = settings["hubs"]
@@ -575,29 +600,119 @@ impl DaemonService {
         )
     }
 
-    pub(super) fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"listen_mode":row["listen_mode"].as_str().unwrap_or("manual"),"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":row["updated_at_ms"].as_u64().into_iter().chain(row["channels"].as_object().into_iter().flat_map(|channels| channels.values()).filter_map(|channel| channel["updated_at_ms"].as_u64())).max().map(iso),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|crate::core::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id")))});
+    fn sample_addresses(&self, samples: &HashMap<&str, HubSample>) -> HashMap<&str, Vec<Value>> {
+        self.slots
+            .iter()
+            .map(|(name, slot)| {
+                (
+                    name.as_str(),
+                    include_local_peers(
+                        &self.state,
+                        slot,
+                        samples[name.as_str()].directory.clone(),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn remote_listeners(
+        &self,
+        samples: &HashMap<&str, HubSample>,
+        sessions: &[Value],
+        addresses: &HashMap<&str, Vec<Value>>,
+    ) -> (Vec<Value>, usize) {
+        let mut remote = Vec::new();
+        let mut online = 0;
+        let now = now_ms();
+        for (hub, slot) in &self.slots {
+            let sample = &samples[hub.as_str()];
+            for row in &sample.directory {
+                let own = crate::core::auth::principal_ids_equal(
+                    string(row, "principal_id"),
+                    string(&slot.identity, "principal_id"),
+                );
+                if !matches!(
+                    crate::core::lease::evaluate_node_lease(row, now),
+                    "ACTIVE" | "DISCONNECTED_RETAINED"
+                ) || (row["scope"] == "self" && !own)
+                {
+                    continue;
+                }
+                online += 1;
+                if own
+                    && !sessions
+                        .iter()
+                        .any(|s| s["hub"] == *hub && s["listener_id"] == row["listener_id"])
+                {
+                    let display = crate::core::identity::display_address(
+                        hub,
+                        &self.config.default_hub,
+                        row,
+                        &addresses[hub.as_str()],
+                    );
+                    remote.push(self.peer_dto(hub, row, &display, sample));
+                }
+            }
+        }
+        (remote, online)
+    }
+}
+impl super::HubAccess {
+    pub(super) fn peer_dto(
+        &self,
+        hub: &str,
+        row: &Value,
+        display: &str,
+        sample: &HubSample,
+    ) -> Value {
+        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":display,"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"listen_mode":row["listen_mode"].as_str().unwrap_or("manual"),"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":row["updated_at_ms"].as_u64().into_iter().chain(row["channels"].as_object().into_iter().flat_map(|channels| channels.values()).filter_map(|channel| channel["updated_at_ms"].as_u64())).max().map(iso),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|crate::core::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id")))});
         let attachments = crate::core::lease::attachments(row, &self.host_id, now_ms());
         result["channels"] = json!(attachments
             .iter()
             .filter_map(|a| a["display_name"].as_str())
             .collect::<Vec<_>>());
         result["attachments"] = json!(attachments);
-        self.project_session_controls(&mut result);
+        self.project_session_controls(&mut result, &sample.capabilities);
         if row["harness"] == "human" {
-            let current = self
-                .slots
-                .get(hub)
-                .is_some_and(|slot| slot.observation_current());
-            let human = self.project_human(Some(row), current, result["can_set_scope"] == true);
+            let human = self.project_human(
+                Some(row),
+                sample.human_current,
+                result["can_set_scope"] == true,
+            );
             if let (Some(out), Some(fields)) = (result.as_object_mut(), human.as_object()) {
                 out.extend(fields.clone());
             }
         }
         result
     }
-
-    fn project_session_controls(&self, row: &mut Value) {
+}
+impl DaemonService {
+    fn project_local_session(
+        &self,
+        row: &mut Value,
+        addresses: &HashMap<&str, Vec<Value>>,
+        capabilities: &Value,
+    ) -> Result<(), String> {
+        *row = project_fields(row, SESSION_FIELDS);
+        self.project_session_controls(row, capabilities);
+        row["custom_title"] = json!(self
+            .state
+            .custom_title(string(row, "harness"), string(row, "session_id"))?
+            .is_some());
+        row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
+        let hub = string(row, "hub");
+        row["display_address"] = json!(crate::core::identity::display_address(
+            hub,
+            &self.config.default_hub,
+            row,
+            &addresses[hub]
+        ));
+        Ok(())
+    }
+}
+impl super::HubAccess {
+    fn project_session_controls(&self, row: &mut Value, capabilities: &Value) {
         let slot = self.slots.get(string(row, "hub"));
         let own = slot.is_some_and(|slot| {
             crate::core::auth::principal_matches(string(row, "principal_id"), &slot.identity)
@@ -609,7 +724,7 @@ impl DaemonService {
             .flatten()
             .is_some_and(|listener| listener["status"] == "ACTIVE");
         let agent = row["harness"] != "human";
-        let mutable = own && slot.is_some_and(|slot| slot.capabilities()["auth_valid"] == true);
+        let mutable = own && capabilities["auth_valid"] == true;
         row["is_self_principal"] = json!(own);
         row["can_set_scope"] =
             json!(mutable && slot.is_some_and(|slot| slot.config["url"] != "local://"));
@@ -629,7 +744,7 @@ impl DaemonService {
                     )
             })
         });
-        let current = slot.is_some_and(|slot| slot.observation_current());
+        let current = slot.is_some_and(|slot| slot.human_observation_current());
         let mut projection = self.project_human(
             record.as_ref(),
             current,
@@ -650,7 +765,8 @@ impl DaemonService {
         };
         json!({"human_can_set_scope":current && can_set_scope,"human_listener_id":record["listener_id"],"human_paused":record["human_paused"].as_bool().unwrap_or(false),"human_about":record["about"],"human_control_revision":record["human_control_revision"],"human_availability":crate::core::lease::evaluate_node_lease(record,now_ms()),"human_scope":record["scope"],"human_state_status":if current{"current"}else{"stale"}})
     }
-
+}
+impl DaemonService {
     pub(super) fn emit(&self, frame: Value) {
         if let Some(ui) = &self.ui {
             ui.emit(frame);
@@ -670,10 +786,36 @@ impl DaemonService {
         let mut hubs: Vec<_> = self
             .slots
             .iter()
-            .map(|(name, slot)| json!([name, slot.event_revision(), slot.capabilities()]))
+            .map(|(name, slot)| {
+                json!([
+                    name,
+                    slot.event_revision(),
+                    slot.directory_revision(),
+                    slot.capabilities()
+                ])
+            })
             .collect();
         hubs.sort_by_key(Value::to_string);
+        let mut inventories: Vec<_> = self
+            .channel_inventories
+            .iter()
+            .map(|(name, entry)| {
+                entry
+                    .cached
+                    .lock()
+                    .map(|cached| {
+                        json!([name, crate::core::identity::hash(&cached.value.to_string())])
+                    })
+                    .map_err(|_| "Channel inventory lock poisoned")
+            })
+            .collect::<Result<_, _>>()?;
+        inventories.sort_by_key(Value::to_string);
         Ok(json!([
+            inventories,
+            self.last_hub_errors,
+            self.host_hub_error
+                .as_ref()
+                .map(super::HostHubError::message),
             changes,
             external,
             hubs,
@@ -707,39 +849,32 @@ impl DaemonService {
             }
         }
         let mut sessions = self.state.active()?;
+        let samples = self.hub_samples();
+        let addresses = self.sample_addresses(&samples);
         sessions.retain(|row| self.slots.contains_key(string(row, "hub")));
         for row in &mut sessions {
-            row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
-            row["display_address"] = json!(self.display_address(string(row, "hub"), row));
-            row["custom_title"] = json!(self
-                .state
-                .custom_title(string(row, "harness"), string(row, "session_id"))?
-                .is_some());
-            *row = project_fields(row, SESSION_FIELDS);
-            self.project_session_controls(row);
+            self.project_local_session(row, &addresses, &samples[string(row, "hub")].capabilities)?;
         }
-        let counts = self.state.db.query("SELECT COUNT(*) AS total,COUNT(CASE WHEN acknowledged_at_ms IS NULL THEN 1 END) AS unread FROM local_signals WHERE activity_hidden=0", &[])?;
-        frame["unread_count"] = counts[0]["unread"].clone();
-        frame["activity_has_any"] = json!(counts[0]["total"].as_u64().unwrap_or(0) > 0);
-        frame["activity_all_total"] = counts[0]["total"].clone();
+        let (total, unread) = self.state.activity_counts()?;
+        frame["unread_count"] = json!(unread);
+        frame["activity_has_any"] = json!(total > 0);
+        frame["activity_all_total"] = json!(total);
         frame["status"] = json!(if sessions.is_empty() {
             "idle"
         } else {
             "active"
         });
+        let (remote, online) = self.remote_listeners(&samples, &sessions, &addresses);
+        frame["my_remote_listeners"] = json!(remote);
+        frame["total_online"] = json!(online);
+        frame["directory_online_count"] = json!(online);
         frame["listeners"] = json!(sessions);
         frame["sessions"] = frame["listeners"].clone();
-        let hubs: Vec<_> = self.slots.iter().map(|(name, slot)| {
-            let capabilities = slot.capabilities();
-            let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
-                "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),
-                "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,
-                "is_builtin":slot.config["url"] == "local://","supports_workspace_scope":slot.config["url"] != "local://",
-                "can_login":slot.config["authMode"] == "oidc" && capabilities["status"] != "connected",
-                "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
-            if let (Some(out),Some(projection)) = (hub.as_object_mut(),self.human_projection(name).as_object()) { out.extend(projection.clone()); }
-            hub
-        }).collect();
+        let hubs: Vec<_> = self
+            .slots
+            .iter()
+            .map(|(name, slot)| self.enabled_hub_dto(name, slot, &samples[name.as_str()]))
+            .collect();
         frame["hubs"] = json!(hubs);
         frame["hub"] = json!(self.config.default_hub);
         Ok(frame)
@@ -777,15 +912,14 @@ impl DaemonService {
             self.status_frame(cached.as_ref().unwrap_or(&Value::Null))
         };
         if let Ok(mut frame) = result {
-            if full {
-                if let Ok(mut cached) = self.last_ui_frame.lock() {
-                    *cached = Some(frame.clone());
-                }
-            }
+            let full_frame = full.then(|| frame.clone());
             if let Some(action) = action {
                 frame["ok"] = json!(true);
                 frame["request_id"] = action["request_id"].clone();
                 frame["source_op"] = action["op"].clone();
+                if super::http_actions::mutating_action(action) {
+                    frame["committed"] = json!(true);
+                }
                 if super::channels::channel_action_kind(action)
                     == Some(super::channels::ChannelActionKind::Mutation)
                 {
@@ -795,10 +929,17 @@ impl DaemonService {
                     frame.as_object_mut().unwrap().remove("source_op");
                 }
             }
+            if !self.ui.as_ref().is_some_and(|ui| ui.emit(frame)) {
+                return;
+            }
+            if let Some(full) = full_frame {
+                if let Ok(mut cached) = self.last_ui_frame.lock() {
+                    *cached = Some(full);
+                }
+            }
             if let Ok(mut previous) = self.last_ui_revision.lock() {
                 *previous = Some(revision);
             }
-            self.emit(frame);
         }
     }
 }

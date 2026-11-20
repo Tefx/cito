@@ -74,6 +74,42 @@ for (const required of ['index.html', 'docs/guide.html', 'docs/hosting.html', 'd
   assert.ok(pages.includes(required), `Missing required page: ${required}`);
 }
 const documents = new Map(pages.map(page => [new URL(page, site).href, readFileSync(new URL(page, site), 'utf8')]));
+// Compare variable-name cells within each environment table, not mentions elsewhere.
+function environmentVars(text, section, html = false) {
+  const heading = html ? section.replaceAll('&', '&amp;') : section;
+  const table = html
+    ? text.match(new RegExp(`<h3>${heading}</h3>\\s*<div\\b[^>]*><table\\b[^>]*>([\\s\\S]*?)</table>`))
+    : text.match(new RegExp(`^### ${heading}\\s*\\n([\\s\\S]*?)(?=^### |^## |(?![\\s\\S]))`, 'm'));
+  assert.ok(table, `Missing ${section} table`);
+  const rows = html
+    ? [...table[1].matchAll(/<tr>\s*<td><code>(CITO_[^<]+)<\/code><\/td>/g)]
+    : [...table[1].matchAll(/^\|\s*`(CITO_[^\x60]+)`\s*\|/gm)];
+  const vars = rows.map(row => row[1].replaceAll('&lt;', '<').replaceAll('&gt;', '>')).sort();
+  assert.ok(vars.length > 0, `Empty ${section} table`);
+  assert.equal(new Set(vars).size, vars.length, `Duplicate ${section} variable`);
+  return vars;
+}
+const hubTables = [
+  ['README.md', readFileSync(new URL('../README.md', site), 'utf8'), false],
+  ['deploy/hub/README.md', readFileSync(new URL('../deploy/hub/README.md', site), 'utf8'), false],
+  ['site/docs/hosting.html', documents.get(new URL('docs/hosting.html', site).href), true]
+];
+for (const [section, sample] of [
+  ['Hub Server', 'CITO_HUB_PORT'],
+  ['Client & Daemon', 'CITO_STATE_DIR'],
+  ['Agent & Channel Plugins', 'CITO_PLUGIN_PATH']
+]) {
+  const tables = hubTables.map(([name, text, html]) => [name, environmentVars(text, section, html)]);
+  if (section === 'Hub Server') assert.ok(tables[0][1].includes('CITO_OIDC_REDIRECT_PORT'), 'Hub Server redirect port missing');
+  for (const [name, vars] of tables.slice(1)) assert.deepEqual(vars, tables[0][1], `${name}: ${section} variables differ from README.md`);
+  for (const [name, text, html] of hubTables) {
+    const cell = html ? `<td><code>${sample}</code></td>` : `| \`${sample}\` |`;
+    assert.ok(text.includes(cell), `${name}: missing ${section} test row`);
+    const missing = text.replace(cell, html ? '<td>removed</td>' : '| removed |');
+    assert.notDeepEqual(environmentVars(missing, section, html), tables[0][1], `${name}: missing ${section} row must be detected`);
+  }
+}
+
 const homepage = documents.get(new URL('index.html', site).href);
 const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
 for (const [page, html] of documents) {

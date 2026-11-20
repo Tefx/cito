@@ -7,19 +7,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 fn matches_process(command: &str) -> bool {
-    let Some((program, script)) = process_entrypoint(command) else {
-        return false;
-    };
-    let entry = script.unwrap_or(program);
-    let name = Path::new(entry)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if script.is_none() {
-        return name == "claude";
-    }
-    matches!(name, "claude" | "claude.js" | "claude.mjs")
-        || (entry.contains("/claude-code/") && matches!(name, "cli.js" | "cli.mjs"))
+    crate::support::matches_process(command, |entry, name, script| {
+        if !script {
+            return name == "claude";
+        }
+        matches!(name, "claude" | "claude.js" | "claude.mjs")
+            || (entry.contains("/claude-code/") && matches!(name, "cli.js" | "cli.mjs"))
+    })
 }
 fn interactive_candidate(req: &Value, p: u32) -> bool {
     let Ok(command) = process_command(p) else {
@@ -30,7 +24,7 @@ fn interactive_candidate(req: &Value, p: u32) -> bool {
     }) {
         return false;
     }
-    let args: Vec<_> = command.split_whitespace().collect();
+    let args: Vec<_> = process_arguments(&command).collect();
     !args
         .iter()
         .any(|arg| matches!(*arg, "-p" | "--print" | "--output-format=stream-json"))
@@ -41,12 +35,37 @@ fn interactive_candidate(req: &Value, p: u32) -> bool {
 }
 use std::time::Duration;
 const EVENTS: [&str; 3] = ["Stop", "SessionStart", "UserPromptSubmit"];
-fn hook_cmd(v: &Value) -> bool {
-    v["type"] == "command"
-        && v["command"]
-            .as_str()
-            .map(|s| s == "cito-claude-hook" || s.ends_with("/cito-claude-hook"))
-            .unwrap_or(false)
+fn quote_hook(path: &str) -> String {
+    if path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/_-.@%+=:,".contains(&b))
+    {
+        path.into()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+fn registered_hook(v: &Value) -> Option<std::borrow::Cow<'_, str>> {
+    if v["type"] != "command" {
+        return None;
+    }
+    let command = v["command"].as_str()?;
+    let path: std::borrow::Cow<'_, str> = if let Some(word) = command.strip_prefix('\'') {
+        let word = word.strip_suffix('\'')?;
+        if word.split("'\\''").any(|part| part.contains('\'')) {
+            return None;
+        }
+        word.replace("'\\''", "'").into()
+    } else if let Some(word) = command.strip_prefix('"') {
+        let word = word.strip_suffix('"')?;
+        if word.contains(['"', '$', '`', '\\']) {
+            return None;
+        }
+        word.into()
+    } else {
+        command.into()
+    };
+    (path == "cito-claude-hook" || path.ends_with("/cito-claude-hook")).then_some(path)
 }
 fn clean_hooks(v: &mut Value) {
     if let Some(events) = v.get_mut("hooks").and_then(Value::as_object_mut) {
@@ -54,7 +73,7 @@ fn clean_hooks(v: &mut Value) {
             if let Some(a) = groups.as_array_mut() {
                 a.retain_mut(|g| {
                     if let Some(hooks) = g.get_mut("hooks").and_then(Value::as_array_mut) {
-                        hooks.retain(|h| !hook_cmd(h));
+                        hooks.retain(|h| registered_hook(h).is_none());
                         !hooks.is_empty()
                     } else {
                         true
@@ -79,6 +98,8 @@ fn setup(req: &Value) -> Result<Value> {
         .map(|s| expand(req, s))
         .unwrap_or_else(|| state(req).join("runtime/plugins/claude"))
         .join("bin/cito-claude-hook");
+    let hook = hook.to_str().ok_or("Hook path must be valid UTF-8")?;
+    let hook_command = quote_hook(hook);
     let desired = json!({"command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
     if op == "setup_inspect" {
         let v = read_json(&path)?;
@@ -90,10 +111,8 @@ fn setup(req: &Value) -> Result<Value> {
                         g["hooks"]
                             .as_array()
                             .map(|h| {
-                                h.iter().any(|entry| {
-                                    entry["type"] == "command"
-                                        && entry["command"].as_str() == hook.to_str()
-                                })
+                                h.iter()
+                                    .any(|entry| registered_hook(entry).as_deref() == Some(hook))
                             })
                             .unwrap_or(false)
                     })
@@ -139,25 +158,12 @@ fn setup(req: &Value) -> Result<Value> {
                 let groups = v["hooks"][e]
                     .as_array_mut()
                     .ok_or("Hook groups must be arrays")?;
-                groups.push(json!({"hooks":[{"type":"command","command":hook}]}));
+                groups.push(json!({"hooks":[{"type":"command","command":hook_command}]}));
             }
         }
         Ok(())
     })?;
-    if remove && req["dry_run"] != true {
-        let _ = fs::remove_dir_all(state(req).join("claude"));
-        if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
-            for entry in entries.flatten() {
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("claude-pid-")
-                {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
+    remove_setup_runtime(req, "claude", Some("claude-pid-"))?;
     Ok(json!({"ok":true,"actions":[action]}))
 }
 fn queue(req: &Value, sid: &str) -> Result<PathBuf> {
@@ -193,6 +199,27 @@ pub fn append_wake(req: &Value, sid: &str) -> Result<()> {
     writeln!(f, "{row}").map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
+fn wake_queue_paths(req: &Value, sid: &str) -> Result<Vec<PathBuf>> {
+    let path = queue(req, sid)?;
+    let prefix = format!(
+        "{}.draining-",
+        path.file_name()
+            .ok_or("Invalid queue path")?
+            .to_string_lossy()
+    );
+    let mut paths = Vec::new();
+    for entry in
+        fs::read_dir(path.parent().ok_or("Invalid queue path")?).map_err(|e| e.to_string())?
+    {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    paths.push(path);
+    Ok(paths)
+}
 fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
     // Snapshot under both identity locks; output and ACK continuation retire rows later.
     let mut lock_sessions = sessions.to_vec();
@@ -204,24 +231,11 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
         .collect::<Result<Vec<_>>>()?;
     let mut paths = vec![];
     for sid in sessions {
-        let path = queue(req, sid)?;
-        let prefix = format!(
-            "{}.draining-",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .ok_or("Invalid queue path")?
+        paths.extend(
+            wake_queue_paths(req, sid)?
+                .into_iter()
+                .map(|path| ((*sid).to_owned(), path)),
         );
-        let mut staged = vec![];
-        if let Some(dir) = path.parent() {
-            for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
-                if e.file_name().to_string_lossy().starts_with(&prefix) {
-                    staged.push(e.path());
-                }
-            }
-        }
-        staged.sort();
-        paths.extend(staged.into_iter().map(|path| ((*sid).to_owned(), path)));
-        paths.push(((*sid).to_owned(), path));
     }
     let mut rows = vec![];
     let mut seen = HashSet::new();
@@ -245,7 +259,7 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
 fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool) -> Result<()> {
     let ids: HashSet<_> = wakes
         .iter()
-        .filter_map(|w| Some((str_at(w, "ack_session")?, str_at(w, "batch_id")?)))
+        .filter_map(|w| Some((raw_str_at(w, "ack_session")?, str_at(w, "batch_id")?)))
         .collect();
     let mut sessions = sessions.to_vec();
     sessions.sort();
@@ -255,24 +269,7 @@ fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool)
         .map(|sid| queue_lock(req, sid))
         .collect::<Result<Vec<_>>>()?;
     for sid in sessions {
-        let path = queue(req, &sid)?;
-        let prefix = format!(
-            "{}.draining-",
-            path.file_name()
-                .ok_or("Invalid queue path")?
-                .to_string_lossy()
-        );
-        let mut paths = vec![path.clone()];
-        if let Some(parent) = path.parent() {
-            paths.extend(
-                fs::read_dir(parent)
-                    .map_err(|e| e.to_string())?
-                    .flatten()
-                    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-                    .map(|e| e.path()),
-            );
-        }
-        for path in paths {
+        for path in wake_queue_paths(req, &sid)? {
             let Some(content) = read_optional(&path)? else {
                 continue;
             };
@@ -325,6 +322,16 @@ fn persist_hook_acks(req: &Value, sessions: &[String], wakes: &[Value]) -> Resul
                 &[row["signal_id"].clone()],
                 &format!("{}:claude", str_at(&listener, "host_id").unwrap_or("")),
             )?;
+            let acked = local.db.query(
+                "SELECT acknowledged_at_ms FROM local_signals WHERE hub=? AND signal_id=?",
+                &[row["hub"].clone(), row["signal_id"].clone()],
+            )?;
+            if acked
+                .first()
+                .is_none_or(|signal| signal["acknowledged_at_ms"].is_null())
+            {
+                return Err("ACK signal authority changed".into());
+            }
         }
     }
     Ok(())
@@ -383,6 +390,17 @@ fn hook_parent_matches(p: u32) -> bool {
                 })
             }))
 }
+fn canonical_hook_identity(binding: &Value, pid: u32) -> Option<(&str, Option<&str>)> {
+    if binding["source"] == "channel"
+        || process_start(pid).as_deref() != Some(str_at(binding, "start")?)
+    {
+        return None;
+    }
+    Some((
+        raw_str_at(binding, "session_id")?,
+        raw_str_at(binding, "cwd"),
+    ))
+}
 fn binding_snapshot(path: &Path) -> Option<Value> {
     read_json(path)
         .ok()
@@ -428,11 +446,11 @@ fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Va
     atomic_write(&path, v.to_string().as_bytes())?;
     Ok(previous)
 }
-fn metadata_session(req: &Value) -> Result<Option<String>> {
+fn metadata_session(req: &Value, binding: Option<&EndpointSession>) -> Result<Option<String>> {
     let mut explicit = vec![];
     for s in [
-        str_at(req, "explicit_session_id"),
-        str_at(&req["headers"], "x-claude-session-id"),
+        raw_str_at(req, "explicit_session_id"),
+        raw_str_at(&req["headers"], "x-claude-session-id"),
     ]
     .into_iter()
     .flatten()
@@ -441,12 +459,12 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
     }
     for source in [&req["meta"], &req["_meta"]] {
         for key in ["claudeSessionId", "sessionId", "claude_session_id"] {
-            if let Some(s) = str_at(source, key) {
+            if let Some(s) = raw_str_at(source, key) {
                 explicit.push(validate_session(s)?);
             }
         }
         if str_at(source, "expected_harness") == Some("claude") {
-            if let Some(s) = str_at(source, "expected_session_id") {
+            if let Some(s) = raw_str_at(source, "expected_session_id") {
                 explicit.push(validate_session(s)?);
             }
         }
@@ -456,6 +474,13 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
             explicit.push(validate_session(&s)?);
         }
     }
+    if let Some(binding) = binding {
+        for id in &mut explicit {
+            if binding.record["session_id"] == *id {
+                id.clone_from(&binding.published);
+            }
+        }
+    }
     explicit.sort();
     explicit.dedup();
     if explicit.len() > 1 {
@@ -463,32 +488,103 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
     }
     Ok(explicit.pop())
 }
-fn resolve(req: &Value) -> Result<String> {
-    let explicit = metadata_session(req)?;
-    let cwd = str_at(req, "cwd").unwrap_or("");
-    if let Some(p) = pid(req) {
-        if let Ok(v) = read_json(&binding_path(req, p)) {
-            if str_at(&v, "start").map(str::to_string) == process_start(p)
-                && str_at(&v, "start").is_some()
-                && v["cwd"] == cwd
-            {
-                if let Some(s) = str_at(&v, "session_id") {
-                    if explicit.as_ref().map(|id| id != s).unwrap_or(false) {
-                        return Err("Conflicting caller metadata for the endpoint".into());
-                    }
-                    let current = process_identity(p)?;
-                    if !matches_process(
-                        str_at(&current, "command").ok_or("Endpoint command is unavailable")?,
-                    ) {
-                        return Err("Endpoint process command does not match the plugin".into());
-                    }
-                    if v["process_identity"].is_object() && v["process_identity"] != current {
-                        return Err("Endpoint process command or start time changed".into());
-                    }
-                    return validate_session(s);
-                }
+// A workspace transcript has no PID. A peer without a bridge can own it too.
+fn workspace_ambiguous(cwd: &str, endpoint: Option<u32>) -> Result<bool> {
+    let canonical = fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
+    let mut peers = user_processes()?.into_iter().filter(|p| {
+        Some(*p) != endpoint
+            && process_command(*p).is_ok_and(|cmd| matches_process(&cmd))
+            && process_cwd(*p).is_ok_and(|dir| Path::new(&dir) == canonical)
+    });
+    Ok(peers.nth(usize::from(endpoint.is_none())).is_some())
+}
+fn session_alias(req: &Value, sid: &str) -> Result<Option<String>> {
+    let path = state(req)
+        .join("claude/aliases")
+        .join(validate_session(sid)?);
+    Ok(read_optional(&path)?
+        .and_then(|s| validate_session(s.strip_suffix('\n').unwrap_or(&s)).ok())
+        .filter(|s| s.starts_with("claude-") && s != sid))
+}
+// Endpoint files retain the hook's transcript ID. Publish the identity used by the live bridge.
+fn bound_session(req: &Value, binding: &Value) -> Result<String> {
+    let sid = raw_str_at(binding, "session_id").ok_or("Missing endpoint session")?;
+    Ok(session_alias(req, sid)?.unwrap_or_else(|| sid.to_owned()))
+}
+struct EndpointSession {
+    pid: u32,
+    record: Value,
+    published: String,
+}
+impl EndpointSession {
+    fn read(req: &Value, endpoint: Option<u32>, cwd: Option<&str>) -> Result<Option<Self>> {
+        let Some(pid) = endpoint else { return Ok(None) };
+        let Ok(record) = read_json(&binding_path(req, pid)) else {
+            return Ok(None);
+        };
+        if cwd.is_some_and(|cwd| record["cwd"] != cwd)
+            || raw_str_at(&record, "session_id").is_none()
+            || str_at(&record, "start")
+                .is_none_or(|start| process_start(pid).as_deref() != Some(start))
+        {
+            return Ok(None);
+        }
+        let published = bound_session(req, &record)?;
+        Ok(Some(Self {
+            pid,
+            record,
+            published,
+        }))
+    }
+
+    // Only the current endpoint's hook ID is interchangeable with its published ID.
+    // Shared verification checks these three fences against the published caller.
+    fn project_fences(&self, req: &Value) -> Option<Value> {
+        let raw = &self.record["session_id"];
+        if raw == &self.published {
+            return None;
+        }
+        let mut projected = req.clone();
+        for path in [
+            "/explicit_session_id",
+            "/meta/expected_session_id",
+            "/_meta/expected_session_id",
+        ] {
+            if let Some(id) = projected.pointer_mut(path).filter(|id| *id == raw) {
+                *id = json!(self.published);
             }
         }
+        Some(projected)
+    }
+}
+fn resolve(req: &Value) -> Result<String> {
+    let binding = EndpointSession::read(req, pid(req), Some(str_at(req, "cwd").unwrap_or("")))?;
+    resolve_session(
+        req,
+        metadata_session(req, binding.as_ref())?.as_deref(),
+        binding.as_ref(),
+    )
+}
+fn resolve_session(
+    req: &Value,
+    explicit: Option<&str>,
+    binding: Option<&EndpointSession>,
+) -> Result<String> {
+    let cwd = str_at(req, "cwd").unwrap_or("");
+    if let Some(binding) = binding {
+        if explicit.is_some_and(|id| id != binding.published) {
+            return Err("Conflicting caller metadata for the endpoint".into());
+        }
+        let current = process_identity(binding.pid)?;
+        if !matches_process(str_at(&current, "command").ok_or("Endpoint command is unavailable")?) {
+            return Err("Endpoint process command does not match the plugin".into());
+        }
+        if binding.record["process_identity"].is_object()
+            && binding.record["process_identity"] != current
+        {
+            return Err("Endpoint process command or start time changed".into());
+        }
+        return Ok(binding.published.clone());
     }
     if let Some(s) = explicit {
         if let Some(p) = pid(req) {
@@ -499,20 +595,26 @@ fn resolve(req: &Value) -> Result<String> {
                 return Err("A verified endpoint process is required for caller metadata".into());
             }
         }
-        return Ok(s);
+        return Ok(s.to_owned());
     }
     let mut transcripts = vec![];
     if let Ok(entries) = fs::read_dir(transcript_dir(req, cwd)) {
         for e in entries.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
             if let Some(s) = n.strip_suffix(".jsonl") {
-                if s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+                if crate::is_valid_transcript_uuid(s) {
                     transcripts.push(s.to_string());
                 }
             }
         }
     }
-    if transcripts.len() == 1 && (pid(req).is_none() || req["cli_cmd"].is_string()) {
+    if transcripts.len() == 1
+        && (pid(req).is_none() || req["cli_cmd"].is_string())
+        && !workspace_ambiguous(
+            cwd,
+            pid(req).filter(|p| process_command(*p).is_ok_and(|cmd| matches_process(&cmd))),
+        )?
+    {
         Ok(transcripts.remove(0))
     } else {
         Err("A session bound to this endpoint is required; workspace transcripts are missing or ambiguous".into())
@@ -523,11 +625,22 @@ fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
     let value = cached_file_projection(req, "claude/transcript-cache", &p, || {
         let mut f = fs::File::open(&p).map_err(|e| e.to_string())?;
         let size = f.metadata().map_err(|e| e.to_string())?.len();
-        f.seek(SeekFrom::Start(size.saturating_sub(128 * 1024)))
+        let start = size.saturating_sub(128 * 1024);
+        f.seek(SeekFrom::Start(start.saturating_sub(1)))
             .map_err(|e| e.to_string())?;
-        let mut s = String::new();
-        f.read_to_string(&mut s).map_err(|e| e.to_string())?;
-        let title: Option<String> = s
+        let mut bytes = Vec::new();
+        f.take(size - start + u64::from(start > 0))
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        let lines = if start == 0 {
+            &bytes[..]
+        } else {
+            bytes
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(&[][..], |i| &bytes[i + 1..])
+        };
+        let title: Option<String> = String::from_utf8_lossy(lines)
             .lines()
             .rev()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -548,6 +661,24 @@ fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
     .ok()?;
     value.as_str().map(str::to_owned)
 }
+#[cfg(test)]
+#[test]
+fn transcript_tail_only_projects_complete_records() {
+    let root = std::env::temp_dir().join(format!("cito-tail-{}", crate::plugins::random_hex(12)));
+    let req = json!({"state_dir":root, "env":{"CITO_CLAUDE_HOME":root}});
+    let project = transcript_dir(&req, "/repo");
+    fs::create_dir_all(&project).unwrap();
+    for (sid, preceding_byte, expected) in
+        [("complete", b'\n', Some("Work")), ("fragment", b'x', None)]
+    {
+        let mut data = vec![preceding_byte];
+        data.extend_from_slice(b"{\"type\":\"custom-title\",\"customTitle\":\"Work\"}\n");
+        data.resize(1 + 128 * 1024, b' ');
+        fs::write(project.join(format!("{sid}.jsonl")), data).unwrap();
+        assert_eq!(title(&req, sid, "/repo").as_deref(), expected);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
 fn badge(req: &Value, sid: &str) -> Result<()> {
     let path = state(req)
         .join("claude/badges")
@@ -563,14 +694,13 @@ fn badge(req: &Value, sid: &str) -> Result<()> {
     }
 }
 fn bridge(req: &Value) -> Result<Value> {
-    let mut p = pid(req).ok_or("Endpoint PID is required")?;
-    let mut visited = HashSet::new();
-    while p > 1 && visited.insert(p) {
-        if process_command(p)
-            .is_ok_and(|command| is_agent_harness(&command) && !matches_process(&command))
-        {
-            break;
-        }
+    let p = pid(req).ok_or("Endpoint PID is required")?;
+    let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
+    for p in endpoint_pid_walk(
+        vec![p],
+        if resolve { usize::MAX } else { 0 },
+        matches_process,
+    ) {
         if let Ok(response) = socket_call(
             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
             &json!({"op":"identify"}),
@@ -580,22 +710,12 @@ fn bridge(req: &Value) -> Result<Value> {
             response["endpoint_pid"] = json!(p);
             return Ok(response);
         }
-        if process_command(p).is_ok_and(|command| matches_process(&command)) {
-            break;
-        }
-        if !matches!(str_at(req, "op"), Some("resolve_caller" | "verify")) {
-            break;
-        }
-        let Some(parent) = process_parent(p) else {
-            break;
-        };
-        p = parent;
     }
     Err("Endpoint bridge is unavailable".into())
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
-    if op.starts_with("setup_") {
+    if matches!(op, "setup_inspect" | "setup_apply" | "setup_remove") {
         return setup(req);
     }
     if matches!(op, "resolve_caller" | "verify") {
@@ -619,11 +739,8 @@ pub fn handle(req: &Value) -> Result<Value> {
                         return None;
                     }
                     response => response,
-                }
-                .or_else(|error| {
-                    if error != "Socket request timed out" || !alive(p) {
-                        return Err(error);
-                    }
+                };
+                let response = socket_response_or_cached(response, p, || {
                     let binding = read_json(&binding_path(&r, p))?;
                     let identity = process_identity(p)?;
                     if str_at(&binding, "start").is_none()
@@ -631,12 +748,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                         || !matches_process(str_at(&identity, "command").unwrap_or(""))
                         || (binding["process_identity"].is_object()
                             && binding["process_identity"] != identity)
-                        || str_at(&binding, "session_id").is_none()
                         || str_at(&binding, "cwd").is_none()
                     {
-                        return Err(error);
+                        return Err("Endpoint identity changed".into());
                     }
                     let mut session = binding;
+                    session["session_id"] = json!(bound_session(&r, &session)?);
                     session["ok"] = json!(true);
                     Ok(session)
                 });
@@ -644,7 +761,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 let binding_path = binding_path(&r, p);
                 let _lock = FileLock::acquire(&binding_path.with_extension("lock")).ok()?;
                 if let Ok(mut binding) = read_json(&binding_path) {
-                    if binding["session_id"] == v["session_id"]
+                    if bound_session(&r, &binding).is_ok_and(|sid| v["session_id"] == sid)
                         && (binding["updated_at_ms"] != v["updated_at_ms"]
                             || binding["session_name"] != v["session_name"])
                     {
@@ -656,7 +773,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 let mut session = caller(
                     &r,
                     "claude",
-                    str_at(&v, "session_id").unwrap_or(""),
+                    raw_str_at(&v, "session_id").unwrap_or(""),
                     str_at(&v, "cwd").unwrap_or(""),
                     Some(p),
                     str_at(&v, "session_name"),
@@ -670,10 +787,6 @@ pub fn handle(req: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"sessions":sessions}))
         }
         "resolve_caller" | "verify" => {
-            let hint = match metadata_session(req) {
-                Ok(hint) => hint,
-                Err(e) => return Ok(error("INVALID_INPUT", e)),
-            };
             let response = bridge(req).ok();
             let endpoint_responded = response.is_some();
             let rejection = response
@@ -688,25 +801,42 @@ pub fn handle(req: &Value) -> Result<Value> {
                         .unwrap_or_else(|| "Claude bridge did not identify an open session".into()),
                 ));
             }
-            if live.is_none()
+            let live_endpoint = live
+                .as_ref()
+                .and_then(|v| v["endpoint_pid"].as_u64())
+                .and_then(|p| u32::try_from(p).ok());
+            let live_sid = live.as_ref().and_then(|v| raw_str_at(v, "session_id"));
+            let cached = live.is_none()
                 && req["require_open"] == false
                 && req["cached_caller"].is_object()
-                && !req["cli_cmd"].is_string()
-            {
+                && !req["cli_cmd"].is_string();
+            let cwd_fence =
+                (live_sid.is_none() && !cached).then(|| str_at(req, "cwd").unwrap_or(""));
+            let binding =
+                match EndpointSession::read(req, live_endpoint.or_else(|| pid(req)), cwd_fence) {
+                    Ok(binding) => binding,
+                    Err(_) if live_sid.is_some() => None, // A valid live response stands on its own.
+                    Err(e) => return Ok(error("BINDING_REQUIRED", e)),
+                };
+            let source = binding
+                .as_ref()
+                .filter(|b| live_sid.is_none_or(|sid| sid == b.published));
+            let hint = match metadata_session(req, source) {
+                Ok(hint) => hint,
+                Err(e) => return Ok(error("INVALID_INPUT", e)),
+            };
+            let projected = source.and_then(|b| b.project_fences(req));
+            let req = projected.as_ref().unwrap_or(req);
+            if cached {
                 match cached_caller(req, "claude", hint.as_deref(), matches_process, |c| {
-                    if let Some(p) = pid(req) {
-                        if let Ok(binding) = read_json(&binding_path(req, p)) {
-                            if str_at(&binding, "start").is_some()
-                                && str_at(&binding, "start").map(str::to_owned) == process_start(p)
-                                && str_at(&binding, "session_id")
-                                    .is_some_and(|sid| c["session_id"] != sid)
-                            {
-                                return Err(error(
-                                    "BINDING_REQUIRED",
-                                    "Endpoint session binding changed",
-                                ));
-                            }
-                        }
+                    if binding
+                        .as_ref()
+                        .is_some_and(|b| c["session_id"] != b.published)
+                    {
+                        return Err(error(
+                            "BINDING_REQUIRED",
+                            "Endpoint session binding changed",
+                        ));
                     }
                     Ok(())
                 }) {
@@ -715,20 +845,15 @@ pub fn handle(req: &Value) -> Result<Value> {
                     Ok(None) => {}
                 }
             }
-            if let (Some(expected), Some(actual)) = (
-                hint.as_deref(),
-                live.as_ref().and_then(|v| str_at(v, "session_id")),
-            ) {
+            if let (Some(expected), Some(actual)) = (hint.as_deref(), live_sid) {
                 if expected != actual {
                     return Ok(error("INVALID_INPUT", "Conflicting caller metadata"));
                 }
             }
-            let sid = match live
-                .as_ref()
-                .and_then(|v| str_at(v, "session_id"))
+            let sid = match live_sid
                 .map(str::to_string)
                 .map(Ok)
-                .unwrap_or_else(|| resolve(req))
+                .unwrap_or_else(|| resolve_session(req, hint.as_deref(), source))
             {
                 Ok(s) => s,
                 Err(e) => {
@@ -747,16 +872,23 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .and_then(|v| str_at(v, "cwd"))
                 .or_else(|| str_at(req, "cwd"))
                 .unwrap_or("");
-            let t = title(req, &sid, cwd);
-            let endpoint = live
+            let t = live
                 .as_ref()
-                .and_then(|v| v["endpoint_pid"].as_u64())
-                .and_then(|p| u32::try_from(p).ok())
+                .and_then(|v| str_at(v, "session_name"))
+                .map(str::to_owned)
                 .or_else(|| {
-                    pid(req).filter(|p| {
-                        process_command(*p).is_ok_and(|command| matches_process(&command))
-                    })
+                    title(
+                        req,
+                        source
+                            .and_then(|b| raw_str_at(&b.record, "session_id"))
+                            .unwrap_or(&sid),
+                        cwd,
+                    )
                 });
+            let endpoint = live_endpoint.or_else(|| {
+                pid(req)
+                    .filter(|p| process_command(*p).is_ok_and(|command| matches_process(&command)))
+            });
             let c = caller(req, "claude", &sid, cwd, endpoint, t.as_deref());
             if live.is_none() && hint.is_none() && has_generic_session_mismatch(req, &sid) {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
@@ -771,11 +903,15 @@ pub fn handle(req: &Value) -> Result<Value> {
         }
         "probe" => {
             if let Some(p) = pid(req) {
-                if let Ok(binding) = read_json(&binding_path(req, p)) {
-                    if let Ok(current) = process_identity(p) {
-                        if !matches_process(str_at(&current, "command").unwrap_or(""))
-                            || (binding["process_identity"].is_object()
-                                && binding["process_identity"] != current)
+                if let Ok(current) = process_identity(p) {
+                    if endpoint_identity_changed(req, &current, matches_process) {
+                        return Ok(
+                            json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
+                        );
+                    }
+                    if let Ok(binding) = read_json(&binding_path(req, p)) {
+                        if (binding["process_identity"].is_object()
+                            && binding["process_identity"] != current)
                             || str_at(&binding, "start")
                                 .is_some_and(|start| process_start(p).as_deref() != Some(start))
                         {
@@ -804,7 +940,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ),
                 Err(_) => match resolve(req) {
                     Ok(current) => Ok(
-                        json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
+                        json!({"ok":true,"status":if Some(current.as_str()) == raw_str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
                     ),
                     Err(reason) => {
                         Ok(json!({"ok":true,"status":"transient_error","reason":reason}))
@@ -813,14 +949,15 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
         }
         "update_badge" => {
-            badge(
-                req,
-                str_at(req, "session_id").ok_or("Session ID is required")?,
-            )?;
-            Ok(json!({"ok":true}))
+            let sid =
+                validate_session(raw_str_at(req, "session_id").ok_or("Session ID is required")?)?;
+            let p = pid(req).ok_or("Endpoint PID is required")?;
+            let path = state(req).join(format!("sockets/claude-pid-{p}.sock"));
+            update_badge(req, &path, p, &sid, matches_process)
         }
         "wake" => {
-            let sid = validate_session(str_at(req, "session_id").ok_or("Session ID is required")?)?;
+            let sid =
+                validate_session(raw_str_at(req, "session_id").ok_or("Session ID is required")?)?;
             if let Some(p) = pid(req) {
                 if let Ok(v) = bridge(req) {
                     if v["ok"] == true {
@@ -831,11 +968,26 @@ pub fn handle(req: &Value) -> Result<Value> {
                         }
                         let r = socket_call(
                             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
-                            &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false}),
-                        )?;
-                        return Ok(
-                            json!({"ok":true,"outcome":if r["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":if r["ok"]==true {Value::Null} else {json!(response_diagnostic(&r,"Claude bridge rejected delivery"))}}),
+                            &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"signals":req["signals"]}),
                         );
+                        match r {
+                            Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
+                                return Ok(
+                                    json!({"ok":true,"outcome":"session_switched","reason":null}),
+                                );
+                            }
+                            Ok(reply) => {
+                                return Ok(
+                                    json!({"ok":true,"outcome":if reply["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":if reply["ok"]==true {Value::Null} else {json!(response_diagnostic(&reply,"Claude bridge rejected delivery"))}}),
+                                )
+                            }
+                            Err(_) => {
+                                append_wake(req, &sid)?;
+                                return Ok(
+                                    json!({"ok":true,"outcome":"delivered_unconfirmed","reason":"Queued for the next hook event"}),
+                                );
+                            }
+                        }
                     }
                     return Ok(
                         json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
@@ -893,7 +1045,7 @@ pub fn hook_main() {
         }
         let mut req = json!({"cwd":input["cwd"],"explicit_session_id":input["session_id"]});
         let p = hook_endpoint(&req);
-        let sid = match str_at(&req, "explicit_session_id") {
+        let sid = match raw_str_at(&req, "explicit_session_id") {
             Some(s) => validate_session(s).map_err(|_| "Invalid Claude session identifier")?,
             None => match resolve(&req) {
                 Ok(s) => s,
@@ -921,9 +1073,7 @@ pub fn hook_main() {
                 }
             }
         }
-        let alias = read_optional(&state(&req).join("claude/aliases").join(&sid))?
-            .and_then(|s| validate_session(&s).ok())
-            .filter(|s| s.starts_with("claude-") && s != &sid);
+        let alias = session_alias(&req, &sid)?;
         let sessions: Vec<_> = alias
             .as_deref()
             .into_iter()
@@ -937,10 +1087,7 @@ pub fn hook_main() {
                 &queue(&req, session)?.with_extension("delivery.lock"),
             )?);
         }
-        let mut wakes = drain_wakes(&req, &sessions)?;
-        // Drain order follows recovered staging files, then the active queue.
-        let mut seen = HashSet::new();
-        wakes.retain(|w| seen.insert((w["ack_session"].clone(), w["batch_id"].clone())));
+        let wakes = drain_wakes(&req, &sessions)?;
         if wakes.is_empty() {
             return Ok(json!({}));
         }
@@ -1025,11 +1172,14 @@ pub fn hook_main() {
                 }
                 let mut confirmed = true;
                 for (expected, ack) in acks {
-                    let response = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
-                        .timeout(Duration::from_millis(500))
-                        .send_json(ack)
-                        .ok()
-                        .and_then(|r| r.into_json::<Value>().ok());
+                    let response = crate::plugins::http_post_mcp(
+                        port,
+                        &ack.to_string(),
+                        Duration::from_millis(500),
+                    )
+                    .ok()
+                    .filter(|r| r.status == 200)
+                    .and_then(|r| serde_json::from_str::<Value>(&r.body).ok());
                     confirmed &= response
                         .as_ref()
                         .is_some_and(|r| hook_ack_confirmed(r, expected));
@@ -1086,10 +1236,7 @@ impl SidecarCleanup {
             }
             guard.0 = true;
             for (path, inode) in &guard.1 {
-                if fs::metadata(path)
-                    .map(|m| (m.dev(), m.ino()) == *inode)
-                    .unwrap_or(false)
-                {
+                if fs::symlink_metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == *inode) {
                     let _ = fs::remove_file(path);
                 }
             }
@@ -1168,7 +1315,8 @@ fn alias_for_fallback(req: &Value, fallback: &str) -> Option<String> {
         .flatten()
         .find_map(|entry| {
             let name = entry.file_name().to_str()?.to_string();
-            if fs::read_to_string(entry.path()).ok()?.trim() == fallback {
+            let value = fs::read_to_string(entry.path()).ok()?;
+            if value.strip_suffix('\n').unwrap_or(&value) == fallback {
                 validate_session(&name).ok()
             } else {
                 None
@@ -1185,7 +1333,7 @@ fn latest_transcript(req: &Value, cwd: &str) -> Option<(String, u64)> {
                 .to_str()?
                 .strip_suffix(".jsonl")?
                 .to_string();
-            if name.len() != 36 || !name.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            if !crate::is_valid_transcript_uuid(&name) {
                 return None;
             }
             let time = entry
@@ -1236,15 +1384,12 @@ fn sidecar(req: Value) -> Result<()> {
         inode: (metadata.dev(), metadata.ino()),
         badges: Mutex::new((false, std::collections::HashMap::new())),
     });
-    let explicit = metadata_session(&req)?;
-    let initial = latest_transcript(&req, cwd);
+    let explicit = metadata_session(&req, None)?;
+    // An unhooked process cannot attribute a workspace transcript to itself.
     let fallback = format!("claude-{p}");
-    let mut alias_active = explicit.is_none() && initial.is_none();
+    let mut alias_active = explicit.is_none();
     let mut first_transcript: Option<String> = None;
-    let mut current = explicit
-        .clone()
-        .or_else(|| initial.as_ref().map(|r| r.0.clone()))
-        .unwrap_or_else(|| fallback.clone());
+    let mut current = explicit.clone().unwrap_or_else(|| fallback.clone());
     let mut last_active = now_ms();
     let mut delivered = std::collections::VecDeque::<String>::new();
     sidecar_watchdog(cleanup.clone());
@@ -1277,52 +1422,29 @@ fn sidecar(req: Value) -> Result<()> {
             if v["op"] == "ping" {
                 return Ok(json!({"ok":true}));
             }
-            let latest = latest_transcript(&req, cwd);
             if alias_active && first_transcript.is_none() {
                 first_transcript = alias_for_fallback(&req, &fallback);
             }
             let mut next = explicit.clone();
-            // A hook-recorded endpoint identity takes precedence over workspace scanning.
+            let mut cwd = cwd;
+            let initial;
             if next.is_none() {
-                if let Ok(binding) = read_json(&binding_path(&req, p)) {
-                    if binding["source"] != "channel"
-                        && str_at(&binding, "start").is_some()
-                        && str_at(&binding, "start").map(str::to_string) == process_start(p)
-                    {
-                        next = str_at(&binding, "session_id").map(str::to_string);
-                        alias_active = next.as_deref().is_some_and(|sid| {
-                            alias_for_fallback(&req, &fallback).as_deref() == Some(sid)
-                        });
-                    }
+                initial = read_json(&binding_path(&req, p)).ok();
+                if let Some((sid, workspace)) =
+                    initial.as_ref().and_then(|v| canonical_hook_identity(v, p))
+                {
+                    next = Some(sid.to_owned());
+                    cwd = workspace.unwrap_or(cwd);
+                    alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
                 }
             }
+            let mut latest = latest_transcript(&req, cwd);
             if next.is_none() {
-                let other_endpoint = fs::read_dir(parent)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .any(|entry| {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        let Some(other) = name
-                            .strip_prefix("claude-pid-")
-                            .and_then(|s| s.strip_suffix(".sock"))
-                            .and_then(|s| s.parse::<u32>().ok())
-                        else {
-                            return false;
-                        };
-                        if other == p {
-                            return false;
-                        }
-                        let Ok(binding) = read_json(&binding_path(&req, other)) else {
-                            return false;
-                        };
-                        binding["cwd"] == cwd
-                            && alive(other)
-                            && str_at(&binding, "start").map(str::to_owned) == process_start(other)
-                    });
-                if other_endpoint {
-                    next = Some(current.clone());
+                if latest.is_some() && workspace_ambiguous(cwd, Some(p))? {
+                    latest = None;
+                    next = Some(fallback.clone());
+                    alias_active = false;
+                    first_transcript = None;
                 } else if let Some((sid, _)) = &latest {
                     if alias_active {
                         if first_transcript
@@ -1366,18 +1488,21 @@ fn sidecar(req: Value) -> Result<()> {
             let mut next = next.unwrap_or_else(|| fallback.clone());
             let mut channel_req = req.clone();
             channel_req["_binding_source"] = json!("channel");
-            if let Some(binding) = record_binding(&channel_req, p, &next, cwd)? {
-                if binding["source"] != "channel"
-                    && str_at(&binding, "start").is_some()
-                    && str_at(&binding, "start").map(str::to_owned) == process_start(p)
-                {
-                    if let Some(sid) = str_at(&binding, "session_id") {
-                        // A hook can commit while this request waits for the leaf lock.
-                        // Keep an established fallback alias, otherwise adopt its identity.
-                        alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
-                        let selected = if alias_active { &fallback } else { sid };
-                        next = selected.to_string();
-                    }
+            let binding = record_binding(&channel_req, p, &next, cwd)?;
+            if let Some((sid, workspace)) =
+                binding.as_ref().and_then(|v| canonical_hook_identity(v, p))
+            {
+                // A hook can commit while this request waits for the leaf lock.
+                alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
+                next = if alias_active {
+                    first_transcript = Some(sid.into());
+                    fallback.clone()
+                } else {
+                    sid.into()
+                };
+                if let Some(workspace) = workspace.filter(|&path| path != cwd) {
+                    cwd = workspace;
+                    latest = latest_transcript(&req, cwd);
                 }
             }
             if next != current {
@@ -1431,6 +1556,7 @@ fn sidecar(req: Value) -> Result<()> {
                 wake["batch_id"] = v["batch_id"].clone();
                 wake["text"] = v["content"].clone();
                 wake["wake"] = v["wake"].clone();
+                wake["signals"] = v["signals"].clone();
                 append_wake(&wake, &current)?;
                 delivered.push_back(batch.into());
                 if delivered.len() > 200 {

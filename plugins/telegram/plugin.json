@@ -10,6 +10,7 @@
   "command": [
     "./bin/cito-plugin-telegram"
   ],
+  "serviceIdentity": { "field": "botToken", "separator": ":" },
   "fields": [
     {
       "key": "botToken",

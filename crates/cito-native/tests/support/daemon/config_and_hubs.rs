@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn sigterm_wakes_an_active_oidc_callback_after_browser_exit() {
+    use std::io::Write;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let provider = f.spawn("python3", &["-u", "-c", r#"import http.server,json
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def do_GET(self):
+  issuer='http://127.0.0.1:'+str(self.server.server_port)
+  raw=json.dumps({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','scopes_supported':['openid']}).encode()
+  self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+s=http.server.HTTPServer(('127.0.0.1',0),Handler)
+print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
+"#], &[]);
+    wait(|| !f.frames(provider).is_empty());
+    let issuer = format!("http://127.0.0.1:{}", f.frames(provider)[0]["port"]);
+    fs::write(&f.config, json!({"default_hub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":issuer,"clientId":"client","redirectPort":0}}}).to_string()).unwrap();
+    // The opener records its URL and exits successfully without sending a callback.
+    let opener = f.dir.join("browser");
+    script(
+        &opener,
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$HOME/callback-url\"\n",
+    );
+    let daemon = f.daemon(&[("CITO_BROWSER_BIN", opener.to_str().unwrap())]);
+    let port = f.port;
+    let login = std::thread::spawn(move || {
+        http(port, "/ui", Some(&json!({"op":"login_hub","hub":"work"})))
+    });
+    wait(|| f.home.join("callback-url").exists());
+    let url = url::Url::parse(&fs::read_to_string(f.home.join("callback-url")).unwrap()).unwrap();
+    let callback = url
+        .query_pairs()
+        .find(|(key, _)| key == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback = url::Url::parse(&callback).unwrap();
+    // A bad callback proves the login worker is inside the callback accept loop.
+    let mut probe = std::net::TcpStream::connect(("127.0.0.1", callback.port().unwrap())).unwrap();
+    probe
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    writeln!(probe, "GET /callback?state=invalid HTTP/1.1\r").unwrap();
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut probe, &mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let start = std::time::Instant::now();
+    f.signal(daemon, libc::SIGTERM);
+    let until = start + std::time::Duration::from_secs(2);
+    wait(|| {
+        assert!(
+            std::time::Instant::now() < until,
+            "Daemon stalled during callback cancellation"
+        );
+        f.exited(daemon)
+    });
+    let result = login.join().unwrap();
+    assert_eq!(result.0, 400, "{result:?}");
+    assert!(result.1["error"].as_str().unwrap().contains("cancelled"));
+    assert!(!f.state.join("oidc-token-work.json").exists());
+    assert!(
+        f.rows("SELECT * FROM daemon_owner").is_empty(),
+        "Graceful shutdown clears ownership"
+    );
+}
+
+#[test]
+fn ui_retries_after_initial_executable_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let ui = f.recording_ui();
+    fs::set_permissions(&ui, fs::Permissions::from_mode(0o600)).unwrap();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    assert!(ui_frames(&f).is_empty());
+    fs::set_permissions(&ui, fs::Permissions::from_mode(0o700)).unwrap();
+    wait(|| ui_frames(&f).iter().any(|r| r["op"] == "state"));
+}
+
+#[test]
 fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
     use std::{
         io::Write,
@@ -14,6 +98,20 @@ fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
     let (release, released) = std::sync::mpsc::channel();
     let (finished, done) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
+        use std::os::fd::AsRawFd;
+        let mut fds = [libc::pollfd {
+            fd: issuer.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        assert!(
+            cito_native::support::poll_until(
+                &mut fds,
+                Some(Instant::now() + Duration::from_secs(10))
+            )
+            .unwrap(),
+            "No issuer connection"
+        );
         let (mut stream, _) = issuer.accept().unwrap();
         stream
             .set_write_timeout(Some(Duration::from_secs(1)))
@@ -656,6 +754,150 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
     }
 }
 #[test]
+fn peer_mutations_return_committed_receipts_only_after_success() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    let human = f
+        .rows("SELECT * FROM local_listeners WHERE harness='human'")
+        .remove(0);
+    let mut actions = [
+        json!({"op":"human_inbox_update","paused":true}),
+        json!({"op":"set_scope","listener_id":human["listener_id"],"scope":"workspace"}),
+        json!({"op":"cli_human_device","attach":false}),
+        json!({"op":"cli_human_device","attach":true}),
+        json!({"op":"listen_session","harness":"fixture","session_id":"session-1"}),
+        json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"Renamed"}),
+        json!({"op":"cli_rename","meta":meta,"title":"CLI renamed"}),
+    ];
+    for (index, action) in actions.iter_mut().enumerate() {
+        let request = format!("mutation-{index}");
+        action["request_id"] = json!(request);
+        let (status, result) = f.action(action.clone());
+        assert_eq!(status, 200, "{action}: {result}");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["committed"], true, "{action}: {result}");
+        wait(|| {
+            ui_frames(&f).into_iter().any(|frame| {
+                frame["request_id"] == request
+                    && frame["source_op"] == action["op"]
+                    && frame["ok"] == true
+                    && frame["committed"] == true
+            })
+        });
+    }
+    let agent = f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture'")
+        .remove(0);
+    assert_eq!(agent["title"], "CLI renamed");
+    let (status, result) = f.action(json!({"op":"unlisten","listener_id":agent["listener_id"]}));
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["committed"], true);
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0]["status"],
+        "UNLISTENED"
+    );
+    let (status, failed) = f.action(
+        json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":""}),
+    );
+    assert_eq!(status, 400, "{failed}");
+    assert_ne!(failed["committed"], true);
+}
+
+#[test]
+fn cli_removal_purges_only_removed_hub_across_reload_and_restart() {
+    let _lock = serial();
+    let f = Fixture::new(
+        json!({"default_hub":"local","hubs":{"local":{"url":"local://","enabled":false},"work":{"url":"local://","enabled":false}}}),
+    );
+    let daemon = f.daemon(&[]);
+    let db = f.db("state.sqlite");
+    for hub in ["local", "work"] {
+        db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES(?,'c_0123456789abcdef','none#alice','alice','host','desktop','fixture','session','','Work','Work','workspace','UNLISTENED','local://')", &[json!(hub)]).unwrap();
+        db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES(?,'signal','c_0123456789abcdef',1,0,'alice','desktop','Sender','Retained history','',?,'STORED_PASSIVE','local://','none#alice')", &[json!(hub),json!(u64::MAX / 2)]).unwrap();
+        db.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES(?,'node','signal','channel',1)", &[json!(hub)]).unwrap();
+        db.execute(
+            "INSERT INTO pending_hub_detaches VALUES(?,'node','local://')",
+            &[json!(hub)],
+        )
+        .unwrap();
+        db.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,'dedup','hash','signal','node','wake_accepted','',?)", &[json!(hub),json!(u64::MAX / 2)]).unwrap();
+        db.execute(
+            "INSERT INTO wake_retries VALUES(?,'node',?)",
+            &[json!(hub), json!(u64::MAX / 2)],
+        )
+        .unwrap();
+        fs::write(
+            f.state.join(format!("oidc-token-{hub}.json")),
+            "retained credential",
+        )
+        .unwrap();
+    }
+    let tables = [
+        "local_listeners",
+        "local_signals",
+        "pending_hub_acks",
+        "pending_hub_detaches",
+        "local_sent_idempotency",
+        "wake_retries",
+    ];
+    let surviving: Vec<_> = tables
+        .iter()
+        .map(|table| {
+            db.query(&format!("SELECT * FROM {table} WHERE hub='local'"), &[])
+                .unwrap()
+        })
+        .collect();
+    // A disabled Hub retains data; reload must distinguish it from removal.
+    assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+    for table in tables {
+        assert_eq!(
+            db.query(&format!("SELECT * FROM {table} WHERE hub='work'"), &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &["setup", "--remove-hub", "work", "--no-login-item", "--json"],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    for restart in [false, true] {
+        if restart {
+            f.stop(daemon);
+            f.daemon(&[]);
+        }
+        assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+        for (table, expected) in tables.iter().zip(&surviving) {
+            assert!(
+                db.query(&format!("SELECT * FROM {table} WHERE hub='work'"), &[])
+                    .unwrap()
+                    .is_empty(),
+                "{table}"
+            );
+            assert_eq!(
+                &db.query(&format!("SELECT * FROM {table} WHERE hub='local'"), &[])
+                    .unwrap(),
+                expected,
+                "{table}"
+            );
+        }
+        assert!(!f.state.join("oidc-token-work.json").exists());
+        assert_eq!(
+            fs::read_to_string(f.state.join("oidc-token-local.json")).unwrap(),
+            "retained credential"
+        );
+    }
+}
+
+#[test]
 fn dual_default_hub_aliases_allow_cli_removal_and_restart() {
     let _lock = serial();
     let f = Fixture::new(json!({
@@ -950,11 +1192,24 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
             let canonical = match key.as_str() {
                 "client_id" | "oidcClientId" => "clientId",
                 "oidcIssuer" => "issuer",
+                "oidcScopes" => "scopes",
+                "redirect_port" | "oidcRedirectPort" => "redirectPort",
+                "auth_mode" | "auth" => "authMode",
                 key => key,
             };
             assert_eq!(&config["hubs"]["work"][canonical], value);
         }
-        for key in ["client_id", "oidcIssuer", "oidcClientId", "request_id"] {
+        for key in [
+            "client_id",
+            "oidcIssuer",
+            "oidcClientId",
+            "oidcScopes",
+            "redirect_port",
+            "oidcRedirectPort",
+            "auth_mode",
+            "auth",
+            "request_id",
+        ] {
             assert!(config["hubs"]["work"].get(key).is_none());
         }
         let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");

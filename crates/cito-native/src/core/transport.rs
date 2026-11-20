@@ -98,6 +98,7 @@ pub struct HubClient {
     pub auth_rejected_hash: Option<String>,
     pub rejected_bearer: Arc<Mutex<Option<String>>>,
     directory_cache: Arc<Mutex<Vec<Value>>>,
+    directory_revision: Arc<AtomicU64>,
     // Serialize network writers without holding the cache lock used by UI projections.
     directory_updates: Arc<Mutex<()>>,
     server_clock: Arc<Mutex<Option<(u64, Instant)>>>,
@@ -108,7 +109,8 @@ pub struct HubClient {
     event_revision: Arc<AtomicU64>,
     event_wait: Arc<(Mutex<()>, std::sync::Condvar)>,
     local_event_wake: Arc<Mutex<Option<Arc<crate::support::WakePipe>>>>,
-    observed_at: Arc<Mutex<Option<Instant>>>,
+    directory_observed_at: Arc<Mutex<Option<Instant>>>,
+    human_observed_at: Arc<Mutex<Option<Instant>>>,
     event_credentials: Arc<Mutex<Option<String>>>,
     pub closed: Arc<AtomicBool>,
     pub registration: Arc<Mutex<()>>,
@@ -133,6 +135,7 @@ impl HubClient {
             auth_rejected_hash: None,
             rejected_bearer: Arc::new(Mutex::new(None)),
             directory_cache: Arc::new(Mutex::new(Vec::new())),
+            directory_revision: Arc::new(AtomicU64::new(0)),
             directory_updates: Arc::new(Mutex::new(())),
             server_clock: Arc::new(Mutex::new(None)),
             local,
@@ -141,7 +144,8 @@ impl HubClient {
             event_revision: Arc::new(AtomicU64::new(1)),
             event_wait: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
             local_event_wake: Arc::new(Mutex::new(None)),
-            observed_at: Arc::new(Mutex::new(None)),
+            directory_observed_at: Arc::new(Mutex::new(None)),
+            human_observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             registration: Arc::new(Mutex::new(())),
             agent: ureq::AgentBuilder::new()
@@ -213,7 +217,7 @@ impl HubClient {
         let response: Value = match serde_json::from_slice(bytes) {
             Ok(value) => value,
             Err(_) if status != 200 => Value::Null,
-            Err(error) => return Err(error.to_string()),
+            Err(_) => return Err("NATS_UNAVAILABLE: Invalid Hub response JSON".into()),
         };
         if status != 200 || response["ok"] == false || !response["error"].is_null() {
             let fallback = match status {
@@ -230,7 +234,13 @@ impl HubClient {
                     .unwrap_or("Hub rejected request"),
             ));
         }
-        Ok(response.get("result").cloned().unwrap_or(response))
+        if response["ok"] != true {
+            return Err("NATS_UNAVAILABLE: Invalid Hub RPC envelope".into());
+        }
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "NATS_UNAVAILABLE: Missing Hub RPC result".into())
     }
     fn rpc_http(&self, op: &str, params: &Value) -> Result<Value, String> {
         let url = url::Url::parse(&format!(
@@ -311,6 +321,7 @@ impl HubClient {
     /// Preserve the authority-owned observations and running stream on renewal.
     pub fn inherit_authority(&mut self, old: &Self) {
         self.directory_cache = old.directory_cache.clone();
+        self.directory_revision = old.directory_revision.clone();
         self.directory_updates = old.directory_updates.clone();
         self.server_clock = old.server_clock.clone();
         self.status = old.status.clone();
@@ -319,7 +330,8 @@ impl HubClient {
         self.event_wait = old.event_wait.clone();
         self.local_event_wake = old.local_event_wake.clone();
         self.rejected_bearer = old.rejected_bearer.clone();
-        self.observed_at = old.observed_at.clone();
+        self.directory_observed_at = old.directory_observed_at.clone();
+        self.human_observed_at = old.human_observed_at.clone();
         self.closed = old.closed.clone();
         self.event_credentials = old.event_credentials.clone();
         if let Ok(mut token) = self.event_credentials.lock() {
@@ -336,12 +348,20 @@ impl HubClient {
     fn observation_recent(&self) -> bool {
         self.local.is_some()
             || self
-                .observed_at
+                .directory_observed_at
                 .lock()
                 .is_ok_and(|at| at.is_some_and(|at| at.elapsed() < Duration::from_secs(60)))
     }
     pub fn observation_current(&self) -> bool {
         self.auth_valid() && self.observation_recent()
+    }
+    pub(super) fn human_observation_current(&self) -> bool {
+        self.auth_valid()
+            && (self.local.is_some()
+                || self
+                    .human_observed_at
+                    .lock()
+                    .is_ok_and(|at| at.is_some_and(|at| at.elapsed() < Duration::from_secs(60))))
     }
     fn auth_valid(&self) -> bool {
         (self.config["authMode"] != "oidc"
@@ -417,6 +437,9 @@ impl HubClient {
             }
         }
     }
+    pub fn directory_revision(&self) -> u64 {
+        self.directory_revision.load(Ordering::Acquire)
+    }
     pub fn event_revision(&self) -> u64 {
         self.event_revision.load(Ordering::Acquire)
     }
@@ -452,6 +475,12 @@ impl HubClient {
         }
     }
     pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
+        self.start_events_with_idle_timeout(Duration::from_secs(90))
+    }
+    fn start_events_with_idle_timeout(
+        &self,
+        idle_timeout: Duration,
+    ) -> Option<thread::JoinHandle<()>> {
         if let Some(local) = &self.local {
             let mut subscription = local.subscribe(Some(self.identity.clone())).ok()?;
             if let Ok(mut wake) = self.local_event_wake.lock() {
@@ -503,7 +532,7 @@ impl HubClient {
         client.agent = ureq::AgentBuilder::new()
             .redirects(0)
             .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_secs(1))
+            .timeout_read(idle_timeout.min(Duration::from_secs(1)))
             .build();
         Some(thread::spawn(move || {
             let mut backoff = crate::support::RetryBackoff::default();
@@ -525,7 +554,7 @@ impl HubClient {
                     request = request.set("Authorization", &format!("Bearer {token}"));
                 }
                 let response = request.call();
-                if matches!(&response, Err(ureq::Error::Status(401 | 403, _))) {
+                if bearer.is_some() && matches!(&response, Err(ureq::Error::Status(401, _))) {
                     client.reject_token(&bearer);
                 }
                 if matches!(&response, Err(ureq::Error::Status(401 | 403 | 409, _))) {
@@ -551,13 +580,67 @@ impl HubClient {
                     client.stream_live.store(true, Ordering::SeqCst);
                     let mut reader = BufReader::new(response.into_reader());
                     let connected = Instant::now();
-                    let mut line = String::new();
+                    let mut last_input = connected;
+                    let mut line = Vec::new();
                     loop {
-                        let remaining = 65_536usize.saturating_sub(line.len());
-                        if remaining == 0 {
+                        if last_input.elapsed() >= idle_timeout {
                             break;
                         }
-                        let result = reader.by_ref().take(remaining as u64).read_line(&mut line);
+                        let remaining = 65_536usize.saturating_sub(line.len());
+                        if remaining == 0 {
+                            // The stream carries invalidation hints, not authoritative payloads.
+                            // Drain an oversized hint without growing memory or reconnecting.
+                            let mut chunk = [0u8; 8192];
+                            let drained = loop {
+                                if client.closed.load(Ordering::SeqCst)
+                                    || last_input.elapsed() >= idle_timeout
+                                {
+                                    break false;
+                                }
+                                match reader.fill_buf() {
+                                    Ok([]) => break false,
+                                    Ok(bytes) => {
+                                        last_input = Instant::now();
+                                        let count = bytes.len().min(chunk.len());
+                                        chunk[..count].copy_from_slice(&bytes[..count]);
+                                        let newline =
+                                            chunk[..count].iter().position(|b| *b == b'\n');
+                                        reader.consume(newline.map_or(count, |n| n + 1));
+                                        if newline.is_some() {
+                                            break true;
+                                        }
+                                    }
+                                    Err(error)
+                                        if matches!(
+                                            error.kind(),
+                                            io::ErrorKind::TimedOut
+                                                | io::ErrorKind::WouldBlock
+                                                | io::ErrorKind::Interrupted
+                                        ) =>
+                                    {
+                                        continue
+                                    }
+                                    Err(_) => break false,
+                                }
+                            };
+                            if !drained {
+                                break;
+                            }
+                            if line.starts_with(b"data:") {
+                                client.mutation();
+                                backoff.reset();
+                            }
+                            line.clear();
+                            continue;
+                        }
+                        let before = line.len();
+                        let result = reader
+                            .by_ref()
+                            .take(remaining as u64)
+                            .read_until(b'\n', &mut line);
+                        if line.len() > before {
+                            last_input = Instant::now();
+                        }
                         if client.closed.load(Ordering::SeqCst) {
                             break;
                         }
@@ -565,13 +648,16 @@ impl HubClient {
                         {
                             continue;
                         }
-                        if !matches!(result, Ok(n) if n > 0 && line.ends_with('\n')) {
+                        if matches!(result, Ok(n) if n > 0 && !line.ends_with(b"\n")) {
+                            continue;
+                        }
+                        if !matches!(result, Ok(n) if n > 0) {
                             break;
                         }
                         if connected.elapsed() >= Duration::from_secs(30) {
                             backoff.reset();
                         }
-                        if line.starts_with("data:") {
+                        if line.starts_with(b"data:") {
                             backoff.reset();
                             // Hints invalidate observations; only the durable consumer advances cursors.
                             client.mutation();
@@ -611,12 +697,18 @@ impl HubClient {
                 return Err(error);
             }
         };
+        if !result["record"].is_object() || !result["record"]["listener_id"].is_string() {
+            return Err("NATS_UNAVAILABLE: Invalid Human response".into());
+        }
         self.cache_human(&result);
         Ok(result)
     }
     fn cache_human(&self, result: &Value) {
+        if !result["record"]["listener_id"].is_string() {
+            return;
+        }
         self.observe_server_clock(result);
-        if let Ok(mut observed) = self.observed_at.lock() {
+        if let Ok(mut observed) = self.human_observed_at.lock() {
             *observed = Some(Instant::now());
         }
         if result["record"].is_object() {
@@ -625,6 +717,7 @@ impl HubClient {
             if let Ok(mut cache) = self.directory_cache.lock() {
                 cache.retain(|row| row["listener_id"] != record["listener_id"]);
                 cache.push(record);
+                self.directory_revision.fetch_add(1, Ordering::Release);
             }
         }
     }
@@ -667,21 +760,29 @@ impl HubClient {
         let mut rows = Vec::new();
         loop {
             let raw = self.rpc("kv_snapshot", &json!({"after_key":cursor}))?;
-            self.observe_server_clock(&raw);
+            if !raw["next_cursor"].is_null() && !raw["next_cursor"].is_string() {
+                return Err("NATS_UNAVAILABLE: Invalid snapshot cursor".into());
+            }
             let items = raw
                 .as_array()
                 .or_else(|| raw["entries"].as_array())
-                .cloned()
-                .unwrap_or_default();
+                .ok_or("NATS_UNAVAILABLE: Missing directory entries")?;
             for item in items {
-                if item.get("listener_id").is_some() {
-                    rows.push(item);
+                if item["listener_id"].is_string() {
+                    rows.push(item.clone());
                     continue;
                 }
                 let data = STANDARD
-                    .decode(string(&item, "value_b64"))
+                    .decode(
+                        item["value_b64"]
+                            .as_str()
+                            .ok_or("NATS_UNAVAILABLE: Missing directory record")?,
+                    )
                     .map_err(|e| e.to_string())?;
                 let mut row: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                if !row.is_object() {
+                    return Err("NATS_UNAVAILABLE: Invalid directory record".into());
+                }
                 row["server_now_ms"] = raw["server_now_ms"].clone();
                 rows.push(row);
             }
@@ -691,20 +792,23 @@ impl HubClient {
             }
             cursor = next;
             if cursor.is_none() {
+                self.observe_server_clock(&raw);
                 break;
             }
         }
         if let Ok(mut cache) = self.directory_cache.lock() {
-            *cache = rows.clone();
+            if *cache != rows {
+                *cache = rows.clone();
+                self.directory_revision.fetch_add(1, Ordering::Release);
+            }
         }
-        if let Ok(mut observed) = self.observed_at.lock() {
-            *observed = Some(Instant::now());
+        let now = Instant::now();
+        if let Ok(mut observed) = self.directory_observed_at.lock() {
+            *observed = Some(now);
+        }
+        if let Ok(mut observed) = self.human_observed_at.lock() {
+            *observed = Some(now);
         }
         Ok(rows)
-    }
-}
-impl Drop for HubClient {
-    fn drop(&mut self) {
-        // Event worker owns another clone; DaemonService explicitly sets closed before join.
     }
 }

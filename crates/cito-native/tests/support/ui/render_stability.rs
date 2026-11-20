@@ -41,7 +41,7 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
     let updated = inspect(&f, p);
     assert_eq!(updated["rebuilds"], scope["rebuilds"]);
     assert_eq!(
-        node(&updated, "directory_items", "directory_warning")["hidden"],
+        node(&updated, "directory_items", "directory_warning_label")["hidden"],
         false
     );
     assert_eq!(
@@ -57,9 +57,60 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
     let same_scope = inspect(&f, p);
     assert_eq!(same_scope["rebuilds"], scope["rebuilds"]);
     assert_eq!(
-        node(&same_scope, "directory_items", "directory_warning")["hidden"],
+        node(&same_scope, "directory_items", "directory_warning_label")["hidden"],
         true
     );
+}
+
+#[test]
+fn pushed_remote_and_online_changes_requery_only_the_open_directory() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame.clone());
+    control(&f, p, "open_settings");
+    control(&f, p, "open_directory");
+    let before = super::lazy_rendering::render_state(&f, p);
+    let queries = || {
+        f.frames(p)
+            .into_iter()
+            .filter(|action| action["op"] == "query_directory")
+            .collect::<Vec<_>>()
+    };
+    let initial = queries().len();
+    frame["my_remote_listeners"] = json!([peer("remote")]);
+    f.send(p, frame.clone());
+    let after_remote = super::lazy_rendering::render_state(&f, p);
+    let remote_queries = queries();
+    assert_eq!(remote_queries.len(), initial + 1);
+    assert_eq!(
+        after_remote["settings_rebuilds"],
+        before["settings_rebuilds"]
+    );
+
+    frame["directory_online_count"] = json!(3);
+    f.send(p, frame.clone());
+    f.send(p, frame.clone());
+    let after_count = super::lazy_rendering::render_state(&f, p);
+    let count_queries = queries();
+    assert_eq!(count_queries.len(), initial + 2);
+    assert_ne!(
+        count_queries.last().unwrap()["request_id"],
+        remote_queries.last().unwrap()["request_id"]
+    );
+    assert_eq!(
+        after_count["settings_rebuilds"],
+        before["settings_rebuilds"]
+    );
+
+    control(&f, p, "close_directory");
+    frame["directory_online_count"] = json!(1);
+    f.send(p, frame);
+    let after_close = super::lazy_rendering::render_state(&f, p);
+    assert_eq!(after_close["directory_open"], false);
+    assert_eq!(queries().len(), initial + 2);
 }
 
 #[test]
@@ -290,7 +341,7 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
     f.send(p, json!({"op":"error","source_op":"query_directory","error":"Directory temporarily unavailable"}));
     let failed = inspect(&f, p);
     assert!(
-        !node(&failed, "directory_items", "directory_warning")["hidden"]
+        !node(&failed, "directory_items", "directory_warning_label")["hidden"]
             .as_bool()
             .unwrap()
     );
@@ -298,7 +349,7 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
     send_fixture(
         &f,
         p,
-        json!({"op":"directory","peers":[remote],"online_count":2,"matched_count":1,"warnings":[]}),
+        json!({"op":"directory","peers":[remote.clone()],"online_count":2,"matched_count":1,"warnings":[]}),
     );
     let cleared = inspect(&f, p);
     assert_eq!(
@@ -306,9 +357,32 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
         "Peer without a timestamp"
     );
     assert_eq!(
-        node(&cleared, "directory_items", "directory_warning")["hidden"],
+        node(&cleared, "directory_items", "directory_warning_label")["hidden"],
         true
     );
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("replacement")],"online_count":2}),
+    );
+    assert!(node(
+        &inspect(&f, p),
+        "directory_items",
+        "copy_dir:personal:stable"
+    )
+    .is_null());
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[remote],"online_count":2}),
+    );
+    let restored = node(
+        &inspect(&f, p),
+        "directory_items",
+        "copy_dir:personal:stable",
+    );
+    assert_eq!(restored["text"], "✓ Copied");
+    assert_eq!(restored["accessibility_label"], "✓ Copied");
     send_fixture(
         &f,
         p,

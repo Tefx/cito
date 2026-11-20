@@ -1,11 +1,10 @@
-#![allow(dead_code)]
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -14,6 +13,12 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+/// Preserve opaque identifier bytes while rejecting blank carriers.
+pub fn raw_str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
 }
 pub fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key)
@@ -31,13 +36,54 @@ pub fn env_value(req: &Value, key: &str) -> Option<String> {
 pub fn home(req: &Value) -> PathBuf {
     PathBuf::from(env_value(req, "HOME").unwrap_or_else(|| "/tmp".into()))
 }
-pub fn expand(req: &Value, value: &str) -> PathBuf {
+pub fn random_uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        let t = now_ms().to_le_bytes();
+        let p = std::process::id().to_le_bytes();
+        bytes[0..8].copy_from_slice(&t);
+        bytes[8..12].copy_from_slice(&p);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+/// Generates cryptographic tokens without masking an entropy-source failure.
+pub fn try_random_hex(bytes_len: usize) -> Result<String> {
+    let mut bytes = vec![0u8; bytes_len];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Best-effort identifiers for temporary paths; use try_random_hex for secrets.
+pub fn random_hex(bytes_len: usize) -> String {
+    try_random_hex(bytes_len).unwrap_or_else(|_| {
+        (0..bytes_len)
+            .map(|i| format!("{:02x}", ((now_ms() as usize).wrapping_add(i * 31)) as u8))
+            .collect()
+    })
+}
+
+pub fn expand_home_path(value: &str, home: &Path) -> PathBuf {
     if value == "~" {
-        home(req)
-    } else if let Some(s) = value.strip_prefix("~/") {
-        home(req).join(s)
+        home.to_path_buf()
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        home.join(rest)
     } else {
-        let p = PathBuf::from(value);
+        PathBuf::from(value)
+    }
+}
+pub fn expand(req: &Value, value: &str) -> PathBuf {
+    {
+        let p = expand_home_path(value, &home(req));
         if p.is_absolute() {
             p
         } else {
@@ -53,11 +99,43 @@ pub fn state(req: &Value) -> PathBuf {
         .or_else(|| env_value(req, "CITO_STATE_DIR").map(|s| expand(req, &s)))
         .unwrap_or_else(|| home(req).join(".cito"))
 }
+pub fn remove_setup_runtime(
+    req: &Value,
+    directory: &str,
+    socket_prefix: Option<&str>,
+) -> Result<()> {
+    if req["op"] != "setup_remove" || req["dry_run"] == true {
+        return Ok(());
+    }
+    let root = state(req);
+    match fs::remove_dir_all(root.join(directory)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    if let Some(prefix) = socket_prefix {
+        let entries = match fs::read_dir(root.join("sockets")) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_name().to_string_lossy().starts_with(prefix) {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        }
+    }
+    Ok(())
+}
 pub fn config_home(req: &Value, env: &str, default: &str) -> PathBuf {
     expand(req, &env_value(req, env).unwrap_or_else(|| default.into()))
 }
 pub fn validate_session(s: &str) -> Result<String> {
-    let s = s.trim();
     if s.is_empty()
         || s.len() > 128
         || !s.as_bytes()[0].is_ascii_alphanumeric()
@@ -143,7 +221,70 @@ fn clean_sidecars(path: &Path) {
         }
     }
 }
+pub fn publication_target(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let mut pending: std::collections::VecDeque<_> = absolute
+        .components()
+        .map(|part| part.as_os_str().to_os_string())
+        .collect();
+    let mut target = PathBuf::new();
+    let mut hops = 0;
+    while let Some(part) = pending.pop_front() {
+        match Path::new(&part).components().next() {
+            Some(Component::RootDir) => target = PathBuf::from("/"),
+            Some(Component::CurDir) | None => {}
+            Some(Component::ParentDir) => {
+                target.pop();
+            }
+            _ => {
+                target.push(&part);
+                match fs::read_link(&target) {
+                    Ok(link) => {
+                        hops += 1;
+                        if hops > 40 {
+                            return Err("Configuration symlink chain exceeds 40 links".into());
+                        }
+                        target.pop();
+                        for part in link.components().rev() {
+                            pending.push_front(part.as_os_str().to_os_string());
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                        ) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+        }
+    }
+    Ok(target)
+}
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_with_mode(path, bytes, None)
+}
+
+/// Publish with an explicit final mode, or preserve the target mode when absent.
+pub fn atomic_write_with_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
+    atomic_write_checked(path, bytes, mode, || Ok(()))
+}
+
+pub fn atomic_write_checked(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let target = publication_target(path)?;
+    let path = target.as_path();
     if let Some(p) = path.parent() {
         fs::create_dir_all(p).map_err(|e| e.to_string())?;
     }
@@ -156,7 +297,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let tmp = PathBuf::from(tmp_name);
-    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
+    let permissions = mode
+        .map(fs::Permissions::from_mode)
+        .or_else(|| fs::metadata(path).ok().map(|m| m.permissions()))
+        .unwrap_or_else(|| fs::Permissions::from_mode(0o600));
     let mut f = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -165,10 +309,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|e| e.to_string())?;
     let r = (|| {
         f.write_all(bytes).map_err(|e| e.to_string())?;
-        if let Some(permissions) = permissions {
-            f.set_permissions(permissions).map_err(|e| e.to_string())?;
-        }
+        f.set_permissions(permissions).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
+        before_rename()?;
         fs::rename(&tmp, path).map_err(|e| e.to_string())
     })();
     if r.is_err() {
@@ -194,26 +337,6 @@ pub fn read_json(path: &Path) -> Result<Value> {
     }
     Ok(v)
 }
-fn mutation_path(path: &Path, remaining: u8) -> Result<PathBuf> {
-    if remaining == 0 {
-        return Err("Too many symbolic links in configuration path".into());
-    }
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return Ok(canonical);
-    }
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        let target = fs::read_link(path).map_err(|e| e.to_string())?;
-        return mutation_path(
-            &path.parent().unwrap_or(Path::new(".")).join(target),
-            remaining - 1,
-        );
-    }
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
-    match (parent, path.file_name()) {
-        (Some(parent), Some(name)) => Ok(mutation_path(parent, remaining)?.join(name)),
-        _ => Ok(path.to_owned()),
-    }
-}
 const MCP_CONFLICT: &str = "Conflicting MCP command; pass --force to replace";
 pub fn check_mcp_command(req: &Value, command: Option<&str>, expected: &str) -> Result<()> {
     if req["op"] != "setup_remove"
@@ -230,10 +353,24 @@ pub fn mutate(
     path: &Path,
     transform: impl FnOnce(Option<&str>) -> Result<Option<String>>,
 ) -> Result<Value> {
+    mutate_with_mode(req, id, path, None, transform)
+}
+pub fn mutate_with_mode(
+    req: &Value,
+    id: &str,
+    path: &Path,
+    mode: Option<u32>,
+    transform: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+) -> Result<Value> {
     let dry = req["dry_run"] == true;
     let remove = req["op"] == "setup_remove";
-    let canonical = mutation_path(path, 40)?;
+    let canonical = publication_target(path)?;
     let path = canonical.as_path();
+    if remove && !path.try_exists().map_err(|e| e.to_string())? {
+        return Ok(
+            json!({"target":id,"path":path,"status":"unchanged","backupPath":null,"detail":"Configuration checked"}),
+        );
+    }
     let lock_path = {
         let mut s = path.as_os_str().to_os_string();
         s.push(".cito.lock");
@@ -266,17 +403,34 @@ pub fn mutate(
         if changed && !dry {
             if !remove {
                 if let Some(ref content) = old {
-                    let mut backup_name = path.as_os_str().to_os_string();
-                    backup_name.push(format!(".bak.{}-{}", now_ms(), std::process::id()));
-                    let p = PathBuf::from(backup_name);
-                    fs::write(&p, content).map_err(|e| e.to_string())?;
-                    fs::set_permissions(&p, fs::Permissions::from_mode(0o600))
+                    let mut timestamp = now_ms();
+                    let (p, mut file) = loop {
+                        let mut backup_name = path.as_os_str().to_os_string();
+                        backup_name.push(format!(".bak.{timestamp}-{}", std::process::id()));
+                        let p = PathBuf::from(backup_name);
+                        match OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o600)
+                            .open(&p)
+                        {
+                            Ok(file) => break (p, file),
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                timestamp = timestamp
+                                    .checked_add(1)
+                                    .ok_or("Backup timestamp exhausted")?;
+                            }
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    };
+                    file.write_all(content.as_bytes())
                         .map_err(|e| e.to_string())?;
+                    file.sync_all().map_err(|e| e.to_string())?;
                     backup = Some(p);
                 }
             }
             match next {
-                Some(ref s) => atomic_write(path, s.as_bytes())?,
+                Some(ref s) => atomic_write_with_mode(path, s.as_bytes(), mode)?,
                 None => {
                     if path.exists() {
                         fs::remove_file(path).map_err(|e| e.to_string())?
@@ -331,6 +485,44 @@ fn socket_io_error(error: std::io::Error) -> String {
     } else {
         error.to_string()
     }
+}
+
+/// Share bridge-clear settlement while each plugin supplies its process identity policy.
+pub fn update_badge(
+    req: &Value,
+    path: &Path,
+    pid: u32,
+    session: &str,
+    matches: impl Fn(&str) -> bool,
+) -> Result<Value> {
+    let clearing = req["badge"].is_null();
+    if clearing && !path.exists() {
+        return Ok(json!({"ok":true}));
+    }
+    match socket_call(
+        path,
+        &json!({"op":"status","session_id":session,"badge":req["badge"]}),
+    ) {
+        Ok(reply) if clearing && reply["error"] == "SESSION_MISMATCH" => Ok(json!({"ok":true})),
+        Err(_) if clearing && !process_command(pid).is_ok_and(|command| matches(&command)) => {
+            let _ = fs::remove_file(path);
+            Ok(json!({"ok":true}))
+        }
+        reply => reply,
+    }
+}
+
+/// Parse the executable once; concrete entrypoint policies remain plugin-owned.
+pub fn matches_process(command: &str, policy: impl FnOnce(&str, &str, bool) -> bool) -> bool {
+    let Some((program, script)) = process_entrypoint(command) else {
+        return false;
+    };
+    let entry = script.unwrap_or(program);
+    let name = Path::new(entry)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    policy(entry, name, script.is_some())
 }
 
 pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
@@ -417,6 +609,50 @@ pub fn inspect_socket_endpoints(
     }
     results.sort_by_key(|(pid, _)| *pid);
     Ok(results)
+}
+/// Walk only the caller's process lineage, stopping at either harness boundary.
+pub fn endpoint_pid_walk(
+    roots: Vec<u32>,
+    depth: usize,
+    matches: impl Fn(&str) -> bool,
+) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for mut pid in roots {
+        for _ in 0..=depth {
+            if pid <= 1 || !visited.insert(pid) {
+                break;
+            }
+            let command = process_command(pid).ok();
+            if command
+                .as_deref()
+                .is_some_and(|c| is_agent_harness(c) && !matches(c))
+            {
+                break;
+            }
+            found.push(pid);
+            if command.as_deref().is_some_and(&matches) {
+                break;
+            }
+            let Some(parent) = process_parent(pid) else {
+                break;
+            };
+            pid = parent;
+        }
+    }
+    found
+}
+
+/// Only a live, timed-out endpoint admits a caller-validated cached response.
+pub fn socket_response_or_cached(
+    response: Result<Value>,
+    pid: u32,
+    cached: impl FnOnce() -> Result<Value>,
+) -> Result<Value> {
+    match response {
+        Err(error) if error == "Socket request timed out" && alive(pid) => cached(),
+        other => other,
+    }
 }
 fn pid_key(key: &str) -> bool {
     key == "pid" || key.ends_with("_pid") || key.ends_with("Pid") || key.ends_with("PID")
@@ -549,7 +785,7 @@ fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
             return Err("Conflicting caller metadata".into());
         }
     }
-    if let Some(expected) = str_at(meta, "expected_session_id") {
+    if let Some(expected) = raw_str_at(meta, "expected_session_id") {
         if caller["session_id"] != expected {
             return Err("Conflicting caller metadata".into());
         }
@@ -559,7 +795,7 @@ fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
 pub fn verify(caller: &Value, req: &Value) -> Result<()> {
     verify_expected_identity(caller, &req["meta"])?;
     verify_expected_identity(caller, &req["_meta"])?;
-    if let Some(expected) = str_at(req, "explicit_session_id") {
+    if let Some(expected) = raw_str_at(req, "explicit_session_id") {
         if caller["session_id"] != expected {
             return Err("Conflicting caller metadata".into());
         }
@@ -690,6 +926,20 @@ pub fn has_harness_ancestor(pid: u32, matches: impl Fn(u32, &str) -> bool) -> bo
     false
 }
 
+pub fn desktop_command(entry: &str) -> bool {
+    entry.ends_with("/Codex.app/Contents/MacOS/Codex")
+        || entry.ends_with("/ChatGPT.app/Contents/MacOS/ChatGPT")
+}
+
+pub fn endpoint_identity_changed(
+    req: &Value,
+    current: &Value,
+    matches: impl FnOnce(&str) -> bool,
+) -> bool {
+    !matches(str_at(current, "command").unwrap_or(""))
+        || (req["process_identity"].is_object() && req["process_identity"] != *current)
+}
+
 pub fn is_agent_harness(command: &str) -> bool {
     let Some((program, script)) = process_entrypoint(command) else {
         return false;
@@ -710,8 +960,9 @@ pub fn is_agent_harness(command: &str) -> bool {
             | "codex"
             | "codex.js"
             | "codex.mjs"
-    ) || (entry.contains("/pi-coding-agent/") || entry.contains("/claude-code/"))
-        && matches!(name, "cli.js" | "cli.mjs")
+    ) || (script.is_none() && desktop_command(entry))
+        || (entry.contains("/pi-coding-agent/") || entry.contains("/claude-code/"))
+            && matches!(name, "cli.js" | "cli.mjs")
 }
 
 /// Ignore inherited endpoint hints that cross a nearer harness boundary.
@@ -805,16 +1056,13 @@ pub fn process_command(pid: u32) -> Result<String> {
             .take(argc)
             .map(String::from_utf8_lossy)
             .collect::<Vec<_>>()
-            .join(" "))
+            .join("\0")
+            + "\0")
     }
     #[cfg(not(target_os = "macos"))]
     {
         std::fs::read(format!("/proc/{pid}/cmdline"))
-            .map(|b| {
-                String::from_utf8_lossy(&b)
-                    .trim_end_matches('\0')
-                    .replace('\0', " ")
-            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
             .map_err(|_| "Cannot inspect endpoint command".into())
     }
 }
@@ -884,9 +1132,9 @@ pub fn has_generic_session_mismatch(req: &Value, actual_sid: &str) -> bool {
     ["meta", "_meta"]
         .iter()
         .all(|key| str_at(&req[key], "expected_harness").is_none())
-        && ["meta", "_meta"]
-            .iter()
-            .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid))
+        && ["meta", "_meta"].iter().any(|key| {
+            raw_str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid)
+        })
 }
 // Concrete plugins validate their own session binding after the shared cache and
 // process checks, before request metadata fences. The host owns cache storage.
@@ -911,7 +1159,6 @@ pub fn cached_caller(
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| error("INVALID_INPUT", "Cached session identity is missing"))?;
-    validate_session(session).map_err(|e| error("INVALID_INPUT", e))?;
     let pid = pid(req)
         .ok_or_else(|| error("BINDING_REQUIRED", "Cached caller requires an endpoint PID"))?;
     if cached["endpoint_pid"].as_u64() != Some(u64::from(pid)) {
@@ -956,10 +1203,16 @@ pub fn cached_caller(
     }
     Ok(Some(cached.clone()))
 }
-// ps exposes a command line rather than argv. Inspect only the program and its
-// immediate interpreter script; arbitrary later arguments never identify an app.
+// Native process inspection preserves argv with NUL separators. Plain command
+// lines are accepted for process-list fixtures; later arguments never identify an app.
+pub fn process_arguments(command: &str) -> impl Iterator<Item = &str> {
+    let argv = command.contains('\0');
+    command
+        .split(move |c: char| if argv { c == '\0' } else { c.is_whitespace() })
+        .filter(|word| !word.is_empty())
+}
 pub fn process_entrypoint(command: &str) -> Option<(&str, Option<&str>)> {
-    let mut words = command.split_whitespace();
+    let mut words = process_arguments(command);
     let program = words.next()?.trim_matches(['\'', '"']);
     let basename = Path::new(program).file_name()?.to_str()?;
     if matches!(basename, "node" | "nodejs" | "bun" | "deno") {
@@ -1060,170 +1313,12 @@ impl WakePipe {
     }
 }
 
-/// Observe an owned, unreaped child without releasing its PID before cleanup.
-pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd;
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: kqueue returns a new descriptor and kevent borrows initialized data.
-        let fd = unsafe { libc::kqueue() };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-        let change = libc::kevent {
-            ident: pid as _,
-            filter: libc::EVFILT_PROC,
-            flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(owned)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: pidfd_open observes a child whose PID remains reserved until wait.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
-    }
-}
+#[path = "support/subprocess.rs"]
+mod subprocess;
+pub use subprocess::{
+    child_exit_fd, poll_until, run_command_with_timeout, run_piped_command, wait_child_exit,
+};
 
-/// Block for descriptor readiness, preserving the absolute deadline across signals.
-pub fn poll_until(fds: &mut [libc::pollfd], deadline: Option<std::time::Instant>) -> Result<bool> {
-    loop {
-        let timeout = deadline
-            .map(|at| {
-                at.saturating_duration_since(std::time::Instant::now())
-                    .as_millis()
-                    .saturating_add(1)
-                    .min(i32::MAX as u128) as i32
-            })
-            .unwrap_or(-1);
-        // SAFETY: poll borrows a live initialized slice for the duration of the call.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
-        if n >= 0 {
-            return Ok(n > 0);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error.to_string());
-        }
-        if deadline.is_some_and(|at| at <= std::time::Instant::now()) {
-            return Ok(false);
-        }
-    }
-}
-
-pub fn wait_child_exit(child: &std::process::Child, timeout: Duration) -> Result<bool> {
-    use std::os::fd::AsRawFd;
-    let fd = child_exit_fd(child.id())?;
-    poll_until(
-        &mut [libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        }],
-        Some(std::time::Instant::now() + timeout),
-    )
-}
-
-pub fn run_command_with_timeout(
-    mut command: std::process::Command,
-    timeout: Duration,
-) -> Result<Option<std::process::Output>> {
-    use std::io::Read;
-    use std::os::fd::{AsRawFd, OwnedFd};
-    use std::os::unix::process::CommandExt;
-    let deadline = std::time::Instant::now() + timeout;
-    let mut child = command
-        .process_group(0)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let result = (|| -> Result<Option<[Vec<u8>; 2]>> {
-        let mut pipes = [
-            child.stdout.take().map(|p| File::from(OwnedFd::from(p))),
-            child.stderr.take().map(|p| File::from(OwnedFd::from(p))),
-        ];
-        for pipe in pipes.iter().flatten() {
-            // SAFETY: each pipe remains owned until the drain completes or times out.
-            unsafe {
-                let flags = libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL);
-                if flags < 0
-                    || libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
-                {
-                    return Err(std::io::Error::last_os_error().to_string());
-                }
-            }
-        }
-        let exited = child_exit_fd(child.id())?;
-        let mut child_exited = false;
-        let mut output = [Vec::new(), Vec::new()];
-        loop {
-            if std::time::Instant::now() >= deadline {
-                return Ok(None);
-            }
-            for (pipe, buffer) in pipes.iter_mut().zip(&mut output) {
-                if let Some(reader) = pipe {
-                    let mut bytes = [0u8; 8192];
-                    match reader.read(&mut bytes) {
-                        Ok(0) => *pipe = None,
-                        Ok(n) => buffer.extend_from_slice(&bytes[..n]),
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Err(e) => return Err(e.to_string()),
-                    }
-                }
-            }
-            if child_exited && pipes.iter().all(Option::is_none) {
-                return Ok(Some(output));
-            }
-            let mut fds = [
-                libc::pollfd {
-                    fd: pipes[0].as_ref().map_or(-1, AsRawFd::as_raw_fd),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: pipes[1].as_ref().map_or(-1, AsRawFd::as_raw_fd),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: if child_exited { -1 } else { exited.as_raw_fd() },
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            poll_until(&mut fds, Some(deadline))?;
-            child_exited |= fds[2].revents != 0;
-        }
-    })();
-    if !matches!(result, Ok(Some(_))) {
-        // SAFETY: the unreaped child reserves this owned process-group ID until wait.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-    }
-    let status = child.wait().map_err(|e| e.to_string());
-    let Some([stdout, stderr]) = result? else {
-        return Ok(None);
-    };
-    Ok(Some(std::process::Output {
-        status: status?,
-        stdout,
-        stderr,
-    }))
-}
 fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut command = Command::new("git");
@@ -1392,11 +1487,6 @@ pub fn alive(pid: u32) -> bool {
 }
 
 // Persistent plugins keep stdin independent of blocking network work. EOF kills all owned threads.
-pub fn stdin_watchdog() -> std::sync::mpsc::Receiver<Value> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    stdin_events(tx, |value| value);
-    rx
-}
 pub fn stdin_events<T: Send + 'static>(tx: std::sync::mpsc::Sender<T>, wrap: fn(Value) -> T) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -1416,65 +1506,72 @@ pub fn stdin_events<T: Send + 'static>(tx: std::sync::mpsc::Sender<T>, wrap: fn(
     });
 }
 
-#[link(name = "sqlite3")]
-extern "C" {
-    fn sqlite3_open_v2(
-        p: *const libc::c_char,
-        db: *mut *mut libc::c_void,
-        flags: libc::c_int,
-        vfs: *const libc::c_char,
-    ) -> libc::c_int;
-    fn sqlite3_close(db: *mut libc::c_void) -> libc::c_int;
-    fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;
-    fn sqlite3_progress_handler(
-        db: *mut libc::c_void,
-        steps: libc::c_int,
-        callback: Option<unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int>,
-        arg: *mut libc::c_void,
-    );
-    fn sqlite3_exec(
-        db: *mut libc::c_void,
-        sql: *const libc::c_char,
-        cb: Option<
-            unsafe extern "C" fn(
-                *mut libc::c_void,
-                libc::c_int,
-                *mut *mut libc::c_char,
-                *mut *mut libc::c_char,
-            ) -> libc::c_int,
-        >,
-        arg: *mut libc::c_void,
-        err: *mut *mut libc::c_char,
-    ) -> libc::c_int;
-    fn sqlite3_free(p: *mut libc::c_void);
-}
-unsafe extern "C" fn collect(
-    arg: *mut libc::c_void,
-    n: libc::c_int,
-    vals: *mut *mut libc::c_char,
-    names: *mut *mut libc::c_char,
-) -> libc::c_int {
-    // SAFETY: sqlite3_exec invokes this synchronously with n valid pointers and our live Vec.
-    let rows = unsafe { &mut *(arg as *mut Vec<Value>) };
-    let mut row = serde_json::Map::new();
-    for i in 0..n as isize {
-        let key = unsafe { std::ffi::CStr::from_ptr(*names.offset(i)) }
-            .to_string_lossy()
-            .into_owned();
-        let p = unsafe { *vals.offset(i) };
-        let v = if p.is_null() {
-            Value::Null
-        } else {
-            Value::String(
-                unsafe { std::ffi::CStr::from_ptr(p) }
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        };
-        row.insert(key, v);
+use sqlite::*;
+pub(crate) mod sqlite {
+    #[link(name = "sqlite3")]
+    extern "C" {
+        pub(crate) fn sqlite3_open_v2(
+            p: *const libc::c_char,
+            db: *mut *mut libc::c_void,
+            flags: libc::c_int,
+            vfs: *const libc::c_char,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_close_v2(db: *mut libc::c_void) -> i32;
+        pub(crate) fn sqlite3_errmsg(db: *mut libc::c_void) -> *const libc::c_char;
+        pub(crate) fn sqlite3_bind_null(stmt: *mut libc::c_void, index: i32) -> i32;
+        pub(crate) fn sqlite3_bind_int64(stmt: *mut libc::c_void, index: i32, value: i64) -> i32;
+        pub(crate) fn sqlite3_bind_double(stmt: *mut libc::c_void, index: i32, value: f64) -> i32;
+        pub(crate) fn sqlite3_column_type(stmt: *mut libc::c_void, column: i32) -> i32;
+        pub(crate) fn sqlite3_column_int64(stmt: *mut libc::c_void, column: i32) -> i64;
+        pub(crate) fn sqlite3_column_double(stmt: *mut libc::c_void, column: i32) -> f64;
+        pub(crate) fn sqlite3_changes(db: *mut libc::c_void) -> i32;
+        pub(crate) fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
+        pub(crate) fn sqlite3_close(db: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;
+        pub(crate) fn sqlite3_progress_handler(
+            db: *mut libc::c_void,
+            steps: libc::c_int,
+            callback: Option<unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int>,
+            arg: *mut libc::c_void,
+        );
+        pub(crate) fn sqlite3_exec(
+            db: *mut libc::c_void,
+            sql: *const libc::c_char,
+            cb: Option<
+                unsafe extern "C" fn(
+                    *mut libc::c_void,
+                    libc::c_int,
+                    *mut *mut libc::c_char,
+                    *mut *mut libc::c_char,
+                ) -> libc::c_int,
+            >,
+            arg: *mut libc::c_void,
+            err: *mut *mut libc::c_char,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_prepare_v2(
+            db: *mut libc::c_void,
+            sql: *const libc::c_char,
+            n: libc::c_int,
+            stmt: *mut *mut libc::c_void,
+            tail: *mut *const libc::c_char,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_bind_text(
+            stmt: *mut libc::c_void,
+            index: libc::c_int,
+            text: *const libc::c_char,
+            length: libc::c_int,
+            destructor: Option<unsafe extern "C" fn(*mut libc::c_void)>,
+        ) -> libc::c_int;
+        pub(crate) fn sqlite3_step(stmt: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_finalize(stmt: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_column_count(stmt: *mut libc::c_void) -> libc::c_int;
+        pub(crate) fn sqlite3_column_name(
+            stmt: *mut libc::c_void,
+            i: libc::c_int,
+        ) -> *const libc::c_char;
+        pub(crate) fn sqlite3_column_text(stmt: *mut libc::c_void, i: libc::c_int) -> *const u8;
+        pub(crate) fn sqlite3_column_bytes(stmt: *mut libc::c_void, i: libc::c_int) -> libc::c_int;
     }
-    rows.push(Value::Object(row));
-    0
 }
 /// Extract a bounded protocol diagnostic without exposing the JSON envelope.
 pub fn response_diagnostic(response: &Value, fallback: &str) -> String {
@@ -1604,7 +1701,16 @@ impl ReadOnlySqlite {
         }
     }
     pub fn rows(&self, sql: &str) -> Result<Vec<Value>> {
-        let sql = std::ffi::CString::new(sql).map_err(|e| e.to_string())?;
+        self.rows_params(sql, &[])
+    }
+    pub fn rows_params(&self, sql: &str, params: &[&str]) -> Result<Vec<Value>> {
+        let sql = std::ffi::CString::new(sql).map_err(|_| "Invalid session query")?;
+        let lengths = params
+            .iter()
+            .map(|text| {
+                i32::try_from(text.len()).map_err(|_| "Session query parameter is too large")
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         loop {
             let remaining = self
                 .deadline
@@ -1613,9 +1719,8 @@ impl ReadOnlySqlite {
                 return Err("Session database deadline exceeded".into());
             }
             let mut rows: Vec<Value> = Vec::new();
-            let mut err = std::ptr::null_mut();
-            // SAFETY: this owns the connection, SQL lives through exec, and the
-            // synchronous callback exclusively borrows rows. SQLite owns err.
+            // SAFETY: this owns the connection; SQL and statement remain live
+            // until finalize. Column bytes are copied before the next step.
             let rc = unsafe {
                 sqlite3_busy_timeout(
                     self.db.get(),
@@ -1627,22 +1732,65 @@ impl ReadOnlySqlite {
                     Some(sqlite_deadline),
                     &self.deadline as *const _ as *mut libc::c_void,
                 );
-                let rc = sqlite3_exec(
+                let mut stmt = std::ptr::null_mut();
+                let mut rc = sqlite3_prepare_v2(
                     self.db.get(),
                     sql.as_ptr(),
-                    Some(collect),
-                    &mut rows as *mut _ as *mut libc::c_void,
-                    &mut err,
+                    -1,
+                    &mut stmt,
+                    std::ptr::null_mut(),
                 );
+                if rc == 0 && !stmt.is_null() {
+                    for (index, (text, length)) in params.iter().zip(&lengths).enumerate() {
+                        // SQLITE_STATIC: borrowed parameter bytes stay live until
+                        // this statement is finalized, including every step/retry.
+                        rc = sqlite3_bind_text(
+                            stmt,
+                            (index + 1) as i32,
+                            text.as_ptr().cast(),
+                            *length,
+                            None,
+                        );
+                        if rc != 0 {
+                            break;
+                        }
+                    }
+                }
+                if rc == 0 && !stmt.is_null() {
+                    loop {
+                        rc = sqlite3_step(stmt);
+                        if rc != 100 {
+                            break;
+                        }
+                        let mut row = serde_json::Map::new();
+                        for i in 0..sqlite3_column_count(stmt) {
+                            let key = std::ffi::CStr::from_ptr(sqlite3_column_name(stmt, i))
+                                .to_string_lossy()
+                                .into_owned();
+                            let p = sqlite3_column_text(stmt, i);
+                            let value = if p.is_null() {
+                                Value::Null
+                            } else {
+                                let bytes = std::slice::from_raw_parts(
+                                    p,
+                                    sqlite3_column_bytes(stmt, i) as usize,
+                                );
+                                json!(String::from_utf8_lossy(bytes))
+                            };
+                            row.insert(key, value);
+                        }
+                        rows.push(Value::Object(row));
+                    }
+                    if rc == 101 {
+                        rc = 0;
+                    }
+                }
+                if !stmt.is_null() {
+                    sqlite3_finalize(stmt);
+                }
                 sqlite3_progress_handler(self.db.get(), 0, None, std::ptr::null_mut());
                 rc
             };
-            if !err.is_null() {
-                // SAFETY: sqlite3_exec allocated this diagnostic, which never escapes.
-                unsafe {
-                    sqlite3_free(err.cast());
-                }
-            }
             if rc == 0 {
                 return Ok(rows);
             }
@@ -1710,6 +1858,111 @@ impl Drop for ReadOnlySqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_strings_keep_padding_and_sqlite_embedded_nuls() -> Result<()> {
+        let value = json!({"session_id":" session\0id ","name":" command ","blank":" \t "});
+        assert_eq!(raw_str_at(&value, "session_id"), Some(" session\0id "));
+        assert_eq!(str_at(&value, "name"), Some("command"));
+        assert_eq!(raw_str_at(&value, "blank"), None);
+        let root = std::env::temp_dir().join(format!(
+            "cito-sqlite-bytes-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let path = root.join("sessions.sqlite");
+            let filename = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            let mut db = std::ptr::null_mut();
+            // SAFETY: owned output pointer and static SQL stay live through calls.
+            unsafe {
+                assert_eq!(
+                    sqlite3_open_v2(filename.as_ptr(), &mut db, 2 | 4, std::ptr::null()),
+                    0
+                );
+                let rc = sqlite3_exec(db, c"CREATE TABLE sessions(id TEXT); INSERT INTO sessions VALUES(CAST(X'2073657373696F6E00696420' AS TEXT))".as_ptr(), None, std::ptr::null_mut(), std::ptr::null_mut());
+                sqlite3_close(db);
+                assert_eq!(rc, 0);
+            }
+            let reader = ReadOnlySqlite::open(&path, Duration::from_secs(1))?;
+            assert_eq!(
+                reader.rows("SELECT id FROM sessions")?[0]["id"],
+                value["session_id"]
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        result
+    }
+    #[test]
+    fn atomic_publication_follows_dangling_chains_and_cleans_failed_temps() {
+        let root = std::env::temp_dir().join(format!(
+            "cito-publication-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let target = root.join("new/settings");
+        for index in (0..40).rev() {
+            let next = if index == 39 {
+                PathBuf::from("new/settings")
+            } else {
+                PathBuf::from(format!("link-{}", index + 1))
+            };
+            std::os::unix::fs::symlink(next, root.join(format!("link-{index}"))).unwrap();
+        }
+        let link = root.join("link-0");
+        atomic_write(&link, b"created").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"created");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write(&link, b"updated").unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(atomic_write_checked(&link, b"rejected", Some(0o600), || {
+            Err("cancelled".into())
+        })
+        .is_err());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"updated");
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+        atomic_write_with_mode(&link, b"private", Some(0o600)).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"private");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::os::unix::fs::symlink("link-0", root.join("too-many")).unwrap();
+        assert!(atomic_write(&root.join("too-many"), b"bad").is_err());
+        std::os::unix::fs::symlink("cycle", root.join("cycle")).unwrap();
+        assert!(atomic_write(&root.join("cycle"), b"bad").is_err());
+        std::os::unix::fs::symlink("missing/parent", root.join("parent-link")).unwrap();
+        atomic_write(&root.join("parent-link/child"), b"child").unwrap();
+        assert_eq!(
+            fs::read(root.join("missing/parent/child")).unwrap(),
+            b"child"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn alive_rejects_process_group_and_out_of_range_ids() {
         assert!(!alive(0));
@@ -1952,7 +2205,7 @@ mod tests {
         fs::write(&target, "original").unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        mutate(&json!({"op":"setup_apply"}), "fixture", &link, |old| {
+        let mutation = mutate(&json!({"op":"setup_apply"}), "fixture", &link, |old| {
             assert_eq!(old, Some("original"));
             Ok(Some("updated".into()))
         })
@@ -1962,6 +2215,12 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+        let backup = PathBuf::from(mutation["backupPath"].as_str().unwrap());
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o640
@@ -1976,12 +2235,12 @@ mod tests {
             .is_symlink());
         assert!(!target.exists());
         assert!(!root.join("settings.cito.lock").exists());
-        let missing = root.join("missing");
+        let missing = root.join("missing/parent/settings");
         mutate(&json!({"op":"setup_remove"}), "fixture", &missing, |_| {
             Ok(None)
         })
         .unwrap();
-        assert!(!root.join("missing.cito.lock").exists());
+        assert!(!root.join("missing").exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let dangling = root.join("dangling");
         std::os::unix::fs::symlink("new/parent/settings", &dangling).unwrap();
@@ -2006,6 +2265,7 @@ mod tests {
             std::env::temp_dir().join(format!("cito-lock-{}-{}", std::process::id(), now_ms()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("settings");
+        fs::write(&path, "0").unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
         let workers: Vec<_> = (0..12)
             .map(|_| {
@@ -2032,6 +2292,12 @@ mod tests {
     }
     #[test]
     fn interpreter_entrypoint_ignores_loader_values_and_rejects_eval() {
+        assert_eq!(process_entrypoint("/Applications/Runtime Tools/node\0--require\0/tmp/preload with spaces.js\0/Users/alice/Agent Tools/pi.mjs\0--session\0other\0"), Some(("/Applications/Runtime Tools/node", Some("/Users/alice/Agent Tools/pi.mjs"))));
+        assert_eq!(
+            process_entrypoint("/Applications/Agent Tools/agent\0--flag\0"),
+            Some(("/Applications/Agent Tools/agent", None))
+        );
+        assert_eq!(process_entrypoint("node\0-e\0/tmp/fake script.js\0"), None);
         assert_eq!(process_entrypoint("node --require /tmp/preload.js --experimental-strip-types /tmp/program.js --session other"), Some(("node", Some("/tmp/program.js"))));
         assert_eq!(process_entrypoint("node -e /tmp/program.js"), None);
         assert_eq!(

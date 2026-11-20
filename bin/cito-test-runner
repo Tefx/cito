@@ -16,5 +16,5 @@ env -i PATH="$PATH" TMPDIR=/tmp HOME="$root/home" USER=alice \
   CITO_STATE_DIR="$root/state" CITO_CONFIG_PATH="$root/state/config.json" \
   CITO_DAEMON_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')" \
   CITO_DISABLE_UI=1 CITO_UI_HEADLESS=1 \
-  CITO_LAUNCHCTL_BIN="$root/mock" CITO_BROWSER_BIN="$root/mock" CITO_OPEN_BIN="$root/mock" \
+  CITO_BROWSER_BIN="$root/mock" CITO_OPEN_BIN="$root/mock" \
   "$@"

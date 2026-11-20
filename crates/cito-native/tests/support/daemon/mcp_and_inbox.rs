@@ -7,38 +7,27 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let source =
         cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
     source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[]).unwrap();
-    let plugin = f.state.join("plugins/codex");
-    fs::create_dir_all(&plugin).unwrap();
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(root().join("plugins/codex/plugin.json")).unwrap())
-            .unwrap();
-    manifest["command"] = json!([CODEX]);
-    fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
-    // Pin all real providers. Fixture::new sets the builtin directory but does
-    // not substitute a provider; do not rely on staged binaries for this seam.
-    let pi = f.state.join("plugins/pi");
-    fs::create_dir_all(&pi).unwrap();
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(root().join("plugins/pi/plugin.json")).unwrap()).unwrap();
-    manifest["command"] = json!([PI]);
-    fs::write(pi.join("plugin.json"), manifest.to_string()).unwrap();
-    let claude = f.state.join("plugins/claude");
-    fs::create_dir_all(&claude).unwrap();
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(root().join("plugins/claude/plugin.json")).unwrap())
-            .unwrap();
-    manifest["command"] = json!([CLAUDE]);
-    fs::write(claude.join("plugin.json"), manifest.to_string()).unwrap();
+    for (id, bin) in [("codex", CODEX), ("pi", PI), ("claude", CLAUDE)] {
+        install_provider_command(&f, id, json!([bin]));
+    }
     let app = f.dir.join("claude.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(endpoint, false).contains("ready"));
     let claude_pid = f.pid(endpoint);
     let sidecar = f.spawn(CLAUDE, &[], &[]);
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":claude_pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {:?} {}",
+            f.frames(sidecar),
+            f.output(sidecar, true)
+        );
+        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
+    });
     let foreign = f.plugin(
         CODEX,
         json!({"op":"resolve_caller","cwd":"/repo",
@@ -117,10 +106,12 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let seeded = f.tool("cito_status", json!({}),
         json!({"expected_harness":"codex","threadId":"thread-a","_stdio":{"endpoint_pid":claude_pid},"cwd":"/repo"}));
     assert_eq!(seeded["ok"], true, "{seeded}");
+    assert_eq!(seeded["registered"], false, "{seeded}");
     source.execute("DELETE FROM threads", &[]).unwrap();
     let routed = f.tool("cito_status", json!({}),
         json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
     assert_eq!(routed["ok"], true, "{routed}");
+    assert_eq!(routed["registered"], true, "{routed}");
     // A stale command must reject the cache before checking conflicting metadata.
     for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
         let cached =
@@ -519,11 +510,19 @@ fn codex_padded_metadata_and_raw_cached_session_have_consistent_fences() {
         for envelope in ["meta", "_meta"] {
             let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
             req[envelope] = json!({"threadId":"selected-session","expected_harness":" codex ","expected_session_id":"selected-session"});
-            let resolved = f.plugin(CODEX, req);
-            assert_eq!(
-                resolved["caller"]["session_id"], "selected-session",
-                "{resolved}"
-            );
+            let resolved = f.plugin(CODEX, req.clone());
+            if thread_id.trim().is_empty() {
+                assert_eq!(
+                    resolved["caller"]["session_id"], "selected-session",
+                    "{resolved}"
+                );
+            } else {
+                assert_eq!(resolved["error_code"], "INVALID_INPUT", "{resolved}");
+                req[envelope]["threadId"] = json!(thread_id);
+                req[envelope]["expected_session_id"] = json!(thread_id);
+                let matched = f.plugin(CODEX, req);
+                assert_eq!(matched["caller"]["session_id"], thread_id, "{matched}");
+            }
         }
     }
     f.env.remove("CODEX_THREAD_ID");
@@ -596,11 +595,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             let mut req = json!({"op":"resolve_caller","require_open":false,
                 "endpoint_pid":pid,"cached_caller":if use_cache {cached.clone()} else {Value::Null}});
             if let Some(key) = envelope {
-                req[key] = json!({"expected_session_id":"selected-session"});
+                req[key] = json!({"expected_session_id":" selected-session "});
             }
             let resolved = f.plugin(PI, req);
             assert_eq!(
-                resolved["caller"]["session_id"], "selected-session",
+                resolved["caller"]["session_id"], " selected-session ",
                 "{use_cache}/{envelope:?}: {resolved}"
             );
             assert_eq!(resolved["caller"]["endpoint_pid"], pid, "{resolved}");
@@ -703,25 +702,26 @@ sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.
     .unwrap();
     let trace = f.dir.join("provider-trace.jsonl");
     for (harness, bin) in [("codex", CODEX), ("claude", CLAUDE), ("pi", PI)] {
-        let plugin = f.state.join("plugins").join(harness);
-        fs::create_dir_all(&plugin).unwrap();
-        let mut manifest: Value = serde_json::from_slice(
-            &fs::read(root().join(format!("plugins/{harness}/plugin.json"))).unwrap(),
-        )
-        .unwrap();
-        manifest["command"] = json!(["python3", forwarder, bin, trace]);
-        fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+        install_provider_command(&f, harness, json!(["python3", forwarder, bin, trace]));
     }
     let app = f.dir.join("claude.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(endpoint, false).contains("ready"));
     let pid = f.pid(endpoint);
     let sidecar = f.spawn(CLAUDE, &[], &[]);
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {:?} {}",
+            f.frames(sidecar),
+            f.output(sidecar, true)
+        );
+        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
+    });
     f.daemon(&[]);
     let seeded = f.tool(
         "cito_status",
@@ -799,14 +799,7 @@ fn nested_harness_stdio_never_claims_an_outer_bridge_but_shells_can() {
         for shell in [false, true] {
             let f = Fixture::new(json!({}));
             for (id, bin) in [("pi", PI), ("claude", CLAUDE), ("codex", CODEX)] {
-                let plugin = f.state.join("plugins").join(id);
-                fs::create_dir_all(&plugin).unwrap();
-                let mut manifest: Value = serde_json::from_slice(
-                    &fs::read(root().join(format!("plugins/{id}/plugin.json"))).unwrap(),
-                )
-                .unwrap();
-                manifest["command"] = json!([bin]);
-                fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+                install_provider_command(&f, id, json!([bin]));
             }
             let inner_app = f.dir.join(format!("{inner}.mjs"));
             fs::write(
@@ -913,7 +906,7 @@ fn pending_business_ack_requires_original_url_and_principal() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let meta = f.provider("delivered");
-    f.daemon(&[]);
+    let daemon = f.daemon(&[]);
     let human = f
         .rows("SELECT * FROM local_listeners WHERE hub='local' AND harness='human'")
         .remove(0);
@@ -949,8 +942,56 @@ fn pending_business_ack_requires_original_url_and_principal() {
             .unwrap()
             .is_empty()
     });
+    // Freeze the competing authority reconciler while injecting a synthetic local
+    // authority. Keep the real acknowledge path and restore/resume before RPCs.
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            // SAFETY: this fixture owns the stopped, unreaped child throughout the guard.
+            unsafe {
+                libc::kill(self.0 as i32, libc::SIGCONT);
+            }
+        }
+    }
+    let resume = Resume(f.pid(daemon));
+    f.signal(daemon, libc::SIGSTOP);
+    let mut status = 0;
+    // SAFETY: waitpid observes our owned child's stop event without reaping it.
+    assert_eq!(
+        unsafe { libc::waitpid(f.pid(daemon) as i32, &mut status, libc::WUNTRACED) },
+        f.pid(daemon) as i32
+    );
+    assert!(libc::WIFSTOPPED(status));
     state.execute("UPDATE local_listeners SET hub_url=\'https://replacement.example.com\',principal_id=\'none#bob\' WHERE listener_id=?", std::slice::from_ref(&human["listener_id"])).unwrap();
     let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
+    local
+        .acknowledge(
+            "local",
+            human["listener_id"].as_str().unwrap(),
+            std::slice::from_ref(&delivered),
+            "device:human",
+        )
+        .unwrap();
+    assert!(state
+        .query(
+            "SELECT * FROM pending_hub_acks WHERE signal_id=?",
+            std::slice::from_ref(&delivered)
+        )
+        .unwrap()
+        .is_empty());
+    assert!(state
+        .query(
+            "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id=?",
+            std::slice::from_ref(&delivered)
+        )
+        .unwrap()[0]["acknowledged_at_ms"]
+        .is_null());
+    state
+        .execute(
+            "UPDATE local_listeners SET hub_url='local://',principal_id=? WHERE listener_id=?",
+            &[human["principal_id"].clone(), human["listener_id"].clone()],
+        )
+        .unwrap();
     local
         .acknowledge(
             "local",
@@ -968,6 +1009,7 @@ fn pending_business_ack_requires_original_url_and_principal() {
         .remove(0);
     assert_eq!(ack["hub_url"], "local://");
     assert_eq!(ack["principal_id"], human["principal_id"]);
+    drop(resume);
     f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
     assert!(state
         .query(
@@ -1054,9 +1096,16 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
         &[row["listener_id"].clone(), json!(now + 60_000)],
     )
     .unwrap();
-    db.transaction(|c|{for i in (1..=55).rev(){c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,?,?,?,'bob','laptop','Sender','Message','2030-01-01T00:00:00.000Z',?,'RECEIVED')",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!(now+60_000)])?;}Ok(())}).unwrap();
+    db.transaction(|c|{for i in (1..=55).rev(){c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,held_reason,hub_url,principal_id) VALUES('local',?,?,?,?,'bob','laptop','Sender','Message','2030-01-01T00:00:00.000Z',?,'STORED_PASSIVE','fixture_hold','local://',?)",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!(now+60_000),row["principal_id"].clone()])?;}Ok(())}).unwrap();
     let selected = f.tool("cito_inbox", json!({"ack_ids":["sig-55"]}), meta.clone());
     assert_eq!(selected["acknowledged_count"], 1);
+    assert!(db
+        .query(
+            "SELECT * FROM wake_retries WHERE listener_id=?",
+            std::slice::from_ref(&row["listener_id"])
+        )
+        .unwrap()
+        .is_empty());
     assert_eq!(
         selected["signals"]
             .as_array()
@@ -1089,6 +1138,215 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
         .any(|l| serde_json::from_str::<Value>(l).unwrap()["op"] == "wake"));
 }
 #[test]
+fn legacy_live_send_reservations_recover_completed_and_pending_publications() {
+    use cito_native::core::identity::hash;
+    let _lock = serial();
+    for human in [false, true] {
+        for pending in [false, true] {
+            let f = Fixture::new(json!({}));
+            let meta = f.provider("delivered_unconfirmed");
+            f.daemon(&[]);
+            let target = enroll(&f, meta);
+            let args = json!({"to":target["listener_id"],"message":"Legacy retry","idempotency_key":"stable"});
+            let send = || {
+                if human {
+                    send_human(&f, args.clone())
+                } else {
+                    f.tool("cito_send", args.clone(), json!({}))
+                }
+            };
+            let first = send();
+            assert_eq!(first["ok"], true, "{first}");
+            let local = f.db("state.sqlite");
+            let hub = f.db("hub.sqlite");
+            let old = local
+                .query("SELECT * FROM local_sent_idempotency", &[])
+                .unwrap()[0]
+                .clone();
+            let publication = hub
+                .query(
+                    "SELECT * FROM hub_signals WHERE signal_id=?",
+                    &[old["signal_id"].clone()],
+                )
+                .unwrap()[0]
+                .clone();
+            let payload: Value =
+                serde_json::from_str(publication["data"].as_str().unwrap()).unwrap();
+            let endpoint = payload["sender_endpoint_key"].as_str().unwrap();
+            let canonical = old["to_listener_id"].as_str().unwrap();
+            let legacy = hash(&format!("{endpoint}|local://|{canonical}|stable"));
+            let legacy_hub = if human {
+                hash(&format!(
+                    "{}|{}|human|{canonical}|{legacy}",
+                    payload["from"]["principal_id"].as_str().unwrap(),
+                    payload["from"]["host_id"].as_str().unwrap()
+                ))
+            } else {
+                legacy.clone()
+            };
+            hub.execute(
+                "UPDATE hub_signals SET msg_id=? WHERE seq=?",
+                &[json!(legacy_hub), publication["seq"].clone()],
+            )
+            .unwrap();
+            local.execute("UPDATE local_sent_idempotency SET dedup_id=?,request_hash=?,status=?,seq=? WHERE dedup_id=?", &[
+                json!(legacy), json!(hash("Legacy retry|null")),
+                json!(if pending {"PENDING_PUBLISH"} else {"wake_accepted"}),
+                if pending {json!(0)} else {publication["seq"].clone()}, old["dedup_id"].clone()
+            ]).unwrap();
+            let recovered = send();
+            assert_eq!(recovered["signal_id"], first["signal_id"], "{recovered}");
+            assert_eq!(recovered["seq"], first["seq"]);
+            assert_eq!(send()["seq"], first["seq"]);
+            assert_eq!(
+                hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                    .unwrap()[0]["n"],
+                1
+            );
+            let saved = local
+                .query("SELECT * FROM local_sent_idempotency", &[])
+                .unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0]["status"], "wake_accepted");
+            assert_eq!(saved[0]["seq"], first["seq"]);
+        }
+    }
+}
+
+#[test]
+fn legacy_reservations_reject_other_targets_and_ambiguous_identity() {
+    use cito_native::core::identity::hash;
+    let _lock = serial();
+    for pending in [false, true] {
+        let f = Fixture::new(json!({}));
+        let meta = f.provider("delivered_unconfirmed");
+        f.daemon(&[]);
+        let target = enroll(&f, meta);
+        let args =
+            json!({"to":target["listener_id"],"message":"Legacy retry","idempotency_key":"stable"});
+        let first = send_human(&f, args.clone());
+        let local = f.db("state.sqlite");
+        let hub = f.db("hub.sqlite");
+        let old = local
+            .query("SELECT * FROM local_sent_idempotency", &[])
+            .unwrap()[0]
+            .clone();
+        let publication = hub
+            .query(
+                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",
+                &[old["signal_id"].clone()],
+            )
+            .unwrap()[0]
+            .clone();
+        let payload: Value = serde_json::from_str(publication["data"].as_str().unwrap()).unwrap();
+        let endpoint = payload["sender_endpoint_key"].as_str().unwrap();
+        let canonical = old["to_listener_id"].as_str().unwrap();
+        let legacy = hash(&format!("{endpoint}|local://|{canonical}|stable"));
+        local
+            .execute(
+                "UPDATE local_sent_idempotency SET dedup_id=?,request_hash=?,status=?,seq=?",
+                &[
+                    json!(legacy),
+                    json!(hash("Legacy retry|null")),
+                    json!(if pending {
+                        "PENDING_PUBLISH"
+                    } else {
+                        "wake_accepted"
+                    }),
+                    if pending {
+                        json!(0)
+                    } else {
+                        first["seq"].clone()
+                    },
+                ],
+            )
+            .unwrap();
+
+        // Seed a retained legacy row for another destination under the incoming
+        // legacy key. The missing sender/key columns cannot reconstruct its tuple;
+        // its stored destination alone proves it cannot belong to this request.
+        let other_key = "other|key";
+        let collision = hash(&format!("{endpoint}|local://|{canonical}|{other_key}"));
+        local
+            .execute(
+                "UPDATE local_sent_idempotency SET dedup_id=?,to_listener_id='c_other'",
+                &[json!(collision)],
+            )
+            .unwrap();
+        let mut other_args = args.clone();
+        other_args["idempotency_key"] = json!(other_key);
+        let second = send_human(&f, other_args.clone());
+        assert_ne!(second["signal_id"], first["signal_id"]);
+        assert_ne!(second["seq"], first["seq"]);
+        let retried = send_human(&f, other_args);
+        assert_eq!(retried["signal_id"], second["signal_id"]);
+        assert_eq!(retried["seq"], second["seq"]);
+        assert_eq!(
+            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                .unwrap()[0]["n"],
+            2
+        );
+        let retained = local
+            .query(
+                "SELECT * FROM local_sent_idempotency WHERE dedup_id=?",
+                &[json!(collision)],
+            )
+            .unwrap()[0]
+            .clone();
+        assert_eq!(retained["signal_id"], old["signal_id"]);
+        assert_eq!(retained["to_listener_id"], "c_other");
+        assert_eq!(
+            retained["status"],
+            if pending {
+                "PENDING_PUBLISH"
+            } else {
+                "wake_accepted"
+            }
+        );
+
+        // If the target also matches, ambiguous legacy identity must fail closed
+        // without changing the retained reservation or publishing a third signal.
+        local
+            .execute(
+                "DELETE FROM local_sent_idempotency WHERE dedup_id<>?",
+                &[json!(collision)],
+            )
+            .unwrap();
+        local
+            .execute(
+                "UPDATE local_sent_idempotency SET to_listener_id=?",
+                &[json!(canonical)],
+            )
+            .unwrap();
+        let ambiguous = send_human_result(
+            &f,
+            json!({
+                "to":target["listener_id"],"message":"Legacy retry","idempotency_key":other_key
+            }),
+        );
+        assert_eq!(ambiguous["http_status"], 400, "{ambiguous}");
+        assert!(
+            ambiguous
+                .to_string()
+                .contains("IDEMPOTENCY_KEY_INDETERMINATE"),
+            "{ambiguous}"
+        );
+        assert_eq!(
+            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                .unwrap()[0]["n"],
+            2
+        );
+        assert_eq!(
+            local
+                .query("SELECT * FROM local_sent_idempotency", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
 fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1100,6 +1358,10 @@ fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let args = json!({"to":target["listener_id"],"message":"Recovery","idempotency_key":"same"});
     assert_eq!(send_human_result(&f, args.clone())["http_status"], 400);
     let row = f.rows("SELECT * FROM local_sent_idempotency")[0].clone();
+    assert_eq!(
+        row["request_hash"],
+        cito_native::core::identity::hash(&json!(["Recovery", Value::Null]).to_string())
+    );
     assert_eq!(row["status"], "PENDING_PUBLISH");
     db.execute("DROP TRIGGER reject_publish", &[]).unwrap();
     let recovered = send_human(&f, args.clone());
@@ -1532,7 +1794,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .unwrap()
         .as_millis() as u64
         + 60_000;
-    db.transaction(|c|{for i in 0..100 {c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,?,?,?,'bob','laptop','Sender',?,'2030-01-01T00:00:00.000Z',?,'STORED_PASSIVE')",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!("🦀".repeat(10000)),json!(expires)])?;}Ok(())}).unwrap();
+    db.transaction(|c|{for i in 0..100 {c.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,?,?,?,'bob','laptop','Sender',?,'2030-01-01T00:00:00.000Z',?,'STORED_PASSIVE','local://',?)",&[json!(format!("sig-{i}")),row["listener_id"].clone(),json!(i),row["binding_generation"].clone(),json!("🦀".repeat(10000)),json!(expires),row["principal_id"].clone()])?;}Ok(())}).unwrap();
     f.daemon(&[]);
     let (s, frame) = f.action(json!({"op":"get_snapshot"}));
     assert_eq!(s, 200);
@@ -1603,6 +1865,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         f.tool("cito_find", json!({"harness":"1agent"}), json!({}))["listeners"],
         json!([])
     );
+    let expected_listeners = f.tool("cito_find", json!({}), json!({}))["listeners"].clone();
     for v in [
         json!([]),
         json!(42),
@@ -1614,7 +1877,9 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
             assert_eq!(http(f.port, path, Some(&v)).0, 400);
         }
         assert_eq!(f.mcp("tools/call", v.clone())["isError"], true);
-        assert_ne!(f.tool_result("cito_find", json!({}), v)["isError"], true);
+        let result = f.tool("cito_find", json!({}), v);
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["listeners"], expected_listeners, "{result}");
     }
     assert_eq!(f.mcp("ping", json!({})), json!({}));
 }
@@ -1678,13 +1943,7 @@ fn incoming_messages_update_unread_state_and_activity_until_read() {
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", recorder.to_str().unwrap()),
     ]);
-    let frames = || {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .collect::<Vec<_>>()
-    };
+    let frames = || ui_frames(&f);
     for message in ["Review requested", "Build completed"] {
         let sent = f.tool(
             "cito_send",

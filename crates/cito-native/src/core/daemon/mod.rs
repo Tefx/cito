@@ -68,10 +68,20 @@ pub(crate) fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
+fn try_registration(lock: &Mutex<()>) -> Result<Option<std::sync::MutexGuard<'_, ()>>, String> {
+    match lock.try_lock() {
+        Ok(guard) => Ok(Some(guard)),
+        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            Err("STATE_ERROR: Registration lock poisoned".into())
+        }
+    }
+}
+
 struct OidcRecovery {
     config: Value,
     rejected: Option<String>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<super::login::Cancellation>,
     worker: thread::JoinHandle<Result<(String, Value), String>>,
 }
 
@@ -79,7 +89,7 @@ struct EndpointProbe {
     due: Instant,
     calm: u32,
     bindings: Vec<String>,
-    worker: Option<thread::JoinHandle<bool>>,
+    worker: Option<thread::JoinHandle<Option<Value>>>,
 }
 
 type SetupResult = Result<(bool, bool, Vec<String>), String>;
@@ -91,23 +101,47 @@ struct SetupInspection {
     worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
 }
 
-struct SetupFinished(Arc<AtomicBool>, Arc<(Mutex<u64>, std::sync::Condvar)>);
-impl Drop for SetupFinished {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-        let mut revision = self.1 .0.lock().unwrap_or_else(|e| e.into_inner());
-        *revision = revision.wrapping_add(1);
-        self.1 .1.notify_all();
-        wake_daemon();
+use super::session_activity::CompletionNotice;
+
+enum HostHubError {
+    Reload(String),
+    Action(String),
+}
+impl HostHubError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Reload(s) | Self::Action(s) => s,
+        }
+    }
+}
+
+/// Immutable request view. Cloned clients share the live authority's close fence;
+/// a worker owns no runtime registry, UI state, or background task handles.
+#[derive(Clone)]
+pub struct HubAccess {
+    pub config: NativeConfig,
+    pub plugins: LoadedPlugins,
+    pub state: LocalState,
+    pub slots: HashMap<String, HubClient>,
+    host_id: String,
+}
+
+impl std::ops::Deref for DaemonService {
+    type Target = HubAccess;
+    fn deref(&self) -> &HubAccess {
+        &self.access
+    }
+}
+impl std::ops::DerefMut for DaemonService {
+    fn deref_mut(&mut self) -> &mut HubAccess {
+        &mut self.access
     }
 }
 
 pub struct DaemonService {
-    pub config: NativeConfig,
-    pub plugins: LoadedPlugins,
-    pub state: LocalState,
+    access: HubAccess,
     pub local: Arc<HubEngine>,
-    pub slots: HashMap<String, HubClient>,
+    configured_hubs: HashSet<String>,
     events: Vec<thread::JoinHandle<()>>,
     receivers: HashMap<String, thread::JoinHandle<()>>,
     caller_cache: Mutex<HashMap<u64, Value>>,
@@ -119,24 +153,25 @@ pub struct DaemonService {
     logins: HashMap<String, Arc<InteractiveLogin>>,
     last_ui: Instant,
     closing: bool,
-    host_id: String,
+    purging: bool,
     host_server: Option<super::hub::HubServer>,
     applied_host_config: Option<Value>,
-    host_hub_reload_failed: bool,
     uninstall: Option<bool>,
     active_settings_hub: Option<String>,
     menu_open: bool,
     directory_open: bool,
+    directory_request: u64,
     last_ui_revision: Mutex<Option<Value>>,
     last_ui_frame: Mutex<Option<Value>>,
     oidc_recoveries: HashMap<String, OidcRecovery>,
     auth_backoff: HashMap<String, crate::support::RetryBackoff>,
-    ack_backoff: Mutex<HashMap<String, (Instant, crate::support::RetryBackoff)>>,
+    ack_backoff: Arc<Mutex<HashMap<String, (Instant, crate::support::RetryBackoff)>>>,
+    setup_serial: Arc<Mutex<()>>,
     retired_auth: Vec<OidcRecovery>,
     last_app_action: HashMap<String, String>,
     setup_inspections: HashMap<String, SetupInspection>,
     setup_completion: Arc<(Mutex<u64>, std::sync::Condvar)>,
-    last_host_hub_error: Option<String>,
+    host_hub_error: Option<HostHubError>,
     last_hub_errors: HashMap<String, (String, bool)>,
     channel_inventories: HashMap<String, Arc<ChannelInventory>>,
     activity_filter: String,
@@ -148,6 +183,15 @@ pub fn run_daemon(config: &NativeConfig, plugins: &LoadedPlugins) {
         eprintln!("cito daemon: {e}");
         std::process::exit(1);
     }
+}
+
+fn jwt_exp(token: &str) -> Option<u64> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.split('.').nth(1)?)
+        .ok()?;
+    serde_json::from_slice::<Value>(&bytes).ok()?["exp"]
+        .as_f64()
+        .map(|exp| exp as u64)
 }
 
 fn poll_deadline(last_poll: Instant) -> Instant {
@@ -188,7 +232,9 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             "INSERT OR REPLACE INTO daemon_owner VALUES(1,?,?)",
             &[json!(std::process::id()), json!(config.daemon_port)],
         )?;
-        s.sync_host_hub()?;
+        if let Err(error) = s.sync_host_hub() {
+            s.host_hub_error = Some(HostHubError::Reload(error));
+        }
     }
     let mut pipe = [-1; 2];
     // SAFETY: pipe points at two writable descriptors; flags keep signal writes nonblocking.
@@ -225,8 +271,10 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let mut calls: Vec<thread::JoinHandle<()>> = Vec::new();
     let mut last_poll = Instant::now();
     let mut poll_requested = true;
-    let mut ui_retry = None;
+    let mut poll_worker: Option<thread::JoinHandle<()>> = None;
     let mut ui_backoff = crate::support::RetryBackoff::default();
+    let mut ui_retry = (ui.is_none() && std::env::var("CITO_DISABLE_UI").as_deref() != Ok("1"))
+        .then(|| Instant::now() + ui_backoff.failed());
     let mut ui_started = Instant::now();
     'running: while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         loop {
@@ -252,14 +300,24 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
                 }
             }
         }
-        if poll_requested || last_poll.elapsed() >= Duration::from_secs(1) {
-            if let Ok(mut s) = service.try_lock() {
-                if let Err(e) = s.poll() {
-                    eprintln!("cito poll: {e}");
-                }
-                last_poll = Instant::now();
-                poll_requested = false;
+        if poll_worker.as_ref().is_some_and(|w| w.is_finished()) {
+            if let Some(worker) = poll_worker.take() {
+                let _ = worker.join();
             }
+        }
+        if (poll_requested || last_poll.elapsed() >= Duration::from_secs(1))
+            && poll_worker.is_none()
+        {
+            let service = Arc::clone(&service);
+            poll_worker = Some(thread::spawn(move || {
+                if let Ok(mut s) = service.lock() {
+                    if let Err(e) = s.poll() {
+                        eprintln!("cito poll: {e}");
+                    }
+                }
+            }));
+            last_poll = Instant::now();
+            poll_requested = false;
         }
         let mut pending = Vec::new();
         for call in calls.drain(..) {
@@ -270,10 +328,12 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             }
         }
         calls = pending;
-        if ui
-            .as_mut()
-            .is_some_and(|u| u.child.try_wait().ok().flatten().is_some())
-        {
+        if ui.as_mut().is_some_and(|u| {
+            if u.mailbox.closed.load(Ordering::SeqCst) {
+                let _ = u.child.kill();
+            }
+            u.child.try_wait().ok().flatten().is_some()
+        }) {
             let restart = if let Ok(mut s) = service.try_lock() {
                 s.disconnect_ui();
                 !s.closing && !shutdown_requested()
@@ -321,9 +381,12 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
                 revents: 0,
             },
         ];
-        let deadline = ui_retry
-            .unwrap_or_else(|| poll_deadline(last_poll))
-            .min(poll_deadline(last_poll));
+        let next = poll_deadline(if poll_worker.is_some() {
+            Instant::now()
+        } else {
+            last_poll
+        });
+        let deadline = ui_retry.unwrap_or(next).min(next);
         crate::support::poll_until(&mut fds, Some(deadline))?;
         if fds[1].revents != 0 {
             let mut bytes = [0u8; 256];
@@ -340,9 +403,13 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
         }
     }
     drop(listener);
+    if let Some(worker) = poll_worker {
+        let _ = worker.join();
+    }
     // Set closing before draining calls, then close the final host server after drain.
     if let Ok(mut s) = service.lock() {
         s.closing = true;
+        s.cancel_logins();
     }
     for call in calls {
         let _ = call.join();
@@ -424,11 +491,15 @@ impl DaemonService {
         fs::set_permissions(&host_path, fs::Permissions::from_mode(0o600))
             .map_err(|e| e.to_string())?;
         let mut service = Self {
-            config: config.clone(),
-            plugins: plugins.clone(),
-            state,
+            access: HubAccess {
+                config: config.clone(),
+                plugins: plugins.clone(),
+                state,
+                slots: HashMap::new(),
+                host_id,
+            },
             local,
-            slots: HashMap::new(),
+            configured_hubs: HashSet::new(),
             events: Vec::new(),
             receivers: HashMap::new(),
             caller_cache: Mutex::new(HashMap::new()),
@@ -442,31 +513,32 @@ impl DaemonService {
             logins: HashMap::new(),
             last_ui: Instant::now() - Duration::from_secs(1),
             closing: false,
-            host_id,
+            purging: false,
             host_server: None,
             applied_host_config: None,
-            host_hub_reload_failed: false,
             uninstall: None,
             active_settings_hub: None,
             menu_open: false,
             directory_open: false,
+            directory_request: 0,
             last_ui_revision: Mutex::new(None),
             last_ui_frame: Mutex::new(None),
             oidc_recoveries: HashMap::new(),
             auth_backoff: HashMap::new(),
-            ack_backoff: Mutex::new(HashMap::new()),
+            ack_backoff: Arc::default(),
+            setup_serial: Arc::default(),
             retired_auth: Vec::new(),
             last_app_action: HashMap::new(),
             setup_inspections: HashMap::new(),
             setup_completion: Arc::new((Mutex::new(0), std::sync::Condvar::new())),
-            last_host_hub_error: None,
+            host_hub_error: None,
             last_hub_errors: HashMap::new(),
             channel_inventories: HashMap::new(),
             activity_filter: "all".into(),
             activity_query: String::new(),
         };
         // Inspect before the service is published to HTTP/UI workers.
-        for plugin in service.plugins.agent_plugins() {
+        for plugin in service.access.plugins.agent_plugins() {
             service.setup_inspections.insert(
                 plugin.id.clone(),
                 SetupInspection {
@@ -506,9 +578,12 @@ impl DaemonService {
             });
         entry.generation = entry.generation.wrapping_add(1);
         if entry.worker.is_none() {
-            if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+            if let Some(plugin) = self.access.plugins.find_by_id(id).cloned() {
                 entry.done.store(false, Ordering::SeqCst);
-                let notice = SetupFinished(entry.done.clone(), self.setup_completion.clone());
+                let notice = CompletionNotice {
+                    done: entry.done.clone(),
+                    completion: self.setup_completion.clone(),
+                };
                 entry.worker = Some((
                     entry.generation,
                     thread::spawn(move || {
@@ -540,10 +615,13 @@ impl DaemonService {
                 continue;
             }
             // A superseded completion is discarded and refreshed at the latest generation.
-            if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+            if let Some(plugin) = self.access.plugins.find_by_id(id).cloned() {
                 let generation = entry.generation;
                 entry.done.store(false, Ordering::SeqCst);
-                let notice = SetupFinished(entry.done.clone(), self.setup_completion.clone());
+                let notice = CompletionNotice {
+                    done: entry.done.clone(),
+                    completion: self.setup_completion.clone(),
+                };
                 entry.worker = Some((
                     generation,
                     thread::spawn(move || {
@@ -557,7 +635,8 @@ impl DaemonService {
             self.emit(json!({"op":"settings","settings":self.settings()}));
         }
     }
-
+}
+impl HubAccess {
     fn raw_config(&self) -> Result<Value, String> {
         match fs::read_to_string(&self.config.config_path) {
             Ok(s) => serde_json::from_str(&s).map_err(|e| format!("Invalid config.json: {e}")),
@@ -565,7 +644,8 @@ impl DaemonService {
             Err(e) => Err(e.to_string()),
         }
     }
-
+}
+impl DaemonService {
     pub fn get_effective_user(&self) -> Result<String, String> {
         let raw = self.raw_config()?;
         let user = std::env::var("CITO_USER")
@@ -580,6 +660,9 @@ impl DaemonService {
     }
 
     pub fn reload_slots(&mut self) -> Result<(), String> {
+        if self.purging {
+            return Err("STATE_ERROR: Local data reset in progress".into());
+        }
         if self.closing {
             return Ok(());
         }
@@ -595,6 +678,18 @@ impl DaemonService {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or(default);
+        // Only a previously configured profile proves removal. Unconfigured
+        // legacy recovery rows are retained; disabled profiles remain configured.
+        let configured_hubs: HashSet<String> = hubs.keys().cloned().collect();
+        let removed: Vec<_> = self
+            .configured_hubs
+            .difference(&configured_hubs)
+            .cloned()
+            .collect();
+        for name in removed {
+            self.purge_hub_state(&name)?;
+        }
+        self.configured_hubs = configured_hubs;
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
             crate::plugins::apply_hub_url_override(&name, &self.config.default_hub, &mut hub)?;
@@ -678,7 +773,8 @@ impl DaemonService {
                 continue;
             }
             let registration = self.state.registration_lock(&name)?;
-            let mut previous = self.slots.remove(&name);
+            let mut previous = self.slots.get(&name).cloned();
+            let mut retired_rows = Vec::new();
             if let Some(old) = &previous {
                 let changed = old.config["url"] != hub["url"]
                     || (auth != "oidc"
@@ -693,22 +789,17 @@ impl DaemonService {
                         .into_iter()
                         .filter(|r| r["hub"] == name)
                     {
-                        let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
-                        let _ = detach_channel_expected(
-                            old,
-                            string(&row, "listener_id"),
-                            &channel,
-                            &row,
-                        );
-                    }
-                }
-                if changed {
-                    for row in self
-                        .state
-                        .active()?
-                        .into_iter()
-                        .filter(|row| row["hub"] == name)
-                    {
+                        if old.local.is_some() {
+                            let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
+                            let _ = detach_channel_expected(
+                                old,
+                                string(&row, "listener_id"),
+                                &channel,
+                                &row,
+                            );
+                        } else {
+                            retired_rows.push(row.clone());
+                        }
                         self.state
                             .fence_listener_for(&row, "fenced_before_dispatch")?;
                     }
@@ -731,7 +822,7 @@ impl DaemonService {
                     let hub_name = name.clone();
                     let config = hub.clone();
                     let rejected = rejected_hash.clone();
-                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let cancelled = Arc::new(super::login::Cancellation::default());
                     let cancel = cancelled.clone();
                     let worker = thread::spawn(move || {
                         super::login::recover_cancellable(
@@ -741,6 +832,7 @@ impl DaemonService {
                             rejected.as_deref(),
                             false,
                             &|| cancel.load(Ordering::SeqCst) || shutdown_requested(),
+                            Some(cancel.fd()?),
                         )
                     });
                     self.oidc_recoveries.insert(
@@ -782,17 +874,7 @@ impl DaemonService {
                 {
                     Ok((token, identity)) => {
                         self.auth_backoff.remove(&name);
-                        client.expires_at = token
-                            .split('.')
-                            .nth(1)
-                            .and_then(|p| {
-                                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                                    .decode(p)
-                                    .ok()
-                            })
-                            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                            .and_then(|v| v["exp"].as_u64())
-                            .unwrap_or(0);
+                        client.expires_at = jwt_exp(&token).unwrap_or(0);
                         client.bearer = Some(token);
                         client.identity = identity;
                     }
@@ -826,12 +908,33 @@ impl DaemonService {
                 if retained {
                     client.inherit_authority(old);
                 } else {
-                    old.close();
+                    old.close_for_state(&self.state)?;
+                    // A failed fence must leave the replacement eligible for retry.
+                    self.slots.remove(&name);
                 }
             }
-            if !retained {
-                self.channel_inventories.remove(&name);
+            // Cleanup uses the old profile and channel token. Tie cancellation to
+            // the replacement's lifetime so a further switch or shutdown reaps it.
+            if let Some(mut cleanup) = previous.clone().filter(|_| !retired_rows.is_empty()) {
+                cleanup.closed = client.closed.clone();
+                let host = self.host_id.clone();
+                self.events.push(thread::spawn(move || {
+                    for row in retired_rows {
+                        if cleanup.closed.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let channel = format!("{host}:{}", string(&row, "harness"));
+                        let _ = detach_channel_expected(
+                            &cleanup,
+                            string(&row, "listener_id"),
+                            &channel,
+                            &row,
+                        );
+                    }
+                }));
             }
+            // Old writers check the close fence inside their SQLite transaction.
+            // This query observes any commit admitted before close.
             // Disabled profiles have no previous slot. Durable binding identity must
             // still be checked before any receiver can use the replacement client.
             for row in self.state.db.query(
@@ -851,6 +954,9 @@ impl DaemonService {
                     // Legacy bindings predate URL persistence; record the first known profile.
                     self.state.db.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=? AND hub_url IS NULL", &[hub["url"].clone(),row["hub"].clone(),row["listener_id"].clone()])?;
                 }
+            }
+            if !retained {
+                self.channel_inventories.remove(&name);
             }
             if !retained && (auth != "oidc" || client.bearer.is_some()) {
                 if let Some(events) = client.start_events() {
@@ -880,7 +986,7 @@ impl DaemonService {
         for name in removed {
             self.channel_inventories.remove(&name);
             if let Some(slot) = self.slots.remove(&name) {
-                slot.close();
+                slot.close_for_state(&self.state)?;
             }
         }
         if self
@@ -905,10 +1011,21 @@ impl DaemonService {
         let _registration = registration
             .lock()
             .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        Self::reconcile_unlistened_locked(state, client, host_id)
+    }
+
+    fn reconcile_unlistened_locked(
+        state: &LocalState,
+        client: &HubClient,
+        host_id: &str,
+    ) -> Result<(), String> {
         for pending in state.db.query(
             "SELECT * FROM pending_hub_detaches WHERE hub=?",
             &[json!(client.name)],
         )? {
+            if client.closed.load(Ordering::Acquire) {
+                return Err("DETACH_PENDING: Hub changed before detach".into());
+            }
             let id = string(&pending, "listener_id");
             let Some(row) = state
                 .listener(&client.name, id)?
@@ -992,16 +1109,27 @@ impl DaemonService {
             )
             && super::registration::remote_matches_listener(remote, &row, &channel)
         {
-            state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            state.db.transaction(|db| {
+                client.check_current()?;
+                db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+                Ok(())
+            })?;
         }
         Ok(())
     }
 
     fn ensure_human_nodes(&mut self) -> Result<(), String> {
         for (slot_name, client) in self.slots.clone() {
-            if client.local.is_some() {
-                let _ = Self::reconcile_unlistened(&self.state, &client, &self.host_id);
-            }
+            let registration = client.registration.clone();
+            let _local_guard = if client.local.is_some() {
+                let Some(guard) = try_registration(&registration)? else {
+                    continue;
+                };
+                let _ = Self::reconcile_unlistened_locked(&self.state, &client, &self.host_id);
+                Some(guard)
+            } else {
+                None
+            };
             if client.config["authMode"] == "oidc" && client.bearer.is_none() {
                 continue;
             }
@@ -1013,7 +1141,7 @@ impl DaemonService {
             let args = json!({"about":"Human receiver"});
             let caller = json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
             if client.local.is_some() {
-                match super::registration::register_automatic_human(
+                match super::registration::register_automatic_human_locked(
                     &self.state,
                     &client,
                     &self.host_id,
@@ -1046,7 +1174,8 @@ impl DaemonService {
         }
         Ok(())
     }
-
+}
+impl HubAccess {
     fn slot(&self, name: &str) -> Result<&HubClient, String> {
         self.slots
             .get(name)
@@ -1061,8 +1190,12 @@ impl DaemonService {
             format!("{hub}:{id}")
         }
     }
-
+}
+impl DaemonService {
     pub fn poll(&mut self) -> Result<(), String> {
+        if self.purging {
+            return Ok(());
+        }
         self.events.retain(|event| !event.is_finished());
         self.refresh_setup_inspections();
         self.reload_slots()?;
@@ -1072,6 +1205,7 @@ impl DaemonService {
         self.last_hub_errors.retain(|hub, (_, transient)| {
             !*transient
                 || self
+                    .access
                     .slots
                     .get(hub)
                     .is_none_or(|slot| slot.connection_status() != "connected")
@@ -1101,7 +1235,9 @@ impl DaemonService {
             let (due, observed_gen) = {
                 let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
                 (
-                    cached.value["status"] == "loading" || cached.retry_at <= Instant::now(),
+                    cached.authorized_for_retry(&slot)
+                        && (cached.value["status"] == "loading"
+                            || cached.retry_at <= Instant::now()),
                     cached.completed_gen,
                 )
             };
@@ -1110,11 +1246,12 @@ impl DaemonService {
                     key,
                     thread::spawn(move || {
                         let _ = inventory.refresh(&slot, observed_gen);
+                        wake_daemon();
                     }),
                 );
             }
         }
-        for (hub, slot) in &self.slots {
+        for (hub, slot) in &self.access.slots {
             let key = format!("directory:{hub}");
             let revision = slot.event_revision();
             let due = self
@@ -1136,15 +1273,22 @@ impl DaemonService {
                     key,
                     thread::spawn(move || {
                         let refreshed = (|| -> Result<(), String> {
+                            slot.directory()?;
                             let registration = state.registration_lock(&slot.name)?;
                             let _registration = registration
                                 .lock()
                                 .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-                            for remote in slot.directory()? {
+                            if slot.closed.load(Ordering::Acquire) {
+                                return Ok(());
+                            }
+                            // A Human policy write may have advanced the cache while we
+                            // waited. Project its current record, not the earlier RPC result.
+                            for remote in slot.cached_directory() {
                                 Self::reconcile_human_scope(&state, &slot, &host_id, &remote)?;
                             }
                             Ok(())
                         })();
+                        wake_daemon();
                         if refreshed.is_ok() && slot.local.is_none() {
                             let _ = Self::reconcile_unlistened(&state, &slot, &host_id);
                         }
@@ -1153,7 +1297,14 @@ impl DaemonService {
             }
         }
         self.schedule_probes()?;
-        for row in self.state.active()? {
+        let active = self.state.active()?;
+        let keys: HashSet<String> = active
+            .iter()
+            .map(|row| format!("{}:{}", string(row, "hub"), string(row, "listener_id")))
+            .chain(self.slots.keys().map(|hub| format!("directory:{hub}")))
+            .collect();
+        self.observations.retain(|key, _| keys.contains(key));
+        for row in active {
             let hub = string(&row, "hub");
             let key = format!("{hub}:{}", string(&row, "listener_id"));
             if self.receivers.contains_key(&key) {
@@ -1208,25 +1359,12 @@ impl DaemonService {
                         .and_then(|record| record["channels"][&channel]["updated_at_ms"].as_u64());
                     if updated.is_none_or(|updated| slot.server_now().saturating_sub(updated) >= 20_000) {
                     if let Err(error) = slot.human_request("human_device_heartbeat",&json!({"node_id":row["listener_id"],"channel_id":channel,"binding_generation":row["binding_generation"],"owner_token":row["owner_token"]})) {
-                        if error.starts_with("STALE_GENERATION:") { let _ = state.fence_listener_for(&row,"fenced_before_dispatch"); }
+                        if error.starts_with("STALE_GENERATION:") { let _ = slot.with_current_state(&state,||state.fence_listener_for(&row,"fenced_before_dispatch")); }
                         return;
                     }
                     }
-                } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
-                    if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
-                    let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
-                    let mut changed = remote["listen_mode"] != row["listen_mode"];
-                    remote["listen_mode"] = row["listen_mode"].clone();
-                    if let Ok(Some(title)) = state.custom_title(string(&row,"harness"),string(&row,"session_id")) {
-                        if remote["title"] != title || remote["custom_title"] != true {
-                            remote["title"] = json!(title); remote["custom_title"] = json!(true); changed = true;
-                        }
-                    }
-                    if let Some(ch) = remote["channels"].get_mut(&channel).and_then(Value::as_object_mut) {
-                        let updated=ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
-                        if slot.server_now().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(slot.server_now())); changed=true; }
-                    }
-                    if changed { let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision)); }
+                } else if !Self::heartbeat_agent(&state, &slot, &channel, &row).unwrap_or(false) {
+                    return;
                 }
                 if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |_| {}) {
                     if !slot.closed.load(Ordering::SeqCst) { eprintln!("cito receiver {}: {error}",slot.name); }
@@ -1238,7 +1376,7 @@ impl DaemonService {
         let changed = self
             .session_activity
             .as_mut()
-            .map(|activity| activity.tick(&self.state, &live))
+            .map(|activity| activity.tick(&self.access.state, &live))
             .transpose()?
             .unwrap_or(false);
         self.auto_listen()?;
@@ -1247,6 +1385,71 @@ impl DaemonService {
             self.last_ui = Instant::now();
         }
         Ok(())
+    }
+
+    fn heartbeat_agent(
+        state: &LocalState,
+        slot: &HubClient,
+        channel: &str,
+        queued: &Value,
+    ) -> Result<bool, String> {
+        let id = string(queued, "listener_id");
+        let lock = state.registration_lock(&slot.name)?;
+        let _guard = lock
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        let Some(row) = state.listener(&slot.name, id)?.filter(|row| {
+            row["status"] == "ACTIVE"
+                && row["binding_generation"] == queued["binding_generation"]
+                && row["owner_token"] == queued["owner_token"]
+        }) else {
+            return Ok(false);
+        };
+        if let Ok(Some((mut remote, revision))) = slot.kv_get(id) {
+            if !super::registration::remote_matches_listener(&remote, &row, channel)
+                || remote["channels"][channel]["state"] != "ACTIVE"
+            {
+                slot.with_current_state(state, || {
+                    state.fence_listener_for(&row, "fenced_before_dispatch")
+                })?;
+                return Ok(false);
+            }
+            state.db.transaction(|db| {
+                slot.check_current()?;
+                db.execute("UPDATE local_listeners SET scope=?1 WHERE hub=?2 AND listener_id=?3 AND binding_generation=?4 AND owner_token=?5 AND scope IS NOT ?1", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+                Ok(())
+            })?;
+            let mut changed = remote["listen_mode"] != row["listen_mode"];
+            remote["listen_mode"] = row["listen_mode"].clone();
+            if let Ok(Some(title)) =
+                state.custom_title(string(&row, "harness"), string(&row, "session_id"))
+            {
+                // A failed naming-intent save leaves the newly committed binding title intact.
+                if row["title"] == title
+                    && (remote["title"] != title || remote["custom_title"] != true)
+                {
+                    remote["title"] = json!(title);
+                    remote["custom_title"] = json!(true);
+                    changed = true;
+                }
+            }
+            if let Some(ch) = remote["channels"]
+                .get_mut(channel)
+                .and_then(Value::as_object_mut)
+            {
+                let now = slot.server_now();
+                if now.saturating_sub(ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0))
+                    >= 20_000
+                {
+                    ch.insert("updated_at_ms".into(), json!(now));
+                    changed = true;
+                }
+            }
+            if changed {
+                let _ = slot.kv_save(id, &remote, Some(revision));
+            }
+        }
+        Ok(true)
     }
 
     fn schedule_probes(&mut self) -> Result<(), String> {
@@ -1296,10 +1499,16 @@ impl DaemonService {
                 .as_ref()
                 .is_some_and(|worker| worker.is_finished())
             {
-                let quiet = probe
+                let observation = probe
                     .worker
                     .take()
-                    .is_some_and(|worker| worker.join().unwrap_or(false));
+                    .and_then(|worker| worker.join().ok().flatten());
+                let quiet = observation.is_some();
+                if let (Some(activity), Some(observation)) =
+                    (&mut self.session_activity, observation)
+                {
+                    activity.observe_badge(&observation);
+                }
                 probe.calm = if quiet {
                     probe.calm.saturating_add(1).min(5)
                 } else {
@@ -1316,18 +1525,20 @@ impl DaemonService {
                 continue;
             }
             let Some(plugin) = self
+                .access
                 .plugins
                 .find_by_id(string(&rows[0], "harness"))
                 .cloned()
             else {
                 continue;
             };
-            let state = self.state.clone();
-            let dir = self.config.state_dir.clone();
+            let state = self.access.state.clone();
+            let dir = self.access.config.state_dir.clone();
             let targets: Vec<_> = rows
                 .into_iter()
                 .filter_map(|row| {
-                    self.slots
+                    self.access
+                        .slots
                         .get(string(&row, "hub"))
                         .cloned()
                         .map(|client| (row, client))
@@ -1347,19 +1558,29 @@ impl DaemonService {
                 let quiet = result
                     .as_ref()
                     .is_ok_and(|result| result["ok"] == true && result["status"] == "alive");
-                if let Ok(result) = result {
-                    for (row, client) in targets {
-                        let _ = super::receiver::apply_probe(&state, &client, &row, &result);
-                    }
+                let result = result.unwrap_or_else(|error| json!({"ok":false,"error":error}));
+                let mut observation = targets[0].0.clone();
+                if let Some(badge) = result.get("badge") {
+                    observation["badge"] = badge.clone();
+                }
+                for (row, client) in targets {
+                    let _ = super::receiver::apply_probe(&state, &client, &row, &result);
                 }
                 wake_daemon();
-                quiet
+                quiet.then_some(observation)
             }));
         }
         Ok(())
     }
 
-    fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
+    // The outer result owns the config commit; the inner result owns only its
+    // secondary local projection, which cannot turn a confirmed save into failure.
+    fn set_auto_listen_locked(
+        &mut self,
+        hub: &str,
+        enabled: bool,
+        detaches: &mut mcp::Detaches,
+    ) -> Result<Result<(), String>, String> {
         if !self.slots.contains_key(hub) {
             let raw = self.raw_config()?;
             let (_, hubs, _) =
@@ -1368,11 +1589,7 @@ impl DaemonService {
                 return Err(format!("INVALID_INPUT: Unknown hub: {hub}"));
             }
         }
-        // Serialize enabling fresh discovery with deferred detaches and enrollment.
-        let registration = self.state.registration_lock(hub)?;
-        let _registration = registration
-            .lock()
-            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        // The captured policy edit owns registration until all local intents commit.
         self.mutate_config(|v| {
             if v["hubs"].is_null() {
                 v["hubs"] = json!({"local":{"url":"local://"}});
@@ -1380,43 +1597,50 @@ impl DaemonService {
             v["hubs"][hub]["autoListen"] = json!(enabled);
             Ok(())
         })?;
-        if enabled {
-            self.state.db.transaction(|c| {
-                c.execute(
-                    "UPDATE local_listeners SET user_stopped=0 WHERE hub=? AND harness!='human'",
-                    &[json!(hub)],
-                )?;
-                Ok(())
-            })?;
-        }
         if let Some(slot) = self.slots.get_mut(hub) {
             slot.config["autoListen"] = json!(enabled);
         }
-        drop(_registration);
-        if !enabled {
-            let mut errors = Vec::new();
-            for row in self.state.active()?.into_iter().filter(|r| {
-                r["hub"] == hub && r["harness"] != "human" && r["listen_mode"] == "auto"
-            }) {
-                if let Err(error) =
-                    self.retire_id(hub, string(&row, "listener_id"), "auto_disabled")
-                {
-                    errors.push(error);
-                }
-            }
-            if !errors.is_empty() {
-                return Err(format!("DETACH_PENDING: {}", errors.join("; ")));
-            }
-        }
-        if enabled {
-            if let Some(activity) = self.session_activity.as_mut() {
+        let projection = (|| {
+            if !enabled {
                 for plugin in self.plugins.agent_plugins() {
-                    activity.mark_stale(&plugin.id);
+                    self.state.invalidate_discovery(&plugin.id)?;
                 }
-                activity.refresh_discovery();
             }
-        }
-        Ok(())
+            if enabled {
+                self.state.db.transaction(|c| {
+                    c.execute(
+                        "UPDATE local_listeners SET user_stopped=0 WHERE hub=? AND harness!='human'",
+                        &[json!(hub)],
+                    )?;
+                    Ok(())
+                })?;
+            }
+            if !enabled {
+                let mut errors = Vec::new();
+                for row in self.state.active()?.into_iter().filter(|r| {
+                    r["hub"] == hub && r["harness"] != "human" && r["listen_mode"] == "auto"
+                }) {
+                    if let Err(error) =
+                        detaches.retire(self, hub, string(&row, "listener_id"), "auto_disabled")
+                    {
+                        errors.push(error);
+                    }
+                }
+                if !errors.is_empty() {
+                    return Err(format!("DETACH_PENDING: {}", errors.join("; ")));
+                }
+            }
+            if enabled {
+                if let Some(activity) = self.session_activity.as_mut() {
+                    for plugin in self.access.plugins.agent_plugins() {
+                        activity.mark_stale(&plugin.id);
+                    }
+                    activity.refresh_discovery();
+                }
+            }
+            Ok(())
+        })();
+        Ok(projection)
     }
 
     /// Reconcile source activity independently of discovery scans and Hub heartbeats.
@@ -1462,26 +1686,32 @@ impl DaemonService {
             };
             let hub = string(&row, "hub");
             let lock = self.state.registration_lock(hub)?;
-            let guard = lock
-                .lock()
-                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+            let Some(_guard) = try_registration(&lock)? else {
+                continue;
+            };
             let retired = self.state.db.transaction(|c| {
                 let now = now_ms();
-                let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='idle',retired_activity_revision=last_activity_revision,updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND status='ACTIVE' AND listen_mode='auto' AND ?1-COALESCE(last_activity_at_ms,?1)>?4 AND lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND ((s.state IN ('RECEIVED','DISPATCHING') AND s.held_reason IS NULL AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>?1) OR s.delivered_at_ms+300000>?1))", &[json!(now),json!(hub),row["listener_id"].clone(),json!(timeout)])?;
+                let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='idle',retired_activity_revision=last_activity_revision,updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND status='ACTIVE' AND listen_mode='auto' AND ?1-COALESCE(last_activity_at_ms,?1)>?4 AND lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND (((s.state IN ('RECEIVED','DISPATCHING') AND s.held_reason IS NULL OR s.state='STORED_PASSIVE' AND COALESCE(s.held_reason,'') IN ('','driver_unavailable') AND s.binding_generation=local_listeners.binding_generation AND s.hub_url=local_listeners.hub_url AND COALESCE(s.batch_expires_at_ms,s.expires_at_ms)>?1) AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>?1) OR s.delivered_at_ms+300000>?1))", &[json!(now),json!(hub),row["listener_id"].clone(),json!(timeout)])?;
                 if changed > 0 {
                     c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),row["listener_id"].clone(),row["hub_url"].clone()])?;
+                    super::state::reconcile_wake_retry(c, hub, string(&row, "listener_id"))?;
                 }
                 Ok(changed > 0)
             })?;
-            drop(guard);
             if retired {
                 self.state.invalidate_discovery(string(&row, "harness"))?;
                 if let Some(slot) = self.slots.get(hub) {
-                    Self::reconcile_unlistened(&self.state, slot, &self.host_id)?;
+                    if slot.local.is_some() {
+                        Self::reconcile_unlistened_locked(&self.state, slot, &self.host_id)?;
+                    } else {
+                        // The directory worker drains remote detaches outside the service mutex.
+                        self.observations.remove(&format!("directory:{hub}"));
+                    }
                 }
             }
         }
         let mut stale = HashSet::new();
+        let mut remote = HashMap::<String, Vec<(Value, Value)>>::new();
         for candidate in candidates {
             let harness = string(&candidate, "harness");
             let Some(plugin) = self.plugins.find_by_id(harness) else {
@@ -1529,6 +1759,15 @@ impl DaemonService {
                     .as_ref()
                     .is_some_and(|r| r["status"] == "ACTIVE" || r["user_stopped"] == 1)
                 {
+                    continue;
+                }
+                if prior.as_ref().is_some_and(|r| {
+                    r["retirement_reason"] == "idle"
+                        && !qualifying_activity(&candidate).is_some_and(|(revision, _)| {
+                            activity_revision(r, "retired_activity_revision")
+                                .is_none_or(|old| revision > old)
+                        })
+                }) {
                     continue;
                 }
                 let restoring = prior.as_ref().is_some_and(|r| {
@@ -1587,14 +1826,76 @@ impl DaemonService {
                     }
                 }
                 let args = json!({"about":candidate["title"],"discovered_at":candidate["discovered_at"],"_auto":true,"_restore":restoring});
-                if let Err(error) = self.listen(hub, &args, &candidate) {
-                    if error.starts_with("STALE_DISCOVERY") {
-                        stale.insert(harness.to_owned());
-                    } else {
-                        eprintln!("cito auto-listen {hub}: {error}");
+                {
+                    let mut args = args;
+                    let mut caller = candidate.clone();
+                    caller["title"] = json!(mcp::default_session_title(
+                        &candidate,
+                        &self.config.home_dir,
+                        &plugin.display_name,
+                        string(&slot.identity, "owner_user"),
+                        string(&args, "about")
+                    ));
+                    if slot.local.is_none() {
+                        args["_expected_revision"] = candidate["discovery_revision"].clone();
+                        remote.entry(hub.clone()).or_default().push((args, caller));
+                    } else if let Some(_guard) = try_registration(&slot.registration)? {
+                        match super::registration::register_endpoint_locked(
+                            &self.state,
+                            slot,
+                            &self.host_id,
+                            &args,
+                            &caller,
+                        ) {
+                            Ok(_) => {
+                                Self::reconcile_unlistened_locked(
+                                    &self.state,
+                                    slot,
+                                    &self.host_id,
+                                )?;
+                                let _ = slot.directory();
+                            }
+                            Err(error) if error.starts_with("STALE_DISCOVERY") => {
+                                stale.insert(harness.to_owned());
+                            }
+                            Err(error) => eprintln!("cito auto-listen {hub}: {error}"),
+                        }
                     }
                 }
             }
+        }
+        for (hub, jobs) in remote {
+            let key = format!("auto-agent:{hub}");
+            if self.receivers.get(&key).is_some_and(|w| !w.is_finished()) {
+                continue;
+            }
+            let slot = self.slot(&hub)?.clone();
+            let state = self.state.clone();
+            let host = self.host_id.clone();
+            self.receivers.insert(
+                key,
+                thread::spawn(move || {
+                    for (args, caller) in jobs {
+                        if slot.closed.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Err(error) = super::registration::register_endpoint(
+                            &state, &slot, &host, &args, &caller,
+                        )
+                        .map(|result| {
+                            if let Some(warning) = result["warning"].as_str() {
+                                eprintln!("cito auto-listen {hub}: {warning}");
+                            }
+                        }) {
+                            if error.starts_with("STALE_DISCOVERY") {
+                                let _ = state.invalidate_discovery(string(&caller, "harness"));
+                            } else {
+                                eprintln!("cito auto-listen {hub}: {error}");
+                            }
+                        }
+                    }
+                }),
+            );
         }
         if let Some(activity) = self.session_activity.as_mut() {
             for harness in stale {
@@ -1607,13 +1908,15 @@ impl DaemonService {
     /// Give fast providers a bounded first-render opportunity. Workers retain
     /// ownership after the deadline and are reaped by the regular poll path.
     fn update_discovery_demand(&mut self) {
-        let configured = self
+        let configured: HashSet<String> = self
             .plugins
             .agent_plugins()
             .into_iter()
             .filter(|plugin| {
-                self.inspect_setup(plugin)
-                    .is_ok_and(|(_, configured, _)| configured)
+                self.last_app_action.get(&plugin.id).map(String::as_str) != Some("disconnect")
+                    && self
+                        .inspect_setup(plugin)
+                        .is_ok_and(|(_, configured, _)| configured)
             })
             .map(|plugin| plugin.id.clone())
             .collect();
@@ -1622,8 +1925,11 @@ impl DaemonService {
             || self.active_settings_hub.is_some()
             || self
                 .slots
-                .values()
-                .any(|slot| slot.config["autoListen"] == true);
+                .iter()
+                .any(|(hub, slot)| slot.config["autoListen"] == true || self.state.db.query(
+                    "SELECT harness FROM local_listeners WHERE hub=? AND status='UNLISTENED' AND user_stopped=0 AND listen_mode='manual' AND retirement_reason='hard_exit'",
+                    &[json!(hub)],
+                ).is_ok_and(|rows| rows.iter().any(|row| configured.contains(string(row, "harness")))));
         if let Some(activity) = self.session_activity.as_mut() {
             activity.discovery_demand(background, configured);
         }
@@ -1671,7 +1977,7 @@ impl DaemonService {
             activity.refresh_discovery();
             loop {
                 let observed = activity.completion_revision();
-                activity.tick(&self.state, &live)?;
+                activity.tick(&self.access.state, &live)?;
                 if !activity.discovery_pending()
                     || Instant::now() >= deadline
                     || shutdown_requested()
@@ -1690,7 +1996,7 @@ impl DaemonService {
         if let Some(parent) = self.config.config_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let target = crate::core::config::publication_target(&self.config.config_path)?;
+        let target = crate::support::publication_target(&self.config.config_path)?;
         crate::plugins::with_config_lock(&target, || {
             let mut raw = match fs::read_to_string(&target) {
                 Ok(text) => serde_json::from_str(&text)
@@ -1720,21 +2026,15 @@ impl DaemonService {
                     }
                 }
             }
-            let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
-            fs::write(&tmp, rendered).map_err(|e| e.to_string())?;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-            fs::rename(tmp, &target).map_err(|e| e.to_string())?;
+            crate::support::atomic_write_with_mode(&target, rendered.as_bytes(), Some(0o600))?;
             Ok(())
         })
     }
-    fn shutdown(&mut self) {
-        // The caller sets closing while holding the service mutex after all calls drain.
-        self.closing = true;
-        for entry in self.setup_inspections.values_mut() {
-            if let Some((_, worker)) = entry.worker.take() {
-                let _ = worker.join();
-            }
+    fn cancel_logins(&self) {
+        // Wake callback and lock waits before joining workers. Do not acquire
+        // publication locks here: login workers release them before re-entering service.
+        for attempt in self.logins.values() {
+            attempt.cancelled.store(true, Ordering::SeqCst);
         }
         for pending in self
             .oidc_recoveries
@@ -1742,6 +2042,16 @@ impl DaemonService {
             .chain(self.retired_auth.iter())
         {
             pending.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.closing = true;
+        self.cancel_logins();
+        for entry in self.setup_inspections.values_mut() {
+            if let Some((_, worker)) = entry.worker.take() {
+                let _ = worker.join();
+            }
         }
         for pending in self
             .oidc_recoveries
@@ -1752,7 +2062,7 @@ impl DaemonService {
             let _ = pending.worker.join();
         }
         for slot in self.slots.values() {
-            slot.close();
+            let _ = slot.close_for_state(&self.state);
         }
         for (_, receiver) in self.receivers.drain() {
             let _ = receiver.join();

@@ -1,4 +1,76 @@
 use super::*;
+
+#[test]
+fn oidc_network_errors_redact_discovery_paths_and_jwks_query_credentials() {
+    use std::io::{BufRead, BufReader, Write};
+    for jwks_failure in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let issuer = format!("http://{}/private-issuer", listener.local_addr().unwrap());
+        let discovery =
+            json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys?credential=private-query")})
+                .to_string();
+        let server = std::thread::spawn(move || {
+            for index in 0..if jwks_failure { 2 } else { 1 } {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                drop(reader);
+                let (status, body) = if jwks_failure && index == 0 {
+                    ("200 OK", discovery.as_str())
+                } else {
+                    ("403 Forbidden", "private diagnostic")
+                };
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let verifier = OidcVerifier::new(&issuer, "client").unwrap();
+        let error = verifier.refresh(None).unwrap_err();
+        server.join().unwrap();
+        assert!(error.starts_with("AUTH_UNAVAILABLE:"));
+        for secret in ["private-issuer", "private-query", "private diagnostic"] {
+            assert!(!error.contains(secret), "{error}");
+        }
+    }
+}
+
+#[test]
+fn health_exposes_only_oidc_discovery_metadata() {
+    for (mode, token) in [("none", None), ("token", Some("secret".into()))] {
+        let auth = HubAuth::new(mode, token, None, None).unwrap();
+        assert!(auth.health().get("oidc").is_none());
+        assert_eq!(auth.health()["auth_mode"], mode);
+    }
+    let mut auth = HubAuth::new(
+        "oidc",
+        None,
+        Some("https://id.example.com".into()),
+        Some("client".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        auth.health()["oidc"],
+        json!({"issuer":"https://id.example.com","client_id":"client"})
+    );
+    auth.redirect_port = Some(0);
+    assert!(auth.health()["oidc"].get("redirect_port").is_none());
+    auth.redirect_port = Some(65535);
+    assert_eq!(auth.health()["oidc"]["redirect_port"], 65535);
+}
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, EncodingKey, Header};
 fn verifier(alg: Algorithm) -> (OidcVerifier, EncodingKey) {
@@ -59,6 +131,33 @@ fn verifier(alg: Algorithm) -> (OidcVerifier, EncodingKey) {
     }
     (verifier, key)
 }
+#[test]
+fn missing_kid_selects_only_an_unambiguous_eligible_signing_key() {
+    let (v, key) = verifier(Algorithm::RS256);
+    let header = Header::new(Algorithm::RS256);
+    let claims = json!({"iss":"https://id.example.com","aud":"client","sub":"alice","exp":crate::plugins::now_ms()/1000+60});
+    let jwt = encode(&header, &claims, &key).unwrap();
+    let (_, original_epoch) = v.verification_key(&header, None, None).unwrap();
+    {
+        let mut cache = v.cache.lock().unwrap();
+        let keys = &mut cache.keys.as_mut().unwrap().keys;
+        let mut enc = keys[0].clone();
+        enc.common.public_key_use = Some(jsonwebtoken::jwk::PublicKeyUse::Encryption);
+        keys.push(enc);
+        cache.loaded_at = Some(Instant::now());
+    }
+    assert!(v
+        .verification_key(&header, None, Some(original_epoch))
+        .is_ok());
+    assert!(v.verify(&jwt).is_ok());
+    {
+        let mut cache = v.cache.lock().unwrap();
+        let keys = &mut cache.keys.as_mut().unwrap().keys;
+        keys.push(keys[0].clone());
+    }
+    assert!(v.verify(&jwt).is_err());
+}
+
 #[test]
 fn real_supported_asymmetric_signatures_and_claim_validation() {
     for alg in [
@@ -387,11 +486,34 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         cache.keys = Some(serde_json::from_value(keys).unwrap());
         cache.refresh_at = Some(Instant::now() - Duration::from_secs(61));
     }
-    assert!(
-        verifier.verify(&token).is_ok(),
-        "Known-kid signature miss must refresh a rotated key"
-    );
-    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    // Hold the correct key at the HTTP fixture until all follower threads have
+    // rejected the cached signature and entered the single-flight wait branch.
+    let before = requests.load(Ordering::SeqCst);
+    let (observed, waiting) = std::sync::mpsc::channel();
+    verifier.cache.lock().unwrap().signature_miss_wait = Some(observed);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    std::thread::scope(|scope| {
+        let release = keys.lock().unwrap();
+        let callers: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| verifier.verify_with_deadline(&token, deadline)))
+            .collect();
+        let mut followers = std::collections::HashSet::new();
+        while followers.len() < callers.len() - 1 {
+            followers.insert(
+                waiting
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap(),
+            );
+        }
+        drop(release);
+        for caller in callers {
+            assert_eq!(
+                caller.join().unwrap().unwrap()["principal_id"],
+                format!("oidc:{issuer}|subject")
+            );
+        }
+    });
+    assert_eq!(requests.load(Ordering::SeqCst), before + 1);
     {
         let mut cache = verifier.cache.lock().unwrap();
         cache.loaded_at = Some(Instant::now() - Duration::from_secs(301));
@@ -471,6 +593,7 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
     );
     let auth = HubAuth {
         mode: "oidc".into(),
+        redirect_port: None,
         token: None,
         verifier: Some(verifier),
     };
@@ -530,6 +653,7 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
             0,
             HubAuth {
                 mode: "oidc".into(),
+                redirect_port: None,
                 token: None,
                 verifier: Some(verifier),
             },

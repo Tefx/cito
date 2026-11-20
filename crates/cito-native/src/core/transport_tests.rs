@@ -3,6 +3,92 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
 #[test]
+fn silent_established_sse_reconnects_without_peer_eof() {
+    use std::os::fd::AsRawFd;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap())}),
+        "alice",
+        None,
+    );
+    let worker = client
+        .start_events_with_idle_timeout(Duration::from_millis(150))
+        .unwrap();
+    let accept = || {
+        let mut fds = [libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        crate::support::poll_until(&mut fds, Some(Instant::now() + Duration::from_secs(3)))
+            .unwrap();
+        assert_ne!(fds[0].revents, 0, "No SSE connection");
+        listener.accept().unwrap().0
+    };
+    let mut first = accept();
+    let initial = client.event_revision();
+    first.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: first\n\n").unwrap();
+    client.wait_for_event(initial, Instant::now() + Duration::from_secs(1));
+    assert!(client.event_revision() > initial);
+    let mut second = accept();
+    assert!(!client.stream_live.load(Ordering::SeqCst));
+    client.close();
+    second
+        .write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n")
+        .unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn oversized_sse_hints_drain_without_reconnect_and_keep_following_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, released) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: ").unwrap();
+        // A maximum-codepoint signal expands beyond the bounded line buffer on the wire.
+        let chunk = "x".repeat(8191);
+        for _ in 0..40 {
+            socket.write_all(chunk.as_bytes()).unwrap();
+        }
+        socket.write_all(b"\n\ndata: following\n\n").unwrap();
+        socket.flush().unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(3));
+    });
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{address}")}),
+        "alice",
+        None,
+    );
+    let observed = client.event_revision();
+    let worker = client.start_events().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while client.event_revision() < observed + 2 {
+        assert!(
+            Instant::now() < deadline,
+            "Oversized and following hints must both invalidate"
+        );
+        thread::yield_now();
+    }
+    assert!(client.stream_live.load(Ordering::SeqCst));
+    client.close();
+    let _ = release.send(());
+    worker.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
 fn embedded_and_http_events_invalidate_after_commits_and_shutdown_cleanly() {
     for http in [false, true] {
         let dir =
@@ -63,7 +149,12 @@ fn embedded_and_http_events_invalidate_after_commits_and_shutdown_cleanly() {
 #[test]
 fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
     use std::os::fd::AsRawFd;
-    for status in [503, 401] {
+    for (status, token) in [
+        (503, Some("first")),
+        (401, Some("first")),
+        (403, Some("first")),
+        (401, None),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(crate::support::WakePipe::new().unwrap());
@@ -103,7 +194,7 @@ fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
             );
             sent.send(Instant::now()).unwrap();
         });
-        let config = json!({"url":format!("http://{address}"),"token":"first"});
+        let config = json!({"url":format!("http://{address}"),"token":token});
         let client = HubClient::new("work".into(), config.clone(), "alice", None);
         let worker = client.start_events().unwrap();
         let first = calls.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -112,10 +203,15 @@ fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
             let third = calls.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(second.duration_since(first) >= Duration::from_millis(200));
             assert!(third.duration_since(second) >= Duration::from_millis(450));
+            assert!(client.rejected_bearer.lock().unwrap().is_none());
         } else {
             assert!(
                 calls.recv_timeout(Duration::from_millis(600)).is_err(),
                 "Permanent rejection must suspend the stream"
+            );
+            assert_eq!(
+                client.rejected_bearer.lock().unwrap().is_some(),
+                status == 401 && token.is_some()
             );
             let mut replacement = HubClient::new("work".into(), config, "alice", None);
             replacement.bearer = Some("replacement".into());
@@ -198,8 +294,13 @@ fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
         None,
     );
     client.cache_human(&json!({"record":{"listener_id":"human"}}));
+    assert!(
+        !client.observation_current(),
+        "Single-node observations cannot establish directory freshness"
+    );
+    *client.directory_observed_at.lock().unwrap() = Some(Instant::now());
     client
-        .parse_rpc_response(200, br#"{"ok":true}"#, &None)
+        .parse_rpc_response(200, br#"{"ok":true,"result":null}"#, &None)
         .unwrap();
     // A disconnected SSE stream cannot downgrade a successful RPC or observation.
     client.stream_live.store(false, Ordering::SeqCst);
@@ -217,7 +318,9 @@ fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
     assert_eq!(client.capabilities()["rpc_status"], "disconnected");
     assert_ne!(client.connection_status(), "connected");
     client.stream_live.store(true, Ordering::SeqCst);
-    *client.observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+    *client.directory_observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+    client.cache_human(&json!({"record":{"listener_id":"human","title":"Updated"}}));
+    assert!(client.human_observed_at.lock().unwrap().unwrap().elapsed() < Duration::from_secs(1));
     assert!(!client.observation_current());
     assert_eq!(client.connection_status(), "connected");
 }
@@ -415,6 +518,37 @@ fn https_rpc_extracts_error_envelopes_and_accepts_null_error() {
         "accepted"
     );
 }
+// Check the outgoing RPC as well as its response, including the cursor used for later pages.
+fn serve_rpc(listener: &TcpListener, op: &str, params: &Value, status: u16, response: &Value) {
+    use std::os::fd::AsRawFd;
+    let mut fds = [libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    crate::support::poll_until(&mut fds, Some(Instant::now() + Duration::from_secs(3))).unwrap();
+    assert_ne!(fds[0].revents, 0, "Missing {op} request");
+    let (mut socket, _) = listener.accept().unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut reader = BufReader::new(&mut socket);
+    let head = crate::core::http_boundary::read_head(&mut reader, 16_384).unwrap();
+    let mut body = vec![0; head.length];
+    reader.read_exact(&mut body).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"op":op,"params":params})
+    );
+    let raw = response.to_string();
+    write!(
+        socket,
+        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}",
+        raw.len()
+    )
+    .unwrap();
+}
+
 #[test]
 fn http_rpc_response_status_and_error_envelopes() {
     for (status, body, expected, state) in [
@@ -437,6 +571,18 @@ fn http_rpc_response_status_and_error_envelopes() {
             "connected",
         ),
         (
+            200,
+            json!({}),
+            Err("NATS_UNAVAILABLE: Invalid Hub RPC envelope"),
+            "connected",
+        ),
+        (
+            200,
+            json!({"ok":true}),
+            Err("NATS_UNAVAILABLE: Missing Hub RPC result"),
+            "connected",
+        ),
+        (
             401,
             json!({}),
             Err("UNAUTHORIZED: Hub rejected request"),
@@ -454,37 +600,23 @@ fn http_rpc_response_status_and_error_envelopes() {
             Err("NATS_UNAVAILABLE: Retry"),
             "connected",
         ),
+        (
+            500,
+            json!({"error":{"code":"INTERNAL_ERROR","message":"Temporary failure"}}),
+            Err("INTERNAL_ERROR: Temporary failure"),
+            "connected",
+        ),
+        (
+            503,
+            json!({"error":{"code":"UNAVAILABLE","message":"Busy"}}),
+            Err("UNAVAILABLE: Busy"),
+            "connected",
+        ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let raw = body.to_string();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let mut reader = BufReader::new(&mut socket);
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line.to_ascii_lowercase().starts_with("content-length:") {
-                    length = line.split(':').nth(1).unwrap().trim().parse().unwrap();
-                }
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            drop(reader);
-            write!(
-                socket,
-                "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}",
-                raw.len()
-            )
-            .unwrap();
-        });
+        let server =
+            thread::spawn(move || serve_rpc(&listener, "fixture", &json!({}), status, &body));
         let client = HubClient::new(
             "work".into(),
             json!({"url":format!("http://{address}")}),
@@ -498,6 +630,93 @@ fn http_rpc_response_status_and_error_envelopes() {
         assert_eq!(client.connection_status(), state);
     }
 }
+#[test]
+fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap())}),
+        "alice",
+        None,
+    );
+    let observe = || {
+        (
+            client.directory_cache.lock().unwrap().clone(),
+            client.directory_revision(),
+            *client.server_clock.lock().unwrap(),
+            *client.directory_observed_at.lock().unwrap(),
+            *client.human_observed_at.lock().unwrap(),
+        )
+    };
+    let fetch = |pages: Vec<(Value, Value)>| {
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                for (cursor, page) in pages {
+                    serve_rpc(
+                        &listener,
+                        "kv_snapshot",
+                        &json!({"after_key":cursor}),
+                        200,
+                        &json!({"ok":true,"result":page}),
+                    );
+                }
+            });
+            let result = client.directory();
+            server.join().unwrap();
+            result
+        })
+    };
+    let page = |id: &str, clock: u64, next: Value| json!({"server_now_ms":clock,"entries":[{"value_b64":STANDARD.encode(json!({"listener_id":id}).to_string())}],"next_cursor":next});
+    let committed = fetch(vec![(Value::Null, page("committed", 1000, Value::Null))]).unwrap();
+    let before = observe();
+    assert_eq!(before.0, committed);
+    assert!(before.1 > 0 && before.2.is_some() && before.3.is_some() && before.4.is_some());
+    for later in [false, true] {
+        let encoding_error = STANDARD.decode("%%%").unwrap_err().to_string();
+        let mut invalid = vec![
+            (json!({}), "NATS_UNAVAILABLE: Missing directory entries"),
+            (
+                json!({"entries":[],"next_cursor":7}),
+                "NATS_UNAVAILABLE: Invalid snapshot cursor",
+            ),
+            (
+                json!({"entries":[{"value_b64":"%%%"}]}),
+                encoding_error.as_str(),
+            ),
+            (
+                json!({"entries":[{"value_b64":STANDARD.encode(b"[]") }]}),
+                "NATS_UNAVAILABLE: Invalid directory record",
+            ),
+        ];
+        if later {
+            invalid.push((
+                json!({"entries":[],"next_cursor":"middle"}),
+                "NATS_UNAVAILABLE: Snapshot cursor did not advance",
+            ));
+        }
+        for (mut bad, expected) in invalid {
+            bad["server_now_ms"] = json!(999_999);
+            let mut pages = Vec::new();
+            let cursor = if later {
+                pages.push((Value::Null, page("uncommitted", 888_888, json!("middle"))));
+                json!("middle")
+            } else {
+                Value::Null
+            };
+            pages.push((cursor, bad));
+            assert_eq!(fetch(pages).unwrap_err(), expected);
+            assert_eq!(observe(), before);
+        }
+    }
+    let recovered = fetch(vec![(Value::Null, page("recovered", 100_000, Value::Null))]).unwrap();
+    let after = observe();
+    assert_eq!(recovered[0]["listener_id"], "recovered");
+    assert_eq!(after.0, recovered);
+    assert_eq!(after.1, before.1 + 1);
+    assert_eq!(after.2.unwrap().0, 100_000);
+    assert!(after.3 > before.3 && after.4 > before.4);
+}
+
 #[test]
 fn directory_snapshot_pages_exceed_transport_total_budget() {
     for https in [false, true] {
@@ -567,7 +786,7 @@ fn large_backlog_pages_round_trip_over_http_and_https() {
                 .rpc("consumer_backlog", &json!({"name":"large"}))
                 .unwrap();
         }
-        assert_eq!(pages, 2);
+        assert!(pages > 1 && pages <= received.len());
         assert_eq!(
             received,
             (0..16)

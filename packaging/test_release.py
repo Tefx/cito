@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("cito_release", Path(__file__).with_name("release.py"))
@@ -25,6 +26,12 @@ class BundleVerificationTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.app = Path(self.directory.name) / "Cito.app"
+        source = Path(self.directory.name) / "repo"
+        (source / "plugins/sample").mkdir(parents=True)
+        (source / "plugins/sample/plugin.json").write_text('{}')
+        root_patch = patch.object(release, "ROOT", source)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         for name in ("Contents/Helpers/cito-native", "Contents/Helpers/cito-ui", "Contents/Resources/AppIcon.icns"):
             path = self.app / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,8 +40,24 @@ class BundleVerificationTests(unittest.TestCase):
             plistlib.dump({"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3"}, stream)
         self.plugin = self.app / "Contents/Resources/plugins/sample"
         self.plugin.mkdir(parents=True)
-        (self.plugin / "plugin.json").write_text(json.dumps({"command": ["./driver"]}))
+        (self.plugin / "plugin.json").write_text(json.dumps({"version": "1.2.3", "command": ["./driver"]}))
         self.driver = self.plugin / "driver"
+
+    def test_all_builtin_plugins_must_be_present_at_the_expected_version(self):
+        self.driver.write_text("fixture")
+        self.driver.chmod(0o755)
+        missing = release.ROOT / "plugins/second/plugin.json"
+        missing.parent.mkdir()
+        missing.write_text('{}')
+        with patch.object(release, "run", side_effect=self.command):
+            with self.assertRaisesRegex(release.ReleaseError, "second"):
+                release.verify_bundle(self.app, "1.2.3")
+            missing.unlink()
+            value = json.loads((self.plugin / "plugin.json").read_text())
+            value["version"] = "1.2.2"
+            (self.plugin / "plugin.json").write_text(json.dumps(value))
+            with self.assertRaisesRegex(release.ReleaseError, "sample"):
+                release.verify_bundle(self.app, "1.2.3")
 
     def command(self, argv, **kwargs):
         output = "arm64" if str(argv[0]).endswith("lipo") else "cito v1.2.3"
@@ -61,6 +84,28 @@ class BundleVerificationTests(unittest.TestCase):
             return self.command(argv, **kwargs)
         with patch.object(release, "run", side_effect=wrong_arch), self.assertRaisesRegex(release.ReleaseError, "arm64"):
             release.verify_bundle(self.app, "1.2.3")
+
+
+class CleanupTests(unittest.TestCase):
+    def test_secondary_failure_does_not_skip_cleanup_or_mask_primary(self):
+        observed = []
+        def failed():
+            observed.append("first")
+            raise OSError("sensitive cleanup diagnostic")
+        def last():
+            observed.append("last")
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            with self.assertRaisesRegex(RuntimeError, "primary"):
+                try:
+                    raise RuntimeError("primary")
+                finally:
+                    release.cleanup_steps(failed, last)
+            self.assertEqual(observed, ["first", "last"])
+            self.assertNotIn("sensitive", output.getvalue())
+            observed.clear()
+            with self.assertRaises(release.ReleaseError):
+                release.cleanup_steps(failed, last)
+            self.assertEqual(observed, ["first", "last"])
 
 
 class MetadataTests(unittest.TestCase):
@@ -138,6 +183,217 @@ def cask(name, &block)
 end
 load ARGV.fetch(0)
 '''
+
+
+class ReleaseAssetTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.local = self.root / "local"
+        self.local.mkdir()
+        self.tag = f"v{release.version()}"
+        self.archive = self.local / release.ARCHIVE
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr("Cito.app/Contents/Info.plist", plistlib.dumps({
+                "CFBundleShortVersionString": release.version(),
+                "CFBundleVersion": release.version(),
+            }))
+            for name in ("Helpers/cito-native", "Helpers/cito-ui", "Resources/AppIcon.icns"):
+                archive.writestr(f"Cito.app/Contents/{name}", b"component fixture")
+            for manifest in (release.ROOT / "plugins").glob("*/plugin.json"):
+                prefix = f"Cito.app/Contents/Resources/plugins/{manifest.parent.name}"
+                archive.writestr(f"{prefix}/plugin.json", json.dumps({
+                    "version": release.version(), "command": ["./driver"],
+                }))
+                archive.writestr(f"{prefix}/driver", b"executable fixture")
+        release.write_checksum(self.archive)
+        self.remote = {
+            path.name: path.read_bytes() for path in self.local.iterdir()
+        }
+        self.output = self.root / "outputs"
+        self.output.write_text("sentinel=yes\n")
+        self.infos = []
+        self.commands = []
+        self.reject_staple = False
+        for patcher in (
+            patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.output), "GITHUB_REPOSITORY": "acme/service"}),
+            patch.object(release, "run", side_effect=self.command),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def info(self, draft=False, names=None):
+        if names is None:
+            names = self.remote.keys()
+        return {"tagName": self.tag, "isDraft": draft, "assets": [{"name": name} for name in names]}
+
+    def command(self, argv, **kwargs):
+        self.commands.append(argv)
+        stdout = ""
+        if argv[:3] == ["gh", "release", "view"]:
+            self.assertTrue(self.infos, "Unexpected release query")
+            info = self.infos.pop(0)
+            if info is None:
+                return subprocess.CompletedProcess(argv, 1, "", "release not found")
+            stdout = json.dumps(info)
+        elif argv[:3] == ["gh", "release", "download"]:
+            name = argv[argv.index("--pattern") + 1]
+            (Path(argv[argv.index("--dir") + 1]) / name).write_bytes(self.remote[name])
+        elif argv[:2] == ["gh", "api"]:
+            stdout = "[[]]"
+        elif argv[:3] == ["gh", "release", "edit"]:
+            # The next view response models the external publish result.
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        elif argv[:3] == ["gh", "release", "upload"]:
+            self.assertEqual(Path(argv[4]).read_bytes(), self.remote[Path(argv[4]).name])
+        elif argv[:3] == ["/usr/bin/ditto", "-x", "-k"]:
+            with zipfile.ZipFile(argv[3]) as archive:
+                archive.extractall(argv[4])
+            for driver in Path(argv[4]).glob("Cito.app/Contents/Resources/plugins/*/driver"):
+                driver.chmod(0o755)
+        elif argv[:2] == ["/usr/bin/codesign", "--verify"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        elif argv[:3] == ["/usr/bin/xcrun", "stapler", "validate"]:
+            if self.reject_staple:
+                raise release.ReleaseError("Native staple verification failed.")
+        elif argv[:2] == ["/usr/bin/lipo", "-archs"]:
+            stdout = "arm64"
+        elif argv[-1] == "--version":
+            stdout = f"cito v{release.version()}"
+        else:
+            self.fail(f"Unexpected external command: {argv}")
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    def test_asset_lookup_only_emits_reuse_at_cli_boundary(self):
+        for draft, names in ((False, None), (True, None), (True, [release.ARCHIVE])):
+            with self.subTest(draft=draft, names=names):
+                self.output.write_text("sentinel=yes\n")
+                info = self.info(draft, names)
+                self.infos = [info, info]
+                destination = self.root / f"lookup-{draft}-{names is None}"
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    self.assertTrue(release.existing_assets(self.tag, destination))
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+                self.assertEqual((destination / (release.ARCHIVE + ".sha256")).read_bytes(),
+                                 self.remote[release.ARCHIVE + ".sha256"])
+                with patch.object(sys, "argv", ["release.py", "assets", self.tag, str(destination)]), contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    previous = os.umask(0o077)
+                    try:
+                        self.assertEqual(release.main(), 0)
+                    finally:
+                        os.umask(previous)
+                self.assertEqual(stdout.getvalue(), "reused=true\n")
+                self.assertEqual(self.output.read_text(), "sentinel=yes\nreused=true\n")
+                self.assertEqual(self.infos, [])
+
+    def test_publish_retry_reuses_assets_without_emitting_workflow_outputs(self):
+        for draft, names in ((False, None), (True, None), (True, [release.ARCHIVE])):
+            with self.subTest(draft=draft, names=names):
+                self.commands.clear()
+                info = self.info(draft, names)
+                self.infos = [info, info, self.info()]
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    release.publish(self.tag, self.local)
+                self.assertIn("is published", stdout.getvalue())
+                self.assertNotIn("reused=", stdout.getvalue())
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+                mutations = [argv[2] for argv in self.commands
+                             if argv[:2] == ["gh", "release"] and argv[2] in ("create", "upload", "edit")]
+                expected = ["edit"] if draft else []
+                if names is not None:
+                    expected.insert(0, "upload")
+                self.assertEqual(mutations, expected)
+                self.assertEqual(self.infos, [])
+
+    def test_publish_rejects_disappeared_or_empty_draft_on_requery(self):
+        for changed in (None, self.info(True, [])):
+            with self.subTest(changed=changed):
+                self.commands.clear()
+                self.infos = [self.info(True), changed]
+                with self.assertRaisesRegex(release.ReleaseError, "changed during verification"):
+                    release.publish(self.tag, self.local)
+                self.assert_no_mutations()
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+                self.assertEqual(self.infos, [])
+
+    def assert_no_mutations(self):
+        self.assertFalse([argv for argv in self.commands if argv[:2] == ["gh", "release"]
+                          and argv[2] in ("create", "upload", "edit")])
+
+    def test_incomplete_and_unverified_assets_are_rejected_by_lookup_and_publish(self):
+        checksum = release.ARCHIVE + ".sha256"
+        cases = [
+            (False, [], False, "incomplete"),
+            (True, [checksum], False, "incomplete"),
+            (False, [checksum], False, "incomplete"),
+            (False, [release.ARCHIVE], False, "missing its checksum"),
+            (False, None, True, "checksum"),
+            (True, None, True, "checksum"),
+        ]
+        original = self.remote[checksum]
+        for draft, names, corrupt, message in cases:
+            for publishing in (False, True):
+                with self.subTest(draft=draft, names=names, corrupt=corrupt, publishing=publishing):
+                    self.commands.clear()
+                    self.remote[checksum] = b"invalid checksum\n" if corrupt else original
+                    info = self.info(draft, names)
+                    self.infos = [self.info(True), info] if publishing else [info]
+                    with self.assertRaisesRegex(release.ReleaseError, message):
+                        if publishing:
+                            release.publish(self.tag, self.local)
+                        else:
+                            release.existing_assets(self.tag, self.root / "rejected")
+                    self.assert_no_mutations()
+                    self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+                    self.assertEqual(self.infos, [])
+
+    def test_remote_native_verification_failure_prevents_publish_mutations(self):
+        self.reject_staple = True
+        for draft in (False, True):
+            with self.subTest(draft=draft):
+                self.commands.clear()
+                self.infos = [self.info(draft)]
+                with self.assertRaisesRegex(release.ReleaseError, "staple verification"):
+                    release.existing_assets(self.tag, self.root / "invalid-staple")
+                self.assert_no_mutations()
+                self.assertEqual(self.infos, [])
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+
+                # Allow the local archive, then reject the downloaded remote copy.
+                self.infos = [self.info(draft), self.info(draft)]
+                original_command = self.command
+
+                def reject_remote(argv, **kwargs):
+                    if argv[:3] == ["/usr/bin/xcrun", "stapler", "validate"] and self.infos:
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    return original_command(argv, **kwargs)
+
+                self.commands.clear()
+                with patch.object(release, "run", side_effect=reject_remote):
+                    with self.assertRaisesRegex(release.ReleaseError, "staple verification"):
+                        release.publish(self.tag, self.local)
+                self.assert_no_mutations()
+                self.assertEqual(self.infos, [])
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+
+    def test_absent_release_and_empty_draft_are_nonreuse_at_cli_boundary(self):
+        for info in (None, self.info(True, [])):
+            with self.subTest(info=info):
+                self.output.write_text("sentinel=yes\n")
+                self.infos = [info, info]
+                self.assertFalse(release.existing_assets(self.tag, self.root / "absent"))
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
+                with patch.object(sys, "argv", ["release.py", "assets", self.tag, str(self.root / "absent")]), contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    previous = os.umask(0o077)
+                    try:
+                        self.assertEqual(release.main(), 0)
+                    finally:
+                        os.umask(previous)
+                self.assertEqual(stdout.getvalue(), "reused=false\n")
+                self.assertEqual(self.output.read_text(), "sentinel=yes\nreused=false\n")
+                self.assertEqual(self.infos, [])
 
 
 class ArtifactTests(unittest.TestCase):
@@ -270,6 +526,12 @@ class ArtifactTests(unittest.TestCase):
             for path in (helper, app / "Contents/Helpers/cito-native", resources / "AppIcon.icns"):
                 path.write_bytes(b"component fixture")
 
+            for source in (release.ROOT / "plugins").glob("*/plugin.json"):
+                directory = resources / "plugins" / source.parent.name
+                directory.mkdir(parents=True)
+                (directory / "plugin.json").write_text(json.dumps({"version": "1.2.3", "command": ["./driver"]}))
+                (directory / "driver").write_bytes(b"executable fixture")
+                (directory / "driver").chmod(0o755)
             plugin = resources / "plugins/fixture/bin/channel"
             plugin.parent.mkdir(parents=True)
             plugin.write_bytes(b"executable fixture")

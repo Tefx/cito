@@ -11,6 +11,136 @@ fn open_settings(f: &Fixture, p: usize, cfg: &Value, tab: &str) {
 }
 
 #[test]
+fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banners_redraw() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    let mut base = state();
+    base["settings"] = cfg.clone();
+    f.send(p, base.clone());
+    f.send(p, json!({"op":"test_menu_open"}));
+    let menu = render_state(&f, p);
+    let mut warning = base.clone();
+    warning["warning"] = json!("Connection is degraded.");
+    f.send(p, warning);
+    assert!(
+        render_state(&f, p)["menu_rebuilds"].as_u64().unwrap()
+            > menu["menu_rebuilds"].as_u64().unwrap()
+    );
+    assert!(!node(&inspect(&f, p), "items", "menu_error_row").is_null());
+
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    assert!(!node(
+        &inspect(&f, p),
+        "settings_items",
+        "settings_channel:channel"
+    )
+    .is_null());
+    let settings_before = render_state(&f, p);
+    base["warning"] = json!("Refresh will retry shortly.");
+    f.send(p, base.clone());
+    assert!(
+        render_state(&f, p)["settings_rebuilds"].as_u64().unwrap()
+            > settings_before["settings_rebuilds"].as_u64().unwrap()
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "settings_error_label")["text"],
+        "Refresh will retry shortly."
+    );
+    control(&f, p, "dismiss_settings_error");
+
+    cfg["channels"] = json!([]);
+    cfg["apps"] = json!([]);
+    cfg["hubs"][0]["user"] = json!("bob");
+    cfg["hubs"][0]["status"] = json!("disconnected");
+    cfg["channel_inventory_error"] = json!("Service unavailable.");
+    cfg["launch_at_login"] = json!(true);
+    f.send(p, json!({"op":"settings","truncated":true,"settings":cfg}));
+    let stale = inspect(&f, p);
+    assert_eq!(
+        node(&stale, "settings_items", "channel_inventory_error")["text"],
+        "Service unavailable."
+    );
+    assert_eq!(
+        node(&stale, "settings_items", "inbox_control_title")["text"],
+        "You (@bob)"
+    );
+    assert!(!node(&stale, "settings_items", "settings_channel:channel").is_null());
+    assert_eq!(stale["settings_launch_at_login"], true);
+
+    cfg["channel_inventory_error"] = Value::Null;
+    cfg["hubs"][0]["user"] = json!("alice");
+    base["settings"] = cfg;
+    base["truncated"] = json!(true);
+    base.as_object_mut().unwrap().remove("warning");
+    f.send(p, base);
+    let fresh = inspect(&f, p);
+    assert!(node(&fresh, "settings_items", "channel_inventory_error").is_null());
+    assert_eq!(
+        node(&fresh, "settings_items", "inbox_control_title")["text"],
+        "You (@alice)"
+    );
+    assert!(!node(&fresh, "settings_items", "settings_channel:channel").is_null());
+}
+
+#[test]
+fn channel_receipts_without_channel_ids_settle_resets_and_retire_only_committed_secrets() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][0]["value"] = Value::Null;
+    cfg["channels"][0]["fields"][1]["value"] = json!("saved");
+    open_settings(&f, p, &cfg, "channels");
+    let latest = |op: &str| f.frames(p).into_iter().rfind(|a| a["op"] == op).unwrap();
+    let input = |key: &str, text: &str| {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{key}"),"value":text}))
+    };
+    control(&f, p, "edit_hub_service:channel");
+    input("secret", "draft-token");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let request = latest("save_hub_service");
+    f.send(p, json!({"op":"settings","action":"save_hub_service","request_id":request["request_id"],"committed":true}));
+    let settled = inspect(&f, p);
+    assert_eq!(settled["pending_channel_saves"], json!([]));
+    assert!(!node(&settled, "settings_items", "channel_field:channel:secret").is_null());
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    assert_eq!(latest("save_hub_service")["values"], json!({}));
+
+    control(&f, p, "edit_user_channel:channel");
+    input("account", "new draft");
+    for fenced in [true, false] {
+        control(&f, p, "unpair_channel:channel");
+        inspect(&f, p);
+        let reset = latest("channel_unpair");
+        f.send(p, json!({"op":"settings","action":"channel_unpair","request_id":reset["request_id"],"committed":true,"authority_changed":fenced}));
+        let settled = inspect(&f, p);
+        assert_eq!(settled["pending_channel_resets"], json!([]));
+        let field = node(&settled, "settings_items", "channel_field:channel:account");
+        if fenced {
+            assert_eq!(field["text"], "new draft");
+        } else {
+            assert!(field.is_null());
+        }
+    }
+    control(&f, p, "edit_user_channel:channel");
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:account"
+        )["text"],
+        "saved"
+    );
+}
+
+#[test]
 fn authority_fenced_pair_receipts_retire_pending_without_replacement_instructions() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -44,6 +174,8 @@ fn authority_fenced_pair_receipts_retire_pending_without_replacement_instruction
             node(&inspect(&f, p), "settings_items", "pair_channel:channel")["enabled"],
             false
         );
+        let mut receipt = receipt;
+        receipt.as_object_mut().unwrap().remove("channel");
         f.send(p, receipt);
         let settled = inspect(&f, p);
         assert_eq!(
@@ -174,6 +306,200 @@ fn authority_fenced_test_receipts_retire_pending_without_replacement_results() {
             )["text"],
             "Replacement ready"
         );
+    }
+}
+
+#[test]
+fn read_only_pairing_editor_can_select_and_copy_and_feedback_restores_full_width() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["can_edit_personal"] = json!(false);
+    open_settings(&f, p, &cfg, "channels");
+    let ready = inspect(&f, p);
+    assert_eq!(
+        node(&ready, "settings_items", "edit_user_channel:channel")["hidden"],
+        true
+    );
+    assert_eq!(
+        node(&ready, "settings_items", "pair_channel:channel")["text"],
+        "Re-pair…"
+    );
+    control(&f, p, "pair_channel:channel");
+    inspect(&f, p);
+    let pair = f
+        .frames(p)
+        .into_iter()
+        .rfind(|v| v["op"] == "channel_pair")
+        .unwrap();
+    let instruction = "Open your account, then enter this code.\nCode: 123456";
+    f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":pair["request_id"],"instruction":instruction,"pairing_command":"pair 123456"}));
+    let copied = inspect(&f, p);
+    let width = node(&copied, "settings_items", "copy_pair_command:channel")["width"].clone();
+    assert_eq!(
+        node(&copied, "settings_items", "copy_pair_command:channel")["text"],
+        "✓ Copied"
+    );
+    f.send(
+        p,
+        json!({"op":"test_expire_copy_feedback","id":"copy_pair_command:channel"}),
+    );
+    let restored = inspect(&f, p);
+    let copy = node(&restored, "settings_items", "copy_pair_command:channel");
+    assert_eq!(copy["width"], width);
+    assert_eq!(copy["text"], "Copy Command");
+    assert_eq!(copy["accessibility_label"], "Copy Command");
+
+    f.send(
+        p,
+        json!({"op":"test_focus_field","id":"pairing_instruction:channel","caret_only":true}),
+    );
+    let editor = inspect(&f, p)["field_editors"][0].clone();
+    assert_eq!(editor["id"], "pairing_instruction:channel");
+    assert_eq!(editor["editable"], false);
+    assert_eq!(editor["selection_length"], 0);
+    for key in ["command-a", "command-c"] {
+        f.send(p, json!({"op":"test_settings_key","key":key,"via":"panel"}));
+    }
+    let selected = inspect(&f, p);
+    assert_eq!(
+        selected["field_editors"][0]["selection_length"],
+        instruction.len()
+    );
+    assert_eq!(selected["clipboard"], instruction);
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"command-x","via":"panel"}),
+    );
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "pairing_instruction:channel"
+        )["text"],
+        instruction
+    );
+
+    f.send(p, json!({"op":"test_oracle_calibration","kind":"bar_anchor","id":"cancel_pair_channel:channel"}));
+    assert_eq!(
+        inspect_unchecked(&f, p, None)["non_anchored_action_bars"],
+        json!(["stratum_user:channel: pairing row is not edge anchored"])
+    );
+    f.send(p, json!({"op":"test_end_editing"}));
+    f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+    inspect(&f, p);
+}
+
+#[test]
+fn gateway_clear_only_bar_fits_and_new_channel_edits_remove_saved_feedback() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["hub_ready"] = json!(false);
+    cfg["channels"][0]["fields"][0]["hidden"] = json!(true);
+    open_settings(&f, p, &cfg, "channels");
+    let snapshot = inspect(&f, p);
+    let clear = node(&snapshot, "settings_items", "clear_channel_service:channel");
+    let stratum = node(&snapshot, "settings_items", "stratum_hub:channel");
+    assert_eq!(clear["x"], 12);
+    assert!(stratum["height"].as_f64().unwrap() >= 68.0);
+    cfg["channels"][0]["hub_ready"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let input = |value| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"channel_field:channel:account","value":value}),
+        )
+    };
+    input("first draft");
+    control(&f, p, "save_channel:channel");
+    inspect(&f, p);
+    let saved = f
+        .frames(p)
+        .into_iter()
+        .rfind(|v| v["op"] == "channel_save")
+        .unwrap();
+    cfg["channels"][0]["fields"][1]["value"] = json!("first draft");
+    f.send(p, json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","request_id":saved["request_id"]}));
+    let confirmed = inspect(&f, p);
+    let button = |s: &Value| node(s, "settings_items", "save_channel:channel");
+    assert_eq!(button(&confirmed)["text"], "✓ Saved");
+    input("newer edit");
+    let editing = inspect(&f, p);
+    assert_eq!(button(&editing)["instance"], button(&confirmed)["instance"]);
+    assert_eq!(button(&editing)["green"], false);
+    assert_eq!(button(&editing)["text"], "Save");
+    assert_eq!(button(&editing)["accessibility_label"], "Save");
+    control(&f, p, "settings_tab:apps");
+    control(&f, p, "settings_tab:channels");
+    let remounted = inspect(&f, p);
+    assert_eq!(button(&remounted)["text"], "Save");
+    assert_eq!(
+        node(
+            &remounted,
+            "settings_items",
+            "channel_field:channel:account"
+        )["text"],
+        "newer edit"
+    );
+}
+
+#[test]
+fn settings_oracle_checks_native_wrap_insets_and_added_action_rows() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    open_settings(&f, p, &settings(), "channels");
+    f.send(
+        p,
+        json!({"op":"test_oracle_calibration","kind":"wrapped_cell_inset"}),
+    );
+    assert!(inspect_unchecked(&f, p, None)["truncated_labels"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("wrapped_cell_probe")));
+    f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+    inspect(&f, p);
+
+    control(&f, p, "settings_tab:hubs");
+    for (open, button, container, row) in [
+        (None, "toggle_host_hub", "host_hub_card", "sharing"),
+        (
+            Some("open_add_hub"),
+            "submit_add_hub",
+            "add_hub_form",
+            "submit",
+        ),
+        (
+            Some("open_uninstall_confirm"),
+            "confirm_disconnect_all",
+            "uninstall_confirm_box",
+            "confirm",
+        ),
+    ] {
+        if let Some(id) = open {
+            control(&f, p, id);
+        }
+        inspect(&f, p);
+        for (kind, message) in [
+            ("bar_anchor", "is not edge anchored"),
+            ("bar_midY", "controls are not vertically centered"),
+        ] {
+            f.send(
+                p,
+                json!({"op":"test_oracle_calibration","kind":kind,"id":button}),
+            );
+            assert_eq!(
+                inspect_unchecked(&f, p, None)["non_anchored_action_bars"],
+                json!([format!("{container}: {row} row {message}")])
+            );
+            f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+            inspect(&f, p);
+        }
     }
 }
 

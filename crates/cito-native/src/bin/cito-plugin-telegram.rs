@@ -1,7 +1,6 @@
 #[path = "../../../../plugins/telegram/native.rs"]
 mod plugin;
-#[path = "../plugin_support.rs"]
-mod support;
+use cito_native::support;
 fn main() {
     plugin::main();
 }

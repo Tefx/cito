@@ -1,14 +1,399 @@
 use super::*;
 
 #[test]
+fn listen_preflight_preserves_sibling_titles_and_blank_descriptions_use_defaults() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    for hub in ["local", "work"] {
+        assert_eq!(
+            f.tool(
+                "cito_listen",
+                json!({"hub":hub,"about":"Original"}),
+                meta.clone()
+            )["ok"],
+            true
+        );
+    }
+    let before =
+        f.rows("SELECT hub,title,about FROM local_listeners WHERE harness='fixture' ORDER BY hub");
+    let (status,error) = f.action(json!({"op":"listen_session","hub":"local","harness":"fixture","session_id":"session-1","title":"Uncommitted title","scope":"invalid"}));
+    assert_eq!(status, 400, "{error}");
+    assert_eq!(
+        f.rows("SELECT hub,title,about FROM local_listeners WHERE harness='fixture' ORDER BY hub"),
+        before
+    );
+    assert!(f.rows("SELECT * FROM session_custom_titles").is_empty());
+    let (status,result) = f.action(json!({"op":"listen_session","hub":"local","harness":"fixture","session_id":"session-1","title":"Useful title","about":"   ","scope":"self"}));
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        f.rows("SELECT about FROM local_listeners WHERE hub='local' AND harness='fixture'")[0]
+            ["about"],
+        "Useful title"
+    );
+    let state = f.db("state.sqlite");
+    state.execute("CREATE TRIGGER reject_title BEFORE INSERT ON session_custom_titles BEGIN SELECT RAISE(ABORT,'title maintenance unavailable'); END", &[]).unwrap();
+    let (status,result)=f.action(json!({"op":"listen_session","hub":"local","harness":"fixture","session_id":"session-1","title":"Failed title maintenance","about":"Committed enrollment","scope":"self"}));
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["committed"], true);
+    assert!(result["maintenance_warning"].is_string());
+    assert_eq!(
+        f.rows("SELECT status,about FROM local_listeners WHERE hub='local' AND harness='fixture'")
+            [0],
+        json!({"status":"ACTIVE","about":"Committed enrollment"})
+    );
+    assert_eq!(
+        f.rows("SELECT title FROM session_custom_titles WHERE harness='fixture'")[0]["title"],
+        "Useful title"
+    );
+    state.execute("DROP TRIGGER reject_title", &[]).unwrap();
+    let (status, result) = f.action(
+        json!({"op":"listen_session","hub":"local","harness":"human","about":"   ","scope":"self"}),
+    );
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        f.rows("SELECT about FROM local_listeners WHERE hub='local' AND harness='human'")[0]
+            ["about"],
+        "Human"
+    );
+    let bytes = fs::read(&f.config).unwrap();
+    let (status,result)=f.action(json!({"op":"setup_save_hub","name":"local","url":"https://hub.example.com","auth_mode":"none"}));
+    assert_eq!(status, 400, "{result}");
+    assert_eq!(fs::read(&f.config).unwrap(), bytes);
+    for args in [
+        vec![
+            "setup",
+            "--hub",
+            "local",
+            "--url",
+            "https://hub.example.com",
+        ],
+        vec![
+            "setup",
+            "--hub",
+            "work",
+            "--url",
+            "https://hub.example.com",
+            "--user",
+            "invalid user",
+        ],
+    ] {
+        let (ok, out, error) = f.command(NATIVE, &args, "");
+        assert!(!ok, "{out} {error}");
+        assert_eq!(fs::read(&f.config).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn title_bearing_cli_and_mcp_enrollment_preserves_siblings_on_remote_failure() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let (_, port) = f.hub();
+    fs::write(&f.config, json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}}}).to_string()).unwrap();
+    let meta = f.provider("accepted");
+    f.daemon(&[]);
+    for hub in ["local", "work"] {
+        f.tool(
+            "cito_listen",
+            json!({"hub":hub,"about":"Original","title":"Original title"}),
+            meta.clone(),
+        );
+    }
+    let local = f.db("hub.sqlite");
+    let remote = f.db("hub/hub.sqlite");
+    let titles =
+        || f.rows("SELECT hub,title FROM local_listeners WHERE harness='fixture' ORDER BY hub");
+    let customs = || f.rows("SELECT * FROM session_custom_titles");
+    let hub_title = |db: &cito_native::database::Database| {
+        let rows = db.query("SELECT CAST(value AS TEXT) AS value FROM hub_kv WHERE json_extract(CAST(value AS TEXT),'$.harness')='fixture'", &[]).unwrap();
+        let row: Value = serde_json::from_str(rows[0]["value"].as_str().unwrap()).unwrap();
+        (row["title"].clone(), row["custom_title"].clone())
+    };
+    let before = (titles(), customs(), hub_title(&local), hub_title(&remote));
+    for fault in ["cas", "read"] {
+        if fault == "cas" {
+            remote.execute("CREATE TRIGGER reject_registration BEFORE UPDATE ON hub_kv BEGIN SELECT RAISE(ABORT,'registration unavailable'); END", &[]).unwrap();
+        } else {
+            // A visible row with invalid wire bytes makes the real remote kv_get fail.
+            remote
+                .execute("UPDATE hub_kv SET value=CAST('invalid-json' AS BLOB)", &[])
+                .unwrap();
+        }
+        for route in ["mcp", "cli"] {
+            if route == "mcp" {
+                let result = f.tool_result("cito_listen", json!({"hub":"work","about":"Attempted enrollment","title":"Uncommitted title"}), meta.clone());
+                assert_eq!(result["isError"], true, "{result}");
+                let payload: Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert!(
+                    payload["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(if fault == "cas" {
+                            "registration unavailable"
+                        } else {
+                            "expected value"
+                        }),
+                    "{payload}"
+                );
+            } else {
+                let (ok, out, err) = f.command(
+                    NATIVE,
+                    &[
+                        "listen",
+                        "--hub",
+                        "work",
+                        "--harness",
+                        "fixture",
+                        "--session",
+                        "session-1",
+                        "--title",
+                        "Uncommitted title",
+                        "Attempted enrollment",
+                        "--json",
+                    ],
+                    "",
+                );
+                assert!(!ok, "{out} {err}");
+                assert!(
+                    err.contains(if fault == "cas" {
+                        "registration unavailable"
+                    } else {
+                        "expected value"
+                    }),
+                    "{err}"
+                );
+            }
+            assert_eq!(titles(), before.0);
+            assert_eq!(customs(), before.1);
+            assert_eq!(hub_title(&local), before.2);
+            if fault == "cas" {
+                assert_eq!(hub_title(&remote), before.3);
+            } else {
+                assert_eq!(
+                    remote
+                        .query("SELECT CAST(value AS TEXT) AS value FROM hub_kv", &[])
+                        .unwrap()[0]["value"],
+                    "invalid-json"
+                );
+            }
+        }
+        if fault == "cas" {
+            remote
+                .execute("DROP TRIGGER reject_registration", &[])
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn cli_and_mcp_enrollment_report_post_commit_title_failures() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let (_, port) = f.hub();
+    fs::write(&f.config, json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}}}).to_string()).unwrap();
+    let meta = f.provider("accepted");
+    f.daemon(&[]);
+    f.tool(
+        "cito_listen",
+        json!({"hub":"work","about":"Sibling","title":"Original title"}),
+        meta.clone(),
+    );
+    let db = f.db("state.sqlite");
+    let remote = f.db("hub/hub.sqlite");
+    for fault in ["persistence", "propagation"] {
+        if fault == "persistence" {
+            db.execute("CREATE TRIGGER reject_title BEFORE INSERT ON session_custom_titles BEGIN SELECT RAISE(ABORT,'title maintenance unavailable'); END", &[]).unwrap();
+        } else {
+            db.execute("DROP TRIGGER reject_title", &[]).unwrap();
+            remote.execute("CREATE TRIGGER reject_title BEFORE UPDATE ON hub_kv BEGIN SELECT RAISE(ABORT,'title propagation unavailable'); END", &[]).unwrap();
+        }
+        for route in ["mcp", "cli"] {
+            let result = if route == "mcp" {
+                f.tool(
+                    "cito_listen",
+                    json!({"about":"Committed enrollment","title":"New title"}),
+                    meta.clone(),
+                )
+            } else {
+                let (ok, out, err) = f.command(
+                    NATIVE,
+                    &[
+                        "listen",
+                        "--harness",
+                        "fixture",
+                        "--session",
+                        "session-1",
+                        "--title",
+                        "New title",
+                        "Committed enrollment",
+                        "--json",
+                    ],
+                    "",
+                );
+                assert!(ok, "{out} {err}");
+                serde_json::from_str(&out).unwrap()
+            };
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["committed"], true, "{result}");
+            assert!(result["warning"].is_string(), "{result}");
+            assert!(result["maintenance_warning"].is_string(), "{result}");
+            assert_eq!(result["title"], "New title");
+            assert_eq!(f.rows("SELECT title,status,about FROM local_listeners WHERE hub='local' AND harness='fixture'")[0], json!({"title":"New title","status":"ACTIVE","about":"Committed enrollment"}));
+            assert_eq!(
+                f.rows("SELECT title FROM local_listeners WHERE hub='work' AND harness='fixture'")
+                    [0]["title"],
+                if fault == "persistence" {
+                    "Original title"
+                } else {
+                    "New title"
+                }
+            );
+            assert_eq!(
+                f.rows("SELECT title FROM session_custom_titles WHERE harness='fixture'")[0]
+                    ["title"],
+                if fault == "persistence" {
+                    "Original title"
+                } else {
+                    "New title"
+                }
+            );
+            let local = f.db("hub.sqlite");
+            let query = "SELECT json_extract(CAST(value AS TEXT),'$.title') AS title,json_extract(CAST(value AS TEXT),'$.custom_title') AS custom_title FROM hub_kv WHERE json_extract(CAST(value AS TEXT),'$.harness')='fixture'";
+            assert_eq!(
+                local.query(query, &[]).unwrap()[0],
+                json!({"title":"New title","custom_title":1})
+            );
+            assert_eq!(
+                remote.query(query, &[]).unwrap()[0],
+                json!({"title":"Original title","custom_title":1})
+            );
+        }
+    }
+}
+
+#[test]
+fn disabled_hub_retirement_reaches_durable_agent_and_human_bindings() {
+    let _lock = serial();
+    for route in [
+        "mcp",
+        "cli-agent",
+        "cli_human_device",
+        "cli-human",
+        "unlisten_session",
+        "unlisten_session-hub",
+    ] {
+        let f = Fixture::new(json!({}));
+        let (_, port) = f.hub();
+        fs::write(&f.config, json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}}}).to_string()).unwrap();
+        let meta = f.provider("accepted");
+        f.daemon(&[]);
+        let agent = route == "mcp" || route == "cli-agent";
+        let harness = if agent { "fixture" } else { "human" };
+        let registration = if agent {
+            f.tool(
+                "cito_listen",
+                json!({"hub":"work","about":"Receiver"}),
+                meta.clone(),
+            )
+        } else {
+            let (status, result) =
+                f.action(json!({"op":"cli_human_device","hub":"work","attach":true}));
+            assert_eq!(status, 200, "{result}");
+            result
+        };
+        assert!(registration["listener_id"].is_string());
+        let before = f.rows(&format!(
+            "SELECT * FROM local_listeners WHERE hub='work' AND harness='{harness}'"
+        ))[0]
+            .clone();
+        let id = before["listener_id"].as_str().unwrap();
+        let (status, result) =
+            f.action(json!({"op":"setup_toggle_hub","hub":"work","enabled":false}));
+        assert_eq!(status, 200, "{result}");
+        match route {
+            "mcp" => {
+                let result = f.tool_result("cito_unlisten", json!({"hub":"work"}), meta);
+                assert_eq!(result["isError"], true, "{result}");
+                assert!(result.to_string().contains("DETACH_PENDING"), "{result}");
+            }
+            "cli-agent" | "cli-human" => {
+                let mut args = vec!["unlisten", "--hub", "work", "--harness", harness, "--json"];
+                if agent {
+                    args.extend(["--session", "session-1"]);
+                }
+                let (ok, out, err) = f.command(NATIVE, &args, "");
+                assert!(!ok, "{out} {err}");
+                assert!(
+                    format!("{out} {err}").contains("DETACH_PENDING"),
+                    "{out} {err}"
+                );
+            }
+            _ => {
+                let action = if route == "cli_human_device" {
+                    json!({"op":route,"hub":"work","attach":false})
+                } else if route == "unlisten_session-hub" {
+                    json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"})
+                } else {
+                    json!({"op":"unlisten_session","harness":"human","session_id":"default"})
+                };
+                let (status, result) = f.action(action);
+                assert_eq!(status, 400, "{result}");
+                let expected = if route == "unlisten_session-hub" {
+                    "INVALID_INPUT: Unknown or disabled hub"
+                } else {
+                    "DETACH_PENDING"
+                };
+                assert!(result.to_string().contains(expected), "{result}");
+                assert_ne!(result["committed"], true);
+            }
+        }
+        let after = f.rows(&format!(
+            "SELECT * FROM local_listeners WHERE hub='work' AND listener_id='{id}'"
+        ))[0]
+            .clone();
+        let denied = route == "unlisten_session-hub";
+        assert_eq!(
+            after["status"],
+            if denied { "ACTIVE" } else { "UNLISTENED" }
+        );
+        if denied {
+            assert_eq!(after["user_stopped"], before["user_stopped"]);
+        }
+        assert_eq!(after["hub_url"], before["hub_url"]);
+        assert_eq!(
+            f.rows(&format!(
+                "SELECT * FROM pending_hub_detaches WHERE hub='work' AND listener_id='{id}'"
+            ))
+            .len(),
+            usize::from(!denied)
+        );
+        let remote = f
+            .db("hub/hub.sqlite")
+            .query("SELECT value FROM hub_kv WHERE key=?", &[json!(id)])
+            .unwrap();
+        let remote: Value = serde_json::from_str(remote[0]["value"].as_str().unwrap()).unwrap();
+        assert_eq!(remote["state"], "ACTIVE");
+        if !agent {
+            assert_ne!(
+                remote["human_paused"], true,
+                "Detaching a device must not change inbox policy"
+            );
+        }
+    }
+}
+
+#[test]
 fn oversized_committed_channel_values_get_payload_free_success_receipts() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let plugin = f.state.join("plugins/channel");
-    fs::create_dir_all(&plugin).unwrap();
-    fs::write(plugin.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
-        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
-        "fields":[{"key":"credential","scope":"hub","type":"string","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    channel_provider(
+        &f,
+        "channel",
+        json!([{"key":"credential","scope":"hub","type":"string","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
+    );
     let ui = f.recording_ui();
     f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -26,16 +411,12 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
         let (status, response) = f.action(action);
         assert_eq!(status, 200, "{response}");
         wait(|| {
-            fs::read_to_string(f.home.join("ui-frames"))
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            ui_frames(&f)
+                .into_iter()
                 .any(|frame| frame["request_id"] == request && frame["op"] == "settings")
         });
-        let frames = fs::read_to_string(f.home.join("ui-frames")).unwrap();
-        let receipt: Value = frames
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        let receipt: Value = ui_frames(&f)
+            .into_iter()
             .find(|frame| frame["request_id"] == request && frame["op"] == "settings")
             .unwrap();
         assert_eq!(receipt["ok"], true, "{receipt}");
@@ -62,24 +443,18 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
 fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let plugin = f.state.join("plugins/channel");
-    fs::create_dir_all(&plugin).unwrap();
-    fs::write(plugin.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
-        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
-        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    channel_provider(
+        &f,
+        "channel",
+        json!([{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
+    );
     let ui = f.recording_ui();
     f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", ui.to_str().unwrap()),
     ]);
     assert_eq!(f.action(json!({"op":"channel_save","channel_id":"channel","enabled":true,"values":{"credential":"saved","address":"room"}})).0, 200);
-    let frames = || -> Vec<Value> {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect()
-    };
+    let frames = || ui_frames(&f);
     for op in ["channel_test", "test_human_channel"] {
         for (id, expected_error, expected_status) in [
             ("channel", "Invalid token", 200),
@@ -654,11 +1029,11 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"work":{"url":"local://"}},"defaultHub":"work"}));
     let meta = f.provider("delivered_unconfirmed");
-    let channel = f.state.join("plugins/channel");
-    fs::create_dir_all(&channel).unwrap();
-    fs::write(channel.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
-        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
-        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let channel = channel_provider(
+        &f,
+        "channel",
+        json!([{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
+    );
     let ui = f.recording_ui();
     f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -675,10 +1050,8 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             .collect()
     };
     let ui_results = || -> Vec<Value> {
-        fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        ui_frames(&f)
+            .into_iter()
             .filter(|frame| frame["op"] == "composer_result")
             .collect()
     };
@@ -728,6 +1101,7 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             assert_eq!(status, 200, "{result}");
             wait(|| ui_results().len() == results_before + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], true);
+            assert!(ui_results().last().unwrap().get("warning").is_none());
             assert_eq!(
                 ui_results().last().unwrap()["request_id"],
                 format!("{op}-{id}")
@@ -864,12 +1238,28 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let recovered = source();
     let local = f.db("state.sqlite");
     local.execute("CREATE TRIGGER reject_sent_commit BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'injected local commit failure'); END", &[]).unwrap();
-    let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
+    let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","request_id":"failed-maintenance","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
     let result = send_human_result(&f, args.clone());
-    assert_eq!(result["http_status"], 400);
-    assert!(result.to_string().contains("injected local commit failure"));
+    assert_eq!(result["http_status"], 200);
+    assert_eq!(result["ok"], true);
+    assert!(
+        result["maintenance_warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("local sent history")),
+        "{result}"
+    );
+    wait(|| {
+        ui_results().iter().any(|r| {
+            r["request_id"] == "failed-maintenance" && r["warning"] == result["maintenance_warning"]
+        })
+    });
     let committed = hub.query("SELECT seq,signal_id FROM hub_signals WHERE json_extract(CAST(data AS TEXT),'$.in_reply_to')=?", &[json!(recovered)]).unwrap();
     assert_eq!(committed.len(), 1);
+    assert_eq!(result["seq"], committed[0]["seq"]);
+    assert!(result["signal_id"]
+        .as_str()
+        .unwrap()
+        .ends_with(committed[0]["signal_id"].as_str().unwrap()));
     assert!(hub
         .query(
             "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
@@ -1122,11 +1512,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     assert_eq!(pairing[0]["expires_ms"], paired["expires_at_ms"]);
     assert!(pairing[0]["consumed_ms"].is_null());
     wait(|| {
-        let frames: Vec<Value> = fs::read_to_string(f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
+        let frames = ui_frames(&f);
         frames.iter().any(|v| {
             v["op"] == "channel_test_result"
                 && v["hub"] == "work"

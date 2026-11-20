@@ -8,7 +8,6 @@ enum CitoMetrics {
     static let settingsWidth: CGFloat = 520
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
-    static let headerInset: CGFloat = 14
     static let cardRadius: CGFloat = 10
     static let sessionTextX: CGFloat = 48
     static let sessionPathWidth = menuRailWidth - sessionTextX - cardInset - 52
@@ -16,6 +15,10 @@ enum CitoMetrics {
     static let directoryTextX: CGFloat = 52
     static let directoryInset: CGFloat = 16
     static let activityTextWidth = directoryWidth - directoryTextX - directoryInset
+}
+
+func compactHomePath(_ path: String, home: String = NSHomeDirectory()) -> String {
+    path == home ? "~" : path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
 }
 
 func normalizedHubURL(_ raw: String) -> String {
@@ -155,12 +158,15 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
     return prefix + leaf + branchSuffix
 }
 
+func measureWrappedHeight(_ text: String, width: CGFloat, font: NSFont) -> CGFloat {
+    ceil((text as NSString).boundingRect(with: NSSize(width: max(0, width), height: .greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font]).height)
+}
+
 func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
     let font = NSFont.systemFont(ofSize: 12)
     guard selected && (measureTextWidth(text, font: font) > CitoMetrics.activityTextWidth || text.contains("\n")) else { return 60 }
-    let wrappedRect = (text as NSString).boundingRect(with: NSSize(width: CitoMetrics.activityTextWidth, height: CGFloat.greatestFiniteMagnitude),
-        options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font])
-    return min(108, max(60, 44 + ceil(wrappedRect.height)))
+    return min(108, max(60, 44 + measureWrappedHeight(text, width: CitoMetrics.activityTextWidth, font: font)))
 }
 
 func cleanHostDisplay(_ raw: String) -> String {

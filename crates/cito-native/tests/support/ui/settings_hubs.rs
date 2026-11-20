@@ -1,6 +1,286 @@
 use super::*;
 
 #[test]
+fn host_hub_failed_projection_and_trailing_error_have_one_error_surface() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["host_hub"]["enabled"] = json!(true);
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"4292"}),
+    );
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    cfg["host_hub"]["error"] = json!("Cannot start sharing: Address already in use");
+    cfg["host_hub"]["running"] = json!(false);
+    f.send(p, json!({"op":"settings","source_op":"set_host_hub","request_id":action["request_id"],"ok":false,"error":"Cannot start sharing: Address already in use","settings":cfg}));
+    f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":action["request_id"],"error":"Cannot start sharing: Address already in use"}));
+    let s = inspect(&f, p);
+    assert_eq!(s["host_hub_port_pending"], false);
+    assert_eq!(s["pending_controls"], json!([]));
+    assert_eq!(
+        node(&s, "settings_items", "host_hub_error")["text"],
+        "Cannot start sharing: Address already in use"
+    );
+    assert!(node(&s, "settings_items", "settings_error_banner").is_null());
+    assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], "4292");
+}
+
+#[test]
+fn editing_host_port_retires_saved_feedback_in_place() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["host_hub"]["enabled"] = json!(true);
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    let input = |value: &str| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":value}),
+        );
+    };
+    input("4292");
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    cfg["host_hub"]["port"] = json!(4292);
+    f.send(p, json!({"op":"settings","source_op":"set_host_hub","ok":true,"request_id":request["request_id"],"settings":cfg}));
+    let button = |snapshot: &Value| node(snapshot, "settings_items", "apply_host_hub_port");
+    let saved = button(&inspect(&f, p));
+    assert_eq!(saved["text"], "✓ Saved");
+    assert_eq!(saved["green"], true);
+    assert_eq!(saved["enabled"], false);
+    input("4293");
+    let edited = button(&inspect(&f, p));
+    assert_eq!(edited["instance"], saved["instance"]);
+    assert_eq!(edited["enabled"], true);
+    assert_eq!(edited["text"], "Apply");
+    assert_eq!(edited["accessibility_label"], "Apply");
+    assert_eq!(edited["green"], false);
+    input("4292");
+    let unchanged = button(&inspect(&f, p));
+    assert_eq!(unchanged["enabled"], false);
+    assert_eq!(unchanged["text"], "Apply");
+}
+
+#[test]
+fn hub_row_mutations_disable_duplicate_submission_and_settle_correlated_receipts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["hubs"][1]["can_login"] = json!(true);
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    for (id, op) in [
+        ("login_hub:work", "hub_action"),
+        ("toggle_hub:work", "setup_toggle_hub"),
+        ("remove_hub:work", "setup_remove_hub"),
+    ] {
+        let before = f.frames(p).len();
+        control(&f, p, id);
+        let pending = inspect(&f, p);
+        assert_eq!(node(&pending, "settings_items", id)["enabled"], false);
+        control(&f, p, id);
+        inspect(&f, p);
+        let actions: Vec<_> = f
+            .frames(p)
+            .into_iter()
+            .skip(before)
+            .filter(|a| a["op"] == op)
+            .collect();
+        assert_eq!(actions.len(), 1);
+        let action = &actions[0];
+        assert!(!action["request_id"].as_str().unwrap().is_empty());
+        f.send(p, json!({"op":"state","source_op":op,"request_id":"stale","ok":true,"committed":true,"warning":"An older request"}));
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", id)["enabled"],
+            false
+        );
+        f.send(p, json!({"op":"state","source_op":op,"request_id":action["request_id"],"ok":true,"committed":true,"warning":"Saved; refresh unavailable"}));
+        let settled = inspect(&f, p);
+        assert_eq!(node(&settled, "settings_items", id)["enabled"], true);
+        assert_eq!(settled["pending_controls"], json!([]));
+        assert_eq!(
+            node(&settled, "settings_items", "settings_error_label")["text"],
+            "Saved; refresh unavailable"
+        );
+    }
+}
+
+#[test]
+fn host_toggle_failures_settle_and_redraw_the_settings_banner() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["host_hub"]["enabled"] = json!(true);
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    for id in ["toggle_host_hub", "toggle_host_hub_auth"] {
+        control(&f, p, id);
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "set_host_hub")
+            .unwrap();
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", id)["enabled"],
+            false
+        );
+        f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":request["request_id"],"error":"Sharing failed"}));
+        let s = inspect(&f, p);
+        assert_eq!(s["pending_controls"], json!([]));
+        assert_eq!(node(&s, "settings_items", id)["enabled"], true);
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Sharing failed"
+        );
+        control(&f, p, "dismiss_settings_error");
+    }
+}
+
+#[test]
+fn clipboard_join_errors_stay_outside_an_idle_add_hub_form() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"https://hub.example.com"}),
+    );
+    control(&f, p, "paste_hub_invite");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "paste_hub_invite")
+        .unwrap();
+    f.send(
+        p,
+        json!({"op":"error","request_id":"unrelated","error":"Other request failed"}),
+    );
+    assert_eq!(inspect(&f, p)["hub_invite_pending"], true);
+    for correlated in [true, false] {
+        let mut error = json!({"op":"error","source_op":"paste_hub_invite","error":"Join failed"});
+        if correlated {
+            error["request_id"] = request["request_id"].clone();
+        }
+        f.send(p, error);
+        let s = inspect(&f, p);
+        assert_eq!(s["hub_invite_pending"], false);
+        assert!(node(&s, "settings_items", "add_hub_error").is_null());
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Join failed"
+        );
+    }
+}
+
+#[test]
+fn superseded_invite_parse_errors_preserve_the_current_draft_and_pending_requests() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    for replacement in [
+        "https://corrected.example.com",
+        "cito setup --hub corrected --url https://corrected.example.com",
+    ] {
+        f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"cito setup --hub stale --url https://stale.example.com"}));
+        inspect(&f, p);
+        let stale = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "paste_hub_invite")
+            .unwrap();
+        assert_eq!(stale["parse_only"], true);
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"settings_hub_url","value":replacement}),
+        );
+        let before = inspect(&f, p);
+        let current = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "paste_hub_invite")
+            .unwrap();
+        for request in [stale["request_id"].clone(), json!("")] {
+            f.send(p,json!({"op":"error","source_op":"paste_hub_invite","request_id":request,"error":"Delayed invalid invite"}));
+            let after = inspect(&f, p);
+            for key in ["pending_hub_save", "pending_controls", "hub_invite_pending"] {
+                assert_eq!(after[key], before[key], "{key}");
+            }
+            for id in ["settings_hub_name", "settings_hub_url"] {
+                assert_eq!(
+                    node(&after, "settings_items", id)["text"],
+                    node(&before, "settings_items", id)["text"]
+                );
+            }
+            assert!(node(&after, "settings_items", "settings_error_banner").is_null());
+            assert!(node(&after, "settings_items", "add_hub_error").is_null());
+        }
+        if replacement.starts_with("cito setup ") {
+            assert_ne!(current["request_id"], stale["request_id"]);
+            // Acceptance of B proves A's error did not clear the newer parse.
+            f.send(p,json!({"op":"hub_invite","request_id":current["request_id"],"config":{"name":"corrected","url":"https://corrected.example.com"}}));
+            let parsed = inspect(&f, p);
+            assert_eq!(
+                node(&parsed, "settings_items", "settings_hub_name")["text"],
+                "corrected"
+            );
+            assert_eq!(
+                node(&parsed, "settings_items", "settings_hub_url")["text"],
+                "https://corrected.example.com"
+            );
+        }
+    }
+}
+
+#[test]
 fn v41_start_sharing_and_auth_validate_ports_without_blocking_stop() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -63,7 +343,7 @@ fn v41_start_sharing_and_auth_validate_ports_without_blocking_stop() {
 }
 
 #[test]
-fn v41_hub_save_settles_by_name_and_request_not_url_spelling() {
+fn v49_hub_save_settles_by_request_even_without_a_matching_projected_name() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -89,10 +369,9 @@ fn v41_hub_save_settles_by_name_and_request_not_url_spelling() {
         .find(|a| a["op"] == "setup_save_hub")
         .unwrap();
     f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":request["request_id"],"settings":cfg}));
-    assert_eq!(
-        node(&inspect(&f, p), "settings_items", "submit_add_hub")["enabled"],
-        false,
-        "A matching request without the saved Hub cannot settle"
+    assert!(
+        node(&inspect(&f, p), "settings_items", "add_hub_form").is_null(),
+        "A matching explicit success settles even when its projection omits the saved Hub"
     );
     cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"shared","url":"https://example.com/","auth_mode":"none","enabled":true,"is_default":false,"status":"connected"}));
     f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":request["request_id"],"settings":cfg}));
@@ -179,6 +458,59 @@ fn v39_invite_parse_receipts_stay_in_the_form_and_modal_return_cannot_submit() {
             .count(),
         before + 1
     );
+}
+
+#[test]
+fn new_automatic_hub_name_stays_in_create_mode_after_previous_draft_commits() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    let enter_url = |url| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"settings_hub_url","value":url}),
+        )
+    };
+    let latest = || {
+        f.frames(p)
+            .into_iter()
+            .rfind(|a| a["op"] == "setup_save_hub")
+            .unwrap()
+    };
+    enter_url("https://relay.example.com");
+    control(&f, p, "submit_add_hub");
+    inspect(&f, p);
+    let submitted = latest();
+    assert_eq!(submitted["name"], "relay");
+
+    enter_url("https://relay.example.org");
+    control(&f, p, "settings_tab:apps");
+    control(&f, p, "settings_tab:hubs");
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "settings_hub_url")["text"],
+        "https://relay.example.org"
+    );
+    cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"relay","url":"https://relay.example.com","auth_mode":"none","enabled":true,"is_default":false,"status":"connected"}));
+    f.send(p, json!({"op":"settings","settings":cfg,"ok":true,"source_op":"setup_save_hub","request_id":submitted["request_id"]}));
+    let draft = inspect(&f, p);
+    assert_eq!(
+        node(&draft, "settings_items", "submit_add_hub")["text"],
+        "Join Hub"
+    );
+    control(&f, p, "submit_add_hub");
+    inspect(&f, p);
+    let next = latest();
+    assert_ne!(next["request_id"], submitted["request_id"]);
+    assert_eq!(next["name"], "relay-2");
+    assert_eq!(next["url"], "https://relay.example.org");
+    assert!(next["edit"].is_null());
 }
 
 #[test]
@@ -546,7 +878,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
         assert_eq!(action["name"], expected);
         let canonical_url = url.trim().trim_end_matches('/');
         assert_eq!(action["url"], canonical_url);
-        let saved = json!({"name":expected,"url":canonical_url,"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
+        let saved = json!({"name":expected,"url":canonical_url,"auth_mode":action.get("auth_mode").cloned().unwrap_or(json!("none")),"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
         let hubs = cfg["hubs"].as_array_mut().unwrap();
         if let Some(hub) = hubs.iter_mut().find(|hub| hub["name"] == expected) {
             *hub = saved;
@@ -798,6 +1130,15 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
         false
     );
     assert!(!f.frames(p).iter().any(|v| v["op"] == "setup_uninstall_all"));
+    control(&f, p, "settings_tab:hubs");
+    let modal = inspect(&f, p);
+    assert_eq!(modal["settings_tab"], "channels");
+    assert_eq!(
+        node(&modal, "settings_items", "settings_tab:hubs")["enabled"],
+        false
+    );
+    assert!(!node(&modal, "settings_items", "uninstall_confirm_box").is_null());
+    control(&f, p, "cancel_uninstall_all");
     control(&f, p, "settings_tab:hubs");
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "uninstall_confirm_box").is_null());

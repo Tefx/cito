@@ -82,6 +82,11 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     frame["hubs"][0]["human_listener_id"] = json!("inbox");
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_scope"] = json!("workspace");
+    frame["settings"]["hubs"][0]["human_scope"] = json!("workspace");
+    frame["settings"]["hubs"][0]["human_state_status"] = json!("current");
+    frame["settings"]["hubs"][0]["human_listener_id"] = json!("inbox");
+    frame["settings"]["hubs"][0]["human_can_set_scope"] = json!(true);
+    frame["settings"]["hubs"][0]["supports_workspace_scope"] = json!(true);
     let mut human = listener();
     human["harness"] = json!("human");
     human["listener_id"] = json!("inbox");
@@ -214,6 +219,14 @@ fn v39_reload_hint_retains_full_tooltip_and_activity_reset_requeries() {
     assert_eq!(hint["text"], hint["tooltip"]);
     assert_eq!(hint["width"], 244);
     assert_eq!(hint["x"], 46);
+    let id = "candidate_hint:fixture:reload";
+    f.send(
+        p,
+        json!({"op":"test_oracle_calibration","kind":"candidate_hint_jargon","id":id}),
+    );
+    assert_eq!(inspect_unchecked(&f, p, None)["jargon_leaks"], json!([id]));
+    f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+    inspect(&f, p);
     control(&f, p, "open_activity");
     f.send(p, json!({"op":"test_directory_query","query":"missing"}));
     assert!(!node(&inspect(&f, p), "directory_items", "act_reset_search").is_null());
@@ -521,6 +534,67 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
 }
 
 #[test]
+fn activity_projection_is_atomic_and_only_unread_human_replies_acknowledge() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["activity_has_any"] = json!(true);
+    f.send(p, frame.clone());
+    control(&f, p, "open_activity");
+    control(&f, p, "act_filter:all");
+    let item = |id, target, unread| {
+        json!({"hub":"personal","signal_id":id,"listener_id":"c_target","from_user":"bob",
+            "from_host_name":"laptop","from_harness":"fixture","from_title":"Schema work",
+            "from_scoped_id":"personal:sender","target_harness":target,"target_title":"Review",
+            "target_scoped_id":"personal:target","message":"Approve?","created_at":"2030-01-01T00:00:00Z",
+            "unread":unread,"for_me":true,"can_reply":true})
+    };
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[
+        item("agent-unread", "fixture", true), item("human-read", "human", false),
+        item("human-unread", "human", true)], "activity_total":18,"activity_unread_count":9,"activity_filter":"all"}),
+    );
+    let summary =
+        |snapshot: &Value| node(snapshot, "directory_items", "directory_summary")["text"].clone();
+    assert_eq!(summary(&inspect(&f, p)), "18 messages · 9 unread");
+
+    frame["truncated"] = json!(true);
+    frame["unread_count"] = json!(4);
+    frame["activity"] = json!([]);
+    frame["activity_total"] = json!(90);
+    frame["activity_unread_count"] = json!(41);
+    frame["activity_filter"] = json!("me");
+    frame["activity_query"] = json!("foreign slice");
+    f.send(p, frame);
+    let preserved = inspect(&f, p);
+    assert_eq!(preserved["unread_count"], 4);
+    assert_eq!(summary(&preserved), "18 messages · 9 unread");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity_total":55,"activity_filter":"me","activity_query":"foreign slice"}),
+    );
+    assert_eq!(summary(&inspect(&f, p)), "18 messages · 9 unread");
+
+    for id in ["agent-unread", "human-read", "human-unread"] {
+        control(&f, p, &format!("reply_activity:{id}"));
+        assert_eq!(inspect(&f, p)["composer_reply_signal_id"], id);
+        control(&f, p, "composer_cancel");
+    }
+    inspect(&f, p);
+    let acks: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "ack_signals")
+        .collect();
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0]["signal_ids"], json!(["human-unread"]));
+}
+
+#[test]
 fn appkit_activity_reply_filters_navigation_and_read_all() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -709,9 +783,9 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     });
     control(&f, p, "act_filter:all");
     for (reason, label) in [
-        ("stale_generation", "Session reloaded"),
+        ("stale_generation", "App reloaded"),
         ("driver_unavailable", "App unavailable"),
-        ("session_switched", "Session changed"),
+        ("session_switched", "Conversation changed"),
         ("unlistened", "Listening paused"),
         ("unlistened_before_dispatch", "Listening paused"),
         ("fenced_before_dispatch", "Connection changed"),
@@ -880,11 +954,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     );
     let warned = inspect(&f, p);
     assert_eq!(
-        node(&warned, "directory_items", "directory_warning")["hidden"],
+        node(&warned, "directory_items", "directory_warning_label")["hidden"],
         false
     );
     assert!(
-        node(&warned, "directory_items", "directory_warning")["tooltip"]
+        node(&warned, "directory_items", "directory_warning_label")["tooltip"]
             .as_str()
             .unwrap()
             .contains("work")
@@ -896,7 +970,7 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     f.send(p,json!({"op":"error","source_op":"query_directory","error":"CONNECTION_FAILED: Remote Hub unavailable (os error 61)"}));
     let failed = inspect(&f, p);
     assert!(
-        node(&failed, "directory_items", "directory_warning")["text"]
+        node(&failed, "directory_items", "directory_warning_label")["text"]
             .as_str()
             .unwrap()
             .starts_with("Cannot refresh")
@@ -912,7 +986,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         json!({"op":"directory","peers":[peer("one")],"warnings":[]}),
     );
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true
     );
     control(&f, p, "open_settings");
@@ -1020,17 +1098,19 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         let s = inspect(&f, p);
         assert_eq!(
-            node(&s, "directory_items", "directory_warning")["hidden"],
+            node(&s, "directory_items", "directory_warning_label")["hidden"],
             false
         );
         assert_eq!(
-            node(&s, "directory_items", "directory_warning")["text"],
+            node(&s, "directory_items", "directory_warning_label")["text"],
             "Cannot update Activity. Please try again."
         );
-        assert!(node(&s, "directory_items", "directory_warning")["tooltip"]
-            .as_str()
-            .unwrap()
-            .contains(op));
+        assert!(
+            node(&s, "directory_items", "directory_warning_label")["tooltip"]
+                .as_str()
+                .unwrap()
+                .contains(op)
+        );
         assert!(node(&s, "settings_items", "settings_error_banner").is_null());
         let request = f
             .frames(p)
@@ -1040,7 +1120,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
             .unwrap();
         f.send(p,json!({"op":"error","source_op":"query_directory","request_id":request["request_id"],"error":"Directory lookup failed"}));
         assert!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["tooltip"]
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["tooltip"]
                 .as_str()
                 .unwrap()
                 .contains(op),
@@ -1048,7 +1132,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[],"warnings":[]}));
         assert!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["tooltip"]
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["tooltip"]
                 .as_str()
                 .unwrap()
                 .contains(op),
@@ -1056,7 +1144,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         control(&f, p, "dir_mode:directory");
         assert_eq!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["hidden"],
             true
         );
         control(&f, p, "dir_mode:activity");
@@ -1079,14 +1171,22 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     for op in ["error", "state"] {
         f.send(p,json!({"op":op,"ok":false,"source_op":"clear_activity_history","request_id":a["request_id"],"error":"Late failure from A"}));
         assert_eq!(
-            node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "directory_warning_label"
+            )["hidden"],
             true,
             "Superseded {op} failure must not own B's feedback"
         );
     }
     f.send(p,json!({"op":"state","ok":false,"source_op":"clear_activity_history","request_id":b["request_id"],"error":"Current failure from B"}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         false,
         "Matching ok:false mutation results must be visible"
     );
@@ -1096,32 +1196,52 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     success["request_id"] = a["request_id"].clone();
     f.send(p, success.clone());
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         false,
         "A's success cannot settle B's error"
     );
     success["request_id"] = b["request_id"].clone();
     f.send(p, success);
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true,
         "B's matching state success settles its feedback"
     );
     f.send(p,json!({"op":"error","source_op":"clear_activity_history","request_id":a["request_id"],"error":"A after B completed"}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true
     );
     control(&f, p, "delete_activity:sig-0");
     let c = latest_delete();
     f.send(p,json!({"op":"error","source_op":"clear_activity_history","request_id":c["request_id"],"error":"Current failure from C"}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         false
     );
     f.send(p,json!({"op":"directory","ok":true,"source_op":"clear_activity_history","request_id":c["request_id"],"peers":[]}));
     assert_eq!(
-        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "directory_warning_label"
+        )["hidden"],
         true,
         "A matching Directory receipt also settles the action independently of query correlation"
     );
@@ -1423,7 +1543,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     );
     f.send(
         p,
-        json!({"op":"composer_result","ok":true,"request_id":replies[0]["request_id"]}),
+        json!({"op":"composer_result","ok":true,"error":null,"warning":"Message sent. Activity could not refresh.","request_id":replies[0]["request_id"]}),
     );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
@@ -1436,6 +1556,12 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(
         node(&s, "directory_items", "composer_send")["text"],
         "✓ Sent"
+    );
+    let warning = node(&s, "directory_items", "directory_warning_label");
+    assert_eq!(warning["hidden"], false);
+    assert_eq!(
+        warning["tooltip"],
+        "Message sent. Activity could not refresh."
     );
     control(&f, p, "composer_send");
     inspect(&f, p);
@@ -1497,12 +1623,121 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(inspect(&f, p)["directory_open"], false);
 }
 #[test]
+fn composer_settles_empty_errors_and_surfaces_late_failures_after_close() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    send_fixture(&f, p, json!({"op":"directory","peers":[peer("one")]}));
+    let submit = |draft: &str| {
+        control(&f, p, "msg_dir:personal:one");
+        f.send(p, json!({"op":"test_composer_input","value":draft}));
+        control(&f, p, "composer_send");
+        let submitted = inspect(&f, p);
+        assert_eq!(
+            node(&submitted, "directory_items", "composer_send")["text"],
+            "Sending…"
+        );
+        f.frames(p)
+            .into_iter()
+            .find(|v| v["op"] == "send_signal" && v["message"] == draft)
+            .unwrap()["request_id"]
+            .clone()
+    };
+    let empty_error = submit("First draft");
+    f.send(
+        p,
+        json!({"op":"error","source_op":"send_signal","error":"","request_id":empty_error}),
+    );
+    let settled = inspect(&f, p);
+    assert_eq!(
+        node(&settled, "directory_items", "composer_send")["enabled"],
+        true
+    );
+    assert_eq!(
+        node(&settled, "directory_items", "composer_input")["text"],
+        "First draft"
+    );
+    assert_eq!(
+        node(&settled, "directory_items", "directory_warning_label")["hidden"],
+        true
+    );
+
+    for (draft, mut receipt) in [
+        (
+            "Second draft",
+            json!({"op":"composer_result","ok":false,"error":"The Hub cannot deliver this message."}),
+        ),
+        (
+            "Third draft",
+            json!({"op":"error","source_op":"send_signal","error":"The connection closed during send."}),
+        ),
+    ] {
+        receipt["request_id"] = submit(draft);
+        control(&f, p, "composer_cancel");
+        let message = receipt["error"].clone();
+        f.send(p, receipt);
+        let closed = inspect(&f, p);
+        assert_eq!(closed["composer_open"], false);
+        let warning = node(&closed, "directory_items", "directory_warning_label");
+        assert_eq!(warning["hidden"], false);
+        assert_eq!(warning["tooltip"], message);
+    }
+    let success = submit("Fourth draft");
+    control(&f, p, "composer_cancel");
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"error":null,"warning":"","request_id":success}),
+    );
+    let final_state = inspect(&f, p);
+    assert_eq!(
+        node(&final_state, "directory_items", "directory_warning_label")["tooltip"],
+        "The connection closed during send."
+    );
+}
+
+#[test]
+fn oracle_checks_static_directory_pills_even_when_they_have_tooltips() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    inspect(&f, p);
+    let ids = ["dir_mode:directory", "dir_scope:mine", "dir_harness:all"];
+    for id in ids {
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":"truncated_labels","id":id}),
+        );
+    }
+    let snapshot = inspect_unchecked(&f, p, None);
+    let truncated = snapshot["truncated_labels"].as_array().unwrap();
+    for id in ids {
+        assert!(
+            truncated.contains(&json!(id)),
+            "Missing truncation for {id}: {truncated:?}"
+        );
+    }
+}
+
+#[test]
 fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let meta = f.provider("delivered_unconfirmed");
     let mut l = ClosedLoop::new(&f);
     l.until(|s| node(s, "items", "header").is_object());
+    // Cache a complete listener collection before long activity previews mark
+    // subsequent passive snapshots truncated.
+    let listening = f.tool("cito_listen", json!({"about":"Copy fixture"}), meta.clone());
+    assert_eq!(listening["ok"], true, "{listening}");
+    l.until(|s| {
+        nodes(&s["items"])
+            .iter()
+            .any(|n| n["id"].as_str().is_some_and(|id| id.starts_with("copy:")))
+    });
     let message = "😀 ".repeat(32_768);
     let sent = f.tool("cito_send", json!({"to":"@self","message":message}), meta);
     assert_eq!(sent["ok"], true, "{sent}");
@@ -1625,13 +1860,17 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             .find(|action| action["op"] == "query_directory" || action["op"] == "open_directory")
             .unwrap();
         f.send(l.ui,json!({"op":"directory","request_id":query["request_id"],"query":query["query"],"scope":query["scope"],"harness":query["harness"],"peers":[],"warnings":[]}));
-        let warning = node(&inspect(&f, l.ui), "directory_items", "directory_warning");
+        let warning = node(
+            &inspect(&f, l.ui),
+            "directory_items",
+            "directory_warning_label",
+        );
         assert_eq!(warning["hidden"], false);
         assert_eq!(warning["tooltip"], "Message unavailable");
         l.control(&control_id);
         let success = l.until(|s| s["clipboard"] == message.trim());
         assert_eq!(
-            node(&success, "directory_items", "directory_warning")["hidden"],
+            node(&success, "directory_items", "directory_warning_label")["hidden"],
             true,
             "Only the successful correlated retry settles the copy error"
         );
@@ -1642,7 +1881,11 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         l.control(address["id"].as_str().unwrap());
         assert_eq!(inspect(&f, l.ui)["clipboard"], expected);
     }
-    let mut state = f.action(json!({"op":"get_snapshot"})).1;
+    // This final clipboard arbitration section uses a complete synthetic menu
+    // snapshot; the daemon snapshot includes intentionally truncated activity.
+    let mut state = super::state();
+    state["listeners"] = json!([]);
+    state["settings"] = f.action(json!({"op":"get_snapshot"})).1["settings"].clone();
     state["settings"]["host_hub"]["enabled"] = json!(true);
     state["settings"]["host_hub"]["running"] = json!(true);
     state["settings"]["host_hub"]["token"] = json!("fixture-token");
@@ -1702,7 +1945,11 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             })
         });
         assert_eq!(
-            node(&inspect(&f, l.ui), "directory_items", "directory_warning")["hidden"],
+            node(
+                &inspect(&f, l.ui),
+                "directory_items",
+                "directory_warning_label"
+            )["hidden"],
             true
         );
     }

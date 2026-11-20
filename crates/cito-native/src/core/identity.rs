@@ -49,14 +49,8 @@ pub fn listener_id_candidates(identity: &Value, harness: &str, session: &str) ->
     let mut principals = vec![principal.to_string()];
     if let Some(legacy) = identity["legacy_principal_id"].as_str() {
         principals.push(legacy.to_string());
-    } else if let Some(oidc) = principal.strip_prefix("oidc:") {
-        if let Some((issuer, subject)) = oidc.split_once('|') {
-            principals.push(format!("{issuer}#{subject}"));
-        }
-    } else if principal.starts_with("https://") || principal.starts_with("http://") {
-        if let Some((issuer, subject)) = principal.split_once('#') {
-            principals.push(format!("oidc:{issuer}|{subject}"));
-        }
+    } else if let Some(alias) = alternate_oidc_principal(principal) {
+        principals.push(alias);
     }
     let mut ids = Vec::new();
     for principal in principals {
@@ -124,13 +118,22 @@ pub(crate) fn is_live_peer(row: &Value, now: u64) -> bool {
 pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value]) -> String {
     let user = normalize_slug(string(row, "owner_user"));
     let harness = string(row, "harness");
-    let suffix = string(row, "listener_id").strip_prefix("c_").unwrap_or("");
+    let id = string(row, "listener_id");
+    let suffix = if canonical_node_id(id).is_ok() {
+        id.strip_prefix("c_").unwrap_or("")
+    } else {
+        ""
+    };
     let address = if harness == "human" {
         format!("@{}", string(row, "owner_user"))
     } else {
         let mut chosen = None;
         for length in [4, 8, 12, 16] {
-            let prefix = &suffix[..suffix.len().min(length)];
+            let end = suffix
+                .char_indices()
+                .nth(length)
+                .map_or(suffix.len(), |(i, _)| i);
+            let prefix = &suffix[..end];
             if prefix.is_empty() {
                 break;
             }
@@ -168,6 +171,27 @@ pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value
     } else {
         format!("{hub}:{address}")
     }
+}
+
+pub(super) fn normalize_legacy_principal(id: &str) -> Option<String> {
+    let (issuer, subject) = id.split_once('#')?;
+    (!issuer.contains('|') && crate::plugins::validate_oidc_url(issuer, true).is_ok())
+        .then(|| format!("oidc:{issuer}|{subject}"))
+}
+
+pub(super) fn alternate_oidc_principal(id: &str) -> Option<String> {
+    if let Some(canonical) = id.strip_prefix("oidc:") {
+        let (issuer, subject) = canonical.split_once('|')?;
+        let legacy = format!("{issuer}#{subject}");
+        (normalize_legacy_principal(&legacy).as_deref() == Some(id)).then_some(legacy)
+    } else {
+        normalize_legacy_principal(id)
+    }
+}
+
+pub(super) fn same_node_id(a: &str, b: &str) -> bool {
+    !a.is_empty()
+        && (a == b || canonical_node_id(a).is_ok_and(|id| canonical_node_id(b).as_ref() == Ok(&id)))
 }
 
 pub fn canonical_node_id(raw: &str) -> Result<String, String> {
@@ -254,6 +278,17 @@ pub fn iso(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_unicode_ids_use_the_full_safe_fallback() {
+        for id in ["c_ab😀defghijkl", "c_ééé", "c_BAD-ID", "c_abcd"] {
+            let row = json!({"listener_id":id,"owner_user":"alice","harness":"agent"});
+            assert_eq!(
+                display_address("local", "local", &row, &[]),
+                public_listener_id("alice", id)
+            );
+        }
+    }
+
     #[test]
     fn slugs_and_node_ids() {
         assert_eq!(normalize_slug("Alice._Smith"), "alice-smith");

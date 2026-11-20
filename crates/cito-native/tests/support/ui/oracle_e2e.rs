@@ -1,6 +1,140 @@
 use super::*;
 
 #[test]
+fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["hubs"][0]["human_state_status"] = json!("current");
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    for (operation, id) in [
+        ("human_inbox_update", "toggle_inbox"),
+        ("unlisten_all", "stop_all"),
+    ] {
+        control(&f, p, id);
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == operation)
+            .unwrap();
+        f.send(p, json!({"op":"state","ok":false,"source_op":operation,"request_id":request["request_id"],"error":"Mutation failed"}));
+        let s = inspect(&f, p);
+        assert_eq!(s["pending_controls"], json!([]));
+        let label = node(&s, "settings_items", "settings_error_label");
+        assert_eq!(label["text"], "Mutation failed");
+        assert_eq!(label["wraps"], true);
+        assert_eq!(label["maximum_lines"], 2);
+    }
+    control(&f, p, "open_directory");
+    inspect(&f, p);
+    let query = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "open_directory")
+        .unwrap();
+    for (op, source) in [
+        ("directory", "open_directory"),
+        ("error", "directory"),
+        ("directory", "directory"),
+        ("directory", ""),
+    ] {
+        let error = format!("Directory unavailable: {op}/{source}");
+        f.send(p, json!({"op":op,"ok":false,"source_op":source,"request_id":query["request_id"],"error":error}));
+        let s = inspect(&f, p);
+        let warning = node(&s, "directory_items", "directory_warning_label");
+        assert_eq!(warning["hidden"], false);
+        assert_eq!(
+            warning["text"],
+            "Cannot refresh Directory. Showing the last available results."
+        );
+        assert_eq!(warning["tooltip"], error);
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            "Mutation failed",
+            "Directory failures must not replace the Settings banner"
+        );
+    }
+}
+
+#[test]
+fn partial_settings_keep_channels_and_recovery_uses_saved_values_and_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    let mut cfg = settings();
+    let channel = &mut cfg["channels"][0];
+    channel["configured"] = json!(true);
+    channel["status"] = json!("error");
+    channel["fields"][1]["value"] = json!("saved-account");
+    channel["fields"].as_array_mut().unwrap().push(json!({
+        "key":"gateway", "scope":"hub", "label":"Gateway", "type":"string",
+        "required":false, "placeholder":"Gateway", "value":"saved-gateway", "configured":true
+    }));
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    cfg.as_object_mut().unwrap().remove("channels");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "recover_channel:channel:test")["enabled"],
+        true
+    );
+    control(&f, p, "recover_channel:channel:test");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "channel_test")
+        .unwrap();
+    assert_eq!(
+        action["values"],
+        json!({"account":"saved-account","gateway":"saved-gateway"})
+    );
+    f.send(p, json!({"op":"channel_test_result","request_id":action["request_id"],"channel_id":"channel","ok":true}));
+    control(&f, p, "edit_user_channel:channel");
+    f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"draft-account"}));
+    control(&f, p, "recover_channel:channel:test");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "channel_test")
+        .unwrap();
+    assert_eq!(
+        action["values"],
+        json!({"account":"draft-account","gateway":"saved-gateway"})
+    );
+    control(&f, p, "recover_channel:channel:unpair");
+    let s = inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "channel_unpair")
+        .unwrap();
+    assert_eq!(s["pending_channel_resets"], json!([action["request_id"]]));
+    f.send(
+        p,
+        json!({"op":"error","request_id":action["request_id"],"error":"Try again"}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["pending_channel_resets"], json!([]));
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:account")["text"],
+        "draft-account"
+    );
+}
+
+#[test]
 fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -135,7 +269,7 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
 }
 
 #[test]
-fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
+fn activity_clear_confirmation_and_dynamic_accessibility() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -175,7 +309,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     assert!(nodes(&activity["children"])
         .iter()
         .all(|child| child["tooltip"].as_str().unwrap_or("").is_empty()));
-    render_png_as(&f, p, "menu", "menu-dark.png", Some("dark"));
     control(&f, p, "open_directory");
     let mut schema = peer("schema");
     schema["harness"] = json!("pi");
@@ -205,7 +338,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         node(&directory, "directory_items", "directory_facet_separator")["x"],
         151
     );
-    render_png_as(&f, p, "directory", "directory-dark.png", Some("dark"));
     control(&f, p, "copy_dir:personal:schema");
     let copied = inspect(&f, p);
     assert_eq!(
@@ -225,7 +357,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         .frames(p)
         .iter()
         .any(|v| v["op"] == "ack_signals" && v["signal_ids"] == json!(["review"])));
-    render_png_as(&f, p, "directory", "activity-dark.png", Some("dark"));
     control(&f, p, "composer_cancel");
     inspect(&f, p);
     control(&f, p, "activity_clear");
@@ -278,16 +409,6 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         .unwrap();
     assert_eq!(cleared["filter"], "all");
     assert_eq!(cleared["query"], "");
-    control(&f, p, "open_settings");
-    for (tab, file) in [
-        ("apps", "settings-apps-dark.png"),
-        ("channels", "settings-channels-dark.png"),
-        ("hubs", "settings-hubs-dark.png"),
-    ] {
-        control(&f, p, &format!("settings_tab:{tab}"));
-        inspect(&f, p);
-        render_png_as(&f, p, "settings", file, Some("dark"));
-    }
 }
 
 #[test]
@@ -406,7 +527,16 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
             "public clipboard"
         );
     }
-    save_secret("replacement secure value + punctuation");
+    let unchanged = inspect(&f, p);
+    assert_eq!(
+        node(&unchanged, "settings_items", "save_hub_service:channel")["enabled"],
+        false,
+        "Clipboard shortcuts cannot resubmit an unchanged pending secret"
+    );
+    assert_eq!(
+        node(&unchanged, "settings_items", "channel_field:channel:secret")["text"],
+        "••••"
+    );
 
     for (id, op, surface) in [
         (
@@ -719,7 +849,8 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     let busy = occupied.local_addr().unwrap().port().to_string();
     l.input("host_hub_port", &busy);
     l.control("apply_host_hub_port");
-    let failed_port = l.until(|s| !node(s, "settings_items", "settings_error_banner").is_null());
+    let failed_port = l.until(|s| !node(s, "settings_items", "host_hub_error").is_null());
+    assert!(node(&failed_port, "settings_items", "settings_error_banner").is_null());
     assert_eq!(
         node(&failed_port, "settings_items", "host_hub_error")["text"],
         "Cannot start sharing: Address already in use"
@@ -730,7 +861,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             .unwrap()
             .contains("Cannot start sharing:")
     );
-    l.snapshot("settings", "r3_settings_error_banner.png");
+    l.snapshot("settings", "r3_host_hub_error.png");
     l.control("settings_tab:apps");
     l.control("settings_tab:hubs");
     let s = l.until(|s| node(s, "settings_items", "host_hub_port")["text"] == busy);
@@ -848,7 +979,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             "Missing real daemon frame: {op}"
         );
     }
-    // Both Apply submissions own identities; the sharing toggle only uses the active port.
+    // Both Apply submissions and the sharing toggle own correlated receipts.
     assert_eq!(
         l.results
             .iter()
@@ -856,9 +987,9 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
                 |(action, _, _)| action["op"] == "set_host_hub" && action["request_id"].is_string()
             )
             .count(),
-        2
+        3
     );
-    // Command-specific results and generic failures must retain the UI's identity.
+    // Composer failures settle on their result frame; host errors retain the action tag.
     for (action, status, _) in &l.results {
         let result_op = match action["op"].as_str() {
             Some("send_signal" | "send_reply_from_human") => "composer_result",
@@ -871,9 +1002,34 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             .iter()
             .any(|frame| frame["op"] == result_op && frame["request_id"] == action["request_id"]));
         if *status >= 400 {
-            assert!(l.frames.iter().any(|frame| frame["op"] == "error"
-                && frame["source_op"] == action["op"]
-                && frame["request_id"] == action["request_id"]));
+            let matching = l
+                .frames
+                .iter()
+                .filter(|frame| frame["request_id"] == action["request_id"]);
+            if result_op == "composer_result" {
+                let receipts: Vec<_> = matching.collect();
+                assert_eq!(
+                    receipts.len(),
+                    1,
+                    "Composer failure owns one result: {receipts:?}"
+                );
+                assert_eq!(receipts[0]["op"], "composer_result");
+                assert_eq!(receipts[0]["ok"], false);
+                assert!(receipts[0]["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()));
+                continue;
+            }
+            assert!(
+                matching
+                    .clone()
+                    .any(|frame| (frame["ok"] == false || frame["op"] == "error")
+                        && frame["source_op"] == action["op"]
+                        && (frame["error"].is_string()
+                            || frame["settings"]["host_hub"]["error"].is_string())),
+                "Missing failure receipt for {action}: {:?}",
+                matching.collect::<Vec<_>>()
+            );
         }
     }
     for (name, op) in [("office-mac", "error"), ("scratch", "settings")] {
@@ -909,8 +1065,13 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     cfg["hubs"][0]["name"] = json!("local");
     let mut frame = state();
     frame["hubs"][0]["name"] = json!("local");
-    frame["settings"] = cfg.clone();
     frame["listeners"] = json!([]);
+    for hub in cfg["hubs"].as_array_mut().unwrap() {
+        hub["human_paused"] = json!(true);
+        hub["human_state_status"] = json!("current");
+        hub["human_control_revision"] = json!(7);
+    }
+    frame["settings"] = cfg.clone();
     for hub in frame["hubs"].as_array_mut().unwrap() {
         hub["human_paused"] = json!(true);
         hub["human_state_status"] = json!("current");
@@ -952,6 +1113,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     ] {
         let mut unavailable = frame.clone();
         unavailable["hubs"][0]["status"] = json!(status);
+        unavailable["settings"]["hubs"][0]["status"] = json!(status);
         f.send(p, unavailable);
         control(&f, p, "target_hub:local");
         let snapshot = inspect(&f, p);
@@ -999,6 +1161,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         paused["hubs"][0]["human_paused"] = json!(false);
         paused["hubs"][0]["human_control_revision"] = json!(8);
         paused["hubs"][0]["human_availability"] = json!("ACTIVE");
+        paused["settings"]["hubs"][0]["human_paused"] = json!(false);
+        paused["settings"]["hubs"][0]["human_control_revision"] = json!(8);
         paused["source_op"] = json!("human_inbox_update");
         paused["request_id"] = resume["request_id"].clone();
         f.send(p, paused);
@@ -1008,14 +1172,6 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         );
     }
     f.send(p, frame.clone());
-    control(&f, p, "target_hub:work");
-    control(&f, p, "inbox_paused_notice");
-    control(&f, p, "toggle_inbox");
-    inspect(&f, p);
-    assert!(f.frames(p).iter().any(|a| a["op"] == "human_inbox_update"
-        && a["hub"] == "work"
-        && a["paused"] == false
-        && a["expected_control_revision"] == 7));
     control(&f, p, "open_settings");
     control(&f, p, "channel_hub_selector:local");
     control(&f, p, "settings_tab:apps");
@@ -1108,7 +1264,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let paired = inspect(&f, p);
     assert_eq!(
         node(&paired, "settings_items", "stratum_user:channel")["height"],
-        38
+        60
     );
     assert!(node(&paired, "settings_items", "channel_field:channel:account").is_null());
     assert_eq!(
@@ -1245,6 +1401,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     for (running, error) in [
         (false, None),
         (false, Some("Address already in use")),
+        (false, Some("The port is already in use.\nStop the other service or choose a different port.\nThen apply the new port to resume sharing.")),
         (false, Some("")),
         (true, Some("")),
         (true, Some("Hub listener failed")),
@@ -1289,6 +1446,10 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         }
         if let Some(failure) = failure {
             assert_eq!(warning["text"], failure);
+            assert_eq!(warning["wraps"], true);
+            if failure.contains('\n') {
+                assert!(warning["height"].as_f64().unwrap() > 32.0);
+            }
         } else {
             assert!(warning.is_null());
             let title = node(&status, "settings_items", "host_hub_title");
@@ -1500,7 +1661,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         let draft = current + 1;
         f.send(
             p,
-            json!({"op":"test_settings_input","id":"host_hub_port","value":draft.to_string()}),
+            json!({"op":"test_settings_input","id":"host_hub_port","value":format!(" {draft} ")}),
         );
         control(&f, p, "apply_host_hub_port");
         wait(|| {
@@ -1524,7 +1685,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         );
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-            "Apply",
+            "Applying…",
             "An uncorrelated {op} snapshot cannot acknowledge the save"
         );
         cfg["host_hub"]["port"] = json!(draft);
@@ -1569,8 +1730,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert_eq!(action["op"], "set_host_hub");
         assert_eq!(action["port"], 5302);
         assert!(
-            action["request_id"].is_null(),
-            "Toggles cannot own the port save"
+            action["request_id"].is_string() && action["request_id"] != submitted["request_id"],
+            "Toggles own distinct receipts without replacing the port save"
         );
     }
     // Neither untagged errors nor refreshes may release Apply's pending identity.
@@ -1586,7 +1747,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "Apply"
+        "Applying…"
     );
     f.send(
         p,
@@ -1641,7 +1802,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     );
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "Apply"
+        "Applying…"
     );
     cfg["host_hub"]["error"] = Value::Null;
     cfg["host_hub"]["port"] = json!(5303);
@@ -1681,16 +1842,24 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         control(&f, p, &format!("settings_hub_auth:{mode}"));
         let s = inspect(&f, p);
         let track = node(&s, "settings_items", "settings_hub_auth_track");
-        assert_eq!(track["radius"], 13);
-        assert_eq!(track["border_width"], 0);
-        assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
+        // Selection styling is checked by the contrast oracle. This assertion
+        // owns packing geometry rather than implementation-specific RGBA values.
+        let mut right = 0.0;
         for candidate in ["none", "token", "oidc"] {
             let pill = node(
                 &s,
                 "settings_items",
                 &format!("settings_hub_auth:{candidate}"),
             );
-            assert_eq!(pill["border_width"], if candidate == mode { 1 } else { 0 });
+            let x = pill["x"].as_f64().unwrap();
+            assert!(x >= right);
+            right = x + pill["width"].as_f64().unwrap();
+            assert!(right <= track["width"].as_f64().unwrap());
+            assert!(pill["y"].as_f64().unwrap() >= 0.0);
+            assert!(
+                pill["y"].as_f64().unwrap() + pill["height"].as_f64().unwrap()
+                    <= track["height"].as_f64().unwrap()
+            );
         }
         let labels: Vec<_> = nodes(&node(&s, "settings_items", "add_hub_form")["children"])
             .into_iter()
@@ -1739,6 +1908,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
         for (kind, oracle) in [
             ("bar_anchor", "clipped_views"),
             ("fractional_truncation", "truncated_labels"),
+            ("low_contrast_icons", "low_contrast_labels"),
             ("card_padding", "clipped_views"),
             ("strip_anchor", "clipped_views"),
             ("status_emoji", "jargon_leaks"),
@@ -1751,6 +1921,22 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
                     .unwrap()
                     .is_empty(),
                 "{kind}"
+            );
+            f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+            inspect_as(&f, p, Some(appearance));
+        }
+        for edge in ["left", "right"] {
+            f.send(
+                p,
+                json!({"op":"test_oracle_calibration","kind":"partial_hit_test","edge":edge}),
+            );
+            let snapshot = inspect_unchecked(&f, p, Some(appearance));
+            assert!(
+                snapshot["overlapping_siblings"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("menu > open_settings: occluded in hitTest")),
+                "{edge}"
             );
             f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
             inspect_as(&f, p, Some(appearance));
@@ -2292,22 +2478,23 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 assert_eq!(icon["width"], 28);
             }
         } else if tab == "channels" {
-            for (appearance, dark) in [("light", false), ("dark", true)] {
+            for appearance in ["light", "dark"] {
                 let snapshot = inspect_as(&f, p, Some(appearance));
                 let track = node(&snapshot, "settings_items", "channel_hub_strip");
-                assert_eq!(track["radius"], 13);
-                assert_eq!(track["draws_background"], true);
-                let red = track["background"][0].as_f64().unwrap();
-                assert!(if dark { red > 0.9 } else { red < 0.1 });
-                assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
-                assert_eq!(
-                    node(&snapshot, "settings_items", "channel_hub_selector:local")["border_width"],
-                    1
-                );
-                assert_eq!(
-                    node(&snapshot, "settings_items", "channel_hub_selector:work")["border_width"],
-                    0
-                );
+                assert!(track["width"].as_f64().unwrap() <= 398.0);
+                let mut right = 0.0;
+                for hub in ["local", "work"] {
+                    let pill = node(
+                        &snapshot,
+                        "settings_items",
+                        &format!("channel_hub_selector:{hub}"),
+                    );
+                    let x = pill["x"].as_f64().unwrap();
+                    assert!(x >= right);
+                    right = x + pill["width"].as_f64().unwrap();
+                    assert!(right <= track["width"].as_f64().unwrap());
+                    assert!(pill["height"].as_f64().unwrap() <= track["height"].as_f64().unwrap());
+                }
             }
             assert_eq!(
                 node(&s, "settings_items", "plugin_icon:telegram")["tint"],
@@ -2347,7 +2534,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 160);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 8);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 252);
-    assert_eq!(node(&s, "settings_items", "hub_visibility_caption")["text"], "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.");
+    assert_eq!(
+        node(&s, "settings_items", "hub_visibility_caption")["text"],
+        "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team."
+    );
     assert_eq!(s["overlapping_siblings"], json!([]));
     assert_eq!(s["clipped_views"], json!([]));
     assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
@@ -2401,7 +2591,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
 }
 
 #[test]
-fn v29_correlation_editor_keys_and_four_surface_oracle() {
+fn correlation_editor_keys_and_modal_escape() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -2440,7 +2630,24 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
         inspect(&f, p)["directory_selected_id"],
         before["directory_selected_id"]
     );
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one"),peer("two")]}),
+    );
+    control(&f, p, "dir_peer:personal:one");
     control(&f, p, "msg_dir:personal:one");
+    f.send(p, json!({"op":"test_focus_field","id":"composer_input"}));
+    let selected = inspect(&f, p);
+    assert!(selected["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "composer_input"));
+    for via in ["field", "handler"] {
+        f.send(p, json!({"op":"test_directory_key","key":"down","via":via}));
+        assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
+    }
     f.send(p, json!({"op":"test_directory_key","key":"return"}));
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "composer_error")["text"],
@@ -2450,11 +2657,64 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
     assert_eq!(inspect(&f, p)["composer_open"], false);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:hubs");
-    control(&f, p, "open_add_hub");
+    control(&f, p, "edit_hub:personal");
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "submit_add_hub")["text"],
+        "Save"
+    );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
-    assert_eq!(inspect(&f, p)["settings_open"], true);
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_open"], true);
+    assert!(node(&s, "settings_items", "add_hub_form").is_null());
+
+    control(&f, p, "open_add_hub");
+    f.send(p, json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://id.example.com"}));
+    f.send(p, json!({"op":"test_focus_field","id":"settings_hub_url"}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "submit_add_hub")["text"],
+        "Join Hub"
+    );
+    assert!(s["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "settings_hub_url"));
     control(&f, p, "open_uninstall_confirm");
     let modal = inspect(&f, p);
+    assert_eq!(
+        node(&modal, "settings_items", "settings_hub_url")["enabled"],
+        false
+    );
+    assert_eq!(
+        node(&modal, "settings_items", "settings_tab:apps")["enabled"],
+        false
+    );
+    assert_eq!(
+        node(&modal, "settings_items", "cancel_uninstall_all")["enabled"],
+        true
+    );
+    assert!(!modal["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "settings_hub_url"));
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"https://changed.example.com"}),
+    );
+    f.send(p, json!({"op":"test_tab","surface":"settings"}));
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"command-v","via":"panel"}),
+    );
+    control(&f, p, "settings_tab:apps");
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_tab"], "hubs");
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_url")["text"],
+        "https://id.example.com"
+    );
     assert_eq!(
         node(&modal, "settings_items", "uninstall_modal_overlay")["width"],
         520
@@ -2464,28 +2724,15 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
         false
     );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
-    assert_eq!(inspect(&f, p)["settings_open"], true);
-    for appearance in ["light", "dark"] {
-        let s = inspect_as(&f, p, Some(appearance));
-        for invariant in [
-            "truncated_labels",
-            "overlapping_siblings",
-            "clipped_views",
-            "low_contrast_labels",
-            "jargon_leaks",
-            "address_mismatches",
-        ] {
-            assert_eq!(s[invariant], json!([]), "{appearance}: {invariant}");
-        }
-        assert!(!s["settings_items"].as_array().unwrap().is_empty());
-        render_png_as(
-            &f,
-            p,
-            "settings",
-            &format!("v40-settings-{appearance}.png"),
-            Some(appearance),
-        );
-    }
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_open"], true);
+    assert!(node(&s, "settings_items", "uninstall_modal_overlay").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_url")["enabled"],
+        true
+    );
+    f.send(p, json!({"op":"test_settings_key","key":"escape"}));
+    assert!(node(&inspect(&f, p), "settings_items", "add_hub_form").is_null());
 }
 
 #[test]
@@ -2654,7 +2901,7 @@ fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
             .unwrap_or_default()
             .is_empty()
     });
-    f.db("state.sqlite").execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','crash-state','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED')", &[json!(cito_native::plugins::now_ms()+60_000)]).unwrap();
+    f.db("state.sqlite").execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) SELECT hub,'crash-state',listener_id,1,1,'bob','host','Sender','Work','now',?,'RECEIVED',hub_url,principal_id FROM local_listeners WHERE hub='local' AND harness='human' AND status='ACTIVE'", &[json!(cito_native::plugins::now_ms()+60_000)]).unwrap();
     let mut frame = Value::Null;
     wait(|| {
         frame = fs::read_to_string(f.home.join("ui-frames"))

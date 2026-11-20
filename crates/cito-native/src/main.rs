@@ -22,12 +22,12 @@ fn merge(target: &mut Value, patch: &Value) {
         }
     }
 }
-fn output(lock: &Mutex<()>, v: &Value) {
-    if let Ok(_guard) = lock.lock() {
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{v}");
-        let _ = out.flush();
-    }
+fn output(lock: &Mutex<()>, v: &Value) -> Result<(), String> {
+    let _guard = lock.lock().map_err(|_| "Output lock poisoned")?;
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{v}")
+        .and_then(|_| out.flush())
+        .map_err(|e| e.to_string())
 }
 struct Sidecar {
     child: Child,
@@ -36,24 +36,24 @@ struct Sidecar {
 impl Drop for Sidecar {
     fn drop(&mut self) {
         self.input.take();
-        if !cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100))
-            .unwrap_or(false)
-        {
+        let _ = cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100));
+        if cito_native::core::plugins::peek_plugin_exit(self.child.id()).is_ok() {
+            // SAFETY: an unreaped owned process still reserves its process group.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            }
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
     }
 }
 static STDIO_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static STDIO_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+// Signal handlers stay installed until exit, so the corresponding pipe must live that long.
+static STDIO_WAKE: std::sync::OnceLock<cito_native::support::WakePipe> = std::sync::OnceLock::new();
 extern "C" fn stdio_signal(_: libc::c_int) {
     STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-    let fd = STDIO_PIPE.load(std::sync::atomic::Ordering::Relaxed);
-    if fd >= 0 {
-        // SAFETY: the handler uses only an async-signal-safe write to the installed wake pipe.
-        unsafe {
-            libc::write(fd, [1u8].as_ptr().cast(), 1);
-        }
+    if let Some(wake) = STDIO_WAKE.get() {
+        wake.notify();
     }
 }
 fn pop_stdio_line(pending: &mut Vec<u8>) -> Result<Option<String>, String> {
@@ -82,15 +82,13 @@ fn read_sidecar_line(reader: &mut impl BufRead) -> std::io::Result<Option<String
     }
     Ok((n > 0).then_some(line))
 }
-fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
+fn read_stdio_line(pending: &mut Vec<u8>, wake_fd: i32) -> Result<Option<String>, String> {
     loop {
         if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
-            return None;
+            return Ok(None);
         }
-        match pop_stdio_line(pending) {
-            Ok(Some(line)) => return Some(line),
-            Ok(None) => {}
-            Err(_) => return None,
+        if let Some(line) = pop_stdio_line(pending)? {
+            return Ok(Some(line));
         }
         let mut fds = [
             libc::pollfd {
@@ -99,7 +97,7 @@ fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
                 revents: 0,
             },
             libc::pollfd {
-                fd: STDIO_READ.load(std::sync::atomic::Ordering::Relaxed),
+                fd: wake_fd,
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -107,34 +105,82 @@ fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
         // SAFETY: poll borrows initialized descriptors owned by run_mcp_stdio.
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
         if ready < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return None;
+            return Err(error.to_string());
         }
         if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
-            return None;
+            return Ok(None);
+        }
+        if fds
+            .iter()
+            .any(|fd| fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0)
+        {
+            return Err("MCP input poll failed".into());
         }
         let mut bytes = [0u8; 8192];
+        // SAFETY: the writable buffer spans exactly the length passed to read.
         let count =
             unsafe { libc::read(libc::STDIN_FILENO, bytes.as_mut_ptr().cast(), bytes.len()) };
-        if count <= 0 {
-            return None;
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.to_string());
+        }
+        if count == 0 {
+            return if pending.is_empty() {
+                Ok(None)
+            } else {
+                String::from_utf8(std::mem::take(pending))
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            };
         }
         pending.extend_from_slice(&bytes[..count as usize]);
     }
 }
-static STDIO_READ: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
-fn run_mcp_stdio() {
-    let wake = match cito_native::support::WakePipe::new() {
-        Ok(wake) => wake,
-        Err(error) => {
-            eprintln!("cito-mcp: {error}");
-            return;
+fn daemon_rpc_response(body: &str, status: u16, id: Option<&Value>) -> Result<Value, String> {
+    let body = extract_jsonrpc_from_http_body(body)
+        .ok_or_else(|| format!("Invalid daemon response (HTTP {status})"))?;
+    if body.get("jsonrpc").is_none() {
+        let message = body["error"]
+            .as_str()
+            .or_else(|| body["message"].as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Daemon request failed (HTTP {status})"));
+        return Ok(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}}));
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+    #[test]
+    fn http_failures_preserve_jsonrpc_request_ids() {
+        for id in [json!(37), json!("request"), Value::Null] {
+            let rpc = daemon_rpc_response(r#"{"error":"Access denied"}"#, 403, Some(&id)).unwrap();
+            assert_eq!(rpc["jsonrpc"], "2.0");
+            assert_eq!(rpc["id"], id);
+            assert_eq!(rpc["error"]["code"], -32603);
+            assert_eq!(rpc["error"]["message"], "Access denied");
         }
-    };
-    STDIO_READ.store(wake.read_fd(), std::sync::atomic::Ordering::Relaxed);
-    STDIO_PIPE.store(wake.write_fd(), std::sync::atomic::Ordering::Relaxed);
+        let original = json!({"jsonrpc":"2.0","id":"original","result":{}});
+        assert_eq!(
+            daemon_rpc_response(&original.to_string(), 200, None).unwrap(),
+            original
+        );
+    }
+}
+
+fn run_mcp_stdio() -> Result<(), String> {
+    let pipe = cito_native::support::WakePipe::new()?;
+    let wake = STDIO_WAKE.get_or_init(|| pipe);
+    let output_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // SAFETY: handlers store a lock-free atomic and write to the live self-pipe.
     unsafe {
         libc::signal(
@@ -150,17 +196,8 @@ fn run_mcp_stdio() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
-    let (config, plugins) = match load_native_config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("cito-mcp: {e}");
-            std::process::exit(1)
-        }
-    };
-    if let Err(e) = ensure_daemon(&config) {
-        eprintln!("cito-mcp: {e}");
-        std::process::exit(1)
-    }
+    let (config, plugins) = load_native_config()?;
+    ensure_daemon(&config)?;
     let endpoint = cito_native::support::enclosing_endpoint_pid(
         env::var("CITO_ENDPOINT_PID")
             .ok()
@@ -182,8 +219,11 @@ fn run_mcp_stdio() {
             continue;
         }
         let result = (|| -> Result<(Sidecar, Value), String> {
+            use std::os::{fd::AsRawFd, unix::process::CommandExt};
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
             let mut cmd = plugins::plugin_command(plugin)?;
             let mut child = cmd
+                .process_group(0)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -199,13 +239,49 @@ fn run_mcp_stdio() {
                 .take()
                 .ok_or("Plugin stdout unavailable")?;
             let request = json!({"op":"stdio_sidecar","endpoint_pid":endpoint,"cwd":env::current_dir().ok(),"state_dir":config.state_dir,"env":env::vars().collect::<std::collections::BTreeMap<_,_>>()});
-            writeln!(
-                sidecar.input.as_mut().ok_or("Plugin stdin unavailable")?,
-                "{request}"
-            )
-            .map_err(|e| e.to_string())?;
+            let input = sidecar.input.as_mut().ok_or("Plugin stdin unavailable")?;
+            let fd = input.as_raw_fd();
+            // SAFETY: input owns this live descriptor for the entire bounded write.
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+            let bytes = format!("{request}\n").into_bytes();
+            let mut offset = 0;
+            while offset < bytes.len() {
+                if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed)
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err("Plugin startup cancelled or timed out".into());
+                }
+                match input.write(&bytes[offset..]) {
+                    Ok(0) => return Err("Plugin stdin closed".into()),
+                    Ok(n) => offset += n,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        let mut fds = [
+                            libc::pollfd {
+                                fd,
+                                events: libc::POLLOUT,
+                                revents: 0,
+                            },
+                            libc::pollfd {
+                                fd: wake.read_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                        ];
+                        cito_native::support::poll_until(&mut fds, Some(deadline))?;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
             let (tx, rx) = mpsc::channel();
+            let ready_wake = Arc::new(cito_native::support::WakePipe::new()?);
+            let ready_notice = ready_wake.clone();
             let out = lock.clone();
+            let failed = output_failed.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stdout);
                 let ready = read_sidecar_line(&mut reader)
@@ -215,17 +291,39 @@ fn run_mcp_stdio() {
                         serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())
                     });
                 let _ = tx.send(ready);
+                ready_notice.notify();
                 while let Ok(Some(line)) = read_sidecar_line(&mut reader) {
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if v["jsonrpc"] == "2.0" && v.get("method").is_some() {
-                            output(&out, &v)
+                        if v["jsonrpc"] == "2.0"
+                            && v.get("method").is_some()
+                            && output(&out, &v).is_err()
+                        {
+                            failed.store(true, std::sync::atomic::Ordering::Release);
+                            STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+                            wake.notify();
+                            break;
                         }
                     }
                 }
             });
-            let ready = rx
-                .recv_timeout(Duration::from_secs(10))
-                .map_err(|e| e.to_string())??;
+            let mut fds = [
+                libc::pollfd {
+                    fd: ready_wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            if !cito_native::support::poll_until(&mut fds, Some(deadline))?
+                || STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err("Plugin startup cancelled or timed out".into());
+            }
+            let ready = rx.try_recv().map_err(|error| error.to_string())??;
             if ready["op"] != "ready" {
                 return Err("Plugin did not send ready".into());
             }
@@ -240,9 +338,21 @@ fn run_mcp_stdio() {
         }
     }
     let mut pending = Vec::new();
-    while let Some(line) = read_stdio_line(&mut pending) {
-        let Ok(mut req) = serde_json::from_str::<Value>(&line) else {
-            continue;
+    while let Some(line) = read_stdio_line(&mut pending, wake.read_fd())? {
+        let mut req = match serde_json::from_str::<Value>(&line) {
+            Ok(req) if req.is_object() => req,
+            result => {
+                let (code, message) = if result.is_err() {
+                    (-32700, "Parse error")
+                } else {
+                    (-32600, "Invalid Request")
+                };
+                output(
+                    &lock,
+                    &json!({"jsonrpc":"2.0","id":null,"error":{"code":code,"message":message}}),
+                )?;
+                continue;
+            }
         };
         let id = req.get("id").cloned();
         if req["method"] == "tools/call" {
@@ -262,16 +372,16 @@ fn run_mcp_stdio() {
                     return Err("MCP state directory changed; restart the client".into());
                 }
                 ensure_daemon(&current)?;
+                if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err("MCP transport stopped".into());
+                }
                 http_post_mcp(
                     current.daemon_port,
                     &req.to_string(),
                     Duration::from_secs(60),
                 )
             })
-            .and_then(|r| {
-                extract_jsonrpc_from_http_body(&r.body)
-                    .ok_or_else(|| format!("Invalid daemon response (HTTP {})", r.status))
-            });
+            .and_then(|r| daemon_rpc_response(&r.body, r.status, id.as_ref()));
         if let Some(id) = id {
             match result {
                 Ok(mut rpc) => {
@@ -287,10 +397,15 @@ fn run_mcp_stdio() {
                     &lock,
                     &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":e}}),
                 ),
-            }
+            }?
         }
     }
     drop(sidecars);
+    if output_failed.load(std::sync::atomic::Ordering::Acquire) {
+        Err("MCP stdout write failed".into())
+    } else {
+        Ok(())
+    }
 }
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -304,33 +419,26 @@ fn main() {
         Some("setup") => setup::run_setup_cli(&args[2..]),
         Some("hub") => hub::run_hub_cli(&args[2..]),
         Some("daemon") => {
-            let (config, plugins) = load_native_config().unwrap_or_else(|e| {
-                eprintln!("cito daemon: {e}");
-                std::process::exit(1)
-            });
+            let (config, plugins) =
+                load_native_config().unwrap_or_else(|e| plugins::exit_cli_error("cito daemon", &e));
             daemon::run_daemon(&config, &plugins);
         }
         Some("listen" | "unlisten" | "rename" | "status" | "find" | "send" | "inbox") => {
-            let (config, plugins) = load_native_config().unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1)
-            });
+            let (config, plugins) =
+                load_native_config().unwrap_or_else(|e| plugins::exit_cli_error("cito", &e));
             daemon::run_cli_command(&args[1], &args[2..], &config, &plugins);
         }
         Some("mcp-stdio") | None => {
             if argv0 == "Cito" && args.get(1).is_none() {
-                let (config, plugins) = load_native_config().unwrap_or_else(|e| {
-                    eprintln!("cito daemon: {e}");
-                    std::process::exit(1)
-                });
+                let (config, plugins) = load_native_config()
+                    .unwrap_or_else(|e| plugins::exit_cli_error("cito daemon", &e));
                 daemon::run_daemon(&config, &plugins);
             } else {
-                run_mcp_stdio()
+                run_mcp_stdio().unwrap_or_else(|e| plugins::exit_cli_error("cito-mcp", &e))
             }
         }
         Some(other) => {
-            eprintln!("cito-native: unknown subcommand '{other}'");
-            std::process::exit(1)
+            plugins::exit_cli_error("cito-native", &format!("unknown subcommand '{other}'"))
         }
     }
 }
@@ -357,6 +465,10 @@ mod framing_tests {
         assert!(pop_stdio_line(&mut oversized).is_err());
         let mut no_newline = vec![b'x'; 1_048_577];
         assert!(pop_stdio_line(&mut no_newline).is_err());
+    }
+    #[test]
+    fn invalid_poll_descriptor_is_an_input_error() {
+        assert!(read_stdio_line(&mut Vec::new(), i32::MAX).is_err());
     }
     #[test]
     fn sidecar_lines_stop_at_the_budget() {

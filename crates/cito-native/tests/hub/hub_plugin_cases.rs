@@ -1,14 +1,30 @@
 use super::*;
 use std::fs;
+use std::process::Command;
+struct Descendant(i32);
+impl Drop for Descendant {
+    fn drop(&mut self) {
+        if self.0 > 0 {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+}
 
 #[test]
-fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader() {
-    let dir =
-        std::env::temp_dir().join(format!("cito-reaped-{}", crate::plugins::random_uuid_v4()));
+fn child_exit_is_not_masked_by_a_descendants_inherited_stdout() {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "cito-child-exit-{}",
+            crate::plugins::random_uuid_v4()
+        ))
+        .join("sample");
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("driver.py");
     fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
     let plugin = ChannelPlugin {
+        is_builtin: false,
         id: "sample".into(),
         dir: dir.clone(),
         manifest: json!({}),
@@ -24,14 +40,54 @@ fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader(
         .unwrap()
         .parse::<i32>()
         .unwrap();
-    struct Descendant(i32);
-    impl Drop for Descendant {
-        fn drop(&mut self) {
-            unsafe {
-                libc::kill(self.0, libc::SIGKILL);
-            }
-        }
-    }
+    let mut cleanup = Descendant(pid);
+    let exited = crate::support::child_exit_fd(pid as u32).unwrap();
+    assert!(
+        !process.alive(),
+        "A descendant holding stdout must not keep the OS child alive"
+    );
+    process.shutdown();
+    use std::os::fd::AsRawFd;
+    assert!(crate::support::poll_until(
+        &mut [libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0
+        }],
+        Some(Instant::now() + Duration::from_secs(1))
+    )
+    .unwrap());
+    cleanup.0 = 0;
+    drop(cleanup);
+    drop(process);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader() {
+    let dir = std::env::temp_dir()
+        .join(format!("cito-reaped-{}", crate::plugins::random_uuid_v4()))
+        .join("sample");
+    fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("driver.py");
+    fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
+    let plugin = ChannelPlugin {
+        is_builtin: false,
+        id: "sample".into(),
+        dir: dir.clone(),
+        manifest: json!({}),
+        command: vec!["python3".into(), script.to_string_lossy().into_owned()],
+    };
+    let process = ChannelProcess::spawn(&plugin, Arc::new(|_| None)).unwrap();
+    assert!(crate::support::wait_child_exit(
+        &process.child.lock().unwrap(),
+        Duration::from_secs(2)
+    )
+    .unwrap());
+    let pid = fs::read_to_string(dir.join("descendant"))
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
     let cleanup = Descendant(pid);
     assert!(process.child.lock().unwrap().try_wait().unwrap().is_some());
     let started = Instant::now();

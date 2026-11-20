@@ -1,5 +1,106 @@
 //! Shared browser boundary for the native HTTP listeners.
+use std::collections::HashMap;
+use std::io::{BufRead, Read, Write};
 use std::net::SocketAddr;
+
+pub(super) struct RequestHead {
+    pub method: String,
+    pub target: String,
+    pub headers: HashMap<String, String>,
+    pub length: usize,
+}
+
+pub(super) fn read_head(
+    reader: &mut impl BufRead,
+    header_limit: u64,
+) -> Result<RequestHead, (u16, &'static str)> {
+    let mut line = String::new();
+    reader
+        .by_ref()
+        .take(8193)
+        .read_line(&mut line)
+        .map_err(|_| (400, "Invalid request line"))?;
+    if line.len() > 8192 {
+        return Err((400, "Request line too long"));
+    }
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 3 || parts[2] != "HTTP/1.1" {
+        return Err((400, "Malformed HTTP request"));
+    }
+    let method = parts[0].to_owned();
+    let target = parts[1].to_owned();
+    let mut headers = HashMap::new();
+    let mut size = 0;
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .by_ref()
+            .take(header_limit + 1)
+            .read_line(&mut line)
+            .map_err(|_| (400, "Invalid HTTP header"))?;
+        size += bytes as u64;
+        if size > header_limit {
+            return Err((431, "Headers too large"));
+        }
+        if bytes == 0 {
+            return Err((400, "Truncated HTTP headers"));
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        let (key, value) = line.split_once(':').ok_or((400, "Malformed HTTP header"))?;
+        let key = key.trim().to_ascii_lowercase();
+        if key == "transfer-encoding" {
+            return Err((400, "Transfer-Encoding is not supported"));
+        }
+        if headers.insert(key, value.trim().to_owned()).is_some() {
+            return Err((400, "Duplicate header"));
+        }
+    }
+    let length = headers
+        .get("content-length")
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| (400, "Invalid Content-Length"))?
+        .unwrap_or(0);
+    Ok(RequestHead {
+        method,
+        target,
+        headers,
+        length,
+    })
+}
+
+pub(super) fn coded_error(error: &str) -> (&str, &str) {
+    error
+        .split_once(':')
+        .filter(|(code, _)| {
+            !code.is_empty()
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .unwrap_or(("INTERNAL_ERROR", error))
+}
+
+pub(super) fn write_json(stream: &mut impl Write, status: u16, body: &[u8]) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        _ => "Service Unavailable",
+    };
+    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", body.len())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
 use url::{Host, Url};
 
 fn authority(value: &str) -> Option<Url> {
@@ -78,8 +179,66 @@ pub(super) fn validate_hub(
 }
 
 #[cfg(test)]
+pub(super) fn accept_test_client(
+    listener: &std::net::TcpListener,
+) -> Result<std::net::TcpStream, String> {
+    use std::os::fd::AsRawFd;
+    let mut fd = [libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    if !crate::support::poll_until(
+        &mut fd,
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+    )? {
+        return Err("Timed out waiting for fixture connection".into());
+    }
+    listener
+        .accept()
+        .map(|(stream, _)| stream)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn framing_rejects_transfer_encoding_duplicates_and_truncation() {
+        for limit in [16384, 65536] {
+            for headers in [
+                "Transfer-Encoding: chunked\r\n\r\n",
+                "Content-Length: 1\r\ncontent-length: 2\r\n\r\n",
+                "Content-Length: invalid\r\n\r\n",
+                "Host: localhost\r\n",
+            ] {
+                let request = format!("POST /control HTTP/1.1\r\n{headers}");
+                assert_eq!(
+                    read_head(&mut std::io::Cursor::new(request), limit)
+                        .err()
+                        .unwrap()
+                        .0,
+                    400
+                );
+            }
+            let oversized = format!(
+                "GET / HTTP/1.1\r\nX: {}\r\n\r\n",
+                "x".repeat(limit as usize)
+            );
+            assert_eq!(
+                read_head(&mut std::io::Cursor::new(oversized), limit).err(),
+                Some((431, "Headers too large"))
+            );
+            let mut request =
+                std::io::Cursor::new("POST /control HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+            let head = read_head(&mut request, limit).unwrap();
+            assert_eq!(head.length, 2);
+            assert_eq!(head.target, "/control");
+            let mut body = String::new();
+            request.read_to_string(&mut body).unwrap();
+            assert_eq!(body, "{}");
+        }
+    }
     #[test]
     fn authenticated_proxy_authorities_preserve_the_browser_boundary() {
         for bound in ["127.0.0.1:4291", "0.0.0.0:4291", "[::]:4291"] {

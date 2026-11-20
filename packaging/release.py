@@ -124,6 +124,14 @@ def verify_bundle(app, expected):
         raise ReleaseError("App bundle version does not match the release version.")
     if not (app / "Contents/Resources/plugins").is_dir():
         raise ReleaseError("App bundle is missing its bundled plugins.")
+    for manifest in sorted((ROOT / "plugins").glob("*/plugin.json")):
+        bundled = app / "Contents/Resources/plugins" / manifest.parent.name / "plugin.json"
+        try:
+            matches = json.loads(bundled.read_text()).get("version") == expected
+        except (OSError, ValueError):
+            matches = False
+        if not matches:
+            raise ReleaseError(f"Built-in plugin missing or version mismatched: {manifest.parent.name}")
     for name in ("Contents/Helpers/cito-native", "Contents/Helpers/cito-ui", "Contents/Resources/AppIcon.icns"):
         if not (app / name).is_file():
             raise ReleaseError(f"App bundle is missing a required release component: {name}")
@@ -227,6 +235,20 @@ if {[lindex $result 2] != 0 || [lindex $result 3] != 0 || !$seen(apple) || !$see
 '''
 
 
+def cleanup_steps(*actions):
+    """Attempt every cleanup, preserving an active primary exception."""
+    primary = sys.exc_info()[0] is not None
+    failed = False
+    for action in actions:
+        try:
+            action()
+        except Exception:
+            failed = True
+            print("WARNING: Release cleanup failed; inspect local resources.", file=sys.stderr)
+    if failed and not primary:
+        raise ReleaseError("Release cleanup failed; inspect local resources.")
+
+
 @contextlib.contextmanager
 def signing_credentials():
     names = (
@@ -262,9 +284,10 @@ def signing_credentials():
             run(["/usr/bin/expect"], input=NOTARY_AUTH, env={**os.environ, "CITO_KEYCHAIN": str(keychain)})
             yield keychain, matches[0]
         finally:
-            run(["/usr/bin/security", "list-keychains", "-d", "user", "-s", *original])
-            if keychain.exists():
-                run(["/usr/bin/security", "delete-keychain", keychain])
+            cleanup_steps(
+                lambda: run(["/usr/bin/security", "list-keychains", "-d", "user", "-s", *original]),
+                lambda: run(["/usr/bin/security", "delete-keychain", keychain]) if keychain.exists() else None,
+            )
 
 
 def write_checksum(archive):
@@ -381,14 +404,12 @@ def validate_tag(tag):
 def existing_assets(tag, directory):
     info = release_info(tag)
     if not info:
-        output("reused", "false")
-        return
+        return False
     names = {asset["name"] for asset in info["assets"]}
     if ARCHIVE not in names:
         if not info["isDraft"] or names:
             raise ReleaseError("Existing release assets are incomplete. Reconcile them before retrying.")
-        output("reused", "false")
-        return
+        return False
     directory.mkdir(parents=True, exist_ok=True)
     run(["gh", "release", "download", tag, "--repo", repository(), "--pattern", ARCHIVE, "--dir", directory])
     archive = directory / ARCHIVE
@@ -400,7 +421,7 @@ def existing_assets(tag, directory):
     else:
         raise ReleaseError("Published release is missing its checksum; refusing to mutate it.")
     verify_archive(archive)
-    output("reused", "true")
+    return True
 
 
 def publish(tag, directory):
@@ -415,7 +436,8 @@ def publish(tag, directory):
             raise ReleaseError("Created release could not be read back. Reconcile it before retrying.")
     elif info["assets"]:
         with tempfile.TemporaryDirectory() as existing:
-            existing_assets(tag, Path(existing))
+            if not existing_assets(tag, Path(existing)):
+                raise ReleaseError("Existing release assets changed during verification.")
             if (Path(existing) / checksum.name).read_text() != checksum.read_text():
                 raise ReleaseError("Existing release payload differs; immutable assets will not be replaced.")
     if info["isDraft"]:
@@ -482,16 +504,12 @@ def smoke_cask(cask, tap, expected):
             if marker.read_text() != "preserve\n":
                 raise ReleaseError("Ordinary cask uninstall changed user data.")
         finally:
-            run(["brew", "uninstall", "--cask", f"{tap}/cito"], env=env, check=False)
-            for link in links:
-                if link.is_symlink() and link.resolve() == (app / "Contents/MacOS/Cito").resolve():
-                    link.unlink()
-            if original is None:
-                destination.unlink(missing_ok=True)
-            else:
-                destination.write_bytes(original)
-            if legacy_contents is not None:
-                legacy.write_bytes(legacy_contents)
+            cleanup_steps(
+                lambda: run(["brew", "uninstall", "--cask", f"{tap}/cito"], env=env, check=False),
+                *(lambda link=link: link.unlink() if link.is_symlink() and link.resolve() == (app / "Contents/MacOS/Cito").resolve() else None for link in links),
+                lambda: destination.unlink(missing_ok=True) if original is None else destination.write_bytes(original),
+                lambda: legacy.write_bytes(legacy_contents) if legacy_contents is not None else None,
+            )
     print("Cask install, both CLI links, uninstall, and user-data preservation verified.")
 
 
@@ -508,7 +526,7 @@ def tap_ssh(root):
         run(["ssh-add", "-"], input=key + "\n", env=env)
         yield env
     finally:
-        run(["ssh-agent", "-k"], env=env)
+        cleanup_steps(lambda: run(["ssh-agent", "-k"], env=env))
 
 
 def tap_allows_update(current, desired, expected):
@@ -611,7 +629,7 @@ def main():
         elif args.command == "candidate":
             candidate(args.sha, args.destination.resolve())
         elif args.command == "assets":
-            existing_assets(args.tag, args.directory.resolve())
+            output("reused", str(existing_assets(args.tag, args.directory.resolve())).lower())
         elif args.command == "sign":
             notarize(args.app.resolve(), args.archive.resolve())
         elif args.command == "publish":

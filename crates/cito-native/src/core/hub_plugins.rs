@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -19,6 +19,7 @@ pub struct ChannelPlugin {
     pub dir: PathBuf,
     pub manifest: Value,
     pub command: Vec<String>,
+    pub is_builtin: bool,
 }
 
 pub fn discover(
@@ -53,15 +54,13 @@ pub fn discover(
         if descriptor.kind != "human-channel" || m["scope"] == "user" {
             continue;
         }
-        let mut command = descriptor.command;
-        if command[0].starts_with("./") || command[0].starts_with("../") {
-            command[0] = dir.join(&command[0]).to_string_lossy().into();
-        }
+        let command = descriptor.command;
         plugins.push(ChannelPlugin {
             id: descriptor.id,
             dir,
             command,
             manifest: m,
+            is_builtin: descriptor.is_builtin,
         });
     }
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
@@ -87,9 +86,12 @@ impl ChannelProcess {
         callback: Arc<dyn Fn(Value) -> Option<Value> + Send + Sync>,
     ) -> Result<Self, String> {
         let shutdown_wake = Arc::new(crate::support::WakePipe::new()?);
-        let mut child = Command::new(&plugin.command[0])
-            .args(&plugin.command[1..])
-            .current_dir(&plugin.dir)
+        let mut manifest = plugin.manifest.clone();
+        manifest["id"] = json!(plugin.id);
+        manifest["displayName"] = json!(plugin.id);
+        manifest["command"] = json!(plugin.command);
+        let descriptor = super::plugins::parse_manifest(&plugin.dir, plugin.is_builtin, &manifest)?;
+        let mut child = super::plugins::plugin_command(&descriptor)?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -128,6 +130,10 @@ impl ChannelProcess {
                 return Err(std::io::Error::last_os_error().to_string());
             }
         }
+        let exited = crate::support::child_exit_fd(child.id()).inspect_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+        })?;
         let reader_wake = shutdown_wake.clone();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
@@ -158,9 +164,15 @@ impl ChannelProcess {
                                 events: libc::POLLIN,
                                 revents: 0,
                             },
+                            libc::pollfd {
+                                fd: exited.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
                         ];
                         if crate::support::poll_until(&mut fds, None).is_err()
                             || fds[1].revents != 0
+                            || fds[2].revents != 0
                         {
                             break;
                         }
@@ -212,10 +224,18 @@ impl ChannelProcess {
     }
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+            && self
+                .child
+                .lock()
+                .is_ok_and(|child| super::plugins::peek_plugin_exit(child.id()) == Ok(None))
     }
     pub fn send(&self, value: &Value) -> Result<(), String> {
+        self.send_tracked(value).map_err(|(_, error)| error)
+    }
+    /// The boolean records whether any bytes reached the child pipe.
+    pub(super) fn send_tracked(&self, value: &Value) -> Result<(), (bool, String)> {
         if !self.alive() {
-            return Err("PLUGIN_EXEC_FAILED: Plugin subprocess exited".into());
+            return Err((false, "PLUGIN_EXEC_FAILED: Plugin subprocess exited".into()));
         }
         let result = send_line(&self.stdin, value);
         if result.is_err() {
@@ -270,20 +290,18 @@ impl ChannelProcess {
             }
         }
         if let Ok(mut child) = self.child.lock() {
-            let mut reaped = child.try_wait().ok().flatten().is_some();
-            if !reaped {
-                let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
-                reaped = child.try_wait().ok().flatten().is_some();
-            }
-            if !reaped {
+            // waitid also recognizes an exited child after its kqueue exit event
+            // has passed. ECHILD prevents signaling after an external reap.
+            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
+            if super::plugins::peek_plugin_exit(child.id()).is_ok() {
                 // SAFETY: the owned, unreaped child still reserves its PID and
                 // process group, created by spawn. Never signal after reaping.
                 unsafe {
                     libc::kill(-(child.id() as i32), libc::SIGKILL);
                 }
                 let _ = child.kill();
-                let _ = child.wait();
             }
+            let _ = child.wait();
         }
         // No cursor, pairing, or delivery callback may outlive a stopped process.
         // Callers release the process registry and database locks before shutdown.
@@ -299,36 +317,39 @@ impl Drop for ChannelProcess {
         self.shutdown();
     }
 }
-fn send_line(stdin: &Mutex<Option<ChildStdin>>, value: &Value) -> Result<(), String> {
-    let mut guard = stdin.lock().map_err(|_| "Plugin stdin lock poisoned")?;
-    let stdin = guard
-        .as_mut()
-        .ok_or("PLUGIN_EXEC_FAILED: Plugin subprocess exited")?;
-    let mut bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
-    bytes.push(b'\n');
+fn send_line(stdin: &Mutex<Option<ChildStdin>>, value: &Value) -> Result<(), (bool, String)> {
     let mut offset = 0;
-    let until = Instant::now() + Duration::from_secs(2);
-    while offset < bytes.len() {
-        match stdin.write(&bytes[offset..]) {
-            Ok(0) => return Err("PLUGIN_EXEC_FAILED: closed stdin".into()),
-            Ok(n) => offset += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
-                crate::support::poll_until(
-                    &mut [libc::pollfd {
-                        fd: stdin.as_raw_fd(),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    }],
-                    Some(until),
-                )?;
-                if Instant::now() >= until {
-                    return Err("PLUGIN_EXEC_FAILED: channel input timed out".into());
+    let result = (|| -> Result<(), String> {
+        let mut guard = stdin.lock().map_err(|_| "Plugin stdin lock poisoned")?;
+        let stdin = guard
+            .as_mut()
+            .ok_or("PLUGIN_EXEC_FAILED: Plugin subprocess exited")?;
+        let mut bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+        bytes.push(b'\n');
+        let until = Instant::now() + Duration::from_secs(2);
+        while offset < bytes.len() {
+            match stdin.write(&bytes[offset..]) {
+                Ok(0) => return Err("PLUGIN_EXEC_FAILED: closed stdin".into()),
+                Ok(n) => offset += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
+                    crate::support::poll_until(
+                        &mut [libc::pollfd {
+                            fd: stdin.as_raw_fd(),
+                            events: libc::POLLOUT,
+                            revents: 0,
+                        }],
+                        Some(until),
+                    )?;
+                    if Instant::now() >= until {
+                        return Err("PLUGIN_EXEC_FAILED: channel input timed out".into());
+                    }
                 }
+                Err(e) => return Err(format!("PLUGIN_EXEC_FAILED: {e}")),
             }
-            Err(e) => return Err(format!("PLUGIN_EXEC_FAILED: {e}")),
         }
-    }
-    stdin
-        .flush()
-        .map_err(|e| format!("PLUGIN_EXEC_FAILED: {e}"))
+        stdin
+            .flush()
+            .map_err(|e| format!("PLUGIN_EXEC_FAILED: {e}"))
+    })();
+    result.map_err(|e| (offset != 0, e))
 }
