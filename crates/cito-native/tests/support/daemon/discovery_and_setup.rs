@@ -401,11 +401,17 @@ fn daemon_plugins_strip_inherited_caller_identity_but_honor_explicit_request_env
 }
 #[test]
 fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
-    use std::os::fd::AsRawFd;
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let marker = f.state.join("retained-data");
     fs::write(&marker, "preserve").unwrap();
+    let runtime = f.state.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let staged = runtime.join("staged-data");
+    fs::write(&staged, "staged").unwrap();
+    let config_lock = fs::File::create(f.state.join("config.json.lock")).unwrap();
+    let staging_lock = fs::File::create(runtime.join("staging.lock")).unwrap();
     let owner = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -425,6 +431,7 @@ fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
     );
     assert!(!ok && error.contains("owner lock is held"), "{error}");
     assert_eq!(fs::read_to_string(&marker).unwrap(), "preserve");
+    assert_eq!(fs::read_to_string(&staged).unwrap(), "staged");
     assert!(f.config.exists());
     // SAFETY: release the same owned file descriptor; the lock inode stays stable.
     assert_eq!(unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_UN) }, 0);
@@ -436,9 +443,34 @@ fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
     assert!(ok, "{out} {error}");
     assert!(!marker.exists());
     assert!(!f.config.exists());
-    assert!(fs::read_dir(&f.state)
-        .unwrap()
-        .all(|entry| entry.unwrap().file_name() == "daemon.lock"));
+    let entries = |dir: &std::path::Path| {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        entries(&f.state),
+        ["config.json.lock", "daemon.lock", "runtime"]
+    );
+    assert_eq!(entries(&runtime), ["staging.lock"]);
+    // A recreated pathname would permit a second writer to lock a different inode.
+    for (file, path) in [
+        (owner, f.state.join("daemon.lock")),
+        (config_lock, f.state.join("config.json.lock")),
+        (staging_lock, runtime.join("staging.lock")),
+    ] {
+        let before = file.metadata().unwrap();
+        let after = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (after.dev(), after.ino()),
+            (before.dev(), before.ino()),
+            "{}",
+            path.display()
+        );
+    }
 }
 #[test]
 fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
