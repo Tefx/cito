@@ -18446,14 +18446,14 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v54` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the merged outcomes\
-      \ of `v54.core-hub-daemon`, `v54.cli-setup-plugins`, `v54.macos-ui`, and `v54.audit_fix`:\n\
-      \  1. Load `[REQUIRES_SKILL: contract-and-simplicity]` and perform the post-fix\
-      \ delta convergence audit across all 34 admitted ledger items (`#1`–`#25` Tier\
-      \ 1 `[CONTRACT / WIRE]` + `#26`–`#34` Tier 2 `[SIMPLICITY / TRIM]`) and `PA-1`\
-      \ (`crates/cito-native/tests/support/mod.rs`), verifying every item is closed\
-      \ with discriminating regression coverage, 1-to-1 cut-set gluing ($\\delta s|_{\\\
-      partial} = 0$, including `#4` daemon-to-Swift `composer_result.warning`), and\
-      \ `0` remaining Tier 1 or Tier 2 defects (`UNCLOSED_ORIGINAL`, `REPAIR_REGRESSION`,\
+      \ of `v54.core-hub-daemon`, `v54.cli-setup-plugins`, `v54.macos-ui`, `v54.audit_fix`,\
+      \ and `v54.audit_fix_2`:\n  1. Load `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ and perform the post-fix delta convergence audit across all 34 admitted ledger\
+      \ items (`#1`–`#25` Tier 1 `[CONTRACT / WIRE]` + `#26`–`#34` Tier 2 `[SIMPLICITY\
+      \ / TRIM]`) and `PA-1` (`crates/cito-native/tests/support/mod.rs`), verifying\
+      \ every item is closed with discriminating regression coverage, 1-to-1 cut-set\
+      \ gluing ($\\delta s|_{\\partial} = 0$, including `#4` daemon-to-Swift `composer_result.warning`),\
+      \ and `0` remaining Tier 1 or Tier 2 defects (`UNCLOSED_ORIGINAL`, `REPAIR_REGRESSION`,\
       \ or `MISSED_IN_SCOPE`).\n  2. Run full workspace verification at version `0.21.3`\
       \ (confirming `version = \"0.21.3\"` is unchanged, with NO SemVer bump and NO\
       \ git tag):\n     - `cargo fmt --all -- --check`\n     - `git diff --check`\n\
@@ -18467,11 +18467,11 @@ phases:
       \ terminal verification gate (`repo_change_policy: no_repo_change`, `verification_scope:\
       \ FULL`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
       \nAdmit:\n- Depends on `v54.core-hub-daemon`, `v54.cli-setup-plugins`, `v54.macos-ui`,\
-      \ and `v54.audit_fix`.\n- Consumed evidence: integrated commits and targeted\
-      \ verification receipts from `v54.core-hub-daemon`, `v54.cli-setup-plugins`,\
-      \ `v54.macos-ui`, and `v54.audit_fix`, post-fix delta convergence audit over\
-      \ `#1`–`#34` and `PA-1`, and full workspace build/test outputs.\n\nRecovery:\n\
-      - If any ledger item (`#1`–`#34` or `PA-1`), regression test, compiler/clippy\
+      \ `v54.audit_fix`, and `v54.audit_fix_2`.\n- Consumed evidence: integrated commits\
+      \ and targeted verification receipts from `v54.core-hub-daemon`, `v54.cli-setup-plugins`,\
+      \ `v54.macos-ui`, `v54.audit_fix`, and `v54.audit_fix_2`, post-fix delta convergence\
+      \ audit over `#1`–`#34` and `PA-1`, and full workspace build/test outputs.\n\
+      \nRecovery:\n- If any ledger item (`#1`–`#34` or `PA-1`), regression test, compiler/clippy\
       \ check, or release-version invariant fails, report concrete `file:line` and\
       \ failure evidence so the owning implementation track can repair it before Delta\
       \ re-verification."
@@ -18516,6 +18516,7 @@ phases:
     - v54.cli-setup-plugins
     - v54.macos-ui
     - v54.audit_fix
+    - v54.audit_fix_2
     agent: integration-verifier
   - id: v54.audit_fix
     name: 'V54 Fixture Subprocess Group Teardown & Inherited-Pipe Reader Settlement
@@ -18600,3 +18601,56 @@ phases:
       \ -- -D warnings (exit 0)\n  - cargo test -p cito-native --test native support::\
       \ -- --test-threads=2 (1 passed, 0 failed, 1 ignored worker running 9 teardown\
       \ cases including command-descendant, drop-descendant, panic-descendant, ordinary-reader-timeout)"
+  - id: v54.audit_fix_2
+    name: 'V54 macOS Zombie-Leader Process-Group EPERM Teardown Fix & Fast-Exit Regression
+      Closure [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/tests/support/mod.rs\n  blocked_paths:\n\
+      \    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - packaging/**\n    - docs/**\n\nDeliver:\n- Close the macOS XNU `killpg`\
+      \ zombie-only process-group `EPERM` teardown regression introduced in `v54.audit_fix`\
+      \ (`crates/cito-native/tests/support/mod.rs:142-162`, `:348`, `:359`, `:645`)\
+      \ at version `0.21.3` (NO SemVer bump, NO git tag):\n  1. **Zombie-Leader `killpg`\
+      \ `EPERM` Handling in `Process::stop` (`crates/cito-native/tests/support/mod.rs`)**:\n\
+      \     - In `Process::stop`, handle macOS `kill(-(self.child.id() as i32), signal)`\
+      \ returning `EPERM` (`libc::EPERM`) when the owned unreaped child leader has\
+      \ already exited (`wait_child_exit(&self.child, Duration::ZERO) == Ok(true)`),\
+      \ since on macOS XNU signaling a process group whose only remaining member is\
+      \ the unreaped `SZOMB` leader returns `EPERM` rather than `ESRCH`.\n     - Preserve\
+      \ error reporting when `EPERM` occurs while the owned leader is still alive\
+      \ (`wait_child_exit == Ok(false)`), and continue treating `ESRCH` (`libc::ESRCH`)\
+      \ as non-fatal.\n  2. **Discriminating No-Descendant Fast-Exit Regression (`crates/cito-native/tests/support/mod.rs`)**:\n\
+      \     - Extend `fixture_teardown_settles_children_and_preserves_primary_failures`\
+      \ (and `fixture_teardown_failure_worker`) in `crates/cito-native/tests/support/mod.rs`\
+      \ to also cover ordinary no-descendant fast-exit `Fixture::command` and `Fixture::drop`\
+      \ histories alongside the existing descendant-pipe (`command-descendant`, `drop-descendant`,\
+      \ `panic-descendant`), reader-failure, and health-failure cases, verifying exit\
+      \ status `0` and clean sandbox removal without false `EPERM` teardown errors.\n\
+      \nImplementation Notes (Non-Binding):\n- In `Process::stop`, track whether `wait_child_exit(&self.child,\
+      \ Duration::ZERO)` (or the post-`SIGTERM` `wait_child_exit(&self.child, Duration::from_secs(2))`)\
+      \ observed `exited == true` (or re-query `wait_child_exit(&self.child, Duration::ZERO)`\
+      \ on `EPERM`) so `signal_group` permits `EPERM` if and only if the leader has\
+      \ already exited into zombie state.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Isolated worktree transaction restricted to `scope.allowed_paths`\
+      \ (`crates/cito-native/tests/support/mod.rs`; `plan.yaml`, `crates/cito-native/src/**`,\
+      \ `plugins/**`, `src/macos/**`, `packaging/**`, and `docs/**` are blocked).\
+      \ Keep product version at `0.21.3` (NO SemVer bump, NO git tag).\n\nAdmit:\n\
+      - Depends on `v54.audit_fix`.\n- Consumed input: `integration-verifier` Round\
+      \ 2 report (`/tmp/v54-bindings/integration-verifier.report.json`) and macOS\
+      \ `killpg` microprobe (`/tmp/v54-iv-logs-r2/group-signal-probe.json`) on commit\
+      \ `4a9060d31866d8c135fbff156079b8b4d700cf09`.\n- Verification: `cargo fmt --all\
+      \ -- --check && git diff --check && cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings && cargo test -p cito-native --test native support:: -- --test-threads=2\
+      \ && cargo test -p cito-native --test native plugins::pi_bridge -- --test-threads=1`.\
+      \ Consumed by `v54.gate`.\n\nRecovery:\n- Repair any Rust compiler, clippy,\
+      \ or integration test failure in place within the worktree before completion."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets --locked -- -D warnings && cargo test -p cito-native
+      --test native support:: -- --test-threads=2 && cargo test -p cito-native --test
+      native plugins::pi_bridge -- --test-threads=1'
+    refs:
+    - crates/cito-native/tests/support/mod.rs
+    depends_on:
+    - v54.audit_fix
+    agent: rust-senior
