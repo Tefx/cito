@@ -18446,13 +18446,14 @@ phases:
     description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
       \ FULL\n\nDeliver:\n- Terminal Phase `v54` acceptance decision (`PASS` or `FAIL`)\
       \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the merged outcomes\
-      \ of `v54.core-hub-daemon`, `v54.cli-setup-plugins`, and `v54.macos-ui`:\n \
-      \ 1. Load `[REQUIRES_SKILL: contract-and-simplicity]` and perform the post-fix\
+      \ of `v54.core-hub-daemon`, `v54.cli-setup-plugins`, `v54.macos-ui`, and `v54.audit_fix`:\n\
+      \  1. Load `[REQUIRES_SKILL: contract-and-simplicity]` and perform the post-fix\
       \ delta convergence audit across all 34 admitted ledger items (`#1`–`#25` Tier\
-      \ 1 `[CONTRACT / WIRE]` + `#26`–`#34` Tier 2 `[SIMPLICITY / TRIM]`), verifying\
-      \ every item is closed with discriminating regression coverage, 1-to-1 cut-set\
-      \ gluing ($\\delta s|_{\\partial} = 0$, including `#4` daemon-to-Swift `composer_result.warning`),\
-      \ and `0` remaining Tier 1 or Tier 2 defects (`UNCLOSED_ORIGINAL`, `REPAIR_REGRESSION`,\
+      \ 1 `[CONTRACT / WIRE]` + `#26`–`#34` Tier 2 `[SIMPLICITY / TRIM]`) and `PA-1`\
+      \ (`crates/cito-native/tests/support/mod.rs`), verifying every item is closed\
+      \ with discriminating regression coverage, 1-to-1 cut-set gluing ($\\delta s|_{\\\
+      partial} = 0$, including `#4` daemon-to-Swift `composer_result.warning`), and\
+      \ `0` remaining Tier 1 or Tier 2 defects (`UNCLOSED_ORIGINAL`, `REPAIR_REGRESSION`,\
       \ or `MISSED_IN_SCOPE`).\n  2. Run full workspace verification at version `0.21.3`\
       \ (confirming `version = \"0.21.3\"` is unchanged, with NO SemVer bump and NO\
       \ git tag):\n     - `cargo fmt --all -- --check`\n     - `git diff --check`\n\
@@ -18465,11 +18466,12 @@ phases:
       \ `integration-verifier` (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only\
       \ terminal verification gate (`repo_change_policy: no_repo_change`, `verification_scope:\
       \ FULL`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
-      \nAdmit:\n- Depends on `v54.core-hub-daemon`, `v54.cli-setup-plugins`, and `v54.macos-ui`.\n\
-      - Consumed evidence: integrated commits and targeted verification receipts from\
-      \ `v54.core-hub-daemon`, `v54.cli-setup-plugins`, and `v54.macos-ui`, post-fix\
-      \ delta convergence audit over `#1`–`#34`, and full workspace build/test outputs.\n\
-      \nRecovery:\n- If any ledger item (`#1`–`#34`), regression test, compiler/clippy\
+      \nAdmit:\n- Depends on `v54.core-hub-daemon`, `v54.cli-setup-plugins`, `v54.macos-ui`,\
+      \ and `v54.audit_fix`.\n- Consumed evidence: integrated commits and targeted\
+      \ verification receipts from `v54.core-hub-daemon`, `v54.cli-setup-plugins`,\
+      \ `v54.macos-ui`, and `v54.audit_fix`, post-fix delta convergence audit over\
+      \ `#1`–`#34` and `PA-1`, and full workspace build/test outputs.\n\nRecovery:\n\
+      - If any ledger item (`#1`–`#34` or `PA-1`), regression test, compiler/clippy\
       \ check, or release-version invariant fails, report concrete `file:line` and\
       \ failure evidence so the owning implementation track can repair it before Delta\
       \ re-verification."
@@ -18508,8 +18510,79 @@ phases:
     - packaging/release.py
     - packaging/homebrew/cito.rb
     - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/tests/support/mod.rs
     depends_on:
     - v54.core-hub-daemon
     - v54.cli-setup-plugins
     - v54.macos-ui
+    - v54.audit_fix
     agent: integration-verifier
+  - id: v54.audit_fix
+    name: 'V54 Fixture Subprocess Group Teardown & Inherited-Pipe Reader Settlement
+      Closure (PA-1 / #13 & #33) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/tests/support/mod.rs\n  blocked_paths:\n\
+      \    - plan.yaml\n    - crates/cito-native/src/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - packaging/**\n    - docs/**\n\nDeliver:\n- Close `pathway-auditor` Tier\
+      \ 1 finding `PA-1` (`MISSED_IN_SCOPE`, `#13`/`#33`) across the complete `Process`\
+      \ and `Fixture` subprocess lifecycle orbit (`Process::stop`, `Fixture::exited`,\
+      \ `Fixture::stop`, `Fixture::command`, `Fixture::drop`) in `crates/cito-native/tests/support/mod.rs`\
+      \ at version `0.21.3` (NO SemVer bump, NO git tag):\n  1. **Unreaped Process-Group\
+      \ Ownership & Idempotent Group Termination (`Process::stop`, `Fixture::exited`,\
+      \ `Fixture::command`, `Fixture::drop`)**:\n     - Preserve owned child PID and\
+      \ process-group reservation until group cleanup settles: observe child exit\
+      \ without premature reaping before `Process::stop` runs (reusing `cito_native::support::wait_child_exit`\
+      \ rather than `Child::try_wait()` in `Fixture::exited` and `Process::stop`),\
+      \ so fast-exiting parents (including `Fixture::command`'s `wait(|| self.exited(i))`\
+      \ before `self.stop(i)`) never bypass process-group cleanup.\n     - During\
+      \ the first `Process::stop` on an unreaped child, if the parent is still running\
+      \ send `SIGTERM` to `-(self.child.id() as i32)` and wait up to `2s`, then terminate\
+      \ any remaining inherited-pipe descendants in the owned process group (`SIGKILL`\
+      \ to `-(self.child.id() as i32)`) even when the parent already exited before\
+      \ reaping via `self.child.wait()`; cache the reaped `ExitStatus` / stopped state\
+      \ on `Process` so `Fixture::command`, `Fixture::exited`, explicit `Fixture::stop(i)`,\
+      \ and subsequent `Fixture::drop` calls are idempotent and never signal a reaped\
+      \ PID.\n     - Join/settle stdout and stderr reader threads with a bounded failure\
+      \ exit (recording a cleanup error on reader panic or timeout rather than blocking\
+      \ indefinitely) so `Fixture::drop` always reaches detached-daemon and sandbox\
+      \ directory cleanup.\n  2. **Discriminating Parent-Exit + Inherited-Pipe Descendant\
+      \ Regression (`crates/cito-native/tests/support/mod.rs`)**:\n     - Extend the\
+      \ teardown regression suite in `crates/cito-native/tests/support/mod.rs` to\
+      \ cover a fixture-owned parent that exits immediately while a background descendant\
+      \ retains inherited stdout/stderr pipes (e.g., `/bin/sh -c \"sleep 30 & exit\
+      \ 0\"`), exercising:\n       a. `Fixture::command` (where `wait(|| self.exited(i))`\
+      \ observes parent exit before `stop(i)`),\n       b. `Fixture::drop` after an\
+      \ already-exited parent history, and\n       c. primary-panic teardown (`std::thread::panicking()`)\
+      \ with an exited parent + inherited-pipe descendant.\n     - Verify bounded\
+      \ completion, zero surviving descendant processes, sandbox directory removal\
+      \ (`!Path::new(&child_dir).exists()`), and preservation of primary panic exception\
+      \ precedence.\n\nImplementation Notes (Non-Binding):\n- `cito_native::support::wait_child_exit(&child,\
+      \ Duration::ZERO)` is already exported from `crates/cito-native/src/plugin_support.rs`\
+      \ (`crates/cito-native/src/support/subprocess.rs:64-77`) and observes child\
+      \ exit (including macOS `EVFILT_PROC` `ESRCH` for unreaped zombies) without\
+      \ reaping `child`.\n- Keep all edits strictly within `crates/cito-native/tests/support/mod.rs`;\
+      \ do not modify `crates/cito-native/src/**`.\n\nBoundary:\n- Owner: `rust-senior`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Isolated worktree transaction\
+      \ restricted to `scope.allowed_paths` (`crates/cito-native/tests/support/mod.rs`;\
+      \ `plan.yaml`, `crates/cito-native/src/**`, `plugins/**`, `src/macos/**`, `packaging/**`,\
+      \ and `docs/**` are blocked). Keep product version at `0.21.3` (NO SemVer bump,\
+      \ NO git tag).\n\nAdmit:\n- Depends on `v54.core-hub-daemon`, `v54.cli-setup-plugins`,\
+      \ and `v54.macos-ui`.\n- Consumed input: `pathway-auditor` finding `PA-1` (`/tmp/v54-bindings/pathway-auditor.report.json`)\
+      \ on integrated commit `9177e1f3af5763315c39a4110ae696e69d1871e3`.\n- Verification:\
+      \ `cargo fmt --all -- --check && git diff --check && cargo clippy --workspace\
+      \ --all-targets --locked -- -D warnings && cargo test -p cito-native --test\
+      \ native support:: -- --test-threads=2`. Consumed by `v54.gate`.\n\nRecovery:\n\
+      - Repair any Rust compiler, clippy, or `support::` integration test failure\
+      \ in place within the worktree before completion."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets --locked -- -D warnings && cargo test -p cito-native
+      --test native support:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/src/support/subprocess.rs
+    depends_on:
+    - v54.core-hub-daemon
+    - v54.cli-setup-plugins
+    - v54.macos-ui
+    agent: rust-senior
