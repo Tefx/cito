@@ -18006,3 +18006,467 @@ phases:
       Spec link:
 
       - docs/DESIGN.md §§2.2, 4.1, 8.1; plan.yaml step v53.audit_fix'
+- id: v54
+  name: 'V54 3-Pass Converged Audit Remediation: Subprocess ESRCH, Reload & Registration
+    Fencing, Host-Hub Invite & Authority Parity, Claude Hook/UTF-8/CWD Closure, UI
+    Directory Refresh & 34-Item Ledger Closure (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: pending
+  gate: 'All 34 admitted findings (#1–#25 Tier 1 [CONTRACT / WIRE] and #26–#34 Tier
+    2 [SIMPLICITY / TRIM]) are closed with discriminating regression coverage and
+    0 remaining Tier 1 or Tier 2 defects in the post-fix delta convergence audit;
+    product version remains 0.21.3 unchanged (no SemVer bump, no git tag); cargo fmt
+    --all -- --check, git diff --check, cargo clippy --workspace --all-targets --locked
+    -- -D warnings, cargo test --workspace && cargo build --release, Pi bridge Node
+    type-strip test, python3 -m unittest packaging/test_release.py, python3 packaging/release.py
+    check, node crates/cito-native/tests/support/site-clipboard.mjs, and /usr/bin/ruby
+    -c packaging/homebrew/cito.rb pass cleanly.'
+  context: 'Consume the upstream converged 3-Pass 34-Item Admitted Finding Ledger
+    (#1–#25 Tier 1 [CONTRACT / WIRE] + #26–#34 Tier 2 [SIMPLICITY / TRIM]) on pinned
+    commit b1bcdcf9377be0c82446ae040768340beee3b515 at version 0.21.3 (NO SemVer bump,
+    NO git tag) directly without adding a Stage 1 discovery step. Partition remediation
+    into 3 conflict-free parallel implementation steps (v54.core-hub-daemon, v54.cli-setup-plugins,
+    v54.macos-ui; depends_on: []) with strictly disjoint mutable file sets feeding
+    1 terminal verification gate (v54.gate). Lock the cross-layer cut-set contract
+    on #4 (composer_result includes optional non-empty string field "warning" only
+    when maintenance_warning is non-empty, omitting "warning" when absent to preserve
+    the 4-field {"op":"composer_result","ok":true,"error":null,"request_id":...} contract).'
+  depends_on:
+  - v53
+  steps:
+  - id: v54.core-hub-daemon
+    name: 'V54 Core, Hub, Daemon & Receiver Closure: Dedup Partitioning, Heartbeat/Reload/Registration
+      Fencing, Host-Hub Invite & Authority Parity, HTTP Boundary & SQLite Consolidations
+      (#1–#8, #13–#17, #22, #26–#28, #33-core) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/daemon/**\n    - crates/cito-native/src/core/receiver.rs\n\
+      \    - crates/cito-native/src/core/receiver_tests.rs\n    - crates/cito-native/src/core/state.rs\n\
+      \    - crates/cito-native/src/core/state/**\n    - crates/cito-native/src/core/hub.rs\n\
+      \    - crates/cito-native/src/core/hub/**\n    - crates/cito-native/src/core/lease.rs\n\
+      \    - crates/cito-native/src/core/http_boundary.rs\n    - crates/cito-native/src/core/registration.rs\n\
+      \    - crates/cito-native/src/core/database.rs\n    - crates/cito-native/src/plugin_support.rs\n\
+      \    - crates/cito-native/tests/support/mod.rs\n    - crates/cito-native/tests/support/daemon/**\n\
+      \    - crates/cito-native/tests/hub/cases.rs\n  blocked_paths:\n    - plan.yaml\n\
+      \    - crates/cito-native/src/support/subprocess.rs\n    - crates/cito-native/src/core/setup.rs\n\
+      \    - crates/cito-native/src/core/setup/**\n    - crates/cito-native/src/core/cli.rs\n\
+      \    - crates/cito-native/tests/support/plugins.rs\n    - crates/cito-native/tests/support/ui/**\n\
+      \    - plugins/**\n    - src/macos/**\n    - docs/DESIGN.md\n\nDeliver:\n- Consume\
+      \ the converged 34-Item Admitted Finding Ledger directly without repeating Stage\
+      \ 1 discovery, closing all 20 assigned Core, Hub, Daemon, Receiver, State, Registration,\
+      \ and Core/Daemon/Hub Test items (Tier 1 `#1, #2, #3, #4 (daemon side), #5,\
+      \ #6, #7, #8, #14, #15, #16, #17, #22, #13 (hub/daemon/receiver tests & support/mod.rs)`;\
+      \ Tier 2 `#26, #27, #28, #33 (daemon/tests.rs, cases.rs, support/daemon/*.rs,\
+      \ receiver_tests.rs)`) at version `0.21.3` (NO SemVer bump, NO git tag):\n \
+      \ 1. **Daemon MCP Dedup, Background Heartbeat/Reload/Registration Fencing &\
+      \ Initial UI Backoff (`#1, #2, #16, #17, #22`)**:\n     - `#1` (`crates/cito-native/src/core/daemon/mcp.rs`):\
+      \ Split sender-endpoint delimiter ambiguity (`ambiguous_endpoint`, true only\
+      \ when any of `principal_id`, `host_id`, `harness`, or `session_id` contains\
+      \ `'|'`) from full-record legacy delimiter ambiguity (`ambiguous_legacy`) in\
+      \ `send_from` so `endpoint_dedup` fallback remains active whenever `message`,\
+      \ `in_reply_to`, `url`, or `idempotency_key` contains `'|'` while endpoint components\
+      \ are pipe-free.\n     - `#2` (`crates/cito-native/src/core/daemon/mod.rs`,\
+      \ `crates/cito-native/src/core/daemon/http_actions.rs`): In background agent\
+      \ heartbeat inside `DaemonService::poll`, re-read `state.listener` after acquiring\
+      \ `registration_lock`, verify `status == \"ACTIVE\"` and matching `(binding_generation,\
+      \ owner_token)`, and publish the fresh post-lock `listen_mode` so concurrent\
+      \ `set_listen_mode` (`Pin`/`Unpin`) mutations are never clobbered by a stale\
+      \ pre-lock snapshot; use non-blocking `try_lock` on `registration_lock` during\
+      \ background `auto_listen` idle retirement so a contended remote registration\
+      \ lock never stalls the global `service` mutex.\n     - `#16` (`crates/cito-native/src/core/daemon/mod.rs`,\
+      \ `crates/cito-native/src/core/registration.rs`): In `reload_slots`, call `old.close()`\
+      \ and acquire the old slot's `registration` lock before running the durable\
+      \ `local_listeners` fencing scan so in-flight registration/heartbeat calls on\
+      \ the retiring slot settle before fencing; in `registration.rs:local_node`,\
+      \ require `row[\"hub_url\"].is_null() || row[\"hub_url\"] == client.config[\"\
+      url\"]` so a row bound to a prior Hub URL never suppresses automatic enrollment\
+      \ on the reconfigured Hub URL.\n     - `#17` (`crates/cito-native/src/core/registration.rs`):\
+      \ If the local SQLite commit fails after remote `human_device_attach` (in `register_human_device`)\
+      \ or remote `kv_save` (in `register_locked`) has already committed on the Hub,\
+      \ execute best-effort compensating `detach_channel_expected` for the newly created\
+      \ `(generation, owner)` so no active ghost attachment is stranded on the Hub.\n\
+      \     - `#22` (`crates/cito-native/src/core/daemon/mod.rs`): In `run_daemon_inner`,\
+      \ when initial `spawn_ui` returns `None` and `CITO_DISABLE_UI != \"1\"`, initialize\
+      \ `ui_retry = Some(Instant::now() + ui_backoff.failed())` so initial UI launch\
+      \ failure enters the same bounded backoff recovery schedule as post-crash UI\
+      \ replacement.\n  2. **Receiver Probe Retirement, Composer Warning Cut-Set &\
+      \ Host-Hub Invite/Authority Parity (`#3, #4 (daemon side), #14, #15`)**:\n \
+      \    - `#3` (`crates/cito-native/src/core/receiver.rs`, `crates/cito-native/src/core/state.rs`):\
+      \ Require an active non-null `dispatcher_token` (`AND s.dispatcher_token IS\
+      \ NOT NULL`) in `apply_probe`'s `NOT EXISTS (... s.state='DISPATCHING' AND s.acknowledged_at_ms\
+      \ IS NULL)` guard so unowned/expired retry checkpoints (`dispatcher_token IS\
+      \ NULL`) do not permanently block transient-failure (`failures >= 3`) retirement\
+      \ after lease expiry.\n     - `#4 (daemon side — locked cut-set $\\delta s|_{\\\
+      partial} = 0$ with `v54.macos-ui`)` (`crates/cito-native/src/core/daemon/http_actions.rs`):\
+      \ In `action_with_precondition`, extract warning text from `value.get(\"warning\"\
+      ).or_else(|| value.get(\"maintenance_warning\"))`; in `emit_composer_result`,\
+      \ append `\"warning\": warning` to the `composer_result` IPC frame ONLY when\
+      \ `maintenance_warning` is a non-empty string, omitting the `\"warning\"` key\
+      \ completely when absent or empty so the 4-field `{\"op\":\"composer_result\"\
+      ,\"ok\":true,\"error\":null,\"request_id\":...}` contract in `oracle_e2e.rs:2834`\
+      \ remains intact.\n     - `#14` (`crates/cito-native/src/core/daemon/projection.rs`,\
+      \ `crates/cito-native/src/core/daemon/host_hub.rs`): Guarantee a lossless round-trip\
+      \ between `host_hub_server_config`, `settings_for_hub`'s generated `invite_command`\
+      \ (`lan_invite_command` / `tailscale_invite_command`), and `parse_hub_invite`\
+      \ across all accepted token strings (including tokens starting with `--` via\
+      \ `--token=<token>` or JSON invite encoding, and rejecting whitespace in `host_hub_server_config`\
+      \ or encoding safely).\n     - `#15` (`crates/cito-native/src/core/daemon/host_hub.rs`,\
+      \ `crates/cito-native/src/core/daemon/projection.rs`): In `settings_for_hub`,\
+      \ whenever `self.host_server.is_some()`, derive the operational `bind`, `auth_mode`,\
+      \ and `token` for the running listener and its `invite_command` from `self.applied_host_config.as_ref().unwrap_or(host)`\
+      \ so a failed external config reload never mixes the retained listener's port\
+      \ with unapplied credentials.\n  3. **Hub Pairing Reconciliation, Structured\
+      \ Delivery Pagination, Lease Dedup & HTTP Boundary Parity (`#5, #6, #7, #8`)**:\n\
+      \     - `#5` (`crates/cito-native/src/core/hub.rs`): When `human_channel_pair_start`\
+      \ mutates `hub_config` (`changed == true`), reset failed `hub_channel_deliveries`,\
+      \ reconcile all existing `hub_human_channels` rows for that plugin via `attach(...)`,\
+      \ and emit `self.emit(json!({\"type\":\"kv\"}))` after transaction commit, matching\
+      \ `human_channels_configure`.\n     - `#6` (`crates/cito-native/src/core/hub.rs`):\
+      \ Filter `reserve_deliveries` SQL pagination (`ORDER BY seq LIMIT 200`) to structured\
+      \ signals (`EXISTS(SELECT 1 FROM hub_signal_meta m WHERE m.seq=hub_signals.seq)`)\
+      \ before applying `LIMIT 200` so `>= 200` raw stream rows cannot starve subsequent\
+      \ structured notifications.\n     - `#7` (`crates/cito-native/src/core/lease.rs`):\
+      \ In `lease::attachments`, deduplicate `location == \"hub\"` external channel\
+      \ attachments by `(location, channel_id)` (falling back to `plugin_id`/`display_name`\
+      \ only when `channel_id` is empty), while preserving `(\"device\", display_name)`\
+      \ deduplication for device attachments.\n     - `#8` (`crates/cito-native/src/core/http_boundary.rs`,\
+      \ `crates/cito-native/src/core/hub/http.rs`, `crates/cito-native/src/core/daemon/http_actions/transport.rs`):\
+      \ Preserve `431` and `413` HTTP status codes in `hub/http.rs`; in `daemon/http_actions/transport.rs`,\
+      \ strip `?query` from `head.target`, evaluate `GET /health` and `method != \"\
+      POST\"` before reading the request body, return HTTP `400` JSON on truncated\
+      \ POST bodies instead of silently closing the socket, and validate `[A-Z0-9_]+`\
+      \ error-code format on `/mcp` errors; add a `> limit` `431` unit test in `http_boundary.rs`.\n\
+      \  4. **Tier 2 Structural Consolidations & Core/Hub/Daemon Test Hygiene (`#26,\
+      \ #27, #28, #13 & #33-core`)**:\n     - `#26` (`crates/cito-native/src/core/database.rs`,\
+      \ `crates/cito-native/src/plugin_support.rs`): Consolidate duplicate `#[link(name\
+      \ = \"sqlite3\")] extern \"C\"` FFI declarations into a single authority (note:\
+      \ keep `plugin_support.rs` compiling cleanly both when included in `cito-native`\
+      \ and when included via `#[path = ...]` in standalone plugin crates).\n    \
+      \ - `#27` (`crates/cito-native/src/core/state/activity.rs`, `crates/cito-native/src/core/state.rs`):\
+      \ Push `hub` filtering down into SQL in `acknowledge_activity` and execute the\
+      \ update in a single transaction without materializing `message` bodies; align\
+      \ `clear_activity_history` to set `state='STORED_PASSIVE'` when acknowledging\
+      \ human signals.\n     - `#28` (`crates/cito-native/src/core/daemon/projection.rs`,\
+      \ `crates/cito-native/src/core/daemon/mcp.rs`): Reuse a single per-Hub `address_book`\
+      \ snapshot across rows in `snapshot()`, `status_frame()`, and `find_listeners()`.\n\
+      \     - `#13 & #33 (core/hub/daemon tests)` (`crates/cito-native/src/core/hub/regression_tests.rs`,\
+      \ `crates/cito-native/src/core/receiver_tests.rs`, `crates/cito-native/src/core/daemon/tests.rs`,\
+      \ `crates/cito-native/tests/support/mod.rs`, `crates/cito-native/tests/support/daemon/{discovery_and_setup,human_and_channels,mcp_and_inbox}.rs`,\
+      \ `crates/cito-native/tests/hub/cases.rs`): Tighten Gate 1 assertions in `regression_tests.rs`\
+      \ (verify deferred `signal-0..1` become reservable after `next_retry_ms` and\
+      \ assert `subscription.try_recv().is_err()` after scope revocation) and `human_and_channels.rs:127`\
+      \ (assert `mcp` error message content); make `Process::stop` defer assertion\
+      \ panics until after `Fixture::drop` finishes all process/daemon/directory cleanup;\
+      \ add timeouts to blocking `accept()` calls and guard standalone `HubEngine`/temp\
+      \ dirs; clean up residual manual teardown and inline `openpty`/`ui-frames`/`plugin.json`\
+      \ copies.\n\nImplementation Notes (Non-Binding):\n- `plugin_support.rs` is compiled\
+      \ both as `crate::support` inside `cito-native` and via `#[path = \"../../crates/cito-native/src/plugin_support.rs\"\
+      ]` in standalone plugin binaries (`plugins/codex`, `plugins/telegram`); ensure\
+      \ the single SQLite FFI authority in `#26` compiles in both contexts without\
+      \ touching `plugins/**` or `support/subprocess.rs`.\n- Do not modify `crates/cito-native/src/support/subprocess.rs`,\
+      \ `crates/cito-native/src/core/{cli.rs,setup.rs}`, `crates/cito-native/tests/support/plugins.rs`,\
+      \ `plugins/**`, `docs/DESIGN.md`, or `src/macos/**` (owned by sibling parallel\
+      \ steps).\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated worktree transaction restricted to `scope.allowed_paths` (`crates/cito-native/src/support/subprocess.rs`,\
+      \ `crates/cito-native/src/core/{cli,setup}/**`, `crates/cito-native/tests/support/{plugins.rs,ui/**}`,\
+      \ `plugins/**`, `src/macos/**`, `docs/DESIGN.md`, and `plan.yaml` are blocked).\
+      \ Keep product version at `0.21.3` (NO SemVer bump, NO git tag).\n\nAdmit:\n\
+      - Pinned baseline commit `b1bcdcf9377be0c82446ae040768340beee3b515` (Phase `v53`\
+      \ complete).\n- Verification: fast targeted checks (`cargo fmt --all -- --check\
+      \ && git diff --check && cargo clippy --workspace --all-targets --locked --\
+      \ -D warnings && cargo test -p cito-native --lib -- --test-threads=2 && cargo\
+      \ test -p cito-native --test native hub:: -- --test-threads=2 && cargo test\
+      \ -p cito-native --test native daemon:: -- --test-threads=2`). Consumed by `v54.gate`.\n\
+      \nRecovery:\n- Repair any Rust compiler, clippy, or targeted unit/integration\
+      \ test failure in place within the worktree before completion."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets --locked -- -D warnings && cargo test -p cito-native
+      --lib -- --test-threads=2 && cargo test -p cito-native --test native hub:: --
+      --test-threads=2 && cargo test -p cito-native --test native daemon:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/http_actions/transport.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state/activity.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/hub/http.rs
+    - crates/cito-native/src/core/hub/regression_tests.rs
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/http_boundary.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/database.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    - crates/cito-native/tests/support/daemon/human_and_channels.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - crates/cito-native/tests/hub/cases.rs
+    agent: rust-senior
+  - id: v54.cli-setup-plugins
+    name: 'V54 Subprocess, CLI/Setup & Agent Plugins Closure: macOS kevent ESRCH Zombie
+      Drain, Setup Lock & Detach Warning Surfacing, Claude Live-Process CWD/Hook-Quoting/UTF-8
+      Tail, Pi Shutdown Fence & Docs Parity (#9–#11, #13-plugins, #18–#20, #23–#24,
+      #29, #32, #33-plugins) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/support/subprocess.rs\n    -\
+      \ crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/**\n\
+      \    - crates/cito-native/src/core/cli.rs\n    - plugins/claude/native.rs\n\
+      \    - plugins/pi/cito-bridge.ts\n    - plugins/codex/native.rs\n    - docs/DESIGN.md\n\
+      \    - crates/cito-native/tests/support/plugins.rs\n  blocked_paths:\n    -\
+      \ plan.yaml\n    - crates/cito-native/src/plugin_support.rs\n    - crates/cito-native/src/core/daemon/**\n\
+      \    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/src/core/hub/**\n\
+      \    - crates/cito-native/src/core/receiver.rs\n    - crates/cito-native/src/core/receiver_tests.rs\n\
+      \    - crates/cito-native/src/core/state.rs\n    - crates/cito-native/src/core/state/**\n\
+      \    - crates/cito-native/src/core/lease.rs\n    - crates/cito-native/src/core/http_boundary.rs\n\
+      \    - crates/cito-native/src/core/registration.rs\n    - crates/cito-native/src/core/database.rs\n\
+      \    - crates/cito-native/tests/support/mod.rs\n    - crates/cito-native/tests/support/daemon/**\n\
+      \    - crates/cito-native/tests/support/ui/**\n    - crates/cito-native/tests/hub/**\n\
+      \    - src/macos/**\n\nDeliver:\n- Consume the converged 34-Item Admitted Finding\
+      \ Ledger directly without repeating Stage 1 discovery, closing all 11 assigned\
+      \ Subprocess, CLI/Setup, Agent Plugins (`claude`, `pi`, `codex`), Design Doc,\
+      \ and Plugin Test items (Tier 1 `#9, #10, #11, #18, #19, #20, #23, #24`; Tier\
+      \ 2 `#29, #32, #33 (plugins.rs:591, 3638)`) at version `0.21.3` (NO SemVer bump,\
+      \ NO git tag):\n  1. **macOS Subprocess `kevent` Zombie Race & CLI/Setup Lock/Diagnostic\
+      \ Closure (`#18, #10, #19, #29`)**:\n     - `#18` (`crates/cito-native/src/support/subprocess.rs`):\
+      \ On macOS, when `kevent(fd, EV_ADD | EV_ONESHOT, EVFILT_PROC, NOTE_EXIT)` fails\
+      \ with `ESRCH` (`libc::ESRCH`) because the owned unreaped child process has\
+      \ already exited into zombie state before kqueue registration, treat the child\
+      \ as already exited rather than failing with `\"No such process\"`, so `run_piped_command`\
+      \ marks `child_exited = true` and drains stdout/stderr to EOF before reaping,\
+      \ and `wait_child_exit` returns `Ok(true)`. Keep `child_exit_fd`'s external\
+      \ signature compatible with callers outside `subprocess.rs` (or use an internal\
+      \ `Option<OwnedFd>` helper inside `subprocess.rs`) so `plugin_support.rs` and\
+      \ `core/{login,plugins,hub_plugins}.rs` require no edits.\n     - `#10` (`crates/cito-native/src/core/setup.rs`):\
+      \ Surface `warning`, `warnings`, and `detach_status` from `setup_remove_hub`\
+      \ and `setup_remove_app` (`disconnect_plugin`) in CLI output, and when `notify_running_daemon`\
+      \ `/control` fails after `mutate_file` has already persisted `config.json`,\
+      \ include explicit saved-config context in the returned error.\n     - `#19`\
+      \ (`crates/cito-native/src/core/setup.rs`): In `uninstall_setup_with_owner`,\
+      \ acquire the configuration locks (`with_config_lock_mode`) and staging lock\
+      \ (`staging.lock`) before removing configuration/runtime files so concurrent\
+      \ CLI setup writers cannot overwrite post-purge state via unlinked lock inodes.\n\
+      \     - `#29` (`crates/cito-native/src/core/cli.rs`, `crates/cito-native/src/core/setup.rs`,\
+      \ `crates/cito-native/src/core/setup/app_bundle.rs`): Consolidate duplicate\
+      \ `inbox` policy validation in `cli.rs:209-241`, and eliminate mutual helper\
+      \ imports and duplicate `struct Candidate(PathBuf)` guards between `setup.rs`\
+      \ and `setup/app_bundle.rs`.\n  2. **Claude Plugin CWD Process Guard, Hook Path\
+      \ Quoting, Canonical CWD Adoption & UTF-8 Tail Safety (`#11, #20, #23, #24`)**:\n\
+      \     - `#11` (`plugins/claude/native.rs`): In unpinned workspace transcript\
+      \ fallback, check all live `claude` processes in the same CWD (not only sidecar\
+      \ sockets in `sidecar_endpoints_in_cwd`) before adopting a latest transcript\
+      \ file or switching sessions.\n     - `#20` (`plugins/claude/native.rs`): When\
+      \ the `hook` binary path contains whitespace or shell metacharacters, quote\
+      \ it safely in `setup_apply` (preserving the raw unquoted path when whitespace/metacharacter-free\
+      \ so existing test assertions in `tests/support/plugins.rs:1845` stay intact),\
+      \ and update `setup_inspect` and `hook_cmd` (`clean_hooks`) to recognize both\
+      \ unquoted and quoted `cito-claude-hook` registrations.\n     - `#23` (`plugins/claude/native.rs`):\
+      \ In `sidecar`, when adopting `session_id` from a canonical hook binding (`binding[\"\
+      source\"] != \"channel\"`), also adopt `binding[\"cwd\"]` (when non-empty) so\
+      \ `identify` and `title` resolve against the coherent workspace.\n     - `#24`\
+      \ (`plugins/claude/native.rs`): In `title()`, read the `128 KiB` tail as raw\
+      \ bytes (`read_to_end`), discard any partial leading line when the `seek` offset\
+      \ is `> 0`, and decode via `String::from_utf8_lossy` so a multibyte UTF-8 codepoint\
+      \ split at `size - 128 KiB` never aborts `custom-title` extraction.\n  3. **Pi\
+      \ Bridge Shutdown Fence & Config Validation, Codex Pre-Queue Trim, Docs Sync\
+      \ & Plugin Tests (`#9, #32, #13 & #33-plugins`)**:\n     - `#9` (`plugins/pi/cito-bridge.ts`):\
+      \ Increment `commandGen` on `session_shutdown` and check `shuttingDown` after\
+      \ `await callMcpTool` in `/cito`; in `readConfig`, reject non-object JSON roots\
+      \ and explicitly invalid `daemonPort`/`daemon_port` values instead of silently\
+      \ falling back to port `4290`.\n     - `#32` (`plugins/codex/native.rs`, `docs/DESIGN.md`):\
+      \ Remove the redundant pre-queue `row_for_id` SQLite open in `plugins/codex/native.rs:828`;\
+      \ update `docs/DESIGN.md:145` to include `resolve_caller` in the `1.5s` timeout\
+      \ note and sync `docs/DESIGN.md:238-240` (`local_signals` column list).\n  \
+      \   - `#13 & #33 (plugins.rs)` (`crates/cito-native/tests/support/plugins.rs`):\
+      \ Add socket timeout to `listener.accept()` at `plugins.rs:591`, replace the\
+      \ two `550ms` sleeps at `plugins.rs:3638` with a condition wait, and add targeted\
+      \ regression tests for `#9, #10, #11, #18, #19, #20, #23, #24`.\n\nImplementation\
+      \ Notes (Non-Binding):\n- In `crates/cito-native/src/support/subprocess.rs`,\
+      \ keep `pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd>` unchanged\
+      \ (or backed by a private `child_exit_fd_opt(pid: u32) -> Result<Option<std::os::fd::OwnedFd>>`\
+      \ used by `wait_child_exit` and `run_piped_command`) so `crates/cito-native/src/plugin_support.rs`\
+      \ does not need to be touched in this step.\n\nBoundary:\n- Owner: `rust-senior`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Isolated worktree transaction\
+      \ restricted to `scope.allowed_paths` (`crates/cito-native/src/plugin_support.rs`,\
+      \ `crates/cito-native/src/core/{daemon,hub,receiver,state,lease,http_boundary,registration,database}/**`,\
+      \ `src/macos/**`, and `plan.yaml` are blocked). Keep product version at `0.21.3`\
+      \ (NO SemVer bump, NO git tag).\n\nAdmit:\n- Pinned baseline commit `b1bcdcf9377be0c82446ae040768340beee3b515`\
+      \ (Phase `v53` complete).\n- Verification: fast targeted checks (`cargo fmt\
+      \ --all -- --check && git diff --check && cargo clippy --workspace --all-targets\
+      \ --locked -- -D warnings && cargo test -p cito-native --lib support:: -- --test-threads=2\
+      \ && cargo test -p cito-native --lib core::setup:: -- --test-threads=2 && cargo\
+      \ test -p cito-native --lib core::cli:: -- --test-threads=2 && cargo test -p\
+      \ cito-native --lib claude:: -- --test-threads=2 && cargo test -p cito-native\
+      \ --test native plugins:: -- --test-threads=2`). Consumed by `v54.gate`.\n\n\
+      Recovery:\n- Repair any Rust, TypeScript, doc, or plugin test failure in place\
+      \ within the worktree before completion."
+    verification: 'cargo fmt --all -- --check && git diff --check && cargo clippy
+      --workspace --all-targets --locked -- -D warnings && cargo test -p cito-native
+      --lib support:: -- --test-threads=2 && cargo test -p cito-native --lib core::setup::
+      -- --test-threads=2 && cargo test -p cito-native --lib core::cli:: -- --test-threads=2
+      && cargo test -p cito-native --lib claude:: -- --test-threads=2 && cargo test
+      -p cito-native --test native plugins:: -- --test-threads=2'
+    refs:
+    - crates/cito-native/src/support/subprocess.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/setup/app_bundle.rs
+    - crates/cito-native/src/core/cli.rs
+    - plugins/claude/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/codex/native.rs
+    - docs/DESIGN.md
+    - crates/cito-native/tests/support/plugins.rs
+    agent: rust-senior
+  - id: v54.macos-ui
+    name: 'V54 macOS Swift UI, HeadlessOracle & UI Tests Closure: Composer Post-Close
+      Error/Warning Surfacing, Directory Remote/Online Refresh, Drawer Button & Truncation
+      Oracle Parity & UI Consolidations (#4-ui, #12, #21, #25, #30–#31, #34) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \  blocked_paths:\n    - plan.yaml\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/mod.rs\n\
+      \    - crates/cito-native/tests/support/daemon/**\n    - crates/cito-native/tests/support/plugins.rs\n\
+      \    - crates/cito-native/tests/hub/**\n    - plugins/**\n    - packaging/**\n\
+      \    - docs/**\n\nDeliver:\n- Consume the converged 34-Item Admitted Finding\
+      \ Ledger directly without repeating Stage 1 discovery, closing all 8 assigned\
+      \ macOS Swift UI, `HeadlessOracle`, and UI Test items (Tier 1 `#4 (Swift side),\
+      \ #12, #21, #25`; Tier 2 `#30, #31, #34`) at version `0.21.3` (NO SemVer bump,\
+      \ NO git tag):\n  1. **Composer Warning & Post-Close Error Surfacing (`#4 (Swift\
+      \ side)` & `#21` — locked cut-set $\\delta s|_{\\partial} = 0$ with `v54.core-hub-daemon`)**:\n\
+      \     - `#4 (Swift side)` & `#21` (`src/macos/Models.swift`, `src/macos/Companion.swift`,\
+      \ `src/macos/DirectorySurface.swift`): Decode optional `warning: String?` on\
+      \ `composer_result` frames and display non-empty warnings via `directoryActionError`\
+      \ / `updateDirectoryWarnings()`; when a failed `composer_result` (`ok == false`)\
+      \ or `isComposerError` arrives after `closeComposer()` has already hidden `directoryComposerBar`,\
+      \ surface the error in `directoryActionError` + `updateDirectoryWarnings()`\
+      \ while preserving the locked `\"✓ Sent\"` button feedback when retargeting\
+      \ between open replies in `tests/support/ui/directory.rs:1476-1503`.\n  2. **Directory\
+      \ Live Refresh on Remote/Online Transitions & Menu/Oracle Geometry Parity (`#25,\
+      \ #12`)**:\n     - `#25` (`src/macos/Companion.swift`): Compute `let directoryRemoteChanged\
+      \ = r != myRemote || onlineCount != directoryOnlineCount` before updating `myRemote`\
+      \ and `directoryOnlineCount` on pushed `state` frames, and trigger `if directoryVisible\
+      \ && (directoryMembershipChanged || directoryRemoteChanged) { queryDirectory()\
+      \ }` while keeping `rebuildSettingsPanel` gated on `directoryMembershipChanged`.\n\
+      \     - `#12` (`src/macos/MenuSurface.swift`, `src/macos/HeadlessOracle.swift`):\
+      \ Compute Hub drawer action button widths with `MenuControl.intrinsicWidth(title,\
+      \ font: btnFont)` in `MenuSurface.swift:219` so `detailWidth` matches `layoutBar`;\
+      \ in `HeadlessOracle.isDataRow`, restrict the `dir_` exemption to data rows\
+      \ (`dir_row:` / `msg_dir:` / `copy_dir:`) so static `dir_mode:*`/`dir_scope:*`/`dir_harness:*`\
+      \ controls are checked for truncation, and recognize clamped 2-hub `hub:<name>`\
+      \ / `settings_hub:<name>` pills in `intentionallyTruncatedLabels`.\n  3. **Tier\
+      \ 2 Swift UI Consolidations & Targeted UI Regression Tests (`#30, #31, #34`)**:\n\
+      \     - `#30` (`src/macos/Companion.swift`, `src/macos/UIPrimitives.swift`):\
+      \ Consolidate duplicate `pendingControls` settlement in `Companion.swift`, and\
+      \ use `control.paddingX` directly in `UIPrimitives.swift:layoutBar` instead\
+      \ of the hardcoded `identifier` prefix table.\n     - `#31` (`src/macos/Companion.swift`):\
+      \ In `Companion.swift:924`, invalidate `apply_host_hub_port.feedbackTimer`,\
+      \ clear resting title/accessibility state, and restore `\"Apply\"` immediately\
+      \ when editing `host_hub_port`; in `Companion.swift:628-633`, clear `if isComposerError\
+      \ { pendingComposer = nil }` before `if error.isEmpty`.\n     - `#34` (`src/macos/DirectorySurface.swift`):\
+      \ Extract a shared copy-feedback timer restoration helper for both Directory\
+      \ and Activity table cells.\n     - Add targeted regression assertions in `crates/cito-native/tests/support/ui/{directory,menu,render_stability,settings_hubs}.rs`.\n\
+      \nBoundary:\n- Owner: `frontend-engineer` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated worktree transaction restricted to `src/macos/**` and `crates/cito-native/tests/support/ui/**`\
+      \ (`plan.yaml`, `crates/cito-native/src/**`, `plugins/**`, `packaging/**`, and\
+      \ `docs/**` are blocked). Keep product version at `0.21.3` (NO SemVer bump,\
+      \ NO git tag).\n\nAdmit:\n- Pinned baseline commit `b1bcdcf9377be0c82446ae040768340beee3b515`\
+      \ (Phase `v53` complete).\n- Verification: fast targeted checks (`cargo test\
+      \ -p cito-native --test native ui:: -- --test-threads=1 && node crates/cito-native/tests/support/site-clipboard.mjs`)\
+      \ pass with 0 compiler warnings and 0 `HeadlessOracle` violations. Consumed\
+      \ by `v54.gate`.\n\nRecovery:\n- Repair any Swift compilation, geometry/layout,\
+      \ `HeadlessOracle`, or UI test failure in place within the worktree before completion."
+    verification: 'cargo test -p cito-native --test native ui:: -- --test-threads=1
+      && node crates/cito-native/tests/support/site-clipboard.mjs'
+    refs:
+    - src/macos/Models.swift
+    - src/macos/Companion.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/UIPrimitives.swift
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/render_stability.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    agent: frontend-engineer
+  - id: v54.gate
+    name: 'V54 Full Workspace Verification & 34-Item Post-Fix Delta Convergence Gate
+      (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
+      \ FULL\n\nDeliver:\n- Terminal Phase `v54` acceptance decision (`PASS` or `FAIL`)\
+      \ under `[REQUIRES_SKILL: contract-and-simplicity]` over the merged outcomes\
+      \ of `v54.core-hub-daemon`, `v54.cli-setup-plugins`, and `v54.macos-ui`:\n \
+      \ 1. Load `[REQUIRES_SKILL: contract-and-simplicity]` and perform the post-fix\
+      \ delta convergence audit across all 34 admitted ledger items (`#1`–`#25` Tier\
+      \ 1 `[CONTRACT / WIRE]` + `#26`–`#34` Tier 2 `[SIMPLICITY / TRIM]`), verifying\
+      \ every item is closed with discriminating regression coverage, 1-to-1 cut-set\
+      \ gluing ($\\delta s|_{\\partial} = 0$, including `#4` daemon-to-Swift `composer_result.warning`),\
+      \ and `0` remaining Tier 1 or Tier 2 defects (`UNCLOSED_ORIGINAL`, `REPAIR_REGRESSION`,\
+      \ or `MISSED_IN_SCOPE`).\n  2. Run full workspace verification at version `0.21.3`\
+      \ (confirming `version = \"0.21.3\"` is unchanged, with NO SemVer bump and NO\
+      \ git tag):\n     - `cargo fmt --all -- --check`\n     - `git diff --check`\n\
+      \     - `cargo clippy --workspace --all-targets --locked -- -D warnings`\n \
+      \    - `cargo test --workspace && cargo build --release`\n     - Pi bridge dependency-free\
+      \ Node type-strip test (`cargo test -p cito-native --test native plugins::pi_bridge\
+      \ -- --test-threads=1`)\n     - `python3 -m unittest packaging/test_release.py`\n\
+      \     - `python3 packaging/release.py check`\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \     - `/usr/bin/ruby -c packaging/homebrew/cito.rb`\n\nBoundary:\n- Owner:\
+      \ `integration-verifier` (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only\
+      \ terminal verification gate (`repo_change_policy: no_repo_change`, `verification_scope:\
+      \ FULL`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
+      \nAdmit:\n- Depends on `v54.core-hub-daemon`, `v54.cli-setup-plugins`, and `v54.macos-ui`.\n\
+      - Consumed evidence: integrated commits and targeted verification receipts from\
+      \ `v54.core-hub-daemon`, `v54.cli-setup-plugins`, and `v54.macos-ui`, post-fix\
+      \ delta convergence audit over `#1`–`#34`, and full workspace build/test outputs.\n\
+      \nRecovery:\n- If any ledger item (`#1`–`#34`), regression test, compiler/clippy\
+      \ check, or release-version invariant fails, report concrete `file:line` and\
+      \ failure evidence so the owning implementation track can repair it before Delta\
+      \ re-verification."
+    verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
+      --all-targets --locked -- -D warnings && cargo test --workspace && cargo build
+      --release && python3 -m unittest packaging/test_release.py && python3 packaging/release.py
+      check && node crates/cito-native/tests/support/site-clipboard.mjs && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/http_boundary.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/database.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/support/subprocess.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/cli.rs
+    - plugins/claude/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/codex/native.rs
+    - src/macos/Models.swift
+    - src/macos/Companion.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/UIPrimitives.swift
+    - docs/DESIGN.md
+    - packaging/test_release.py
+    - packaging/release.py
+    - packaging/homebrew/cito.rb
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v54.core-hub-daemon
+    - v54.cli-setup-plugins
+    - v54.macos-ui
+    agent: integration-verifier
