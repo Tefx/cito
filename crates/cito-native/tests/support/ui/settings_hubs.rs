@@ -1,6 +1,84 @@
 use super::*;
 
 #[test]
+fn deferred_sharing_controls_send_partial_updates_while_stop_is_pending() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["host_hub"]["enabled"] = json!(true);
+    frame["settings"]["host_hub"]["running"] = json!(true);
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"4292"}),
+    );
+    f.send(p, json!({"op":"test_focus_field","id":"host_hub_port"}));
+    control(&f, p, "toggle_host_hub");
+    let stale = inspect(&f, p);
+    assert_eq!(stale["settings_rebuild_deferred"], true);
+    assert_eq!(
+        node(&stale, "settings_items", "toggle_host_hub")["text"],
+        "Stop Sharing"
+    );
+    assert_eq!(stale["pending_controls"].as_array().unwrap().len(), 1);
+
+    control(&f, p, "toggle_host_hub_auth");
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let updates: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|a| a["op"] == "set_host_hub")
+        .collect();
+    assert_eq!(updates.len(), 3);
+    assert_eq!(updates[0]["enabled"], false);
+    assert_eq!(updates[1]["auth_mode"], "token");
+    assert_eq!(updates[2]["port"], 4292);
+    assert!(updates[1].get("enabled").is_none());
+    assert!(updates[2].get("enabled").is_none());
+}
+
+#[test]
+fn deferred_hub_rows_exclude_duplicate_requests_before_repaint() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["settings"]["host_hub"]["enabled"] = json!(true);
+    frame["settings"]["hubs"][1]["can_login"] = json!(true);
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    f.send(p, json!({"op":"test_focus_field","id":"host_hub_port"}));
+    for (id, op) in [
+        ("login_hub:work", "hub_action"),
+        ("toggle_hub:work", "setup_toggle_hub"),
+        ("remove_hub:work", "setup_remove_hub"),
+    ] {
+        control(&f, p, id);
+        let stale = inspect(&f, p);
+        assert_eq!(stale["settings_rebuild_deferred"], true);
+        assert_eq!(node(&stale, "settings_items", id)["enabled"], true);
+        control(&f, p, id);
+        inspect(&f, p);
+        let actions: Vec<_> = f.frames(p).into_iter().filter(|a| a["op"] == op).collect();
+        assert_eq!(actions.len(), 1, "duplicate {op} from the mounted row");
+        assert_eq!(actions[0]["hub"], "work");
+    }
+    f.send(p, json!({"op":"test_end_editing"}));
+    let repainted = inspect(&f, p);
+    assert_eq!(repainted["settings_rebuild_deferred"], false);
+    for id in ["login_hub:work", "toggle_hub:work", "remove_hub:work"] {
+        assert_eq!(node(&repainted, "settings_items", id)["enabled"], false);
+    }
+}
+
+#[test]
 fn host_hub_failed_projection_and_trailing_error_have_one_error_surface() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

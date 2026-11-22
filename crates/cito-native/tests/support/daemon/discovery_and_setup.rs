@@ -472,6 +472,20 @@ fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
         );
     }
 }
+// Health is available before initial setup inspections finish. Establish the
+// settled projection before measuring cache reuse or changing the provider.
+fn assert_initial_fixture_setup(f: &Fixture, configured: bool) {
+    let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+    assert_eq!(status, 200);
+    let app = snapshot["settings"]["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["id"] == "fixture")
+        .unwrap();
+    assert_eq!(app["configured"], configured, "{app}");
+}
+
 #[test]
 fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     let _lock = serial();
@@ -480,6 +494,7 @@ fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     );
     f.provider("delivered");
     f.daemon(&[]);
+    assert_initial_fixture_setup(&f, true);
     let count = || {
         fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl"))
             .unwrap()
@@ -556,6 +571,7 @@ fn setup_refresh_preserves_cached_settings_without_blocking_hub_or_mcp_and_fence
     let f = Fixture::new(json!({}));
     let meta = f.provider("delivered");
     f.daemon(&[]);
+    assert_initial_fixture_setup(&f, true);
     let options_path = f.state.join("plugins/fixture/options.json");
     let calls_path = f.state.join("plugins/fixture/calls.jsonl");
     let gate = f.dir.join("release-setup");
@@ -732,6 +748,7 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", recorder.to_str().unwrap()),
     ]);
+    assert_initial_fixture_setup(&f, false);
     let frames = || ui_frames(&f);
     let inspections = || {
         fs::read_to_string(&calls_path)
@@ -1171,9 +1188,7 @@ fn legacy_cleanup_rejects_invalid_native_config_without_deleting_plugins() {
     f.env.remove("CITO_USER");
     let legacy = f.state.join("plugins/pi");
     fs::create_dir_all(&legacy).unwrap();
-    let manifest = json!({"id":"pi","kind":"agent","displayName":"Legacy copy",
-        "version":"0.20.3","command":["./bin/cito-plugin-pi"]})
-    .to_string();
+    let manifest = legacy_manifest("pi");
     fs::write(legacy.join("plugin.json"), &manifest).unwrap();
     for raw in [
         "{",
@@ -1297,6 +1312,13 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
         "",
     );
     assert!(ok, "{out} {err}");
+}
+
+fn legacy_manifest(id: &str) -> String {
+    let shipped = fs::read(root().join("plugins").join(id).join("plugin.json")).unwrap();
+    let mut manifest: Value = serde_json::from_slice(&shipped).unwrap();
+    manifest["version"] = json!("0.20.3");
+    manifest.to_string()
 }
 
 #[test]
@@ -1430,13 +1452,15 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
     let _lock = serial();
     for mode in ["native", "hub"] {
         let mut f = Fixture::new(json!({}));
-        for id in ["pi", "codex", "claude", "telegram", "human"] {
+        for id in ["pi", "codex", "claude", "telegram"] {
             let dir = f.state.join("plugins").join(id);
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("plugin.json"), json!({"id":id,"kind":if id == "human" || id == "telegram" {"human-channel"} else {"agent"},
-                "displayName":"Legacy staged copy","version":"0.20.3",
-                "command":[format!("./bin/cito-plugin-{id}")]}).to_string()).unwrap();
+            fs::write(dir.join("plugin.json"), legacy_manifest(id)).unwrap();
         }
+        // The retired companion no longer has a shipped manifest.
+        let retired = f.state.join("plugins/human");
+        fs::create_dir_all(&retired).unwrap();
+        fs::write(retired.join("plugin.json"), r#"{"id":"human","kind":"human-channel","displayName":"Human","version":"0.20.3","command":["./bin/cito-plugin-human"]}"#).unwrap();
         let external = f.dir.join("external");
         for name in ["human", "alias"] {
             let dir = external.join(name);
@@ -1838,9 +1862,7 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
     let f = Fixture::new(json!({}));
     let legacy = f.state.join("plugins/pi");
     fs::create_dir_all(&legacy).unwrap();
-    let manifest = json!({"id":"pi","kind":"agent","displayName":"Legacy copy",
-        "version":"0.20.3","command":["./bin/cito-plugin-pi"]})
-    .to_string();
+    let manifest = legacy_manifest("pi");
     fs::write(legacy.join("plugin.json"), &manifest).unwrap();
     fs::write(legacy.join("keep"), "legacy payload").unwrap();
     let before = fs::read(&f.config).unwrap();

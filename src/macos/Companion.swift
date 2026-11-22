@@ -43,6 +43,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var directoryQueryError: String?
     var directoryActionError: String?
     var directoryActionErrorSourceOp: String?
+    var directoryActionWarning: String?
     var latestDirectoryActionRequestId: String?
     let directoryActionOps = ["clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"]
     var directoryWarningLabel: NSTextField?
@@ -121,6 +122,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var composerReplySignalId: String?
     var composerErrorLabel: NSTextField?
     struct PendingComposerSend {
+        let composerDraftIdempotencyKey: String
         let text: String
         let requestId: String
         let target: String
@@ -210,9 +212,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var settingsFieldControls: [String: NSTextField] = [:]
     var channelUiStates: [String: ChannelUiState] = [:]
     var appCheckedUntil: [String: Date] = [:]
-    static let channelResetOps = ["channel_unpair", "channel_cancel_pair", "clear_channel_service", "disconnect_human_channel"]
+    static let channelResetOps = ["channel_unpair", "clear_channel_service", "disconnect_human_channel"]
     static let channelSaveOps = ["channel_save", "save_hub_service"]
-    static let channelControlOps = channelResetOps + channelSaveOps + ["channel_pair", "channel_test", "channel_toggle"]
+    static let channelControlOps = channelResetOps + channelSaveOps + ["channel_cancel_pair", "channel_pair", "channel_test", "channel_toggle"]
     struct PendingControl {
         struct ChannelSave {
             let scope: String
@@ -223,7 +225,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let appCheck: Bool
         // A superseded save still owns its control receipt, but cannot reconcile drafts.
         var channelSave: ChannelSave?
-        var channelReset: (all: Bool, submitted: ChannelUiState)?
+        var channelReset: (hub: Bool, user: Bool, submitted: ChannelUiState)?
+        var pairingToCancel: ChannelUiState.PairingAttempt?
         // Pairing instructions complete the button action; settings settles its projection.
         var awaitingPairSettings = false
     }
@@ -402,17 +405,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         guard frame.op == "settings" || (frame.op == "state" && frame.hubs != nil && frame.listeners != nil),
               frame.ok != false, let value = frame.settings,
               settingsHub(value, hub: settingsFrameHub(frame, pending: pending)) == pending.hub,
-              !(frame.truncated == true && channelSettingsByHub[pending.hub] != nil),
               value.channels?.contains(where: { $0.id == pending.target }) == true else { return nil }
         return pending
     }
 
-    private func mergedSettings(_ observed: SettingsPayload, hub: String?, truncated: Bool) -> SettingsPayload {
-        guard truncated else { return observed }
+    private func mergedSettings(_ observed: SettingsPayload, hub: String?, frame: Frame) -> SettingsPayload {
         var merged = observed
-        if let cached = channelSettingsByHub[settingsHub(observed, hub: hub)] { merged.channels = cached }
-        if let current = settings {
-            merged.apps = current.apps
+        if frame.preservesCollection("settings.channels", alias: "channels"),
+           let cached = channelSettingsByHub[settingsHub(observed, hub: hub)] { merged.channels = cached }
+        if frame.preservesCollection("settings.apps", alias: "apps"), let current = settings { merged.apps = current.apps }
+        if frame.preservesCollection("settings.hubs", alias: frame.hubs == nil ? "hubs" : nil), let current = settings {
             merged.hubs = current.hubs.map { old in
                 guard var updated = observed.hubs.first(where: { $0.name == old.name }) else { return old }
                 updated.attachments = old.attachments ?? updated.attachments
@@ -428,8 +430,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             (value.channels.map { channelSettingsByHub[target] != $0 } ?? false)
     }
 
-    private func updateActivity(_ frame: Frame, preservingCollections: Bool) -> Bool {
-        guard !preservingCollections, let items = frame.activity else { return false }
+    private func updateActivity(_ frame: Frame) -> Bool {
+        guard !frame.preservesCollection("activity"), let items = frame.activity else { return false }
         let total = frame.activity_total ?? activityTotal
         let unread = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
         let query = frame.activity_query ?? ""
@@ -467,17 +469,21 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         guard frame.authority_changed != true, frame.op != "error", frame.ok == true || frame.committed == true else { return true }
         let fields = channelSettingsByHub[hub]?.first { $0.id == pending.target }?.fields ?? []
-        if let reset = pending.channelReset {
-            let unchanged = (channelUiStates[key] ?? ChannelUiState()) == reset.submitted
-            for field in fields where reset.all || field.scope == "user" {
-                if channelUiStates[key]?.drafts[field.key] == reset.submitted.drafts[field.key] {
-                    channelUiStates[key]?.drafts.removeValue(forKey: field.key)
-                }
+        if let reset = pending.channelReset, var ui = channelUiStates[key] {
+            let unchanged = ui == reset.submitted
+            for field in fields where (reset.hub && field.scope == "hub") || (reset.user && field.scope == "user") {
+                if ui.drafts[field.key] == reset.submitted.drafts[field.key] { ui.drafts.removeValue(forKey: field.key) }
             }
             if unchanged {
-                if reset.all { channelUiStates[key, default: ChannelUiState()].resetAll() }
-                else { channelUiStates[key, default: ChannelUiState()].resetPersonal() }
+                if reset.hub { ui.resetGateway() }
+                if reset.user { ui.resetPersonal() }
             }
+            channelUiStates[key] = ui
+        }
+        if let cancelled = pending.pairingToCancel, var ui = channelUiStates[key], cancelled.matches(ui.pairingAttempt) {
+            ui.pendingPairRequest = nil
+            ui.clearPairingInstructions()
+            channelUiStates[key] = ui
         }
         if let save = pending.channelSave, channelSaveProjection(frame, for: pending) == nil {
             // Settings never echo submitted secrets. Keep non-secret drafts
@@ -492,8 +498,22 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     }
 
     @discardableResult
+    private func settleDirectoryActionSuccess(_ frame: Frame) -> Bool {
+        guard let request = frame.request_id, request == latestDirectoryActionRequestId,
+              frame.ok != false, frame.error == nil else { return false }
+        latestDirectoryActionRequestId = nil
+        clearDirectoryActionError()
+        if let warning = frame.warning, !warning.isEmpty {
+            directoryActionWarning = warning
+            updateDirectoryWarnings()
+        }
+        return true
+    }
+
+    @discardableResult
     func settleReceiptOnly(_ frame: Frame) -> Bool {
         guard let request = frame.request_id else { return false }
+        if settleDirectoryActionSuccess(frame) { return true }
         let pendingOperation = pendingControls[request]?.op
         var settled = settleControlReceipt(frame, receiptOnly: true)
         var routedToForm = false
@@ -550,8 +570,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         // Passive collection shedding cannot replace a complete cache. Scalar
         // observations and correlated receipts still advance independently.
-        let preserveCollections = frame.truncated == true && frame.request_id == nil
-        if preserveCollections && ["directory", "settings"].contains(frame.op) {
+        let preserveDirectoryRows = frame.op == "directory" && frame.preservesCollection("peers")
+        if preserveDirectoryRows || (frame.op == "settings" && frame.request_id == nil) {
             let unread = frame.unread_count ?? unreadCount
             let online = frame.online_count ?? directoryOnlineCount
             let hasAny = frame.activity_has_any ?? activityHasAny
@@ -560,7 +580,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 rebuild()
                 refreshDirectoryViews()
             }
-            if frame.op == "directory" { return }
+            if preserveDirectoryRows {
+                if updateActivity(frame) { refreshDirectoryViews() }
+                return
+            }
         }
         let pendingReceipt = frame.request_id.flatMap { pendingControls[$0] }
         let receiptHub = frame.hub ?? pendingReceipt?.hub
@@ -573,19 +596,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         let menuBannerChanged = menuBannerError != previousMenuBanner
         let settingsBannerChanged = settingsBannerError != previousSettingsBanner
-        let truncatedSettings = frame.truncated == true
+        let preserveSettingsChannels = frame.preservesCollection("settings.channels", alias: "channels")
         let settingsHubHint = settingsFrameHub(frame, pending: settledControl && pendingReceipt.map({ Self.channelControlOps.contains($0.op) }) == true ? pendingReceipt : nil)
-        let nextSettings = frame.settings.map { mergedSettings($0, hub: settingsHubHint, truncated: truncatedSettings) }
+        let nextSettings = frame.settings.map { mergedSettings($0, hub: settingsHubHint, frame: frame) }
         let actionFailure = (frame.op == "error" || frame.ok == false) && directoryActionOps.contains(frame.source_op ?? "")
         if actionFailure, let requestId = frame.request_id, !requestId.isEmpty,
            requestId != latestDirectoryActionRequestId {
             if requestId == pendingMessageCopy?.requestId { pendingMessageCopy = nil }
             return
-        }
-        if ["state", "directory"].contains(frame.op), frame.ok != false, frame.error == nil,
-           let latest = latestDirectoryActionRequestId, frame.request_id == latest {
-            clearDirectoryActionError()
-            latestDirectoryActionRequestId = nil
         }
         if frame.op == "activity_message" {
             guard var pending = pendingMessageCopy, frame.request_id == pending.requestId else { return }
@@ -611,7 +629,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             guard let pending = pendingComposer, frame.request_id == pending.requestId else { return }
             pendingComposer = nil
             if frame.ok == true {
-                if composerTarget == pending.target && composerTargetHub == pending.hub && composerReplySignalId == pending.replySignalId && composerInputField?.stringValue == pending.text { closeComposer() }
+                if composerDraftIdempotencyKey == pending.composerDraftIdempotencyKey && composerTarget == pending.target && composerTargetHub == pending.hub && composerReplySignalId == pending.replySignalId && composerInputField?.stringValue == pending.text { closeComposer() }
                 else { setComposerStatus(""); composerSendButton?.copied("✓ Sent") }
             } else {
                 showComposerFailure(frame.error)
@@ -623,7 +641,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         let activityPresenceChanged = frame.activity_has_any.map { $0 != activityHasAny } ?? false
         if frame.op == "settings", let value = nextSettings, frame.ok == false {
-            acceptSettings(value, hub: settingsHubHint, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: truncatedSettings)
+            acceptSettings(value, hub: settingsHubHint, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: preserveSettingsChannels)
         }
         if frame.op == "error" || (frame.ok == false && frame.op != "channel_test_result") {
             let sourceOp = frame.source_op ?? frame.action ?? (settledControl ? pendingReceipt?.op : nil) ?? ""
@@ -686,8 +704,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         // correlation above; only successful commits may omit their projection.
         if frame.op == "state", frame.ok == true, frame.committed == true,
            frame.request_id != nil, frame.hubs == nil || frame.listeners == nil {
-            let receiptSettled = settleReceiptOnly(frame)
-            if settledControl || receiptSettled, let warning = frame.warning, !warning.isEmpty {
+            settleReceiptOnly(frame)
+            if settledControl, let warning = frame.warning, !warning.isEmpty {
                 if settingsVisible { settingsBannerError = warning } else { menuBannerError = warning }
             }
             rebuild()
@@ -695,6 +713,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settingsVisible { rebuildSettingsPanel() }
             return
         }
+        if ["state", "directory"].contains(frame.op) { settleDirectoryActionSuccess(frame) }
         if frame.op == "settings", let value = nextSettings {
             let changed = settingsProjectionChanged(value, hub: settingsHubHint)
             let receipt = settledControl || frame.request_id != nil || frame.source_op != nil
@@ -706,7 +725,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? "") {
                 hubInviteRequest=""; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
-            let uiChanged = acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? ""), truncated: truncatedSettings)
+            let uiChanged = acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub","paste_hub_invite"].contains(frame.source_op ?? ""), truncated: preserveSettingsChannels)
             if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
                !(frame.source_op == "set_host_hub" && presentationError(value.host_hub.error ?? "") == presentationError(warning)) { settingsBannerError = warning }
             if changed || receipt || uiChanged || frame.request_id == hostPort.requestId || settingsBannerError != previousSettingsBanner { rebuildSettingsPanel(preservingEditor: !receipt) }
@@ -720,6 +739,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                   var ui = channelUiStates[key], ui.pendingPairRequest == request else { return }
             pendingControls[request]?.awaitingPairSettings = true
             ui.pendingPairRequest = nil
+            ui.pairingPreviewRequest = request
             ui.pairingInstruction = frame.instruction ?? frame.code ?? ""
             ui.pairingCommand = frame.pairing_command ?? frame.instruction
             ui.pairingURL = frame.pairing_url
@@ -737,33 +757,33 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         if frame.op == "state", let observedHubs = frame.hubs, let observedListeners = frame.listeners {
-            let h = preserveCollections && hasRenderedState ? hubs.map { old in
+            let h = hasRenderedState && frame.preservesCollection("hubs") ? hubs.map { old in
                 guard var updated = observedHubs.first(where: { $0.name == old.name }) else { return old }
                 updated.attachments = old.attachments
                 return updated
             } : observedHubs
-            let l = preserveCollections && hasRenderedState ? listeners : observedListeners
+            let l = hasRenderedState && frame.preservesCollection("listeners") ? listeners : observedListeners
             if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
-            let a = preserveCollections && hasRenderedState ? available : frame.available ?? []
-            let nextDiscovery = preserveCollections && hasRenderedState ? discovery : frame.discovery ?? discovery
+            let a = hasRenderedState && frame.preservesCollection("available") ? available : frame.available ?? []
+            let nextDiscovery = hasRenderedState && frame.preservesCollection("discovery") ? discovery : frame.discovery ?? discovery
             let discoveryChanged = discovery != nextDiscovery
             discovery = nextDiscovery
-            let r = preserveCollections && hasRenderedState ? myRemote : (frame.my_remote_listeners ?? []).filter { $0.harness != "human" }
+            let r = hasRenderedState && frame.preservesCollection("my_remote_listeners") ? myRemote : (frame.my_remote_listeners ?? []).filter { $0.harness != "human" }
             let onlineCount = frame.directory_online_count ?? max(directoryOnlineCount, r.count)
             let directoryRemoteChanged = r != myRemote || onlineCount != directoryOnlineCount
             let nextUnread = frame.unread_count ?? unreadCount
-            let activityProjectionChanged = updateActivity(frame, preservingCollections: preserveCollections)
+            let activityProjectionChanged = updateActivity(frame)
             let activityChanged = activityPresenceChanged || nextUnread != unreadCount || activityProjectionChanged
             unreadCount = nextUnread
             let directoryMembershipChanged = h != hubs || l != listeners
-            let nextHarnesses = preserveCollections && hasRenderedState ? harnesses : frame.harnesses ?? harnesses
+            let nextHarnesses = hasRenderedState && frame.preservesCollection("harnesses") ? harnesses : frame.harnesses ?? harnesses
             let harnessesChanged = nextHarnesses != harnesses
             if harnessesChanged { harnesses = nextHarnesses }
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings.map { settingsProjectionChanged($0, hub: settingsHubHint) } ?? false
             let settingsReceipt = (hostPort.pending && frame.request_id == hostPort.requestId) || (settledControl && projectedSave != nil)
             if (settingsChanged || settingsReceipt), let value = nextSettings ?? settings {
-                acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: truncatedSettings)
+                acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: preserveSettingsChannels)
             }
             if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !settingsReceipt && !menuBannerChanged && !settingsBannerChanged && !activityChanged && !directoryMembershipChanged && a == available && !directoryRemoteChanged {
                 updateStatusItem()
@@ -794,13 +814,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 }
             }
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
-        } else if frame.op == "directory", let observedPeers = frame.peers {
-            let peers = preserveCollections ? directoryAllPeers : observedPeers
+        } else if frame.op == "directory", let peers = frame.peers {
             guard frame.request_id == directoryRequestId && frame.query == directoryQuery && frame.scope == directoryScopeFilter && frame.harness == directoryHarnessFilter else { return }
             if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
             let menuChanged = activityPresenceChanged || (frame.unread_count ?? unreadCount) != unreadCount ||
                 (frame.online_count ?? peers.count) != directoryOnlineCount
-            let activityProjectionChanged = updateActivity(frame, preservingCollections: preserveCollections)
+            let activityProjectionChanged = updateActivity(frame)
             let rowsChanged = activityPresenceChanged || (frame.unread_count ?? unreadCount) != unreadCount ||
                 serverDirectoryQuery == nil || serverDirectoryQuery != directoryQuery ||
                 serverDirectoryScope != directoryScopeFilter || serverDirectoryHarness != directoryHarnessFilter ||
@@ -867,10 +886,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                     pending.channelSave = .init(scope: scope, values: values)
                 }
                 if Self.channelResetOps.contains(operation) {
-                    var submitted = channelUiStates[key] ?? ChannelUiState()
-                    submitted.testResult = nil
-                    let all = operation == "clear_channel_service" || outgoing["reset_hub"] as? Bool == true
-                    pending.channelReset = (all: all, submitted: submitted)
+                    let resetHub = operation == "clear_channel_service" || outgoing["reset_hub"] as? Bool == true
+                    let resetUser = outgoing["reset_user"] as? Bool == true
+                    if resetHub || resetUser {
+                        var submitted = channelUiStates[key] ?? ChannelUiState()
+                        submitted.testResult = nil
+                        pending.channelReset = (hub: resetHub, user: resetUser, submitted: submitted)
+                    }
+                }
+                if operation == "channel_cancel_pair" || pending.channelReset != nil {
+                    pending.pairingToCancel = channelUiStates[key]?.pairingAttempt
                 }
             }
             pendingControls[request] = pending

@@ -72,6 +72,22 @@ fn available_hub_name(base: String, hubs: &Value, url: &Value, original: Option<
     name
 }
 
+fn edited_hub(action: &Value) -> Option<String> {
+    if action["edit"] != true {
+        return None;
+    }
+    action["original_name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let name = string(action, "name");
+            name.bytes()
+                .any(|b| b.is_ascii_alphanumeric())
+                .then(|| normalize_slug(name))
+        })
+}
+
 fn invite_hub_name(invite: &Value, raw: &Value) -> String {
     let base = if string(invite, "name").is_empty() {
         hub_name_from_url(string(invite, "url"))
@@ -316,13 +332,13 @@ fn dispatch_action_inner(
         "setup_save_hub" | "save_hub" | "paste_hub_invite"
     ) && action["parse_only"] != true
     {
-        let (before, default_hub) = {
+        let before = {
             let s = service.lock().map_err(|_| "Daemon lock poisoned")?;
             s.validate_ui_generation(ui_generation)?;
             if action["op"] == "paste_hub_invite" {
                 s.reject_own_hub_invite(&parse_hub_invite(string(action, "invite"))?)?;
             }
-            (s.raw_config()?, s.config.default_hub.clone())
+            s.raw_config()?
         };
         let mut prepared = action.clone();
         let submitted = if action["op"] == "paste_hub_invite" {
@@ -334,15 +350,9 @@ fn dispatch_action_inner(
             .get("config")
             .filter(|v| v.is_object())
             .unwrap_or(&submitted);
-        let original = submitted["original_name"]
-            .as_str()
-            .or_else(|| submitted["hub"].as_str())
-            .unwrap_or(&default_hub);
-        let base = if submitted["edit"] == true {
-            &before["hubs"][original]
-        } else {
-            &Value::Null
-        };
+        let base = edited_hub(&submitted)
+            .and_then(|original| before["hubs"].get(original))
+            .unwrap_or(&Value::Null);
         let config = crate::core::config::discover_hub_config(
             crate::core::config::merge_hub_config(base, patch),
         );
@@ -863,10 +873,7 @@ impl DaemonService {
         }
     }
     pub(super) fn purge_hub_state(&mut self, hub: &str) -> Result<(), String> {
-        if let Some(attempt) = self.logins.remove(hub) {
-            attempt.cancelled.store(true, Ordering::SeqCst);
-            drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
-        }
+        self.cancel_hub_interaction(hub);
         if let Some(slot) = self.slots.remove(hub) {
             slot.close_for_state(&self.state)?;
         }
@@ -1172,27 +1179,24 @@ impl DaemonService {
         ) {
             let saving = matches!(string(action, "op"), "setup_save_hub" | "save_hub");
             let mut hubs = Vec::new();
-            if let Some(hub) = action["hub"]
-                .as_str()
-                .or_else(|| action["name"].as_str())
-                .filter(|hub| !hub.is_empty())
-            {
-                hubs.push(hub.to_owned());
-            } else if !saving {
-                hubs.push(self.config.default_hub.clone());
-            }
             if saving {
                 if let Some(hub) = resolved_hub {
                     hubs.push(hub.to_owned());
                 }
-                let original = string(action, "original_name");
-                if !original.is_empty() {
-                    hubs.push(original.to_owned());
-                }
+                hubs.extend(edited_hub(action));
                 let requested = string(action, "name").trim();
                 if requested.chars().any(|c| c.is_ascii_alphanumeric()) {
                     hubs.push(normalize_slug(requested));
                 }
+            } else {
+                hubs.push(
+                    action["hub"]
+                        .as_str()
+                        .or_else(|| action["name"].as_str())
+                        .filter(|h| !h.is_empty())
+                        .unwrap_or(&self.config.default_hub)
+                        .to_owned(),
+                );
             }
             hubs.sort_unstable();
             hubs.dedup();
@@ -1295,6 +1299,17 @@ impl DaemonService {
         Ok(ToolCall::Retire { hub, id, agent })
     }
 
+    fn cancel_hub_interaction(&mut self, hub: &str) {
+        if self.active_settings_hub.as_deref() == Some(hub) {
+            self.active_settings_hub = None;
+        }
+        if let Some(attempt) = self.logins.remove(hub) {
+            attempt.cancelled.store(true, Ordering::SeqCst);
+            // The lock guards no data; wait for any in-flight publication to finish.
+            drop(attempt.serial.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+    }
+
     fn action_inner(
         &mut self,
         action: &Value,
@@ -1329,19 +1344,11 @@ impl DaemonService {
             .as_str()
             .unwrap_or(&self.config.default_hub)
             .to_string();
-        if matches!(
-            op,
-            "setup_remove_hub" | "remove_hub" | "save_hub" | "setup_save_hub"
-        ) || (op == "hub_action" && action["action"] == "disconnect")
+        if matches!(op, "setup_remove_hub" | "remove_hub")
+            || (op == "hub_action" && action["action"] == "disconnect")
             || (op == "setup_toggle_hub" && action["enabled"] == false)
         {
-            if self.active_settings_hub.as_deref() == Some(&hub) {
-                self.active_settings_hub = None;
-            }
-            if let Some(cancelled) = self.logins.remove(&hub) {
-                cancelled.cancelled.store(true, Ordering::SeqCst);
-                drop(cancelled.serial.lock().map_err(|_| "Login lock poisoned")?);
-            }
+            self.cancel_hub_interaction(&hub);
         }
         self.reload_slots()?;
         if matches!(
@@ -1596,7 +1603,10 @@ impl DaemonService {
                     .map(Value::Object)
                     .unwrap_or_else(|| action.clone());
                 let editing = action["edit"] == true;
-                let original = action["original_name"].as_str().unwrap_or(&hub).to_string();
+                let original = edited_hub(action).unwrap_or_default();
+                if editing && original.is_empty() {
+                    return Err("INVALID_INPUT: Unknown hub to edit".into());
+                }
                 let mut rename_before = Value::Null;
                 let mut renamed_config = Value::Null;
                 self.mutate_config(|v| {
@@ -1779,14 +1789,14 @@ impl DaemonService {
                     }
                     Ok(())
                 })?;
+                if let Some(name) = resolved_hub.as_deref() {
+                    self.cancel_hub_interaction(name);
+                }
                 if let Some(name) = resolved_hub
                     .as_ref()
                     .filter(|name| editing && **name != original)
                 {
-                    if let Some(attempt) = self.logins.remove(&original) {
-                        attempt.cancelled.store(true, Ordering::SeqCst);
-                        drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
-                    }
+                    self.cancel_hub_interaction(&original);
                     if let Some(old) = self.slots.remove(&original) {
                         old.close_for_state(&self.state)?;
                     }

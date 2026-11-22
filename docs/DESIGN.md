@@ -34,7 +34,7 @@
   - No Node.js runtime in core, Hub, or desktop UI; no macOS notification banners (`UNUserNotificationCenter`, `osascript`, or floating windows); no unrequested external channel plugins beyond `Telegram`; no `cito_rename` exposure on MCP `tools_list`.
   - No dedicated `YOUR INBOX` card in the Menu Popover: Human inbox controls (`Pause/Resume Inbox`, OIDC `[ Self / Team ]`, and active delivery summary) reside in **`Settings → Human Channels`**.
   - `Auto-Listen` and `Pin` semantics stay orthogonal and symmetric across all agent harnesses (`listen_mode: auto | manual`, with per-session `Stop` isolating `user_stopped` to that session without turning off Hub `Auto-Listen`, and `Auto-Listen: Off` retiring unpinned `auto` listeners while retaining pinned/manual listeners); idle TTL eviction applies only when a plugin explicitly declares an activity `idleTimeoutMs`.
-  - Zero backwards-compatibility shims for retired popup/card/KV forms; preserve semantic release version `0.21.3` with no release tag unless explicitly requested.
+  - Do not add compatibility shims for retired popup, card, or KV formats. Use the native crate's semantic version and follow [the release procedure](RELEASING.md) for tagging.
 
 ---
 

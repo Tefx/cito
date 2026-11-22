@@ -52,7 +52,7 @@ Cito is distributed as a Homebrew cask only. This installs `Cito.app` in
 
 ```sh
 cito --version
-# -> cito v0.21.3
+# -> cito v0.22.0
 ```
 
 To uninstall the app and both command symlinks while keeping your settings:
@@ -116,7 +116,7 @@ cito setup --hub work --url https://hub.example.com --redirect-port 8400
 
 For an OIDC Hub, URL-only setup and **Join from Clipboard** / **Add Hub…** discover authentication settings from the Hub's `GET /health`: its `oidc` object supplies `issuer`, `client_id`, and, when configured, `redirect_port`. Explicit values take precedence. If discovery reports token authentication, supply the token; if the Hub reports `none` or is unreachable, an unspecified mode falls back to `none`. Explicit OIDC setup fails if issuer or client ID remains missing.
 
-Client `cito setup --redirect-port` and `redirectPort` accept `0..=65535`; `0` explicitly selects an ephemeral loopback port. When the field is absent, `CITO_OIDC_REDIRECT_PORT` supplies a `1..=65535` fallback, or an ephemeral port is selected if the variable is also absent. Configure the identity provider to allow the selected callback.
+Client `cito setup --redirect-port` and `redirectPort` accept `0..=65535`; `0` explicitly selects an ephemeral loopback port. When the port is omitted during setup, Cito uses the port advertised by the Hub. If the configuration still has no port at sign-in, Cito uses `CITO_OIDC_REDIRECT_PORT` (`1..=65535`) or selects an ephemeral port. Configure the identity provider to allow the selected callback.
 
 Or edit `~/.cito/config.json` directly:
 
@@ -267,7 +267,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | `CITO_OIDC_CLIENT_ID` | Required public client ID in OIDC mode; standalone `--client-id`. |
 | `CITO_OIDC_REDIRECT_PORT` | Optional advertised OIDC callback port, `1..=65535`; standalone `--redirect-port` takes precedence. |
 | `CITO_OIDC_ADMIN_USERS` | Empty by default; comma-separated verified owner usernames or OIDC subjects allowed to administer shared channel fields. |
-| `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum cooldown between forced JWKS refreshes for unknown signing keys. |
+| `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum interval between JWKS refresh attempts, including after an unknown key ID or an invalid signature with a cached key. |
 | `CITO_PLUGIN_<ID>_<KEY>` | No default; seeds declared Hub-scoped channel fields at startup, including `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. |
 
 ### Client & Daemon
@@ -325,7 +325,7 @@ Discovery chooses one plugin per ID in this order, highest priority first:
 2. **`${CITO_STATE_DIR}/plugins/<id>/`** (default **`~/.cito/plugins/<id>/`**), reserved exclusively for user-authored plugins and same-ID overrides of built-ins. Remove an override to fall back to its bundled default automatically.
 3. **Bundled defaults**, including `Cito.app/Contents/Resources/plugins/<id>/`, with internal CLI staging under **`~/.cito/runtime/plugins/<id>/`**. Staging never overwrites user plugins.
 
-The macOS companion resolves directly from `Cito.app/Contents/Helpers/cito-ui` (or development `bin/cito-ui-darwin-arm64`); `CITO_UI_BINARY` overrides that path for testing. During upgrade, Cito removes outdated staged built-in copies from `~/.cito/plugins/<id>/` when their command starts with `./bin/cito-` and their manifest version differs from the running release. Custom commands and current-version overrides remain intact.
+The macOS companion resolves directly from `Cito.app/Contents/Helpers/cito-ui` (or development `bin/cito-ui-darwin-arm64`); `CITO_UI_BINARY` overrides that path for testing. During upgrade, Cito recognizes an old staged copy in `~/.cito/plugins/<id>/` only when its version differs from the bundled manifest and every other manifest field matches. A different command, field, or other customization in the manifest preserves the override. Cleanup can unlink an alias of the bundled plugin without deleting its target.
 
 Both Homebrew command links resolve through the App launcher. Invoking `cito-mcp` without arguments starts MCP stdio; invoking `cito` without arguments starts the daemon.
 

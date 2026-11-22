@@ -72,10 +72,10 @@ def check_metadata(root=ROOT):
     return expected
 
 
-def run(args, *, input=None, env=None, cwd=None, check=True, timeout=None):
+def run(args, *, input=None, env=None, cwd=None, check=True, timeout=None, umask=-1):
     result = subprocess.run(
         list(map(str, args)), input=input, text=True, capture_output=True,
-        env=env, cwd=cwd, timeout=timeout,
+        env=env, cwd=cwd, timeout=timeout, umask=umask,
     )
     if check and result.returncode:
         # Native diagnostics may contain credential identifiers or private paths.
@@ -132,15 +132,18 @@ def verify_bundle(app, expected):
             matches = False
         if not matches:
             raise ReleaseError(f"Built-in plugin missing or version mismatched: {manifest.parent.name}")
-    for name in ("Contents/Helpers/cito-native", "Contents/Helpers/cito-ui", "Contents/Resources/AppIcon.icns"):
-        if not (app / name).is_file():
-            raise ReleaseError(f"App bundle is missing a required release component: {name}")
-    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
-    with tempfile.TemporaryDirectory() as directory:
-        result = run([app / "Contents/MacOS/Cito", "--version"], env=isolated_env(Path(directory)))
-    if result.stdout.strip() != f"cito v{expected}":
-        raise ReleaseError("Bundled CLI version does not match the release version.")
-    executables = [app / "Contents/Helpers" / name for name in ("cito-native", "cito-ui")]
+    launcher = app / "Contents/MacOS/Cito"
+    executables = {app / "Contents/Helpers" / name for name in ("cito-native", "cito-ui")}
+    package = app / "Contents/Resources/plugins/pi/package.json"
+    for path in (launcher, *sorted(executables), app / "Contents/Resources/AppIcon.icns", package, package.with_name("cito-bridge.ts")):
+        if not path.is_file():
+            raise ReleaseError(f"App bundle is missing a required release component: {path.relative_to(app)}")
+    try:
+        extensions = json.loads(package.read_text())["pi"]["extensions"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ReleaseError(f"Invalid Pi extension manifest: {package}") from error
+    if not isinstance(extensions, list) or "./cito-bridge.ts" not in extensions:
+        raise ReleaseError(f"{package} must declare the ./cito-bridge.ts extension.")
     for manifest in sorted((app / "Contents/Resources/plugins").glob("*/plugin.json")):
         try:
             command = json.loads(manifest.read_text())["command"]
@@ -151,9 +154,22 @@ def verify_bundle(app, expected):
             raise ReleaseError(f"Invalid bundled plugin manifest {manifest}: {error}") from error
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise ReleaseError(f"Bundled plugin command is missing or not executable: {executable}")
-        executables.append(executable)
-    executables.extend(sorted(path for path in (app / "Contents/Resources/plugins").glob("*/bin/*") if path.is_file() and os.access(path, os.X_OK)))
-    for executable in executables:
+        executables.add(executable)
+    for path in (app / "Contents/Resources/plugins").glob("*/bin/*"):
+        source = ROOT / "plugins" / path.relative_to(app / "Contents/Resources/plugins")
+        if path.is_file() and (os.access(path, os.X_OK) or os.access(source, os.X_OK)):
+            executables.add(path)
+    for path in (app, *app.rglob("*")):
+        mode = path.stat().st_mode
+        required_bits = 0o005 if path.is_dir() or path == launcher or path in executables or mode & 0o111 else 0o004
+        if mode & required_bits != required_bits:
+            raise ReleaseError(f"Insufficient public permissions on {path}: {mode & 0o777:o}")
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
+    with tempfile.TemporaryDirectory() as directory:
+        result = run([launcher, "--version"], env=isolated_env(Path(directory)))
+    if result.stdout.strip() != f"cito v{expected}":
+        raise ReleaseError("Bundled CLI version does not match the release version.")
+    for executable in sorted(executables):
         if run(["/usr/bin/lipo", "-archs", executable]).stdout.strip() != "arm64":
             raise ReleaseError("The release requires arm64 native executables.")
 
@@ -262,11 +278,13 @@ def signing_credentials():
         keychain = root / "signing.keychain-db"
         p12 = root / "identity.p12"
         pem = root / "identity.pem"
+        p12.touch(mode=0o600, exist_ok=False)
         p12.write_bytes(base64.b64decode("".join(credentials["APPLE_CERTIFICATE_P12_BASE64"].split()), validate=True))
         try:
             run(["/usr/bin/openssl", "pkcs12", "-in", p12, "-passin", "stdin", "-nodes", "-out", pem],
-                input=credentials["APPLE_CERTIFICATE_PASSWORD"] + "\n")
-            run(["/usr/bin/security", "create-keychain", "-p", "", keychain])
+                input=credentials["APPLE_CERTIFICATE_PASSWORD"] + "\n", umask=0o077)
+            run(["/usr/bin/security", "create-keychain", "-p", "", keychain], umask=0o077)
+            keychain.chmod(0o600)
             run(["/usr/bin/security", "set-keychain-settings", "-lut", "3600", keychain])
             run(["/usr/bin/security", "unlock-keychain", "-p", "", keychain])
             run(["/usr/bin/security", "list-keychains", "-d", "user", "-s", keychain, *original])
@@ -281,7 +299,7 @@ def signing_credentials():
             matches = [fingerprint for fingerprint, name in identities if name == credentials["APPLE_SIGNING_IDENTITY"]]
             if len(matches) != 1:
                 raise ReleaseError("No unique, valid imported identity matches APPLE_SIGNING_IDENTITY.")
-            run(["/usr/bin/expect"], input=NOTARY_AUTH, env={**os.environ, "CITO_KEYCHAIN": str(keychain)})
+            run(["/usr/bin/expect"], input=NOTARY_AUTH, env={**os.environ, "CITO_KEYCHAIN": str(keychain)}, umask=0o077)
             yield keychain, matches[0]
         finally:
             cleanup_steps(
@@ -518,6 +536,7 @@ def tap_ssh(root):
     key = required("HOMEBREW_TAP_SSH_KEY")
     keys = gh(["api", "meta"])["ssh_keys"]
     known_hosts = root / "known_hosts"
+    known_hosts.touch(mode=0o600, exist_ok=False)
     known_hosts.write_text("".join(f"github.com {value}\n" for value in keys))
     agent = run(["ssh-agent", "-s"]).stdout
     env = {**os.environ, **dict(re.findall(r"(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);", agent))}
@@ -613,7 +632,6 @@ def main():
     command.add_argument("tag")
     command.add_argument("cask", type=Path)
     args = parser.parse_args()
-    os.umask(0o077)
     try:
         if args.command in ("assets", "publish", "tap") and args.tag != f"v{version()}":
             raise ReleaseError("Selected release does not match the canonical version.")

@@ -101,6 +101,17 @@ struct SetupInspection {
     worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
 }
 
+impl Default for SetupInspection {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            value: Err("Setup inspection pending".into()),
+            done: Arc::default(),
+            worker: None,
+        }
+    }
+}
+
 use super::session_activity::CompletionNotice;
 
 enum HostHubError {
@@ -179,7 +190,12 @@ pub struct DaemonService {
 }
 
 pub fn run_daemon(config: &NativeConfig, plugins: &LoadedPlugins) {
-    if let Err(e) = run_daemon_inner(config, plugins) {
+    if let Err(e) = run_daemon_inner(
+        config,
+        plugins,
+        TcpListener::accept,
+        crate::support::poll_until,
+    ) {
         eprintln!("cito daemon: {e}");
         std::process::exit(1);
     }
@@ -204,7 +220,12 @@ fn poll_deadline(last_poll: Instant) -> Instant {
     }
 }
 
-fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<(), String> {
+fn run_daemon_inner(
+    config: &NativeConfig,
+    plugins: &LoadedPlugins,
+    accept: impl Fn(&TcpListener) -> std::io::Result<(std::net::TcpStream, std::net::SocketAddr)>,
+    wait: impl Fn(&mut [libc::pollfd], Option<Instant>) -> Result<bool, String>,
+) -> Result<(), String> {
     if crate::plugins::handover_stale_daemon(config)? {
         return Ok(());
     }
@@ -225,17 +246,6 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let listener =
         TcpListener::bind(("127.0.0.1", config.daemon_port)).map_err(|e| e.to_string())?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let service = Arc::new(Mutex::new(DaemonService::open(config, plugins)?));
-    {
-        let mut s = service.lock().map_err(|_| "Service lock poisoned")?;
-        s.state.db.execute(
-            "INSERT OR REPLACE INTO daemon_owner VALUES(1,?,?)",
-            &[json!(std::process::id()), json!(config.daemon_port)],
-        )?;
-        if let Err(error) = s.sync_host_hub() {
-            s.host_hub_error = Some(HostHubError::Reload(error));
-        }
-    }
     let mut pipe = [-1; 2];
     // SAFETY: pipe points at two writable descriptors; flags keep signal writes nonblocking.
     if unsafe { libc::pipe(pipe.as_mut_ptr()) } != 0 {
@@ -249,6 +259,12 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
         libc::fcntl(write_pipe.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
         libc::fcntl(read_pipe.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
     }
+    let service = DaemonService::open(config, plugins)?;
+    service.state.db.execute(
+        "INSERT OR REPLACE INTO daemon_owner VALUES(1,?,?)",
+        &[json!(std::process::id()), json!(config.daemon_port)],
+    )?;
+    let service = Arc::new(Mutex::new(service));
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     SIGNAL_PIPE.store(write_pipe.as_raw_fd(), Ordering::SeqCst);
     let previous_term = unsafe {
@@ -276,9 +292,12 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let mut ui_retry = (ui.is_none() && std::env::var("CITO_DISABLE_UI").as_deref() != Ok("1"))
         .then(|| Instant::now() + ui_backoff.failed());
     let mut ui_started = Instant::now();
-    'running: while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+    let serving = 'running: loop {
+        if shutdown_requested() {
+            break Ok(());
+        }
         loop {
-            match listener.accept() {
+            match accept(&listener) {
                 Ok((stream, _)) => {
                     let s = service.clone();
                     if calls.iter().filter(|call| !call.is_finished()).count() >= 64 {
@@ -294,10 +313,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => {
-                    eprintln!("cito accept: {e}");
-                    break 'running;
-                }
+                Err(e) => break 'running Err(format!("accept: {e}")),
             }
         }
         if poll_worker.as_ref().is_some_and(|w| w.is_finished()) {
@@ -387,7 +403,9 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             last_poll
         });
         let deadline = ui_retry.unwrap_or(next).min(next);
-        crate::support::poll_until(&mut fds, Some(deadline))?;
+        if let Err(error) = wait(&mut fds, Some(deadline)) {
+            break Err(format!("poll: {error}"));
+        }
         if fds[1].revents != 0 {
             let mut bytes = [0u8; 256];
             // SAFETY: the read end is live and nonblocking; coalesced hints are drained together.
@@ -401,7 +419,8 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             {}
             poll_requested = true;
         }
-    }
+    };
+    request_shutdown();
     drop(listener);
     if let Some(worker) = poll_worker {
         let _ = worker.join();
@@ -435,7 +454,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
         let _ = ui.writer.join();
     }
     drop(service);
-    if let Some(purge) = uninstall {
+    let cleanup = uninstall.map_or(Ok(()), |purge| {
         super::setup::uninstall_setup_with_owner(
             &config.state_dir,
             &config.config_path,
@@ -443,8 +462,9 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             plugins,
             purge,
             Some(&lock),
-        )?;
-    }
+        )
+        .map(|_| ())
+    });
     unsafe {
         libc::signal(libc::SIGTERM, previous_term);
         libc::signal(libc::SIGINT, previous_int);
@@ -452,7 +472,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     SIGNAL_PIPE.store(-1, Ordering::SeqCst);
     drop(write_pipe);
     drop(read_pipe);
-    Ok(())
+    serving.and(cleanup)
 }
 
 pub use super::cli::run_cli_command;
@@ -529,7 +549,12 @@ impl DaemonService {
             setup_serial: Arc::default(),
             retired_auth: Vec::new(),
             last_app_action: HashMap::new(),
-            setup_inspections: HashMap::new(),
+            // The first poll or on-demand refresh starts inspections after publication.
+            setup_inspections: plugins
+                .agent_plugins()
+                .into_iter()
+                .map(|p| (p.id.clone(), SetupInspection::default()))
+                .collect(),
             setup_completion: Arc::new((Mutex::new(0), std::sync::Condvar::new())),
             host_hub_error: None,
             last_hub_errors: HashMap::new(),
@@ -537,18 +562,6 @@ impl DaemonService {
             activity_filter: "all".into(),
             activity_query: String::new(),
         };
-        // Inspect before the service is published to HTTP/UI workers.
-        for plugin in service.access.plugins.agent_plugins() {
-            service.setup_inspections.insert(
-                plugin.id.clone(),
-                SetupInspection {
-                    generation: 0,
-                    value: super::setup::try_inspect_plugin_setup(plugin),
-                    done: Arc::new(AtomicBool::new(true)),
-                    worker: None,
-                },
-            );
-        }
         service.reload_slots()?;
         Ok(service)
     }
@@ -567,31 +580,10 @@ impl DaemonService {
         if self.plugins.find_by_id(id).is_none() {
             return;
         }
-        let entry = self
-            .setup_inspections
-            .entry(id.to_owned())
-            .or_insert_with(|| SetupInspection {
-                generation: 0,
-                value: Err("Setup inspection pending".into()),
-                done: Arc::new(AtomicBool::new(false)),
-                worker: None,
-            });
+        let entry = self.setup_inspections.entry(id.to_owned()).or_default();
         entry.generation = entry.generation.wrapping_add(1);
         if entry.worker.is_none() {
-            if let Some(plugin) = self.access.plugins.find_by_id(id).cloned() {
-                entry.done.store(false, Ordering::SeqCst);
-                let notice = CompletionNotice {
-                    done: entry.done.clone(),
-                    completion: self.setup_completion.clone(),
-                };
-                entry.worker = Some((
-                    entry.generation,
-                    thread::spawn(move || {
-                        let _notice = notice;
-                        super::setup::try_inspect_plugin_setup(&plugin)
-                    }),
-                ));
-            }
+            entry.done.store(false, Ordering::SeqCst);
         }
         self.refresh_setup_inspections();
     }
@@ -600,9 +592,11 @@ impl DaemonService {
         let mut changed = false;
         for (id, entry) in &mut self.setup_inspections {
             if entry.worker.as_ref().is_some_and(|(_, worker)| {
-                entry.done.load(Ordering::SeqCst) || worker.is_finished()
+                !entry.done.load(Ordering::SeqCst) && !worker.is_finished()
             }) {
-                let (generation, worker) = entry.worker.take().unwrap();
+                continue;
+            }
+            if let Some((generation, worker)) = entry.worker.take() {
                 let value = worker
                     .join()
                     .unwrap_or_else(|_| Err("Setup inspection worker panicked".into()));
@@ -611,10 +605,10 @@ impl DaemonService {
                     changed = true;
                     continue;
                 }
-            } else {
+            } else if entry.done.load(Ordering::SeqCst) {
                 continue;
             }
-            // A superseded completion is discarded and refreshed at the latest generation.
+            // First inspection, explicit invalidation, or superseded worker.
             if let Some(plugin) = self.access.plugins.find_by_id(id).cloned() {
                 let generation = entry.generation;
                 entry.done.store(false, Ordering::SeqCst);
@@ -631,7 +625,7 @@ impl DaemonService {
                 ));
             }
         }
-        if changed {
+        if changed && self.ui.is_some() {
             self.emit(json!({"op":"settings","settings":self.settings()}));
         }
     }
@@ -1970,7 +1964,35 @@ impl DaemonService {
         self.refresh_available_until(Instant::now() + Duration::from_millis(1500))
     }
 
+    fn refresh_initial_setup_until(&mut self, deadline: Instant) {
+        // A first snapshot shares its discovery deadline with the initial inspection.
+        let completion = self.setup_completion.clone();
+        loop {
+            let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.refresh_setup_inspections();
+            if !self
+                .setup_inspections
+                .values()
+                .any(|e| e.generation == 0 && e.worker.is_some())
+                || Instant::now() >= deadline
+                || shutdown_requested()
+            {
+                return;
+            }
+            let revision = completion.0.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = completion
+                .1
+                .wait_timeout_while(
+                    revision,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |v| *v == before,
+                )
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
     fn refresh_available_until(&mut self, deadline: Instant) -> Result<(), String> {
+        self.refresh_initial_setup_until(deadline);
         self.update_discovery_demand();
         let live = self.live_receivers()?;
         if let Some(activity) = self.session_activity.as_mut() {

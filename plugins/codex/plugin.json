@@ -13,7 +13,7 @@
   "command": [
     "./bin/cito-plugin-codex"
   ],
-  "version": "0.21.3",
+  "version": "0.22.0",
   "postSetupHint": "Connected · Start a new Codex session, then click + Listen",
   "postDisconnectHint": "Disconnected · Active Codex listeners stopped"
 }

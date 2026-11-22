@@ -149,23 +149,39 @@ fn user_root_aliases_retire_staged_copies_without_retiring_builtin_roots() {
     fs::create_dir_all(&user).unwrap();
     std::os::unix::fs::symlink(&user, &alias).unwrap();
     let staged = user.join("telegram");
-    let write_staged = || {
+    let mut manifest: Value =
+        serde_json::from_str(include_str!("../../../../plugins/telegram/plugin.json")).unwrap();
+    manifest["version"] = json!("0.0.0");
+    let write_staged = |value: &Value| {
         fs::create_dir_all(&staged).unwrap();
-        fs::write(staged.join("plugin.json"), json!({"id":"telegram","kind":"human-channel","displayName":"Legacy staged channel","version":"0.0.0","command":["./bin/cito-plugin-telegram"]}).to_string()).unwrap();
+        fs::write(staged.join("plugin.json"), value.to_string()).unwrap();
     };
     for root in [alias.clone(), user.join("../plugins")] {
-        write_staged();
+        write_staged(&manifest);
         assert!(discover(&[(root, false)], Some(&user)).unwrap().is_empty());
         assert!(!staged.exists());
     }
-    write_staged();
-    let builtin = discover(&[(alias, true)], Some(&user)).unwrap();
+    write_staged(&manifest);
+    let builtin = discover(&[(alias.clone(), true)], Some(&user)).unwrap();
     assert_eq!(builtin.len(), 1);
     assert_eq!(builtin[0].id, "telegram");
     assert!(
         staged.exists(),
         "A builtin fallback is never a user-staged copy"
     );
+    for (field, value) in [
+        ("command", json!(["./bin/cito-custom"])),
+        ("displayName", json!("My channel")),
+    ] {
+        let mut custom = manifest.clone();
+        custom[field] = value;
+        write_staged(&custom);
+        let found = discover(&[(alias.clone(), false)], Some(&user)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].is_builtin);
+        assert_eq!(found[0].manifest, custom);
+        assert!(staged.join("plugin.json").is_file());
+    }
     fs::remove_dir_all(dir).unwrap();
 }
 

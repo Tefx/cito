@@ -511,22 +511,33 @@ pub(super) fn is_staged_plugins_root(root: &Path, state_dir: &Path) -> bool {
 
 /// Discovery skips legacy copies and aliases of the authoritative bundled source.
 pub(super) fn is_legacy_staged_plugin(sub: &Path, manifest: &Value) -> bool {
-    let dir_name = sub.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let manifest_id = manifest["id"].as_str().unwrap_or("");
-    let legacy_command = manifest["command"]
-        .as_array()
-        .and_then(|command| command.first())
-        .and_then(Value::as_str)
-        .is_some_and(|command| command.starts_with("./bin/cito-"));
-    [dir_name, manifest_id].into_iter().any(|id| {
-        let bundled = super::setup::resolve_bundled_plugin_dir(id);
-        !id.is_empty()
-            && bundled.join("plugin.json").is_file()
-            && (same_plugin_root(sub, &bundled)
-                || dir_name == "human"
-                || manifest_id == "human"
-                || (manifest["version"].as_str() != Some(CITO_VERSION) && legacy_command))
-    })
+    let Some(id) = manifest["id"].as_str() else {
+        return false;
+    };
+    if !validate_harness_id(id) || sub.file_name().and_then(|s| s.to_str()) != Some(id) {
+        return false;
+    }
+    let bundled = super::setup::resolve_bundled_plugin_dir(id);
+    let Some(mut shipped) = fs::read(bundled.join("plugin.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+    else {
+        return false;
+    };
+    if same_plugin_root(sub, &bundled) {
+        return true;
+    }
+    if manifest["version"] == shipped["version"] {
+        return false;
+    }
+    let Some(fields) = shipped.as_object_mut() else {
+        return false;
+    };
+    match manifest.get("version") {
+        Some(version) => fields.insert("version".into(), version.clone()),
+        None => fields.remove("version"),
+    };
+    shipped == *manifest
 }
 
 /// Even if cleanup is disabled or removal fails, discovery uses the bundled fallback.
@@ -544,14 +555,11 @@ pub(super) fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
         if fs::symlink_metadata(sub).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             // Unlink the entry itself, never the plugin directory it points to.
             let _ = fs::remove_file(sub);
-        } else {
-            let dir_name = sub.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            let is_source = [dir_name, manifest["id"].as_str().unwrap_or("")]
-                .into_iter()
-                .any(|id| same_plugin_root(sub, &super::setup::resolve_bundled_plugin_dir(id)));
-            if !is_source {
-                let _ = fs::remove_dir_all(sub);
-            }
+        } else if manifest["id"]
+            .as_str()
+            .is_some_and(|id| !same_plugin_root(sub, &super::setup::resolve_bundled_plugin_dir(id)))
+        {
+            let _ = fs::remove_dir_all(sub);
         }
     }
     true
@@ -1196,12 +1204,19 @@ pub struct DaemonHealth {
     pub version: Option<String>,
 }
 
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
 pub fn probe_daemon_health(config: &NativeConfig) -> Option<DaemonHealth> {
+    probe_daemon_health_until(config, Instant::now() + HEALTH_PROBE_TIMEOUT)
+}
+
+fn probe_daemon_health_until(config: &NativeConfig, deadline: Instant) -> Option<DaemonHealth> {
     let addr = SocketAddr::from(([127, 0, 0, 1], config.daemon_port));
-    let timeout = Duration::from_millis(500);
-    let deadline = Instant::now() + timeout;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
-    stream.set_write_timeout(Some(timeout)).ok()?;
+    let mut stream =
+        TcpStream::connect_timeout(&addr, deadline.checked_duration_since(Instant::now())?).ok()?;
+    stream
+        .set_write_timeout(Some(deadline.checked_duration_since(Instant::now())?))
+        .ok()?;
     let req = format!(
         "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
         config.daemon_port
@@ -1285,7 +1300,16 @@ pub fn handover_stale_daemon(config: &NativeConfig) -> Result<bool, String> {
         if existing.version.as_deref() == Some(CITO_VERSION) {
             return Ok(true);
         }
-        stop_daemon(config, &existing)?;
+        if let Err(error) = stop_daemon(config, &existing) {
+            // A peer can complete the handover between either health probe and SIGTERM.
+            // Never signal a replacement. An empty endpoint follows the cold-start path;
+            // the daemon owner lock still arbitrates who gets to start.
+            return match probe_daemon_health(config) {
+                Some(h) if h.version.as_deref() == Some(CITO_VERSION) => Ok(true),
+                None => Ok(false),
+                _ => Err(error),
+            };
+        }
     }
     Ok(false)
 }
@@ -1321,30 +1345,22 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
     let result = (|| {
-        let exited = crate::support::child_exit_fd(child.id())?;
         let mut retry = crate::support::RetryBackoff::default();
-        let deadline = Instant::now() + Duration::from_millis(5000);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if let Some(h) = probe_daemon_health(config) {
-                if h.version.as_deref() == Some(CITO_VERSION) {
-                    return Ok(());
-                }
+            let probe_deadline = deadline.min(Instant::now() + HEALTH_PROBE_TIMEOUT);
+            if probe_daemon_health_until(config, probe_deadline)
+                .is_some_and(|h| h.version.as_deref() == Some(CITO_VERSION))
+            {
+                return Ok(());
             }
-            if crate::support::poll_until(
-                &mut [libc::pollfd {
-                    fd: exited.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                }],
-                Some(deadline.min(Instant::now() + retry.failed())),
-            )? {
-                if probe_daemon_health(config)
-                    .is_some_and(|h| h.version.as_deref() == Some(CITO_VERSION))
-                {
-                    return Ok(());
-                }
-                return Err("Daemon exited before becoming healthy".into());
-            }
+            // Our child can lose the owner lock before the winner serves /health.
+            // Leave a final probe window rather than sleeping out the readiness budget.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let delay = (remaining / 2)
+                .max(Duration::from_millis(10))
+                .min(remaining);
+            std::thread::sleep(retry.failed().min(delay));
         }
         Err(format!(
             "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
@@ -1505,6 +1521,44 @@ mod tests {
             .rejected_ids
             .contains("sample"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upgrades_remove_only_unmodified_builtin_manifests() {
+        let state = env::temp_dir().join(format!("cito-plugin-upgrade-{}", random_hex(8)));
+        let root = state.join("plugins");
+        let dir = root.join("pi");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plugin.json");
+        let mut legacy: Value =
+            serde_json::from_str(include_str!("../../../../plugins/pi/plugin.json")).unwrap();
+        legacy["version"] = json!("0.0.0");
+        for (field, value) in [
+            ("command", json!(["./bin/cito-custom"])),
+            ("command", json!(["./bin/cito-plugin-pi", "custom"])),
+            ("postSetupHint", json!("Custom hint")),
+            ("extra", json!(true)),
+        ] {
+            let mut custom = legacy.clone();
+            custom[field] = value;
+            fs::write(&path, custom.to_string()).unwrap();
+            let loaded = load_plugins(&state);
+            let plugin = loaded.find_by_id("pi").unwrap();
+            assert!(!plugin.is_builtin);
+            assert_eq!(plugin.plugin_dir, dir);
+            assert_eq!(fs::read_to_string(&path).unwrap(), custom.to_string());
+        }
+        fs::write(&path, legacy.to_string()).unwrap();
+        assert!(
+            load_plugins_readonly(&state)
+                .find_by_id("pi")
+                .unwrap()
+                .is_builtin
+        );
+        assert!(path.is_file());
+        assert!(load_plugins(&state).find_by_id("pi").unwrap().is_builtin);
+        assert!(!dir.exists());
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]

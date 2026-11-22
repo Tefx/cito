@@ -484,10 +484,19 @@ fn recover_inner(
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let _cache_lock = FileLock::acquire(&path.with_extension("json.lock"), deadline)?;
     let old = read_cache(&path, settings)?;
+    let old_refresh = old
+        .as_ref()
+        .filter(|_| !force_account_select)
+        .and_then(|cache| cache["refresh_token"].as_str())
+        .filter(|s| !s.is_empty());
     if let Some(cache) = old.as_ref().filter(|cache| {
         !force_account_select && fresh(cache) && cache["token_sha256"].as_str() != rejected
     }) {
-        return verify_cache(cache, settings, deadline);
+        match verify_cache(cache, settings, deadline) {
+            Err(error)
+                if old_refresh.is_some() && error.starts_with("AUTHORIZATION_VIOLATION:") => {}
+            result => return result,
+        }
     }
     let verifier = OidcVerifier::new(settings.issuer, settings.client)?;
     let agent = ureq::AgentBuilder::new().redirects(0).build();
@@ -507,11 +516,6 @@ fn recover_inner(
     let scopes = settings.scopes(&discovery)?;
     let token_url = endpoint(&discovery, "token_endpoint")?;
     let authorization = endpoint(&discovery, "authorization_endpoint")?;
-    let old_refresh = old
-        .as_ref()
-        .filter(|_| !force_account_select)
-        .and_then(|cache| cache["refresh_token"].as_str())
-        .filter(|s| !s.is_empty());
     let refreshed = if let Some(refresh) = old_refresh {
         match deadline.request(agent.post(&token_url))?.send_form(&[
             ("client_id", settings.client),

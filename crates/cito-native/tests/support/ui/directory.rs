@@ -1245,6 +1245,70 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         true,
         "A matching Directory receipt also settles the action independently of query correlation"
     );
+    for op in ["state", "directory"] {
+        control(&f, p, "delete_activity:sig-0");
+        let current = latest_delete();
+        let mut receipt = json!({"op":op,"ok":true,"committed":true,"source_op":"clear_activity_history","request_id":c["request_id"],"warning":"History cleared. Refresh will retry."});
+        f.send(p, receipt.clone());
+        let stale = inspect(&f, p);
+        assert_eq!(
+            node(&stale, "directory_items", "directory_warning_label")["hidden"],
+            true
+        );
+        receipt["request_id"] = current["request_id"].clone();
+        f.send(p, receipt);
+        let settled = inspect(&f, p);
+        let warning = node(&settled, "directory_items", "directory_warning_label");
+        assert_eq!(warning["hidden"], false);
+        assert_eq!(warning["tooltip"], "History cleared. Refresh will retry.");
+        assert_eq!(
+            settled["directory_selected_id"], stale["directory_selected_id"],
+            "Receipt has no rows to project"
+        );
+    }
+}
+
+#[test]
+fn in_flight_directory_query_filters_cached_rows_until_correlated_reply() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    let mut mine = peer("mine");
+    mine["is_self_principal"] = json!(true);
+    let mut other_app = peer("other-app");
+    other_app["is_self_principal"] = json!(true);
+    other_app["harness"] = json!("custom");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("other-owner"), mine, other_app],"matched_count":7,"online_count":7}),
+    );
+    assert_eq!(inspect(&f, p)["directory_matched_count"], 7);
+    control(&f, p, "dir_scope:mine");
+    let scoped = inspect(&f, p);
+    assert_eq!(scoped["directory_matched_count"], 2);
+    assert!(node(&scoped, "directory_items", "dir_row:personal:other-owner").is_null());
+    control(&f, p, "dir_harness:fixture");
+    let faceted = inspect(&f, p);
+    assert_eq!(faceted["directory_matched_count"], 1);
+    assert_eq!(faceted["directory_selected_id"], "personal:mine");
+    f.send(p, json!({"op":"test_directory_query","query":"missing"}));
+    let searching = inspect(&f, p);
+    assert_eq!(searching["directory_matched_count"], 0);
+    assert!(!node(&searching, "directory_items", "directory_reset_filters").is_null());
+    let mut result = peer("canonical");
+    result["is_self_principal"] = json!(true);
+    // The server can match fields omitted from the cached projection.
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[result],"matched_count":3,"online_count":7}),
+    );
+    let replied = inspect(&f, p);
+    assert_eq!(replied["directory_matched_count"], 3);
+    assert_eq!(replied["directory_selected_id"], "personal:canonical");
 }
 
 #[test]
@@ -1617,6 +1681,54 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         json!({"op":"composer_result","ok":true,"request_id":replies[2]["request_id"]}),
     );
     assert_eq!(inspect(&f, p)["composer_open"], false);
+
+    // Recreating the same visible draft gives it a different send identity.
+    let submit_again = || {
+        control(&f, p, "msg_dir:personal:one");
+        f.send(
+            p,
+            json!({"op":"test_composer_input","value":"Identical draft"}),
+        );
+        control(&f, p, "composer_send");
+        inspect(&f, p);
+        f.frames(p)
+            .into_iter()
+            .rfind(|v| v["op"] == "send_signal")
+            .unwrap()
+    };
+    let prior = submit_again();
+    control(&f, p, "composer_cancel");
+    control(&f, p, "msg_dir:personal:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Identical draft"}),
+    );
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":prior["request_id"]}),
+    );
+    let reopened = inspect(&f, p);
+    assert_eq!(reopened["composer_open"], true);
+    assert_eq!(
+        node(&reopened, "directory_items", "composer_input")["text"],
+        prior["message"]
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let current = f
+        .frames(p)
+        .into_iter()
+        .rfind(|v| v["op"] == "send_signal")
+        .unwrap();
+    assert_eq!(current["to"], prior["to"]);
+    assert_eq!(current["message"], prior["message"]);
+    assert_ne!(current["idempotency_key"], prior["idempotency_key"]);
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":current["request_id"]}),
+    );
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+
     f.send(p, state());
     assert!(!node(&inspect(&f, p), "directory_items", "msg_dir:personal:one").is_null());
     f.send(p, json!({"op":"test_directory_key","key":"escape"}));

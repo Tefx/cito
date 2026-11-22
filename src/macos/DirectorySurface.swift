@@ -1,10 +1,9 @@
 import AppKit
 
 extension Companion: NSTableViewDataSource, NSTableViewDelegate {
-    var directoryError: String? { directoryActionError ?? directoryQueryError }
     func clearDirectoryActionError() {
         let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError.map(presentationError) : nil
-        directoryActionError = nil; directoryActionErrorSourceOp = nil
+        directoryActionError = nil; directoryActionErrorSourceOp = nil; directoryActionWarning = nil
         if let oldCopyError = oldCopyError {
             if directorySummaryLabel?.toolTip == oldCopyError { directorySummaryLabel?.toolTip = nil }
             if directorySummaryLabel?.stringValue == oldCopyError {
@@ -17,13 +16,20 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
     func updateDirectoryWarnings() {
         guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
-        let hasError = directoryError != nil
-        let hasWarning = hasError || !directoryWarnings.isEmpty
+        let error = directoryActionError ?? (directoryActionWarning == nil ? directoryQueryError : nil)
+        let hasError = error != nil
+        let hasWarning = hasError || directoryActionWarning != nil || !directoryWarnings.isEmpty
         directoryWarningLabel?.isHidden = !hasWarning
-        directoryWarningLabel?.stringValue = hasError ? (directoryMode == "activity" ? "Cannot update Activity. Please try again." : "Cannot refresh Directory. Showing the last available results.") : "Some Hubs are unavailable. Results may be incomplete."
+        if hasError {
+            directoryWarningLabel?.stringValue = directoryMode == "activity" ? "Cannot update Activity. Please try again." : "Cannot refresh Directory. Showing the last available results."
+        } else if directoryActionWarning != nil {
+            directoryWarningLabel?.stringValue = "Action completed. Results may be incomplete."
+        } else {
+            directoryWarningLabel?.stringValue = "Some Hubs are unavailable. Results may be incomplete."
+        }
         // Directory warnings carry a Hub label added by the daemon. Keep that
         // scope while sanitizing only its diagnostic payload.
-        directoryWarningLabel?.toolTip = directoryError.map(presentationError) ?? directoryWarnings.map { warning in
+        directoryWarningLabel?.toolTip = (error ?? directoryActionWarning).map(presentationError) ?? directoryWarnings.map { warning in
             guard let separator = warning.range(of:": ") else { return presentationError(warning) }
             return String(warning[..<separator.lowerBound]) + ": " + presentationError(String(warning[separator.upperBound...]))
         }.joined(separator:"\n")
@@ -461,7 +467,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             setComposerStatus("Message is too large to send")
             return
         }
-        pendingComposer = PendingComposerSend(text:composerInputField?.stringValue ?? text,
+        pendingComposer = PendingComposerSend(composerDraftIdempotencyKey: composerDraftIdempotencyKey,
+            text:composerInputField?.stringValue ?? text,
             requestId:requestId, target:composerTarget, hub:composerTargetHub, replySignalId:composerReplySignalId)
         setComposerStatus("")
         emit(action)
@@ -745,9 +752,18 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let anchorId = directoryFilteredPeers.indices.contains(top) ? directoryFilteredPeers[top].scoped_id : nil
         let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
         let sameServerQuery = serverDirectoryQuery == directoryQuery && serverDirectoryScope == directoryScopeFilter && serverDirectoryHarness == directoryHarnessFilter
-        if serverDirectoryQuery == nil {
+        if !sameServerQuery {
             directoryFilteredPeers = directoryAllPeers.filter { peer in
-                (directoryScopeFilter != "mine" || peer.is_self_principal == true) && (directoryHarnessFilter == "all" || peer.harness == directoryHarnessFilter) && (directoryQuery.isEmpty || [peer.title, peer.about, peer.display_address, peer.hub ?? "", peer.user, peer.cwd ?? "", peer.repo ?? "", peer.host_name].joined(separator:" ").localizedCaseInsensitiveContains(directoryQuery))
+                guard (directoryScopeFilter != "mine" || peer.is_self_principal == true),
+                      (directoryHarnessFilter == "all" || peer.harness == directoryHarnessFilter) else { return false }
+                if directoryQuery.isEmpty { return true }
+                var searchable = [peer.title, peer.about, peer.display_address, peer.hub ?? "", peer.user,
+                                  peer.cwd ?? "", peer.repo ?? "", peer.host_name, peer.listener_id, peer.public_id, peer.scoped_id]
+                // The visible alias may use a shorter ID than the query.
+                if let separator = peer.display_address.firstIndex(of: "#"), peer.listener_id.hasPrefix("c_") {
+                    searchable.append(String(peer.display_address[...separator]) + peer.listener_id.dropFirst(2))
+                }
+                return searchable.joined(separator: " ").localizedCaseInsensitiveContains(directoryQuery)
             }
         } else { directoryFilteredPeers = directoryAllPeers }
         directoryMatchedCount = daemonMatchedCount ?? (sameServerQuery ? serverDirectoryMatchedCount : directoryFilteredPeers.count)

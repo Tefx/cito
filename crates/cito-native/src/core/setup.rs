@@ -110,12 +110,24 @@ pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> boo
     if !dir.join("plugin.json").is_file() {
         return false;
     }
-    if let Some(cmd) = plugin.command.first() {
-        if (cmd.starts_with("./") || cmd.starts_with("../")) && !dir.join(cmd).is_file() {
-            return false;
-        }
+    if plugin
+        .command
+        .first()
+        .is_some_and(|cmd| !valid_plugin_command(dir, cmd))
+    {
+        return false;
     }
     !plugin.is_builtin || contains_plugin_files(&resolve_bundled_plugin_dir(&plugin.id), dir)
+}
+
+fn valid_plugin_command(dir: &Path, cmd: &str) -> bool {
+    !(cmd.starts_with("./") || cmd.starts_with("../"))
+        || fs::metadata(dir.join(cmd))
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+fn matching_link(source: &Path, target: &Path) -> bool {
+    fs::read_link(source).is_ok_and(|left| fs::read_link(target).is_ok_and(|right| left == right))
 }
 
 fn contains_plugin_files(source: &Path, target: &Path) -> bool {
@@ -124,11 +136,12 @@ fn contains_plugin_files(source: &Path, target: &Path) -> bool {
     };
     for entry in entries {
         let Ok(entry) = entry else { return false };
-        let Ok(kind) = entry.file_type() else {
+        let staged = target.join(entry.file_name());
+        let (Ok(kind), Ok(meta)) = (entry.file_type(), fs::symlink_metadata(&staged)) else {
             return false;
         };
-        let staged = target.join(entry.file_name());
-        if (kind.is_file() && !staged.is_file())
+        if kind != meta.file_type()
+            || (kind.is_symlink() && !matching_link(&entry.path(), &staged))
             || (kind.is_dir() && !contains_plugin_files(&entry.path(), &staged))
         {
             return false;
@@ -211,16 +224,7 @@ fn ensure_plugins_staged<'a>(
                 let staged = candidate.join(&plugin.id);
                 copy_dir_recursive(source, &staged)?;
                 let parsed = super::plugins::parse_manifest_dir(&staged, true)?;
-                let executable = staged.join(&parsed.command[0]);
-                if (parsed.command[0].starts_with("./") || parsed.command[0].starts_with("../"))
-                    && (!executable.is_file()
-                        || fs::metadata(&executable)
-                            .map_err(|e| e.to_string())?
-                            .permissions()
-                            .mode()
-                            & 0o111
-                            == 0)
-                {
+                if !valid_plugin_command(&staged, &parsed.command[0]) {
                     return Err(format!(
                         "PLUGIN_LOAD_ERROR: Invalid staged executable for {}",
                         plugin.id
@@ -301,7 +305,7 @@ fn same_tree(source: &Path, target: &Path) -> bool {
         return false;
     }
     if left.file_type().is_symlink() {
-        return fs::read_link(source).ok() == fs::read_link(target).ok();
+        return matching_link(source, target);
     }
     if left.is_dir() {
         let names = |path: &Path| -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
@@ -1962,6 +1966,47 @@ mod tests {
     }
 
     #[test]
+    fn intact_plugin_requires_executable_local_commands() {
+        let (root, mut plugins) = fixture();
+        let plugin = &mut plugins.plugins[0];
+        let dir = plugin.plugin_dir.clone();
+        let binary = dir.join("bin/sample");
+        for command in ["./bin/sample", "../sample/bin/sample"] {
+            plugin.command[0] = command.into();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o100)).unwrap();
+            assert!(is_plugin_dir_intact(&dir, plugin));
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!is_plugin_dir_intact(&dir, plugin));
+        }
+        plugin.command[0] = "sh".into();
+        assert!(is_plugin_dir_intact(&dir, plugin));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn required_plugin_symlinks_must_preserve_their_targets() {
+        use std::os::unix::fs::symlink;
+        let (root, plugins) = fixture();
+        let source = &plugins.plugins[0].plugin_dir;
+        symlink("bin/sample", source.join("link")).unwrap();
+        let staged = root.join("staged");
+        copy_dir_recursive(source, &staged).unwrap();
+        fs::write(staged.join("extra"), "").unwrap();
+        let source_alias = root.join("source-alias");
+        symlink(source, &source_alias).unwrap();
+        assert!(contains_plugin_files(&source_alias, &staged));
+        let link = staged.join("link");
+        fs::remove_file(&link).unwrap();
+        assert!(!contains_plugin_files(source, &staged));
+        symlink("extra", &link).unwrap();
+        assert!(!contains_plugin_files(source, &staged));
+        fs::remove_file(&link).unwrap();
+        fs::copy(staged.join("bin/sample"), &link).unwrap();
+        assert!(!contains_plugin_files(source, &staged));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn bundled_plugin_resolution_covers_distribution_layouts() {
         let (root, _) = fixture();
         fs::remove_file(root.join("plugins/sample/plugin.json")).unwrap();
@@ -1990,7 +2035,11 @@ mod tests {
         let args: Vec<String> =
             serde_json::from_str(&env::var("CITO_SETUP_TEST_ARGS").expect("worker arguments"))
                 .unwrap();
-        if args == ["test-codesign-failure"] {
+        if args == ["test-private-build-app"] {
+            // SAFETY: umask has no pointer arguments; only this isolated worker inherits it.
+            unsafe { libc::umask(0o077) };
+            run_setup_cli(&["--build-app".into()]);
+        } else if args == ["test-codesign-failure"] {
             env::set_var("CITO_CODESIGN_IDENTITY", "nonexistent-identity-cito-test");
             let root = PathBuf::from(env::var("HOME").unwrap());
             let plugins = crate::plugins::load_plugins(&root);
@@ -2037,6 +2086,48 @@ mod tests {
             .env("CITO_SETUP_TEST_ARGS", serde_json::to_string(args).unwrap())
             .output()
             .unwrap()
+    }
+
+    #[test]
+    fn app_bundle_permissions_are_public_under_private_umask() {
+        let (root, _) = fixture();
+        let bundled = root.join("bundled/sample");
+        fs::create_dir_all(bundled.join("bin")).unwrap();
+        fs::write(bundled.join("package.json"), "{}").unwrap();
+        fs::set_permissions(
+            bundled.join("package.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::write(bundled.join("bin/hook"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(bundled.join("bin/hook"), fs::Permissions::from_mode(0o700)).unwrap();
+        let output = cli_child(&root, &root, &["test-private-build-app"]);
+        assert!(output.status.success(), "{output:?}");
+        let app = root.join("Applications/Cito.app");
+        for (path, mode) in [
+            ("", 0o755),
+            ("Contents", 0o755),
+            ("Contents/Info.plist", 0o644),
+            ("Contents/MacOS/Cito", 0o755),
+            ("Contents/Helpers/cito-native", 0o755),
+            ("Contents/Helpers/cito-ui", 0o755),
+            ("Contents/Resources/AppIcon.icns", 0o644),
+            ("Contents/Resources/plugins/sample", 0o755),
+            ("Contents/Resources/plugins/sample/package.json", 0o644),
+            ("Contents/Resources/plugins/sample/bin/hook", 0o755),
+            ("Contents/_CodeSignature/CodeResources", 0o644),
+        ] {
+            assert_eq!(
+                fs::metadata(app.join(path)).unwrap().permissions().mode() & 0o7777,
+                mode,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            fs::metadata(root.join("bin")).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

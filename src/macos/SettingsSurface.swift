@@ -1,5 +1,63 @@
 import AppKit
 
+// The mounted document owns its editor routing until AppKit releases it.
+final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
+    let hub: String
+    let channels: [ChannelSetupItem]
+    private weak var companion: Companion?
+
+    init(hub: String, channels: [ChannelSetupItem], companion: Companion) {
+        self.hub = hub
+        self.channels = channels
+        self.companion = companion
+        super.init(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func channelField(_ id: String) -> (ChannelSetupItem, ChannelFieldItem)? {
+        for channel in channels {
+            if let field = channel.fields.first(where: { id == "channel_field:\(channel.id):\($0.key)" }) {
+                return (channel, field)
+            }
+        }
+        return nil
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let selfUI = companion, !selfUI.uninstallConfirmOpen,
+              let field = notification.object as? NSTextField, let id = field.identifier?.rawValue,
+              let (channel, schema) = channelField(id) else { return }
+        let key = "\(hub)|\(channel.id)"
+        selfUI.channelUiStates[key, default: ChannelUiState()].drafts[schema.key] = field.stringValue
+        selfUI.channelUiStates[key]?.savedUntil.removeValue(forKey: schema.scope)
+        let gateway = schema.scope == "hub"
+        if let save: MenuControl = selfUI.findView(in: self, id: (gateway ? "save_hub_service:" : "save_channel:") + channel.id) {
+            if selfUI.channelSavePending(gateway ? "save_hub_service" : "channel_save", hub: hub, channel: channel.id, scope: schema.scope) {
+                selfUI.pendingLabel(save, true, "Saving…")
+            } else {
+                let title = gateway ? "Save Gateway Token" : "Save"
+                save.clearFeedback(title: title, accessibilityLabel: title)
+                save.isEnabled = true
+                save.toolTip = title
+            }
+            save.layoutContents()
+        }
+        if let test: MenuControl = selfUI.findView(in: self, id: "test_channel:\(channel.id)") {
+            let visibleFields = channel.fields.filter { $0.hidden != true && $0.scope != "hub" && selfUI.settingsFieldControls["channel_field:\(channel.id):\($0.key)"] != nil }
+            test.isEnabled = !selfUI.isPending("channel_test", hub: hub, target: channel.id) && channel.canSendTest(drafts: selfUI.channelUiStates[key]?.drafts ?? [:], visibleFields: visibleFields)
+        }
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        companion?.controlTextDidEndEditing(notification)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        companion?.control(control, textView: textView, doCommandBy: selector) ?? false
+    }
+}
+
 extension Companion {
     func pendingLabel(_ control: MenuControl, _ pending: Bool, _ title: String) {
         guard pending else { return }
@@ -34,9 +92,12 @@ extension Companion {
         if !selectedChannelHub.isEmpty { return inventory.contains(selectedChannelHub) ? selectedChannelHub : inventory.first ?? "local" }
         return settings?.hubs.first(where: { $0.is_default && $0.enabled })?.name ?? inventory.first ?? "local"
     }
-    func clearChannelDrafts(_ channel: ChannelSetupItem, scope: String? = nil, hub: String? = nil) {
-        let key = "\(hub ?? effectiveChannelHub)|\(channel.id)"
-        for field in channel.fields where scope == nil || field.scope == scope {
+    var mountedChannelsSettings: ChannelsSettingsView? {
+        settingsPanel?.contentView?.subviews.lazy.compactMap { ($0 as? NSScrollView)?.documentView as? ChannelsSettingsView }.first
+    }
+    func clearChannelDrafts(_ channel: ChannelSetupItem, scope: String, hub: String) {
+        let key = "\(hub)|\(channel.id)"
+        for field in channel.fields where field.scope == scope {
             channelUiStates[key, default: ChannelUiState()].drafts.removeValue(forKey: field.key)
         }
     }
@@ -203,9 +264,9 @@ extension Companion {
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
             else if settingsActiveTab == "hubs" && hubForm.isOpen { hubForm = HubFormState(); rebuildSettingsPanel() }
-            else if settingsActiveTab == "channels" {
-                let hub = effectiveChannelHub
-                let channels = channelSettingsByHub[hub] ?? []
+            else if settingsActiveTab == "channels", let mounted = mountedChannelsSettings {
+                let hub = mounted.hub
+                let channels = mounted.channels
                 let editingGateway = channels.filter { channelUiStates["\(hub)|\($0.id)"]?.editingGateway == true }
                 let editing = editingGateway.isEmpty ? channels.filter { channelUiStates["\(hub)|\($0.id)"]?.editingPersonal == true } : editingGateway
                 guard !editing.isEmpty else { closeSettingsPanel(emitAction: true); return }
@@ -224,9 +285,8 @@ extension Companion {
             let field=id?.identifier?.rawValue ?? ""
             let actionId: String
             if settingsActiveTab == "hubs" && field == "host_hub_port" { actionId="apply_host_hub_port" }
-            else if settingsActiveTab == "channels", field.hasPrefix("channel_field:"), let channel=(channelSettingsByHub[effectiveChannelHub] ?? []).first(where:{field.hasPrefix("channel_field:\($0.id):")}) {
-                let scope=channel.fields.first(where:{field=="channel_field:\(channel.id):\($0.key)"})?.scope
-                actionId=(scope == "hub" ? "save_hub_service:" : "save_channel:")+channel.id
+            else if settingsActiveTab == "channels", let (channel, schema) = mountedChannelsSettings?.channelField(field) {
+                actionId=(schema.scope == "hub" ? "save_hub_service:" : "save_channel:")+channel.id
             } else if settingsActiveTab == "hubs" && hubForm.isOpen { actionId="submit_add_hub" }
             else { return }
             if let root=settingsPanel?.contentView, let control: MenuControl = findView(in:root,id:actionId), control.isEnabled { control.pressed?() }
@@ -330,6 +390,7 @@ extension Companion {
         settingsRebuildCount += 1
         let focused = settingsFieldControls.first { $0.value.currentEditor() != nil && $0.value.currentEditor() === window.firstResponder }
         let focusedId = focused?.key
+        let previousChannelHub = mountedChannelsSettings?.hub
         let selectedRange = (focused?.value.currentEditor() as? NSTextView)?.selectedRange()
         if syncFields { syncAddHubFieldsFromControls() }
         MenuControl.clearHoverWhere { $0.window === window }
@@ -412,7 +473,8 @@ extension Companion {
         }
 
         buildAppsTab(in: root)
-        buildChannelsTab(in: root)
+        let renderedHub = effectiveChannelHub
+        buildChannelsTab(in: root, renderedHub: renderedHub)
         buildHubsTab(in: root)
 
         // Persistent Footer (520 × 44 pt, y: 0)
@@ -508,7 +570,8 @@ extension Companion {
 
         window.invalidateShadow()
         if revealAddHub && hubForm.isOpen, let form=root.subviews.compactMap({($0 as? NSScrollView)?.documentView}).flatMap({$0.subviews}).first(where:{$0.identifier?.rawValue=="add_hub_form"}) { form.scrollToVisible(form.bounds) }
-        if !uninstallConfirmOpen, let id = focusedId, let field = settingsFieldControls[id] {
+        if !uninstallConfirmOpen, let id = focusedId, let field = settingsFieldControls[id],
+           !(id.hasPrefix("channel_field:") || id.hasPrefix("pairing_instruction:")) || previousChannelHub == renderedHub {
             window.makeFirstResponder(field)
             if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }
         }
@@ -586,13 +649,14 @@ extension Companion {
 
     }
 
-    func buildChannelsTab(in root: NSView) {
+    func buildChannelsTab(in root: NSView, renderedHub: String) {
         // Tab 2: Human Channels (520 × 368 pt, y: 44)
-        let channelsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
+        let resolvedChannels = channelSettingsByHub[renderedHub] ?? []
+        let visibleChannels = resolvedChannels.filter { $0.can_configure_hub == true || $0.hub_ready == true }
+        let channelsView = ChannelsSettingsView(hub: renderedHub, channels: resolvedChannels, companion: self)
         channelsView.identifier = NSUserInterfaceItemIdentifier("settings_channels_tab")
         channelsView.isHidden = settingsActiveTab != "channels"
-
-        let inboxHub = effectiveChannelHub
+        let inboxHub = renderedHub
         let inboxConfig = settings?.hubs.first { $0.name == inboxHub }
         let inbox = inboxConfig == nil ? hubs.first { $0.name == inboxHub } : nil
         let inboxPaused = inboxConfig?.human_paused ?? inbox?.human_paused ?? false
@@ -655,7 +719,7 @@ extension Companion {
             let width = max(64, measureTextWidth(name, font: .systemFont(ofSize: 11)) + 24)
             let pill = MenuControl(name, frame: NSRect(x: 0, y: 3, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("channel_hub_selector:\(name)")
-            pill.style = effectiveChannelHub == name ? .prominent : .subtleHeader
+            pill.style = renderedHub == name ? .prominent : .subtleHeader
             pill.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.selectedChannelHub = name
@@ -667,12 +731,12 @@ extension Companion {
         if channelHubs.count > 1 {
             mountPillStrip(in: channelsView, frame: NSRect(x: 102, y: cursorY-26, width: 398, height: 26),
                            id: "channel_hub_strip", spacing: 6, trackRadius: 13, pills: channelPills) {
-                $0.identifier?.rawValue == "channel_hub_selector:\(effectiveChannelHub)"
+                $0.identifier?.rawValue == "channel_hub_selector:\(renderedHub)"
             }
             cursorY -= 36
         }
 
-        if let error = channelInventoryErrorsByHub[effectiveChannelHub], !error.isEmpty {
+        if let error = channelInventoryErrorsByHub[renderedHub], !error.isEmpty {
             let message = presentationError(error)
             let height = max(16, measureWrappedHeight(message, width: 480, font: .systemFont(ofSize: 11)))
             let diagnostic = textLabel(message, NSRect(x:20,y:cursorY-height-4,width:480,height:height),size:11,color:CitoPalette.dangerText)
@@ -682,10 +746,8 @@ extension Companion {
             channelsView.addSubview(diagnostic)
             cursorY -= height + 12
         }
-        let resolvedChannels = channelSettingsByHub[effectiveChannelHub] ?? []
-        let visibleChannels = resolvedChannels.filter { $0.can_configure_hub == true || $0.hub_ready == true }
-        if !resolvedChannels.isEmpty && visibleChannels.isEmpty && channelInventoryErrorsByHub[effectiveChannelHub] == nil {
-            let notice = textLabel("External channels are managed by your '\(effectiveChannelHub)' Hub administrator. None are enabled yet.", NSRect(x:20,y:cursorY-42,width:480,height:36),size:11,color:CitoPalette.secondaryText)
+        if !resolvedChannels.isEmpty && visibleChannels.isEmpty && channelInventoryErrorsByHub[renderedHub] == nil {
+            let notice = textLabel("External channels are managed by your '\(renderedHub)' Hub administrator. None are enabled yet.", NSRect(x:20,y:cursorY-42,width:480,height:36),size:11,color:CitoPalette.secondaryText)
             notice.identifier = NSUserInterfaceItemIdentifier("channels_managed_notice")
             notice.maximumNumberOfLines = 0; notice.lineBreakMode = .byWordWrapping
             channelsView.addSubview(notice); cursorY -= 48
@@ -693,7 +755,7 @@ extension Companion {
         var chCursorY: CGFloat = cursorY
         for ch in visibleChannels {
             let visibleFields = ch.fields.filter { $0.hidden != true }
-            let channelKey = "\(effectiveChannelHub)|\(ch.id)"
+            let channelKey = "\(renderedHub)|\(ch.id)"
             let channelUi = channelUiStates[channelKey] ?? ChannelUiState()
             let instruction = channelUi.pairingInstruction
             let instructionFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
@@ -712,9 +774,9 @@ extension Companion {
             let hubGatewayExpanded = ch.can_configure_hub == true && (!gatewayActive || channelUi.editingGateway)
             let personalCollapsed = gatewayActive && ch.configured && !channelUi.editingPersonal && instruction.isEmpty
             let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13, measureWrappedHeight(guide, width: 432, font: .systemFont(ofSize: 10)) + 2) : 0
-            let currentUser=settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? "local"
+            let currentUser=settings?.hubs.first(where:{$0.name==renderedHub})?.user ?? hubs.first(where:{$0.name==renderedHub})?.user ?? "local"
             let gatewayRole = !hubFields.isEmpty ? (guideH > 0 ? "" : "Configured once by the Hub owner. Shared by everyone on this Hub.") :
-                (hasHubScopeFields ? (ch.hub_provided ? "Provided by '\(effectiveChannelHub)' Hub administrator — no gateway setup needed on your Mac." : "Not yet configured by the '\(effectiveChannelHub)' Hub administrator.") : "No shared gateway credentials required for this channel.")
+                (hasHubScopeFields ? (ch.hub_provided ? "Provided by '\(renderedHub)' Hub administrator — no gateway setup needed on your Mac." : "Not yet configured by the '\(renderedHub)' Hub administrator.") : "No shared gateway credentials required for this channel.")
             let gatewayRoleH = gatewayRole.isEmpty ? 0 : max(13, measureWrappedHeight(gatewayRole, width: 432, font: .systemFont(ofSize: 10)))
             let gatewayHasClear = ch.can_clear_hub == true
             let hubStratumH: CGFloat = !showHubStratum ? 0 : (hubGatewayExpanded ? 36 + gatewayRoleH + guideH + hubFieldsH + (!hubFields.isEmpty || gatewayHasClear ? 32 : 0) : 36)
@@ -791,12 +853,12 @@ extension Companion {
                     button.identifier=NSUserInterfaceItemIdentifier("recover_channel:\(ch.id):\(id)")
                     button.style = ["clear","unpair"].contains(id) ? .destructiveHover : .neutral
                     let recoveryOp = ["clear":"disconnect_human_channel", "test":"channel_test", "unpair":"channel_unpair"][id]
-                    if let op = recoveryOp { pendingLabel(button,isPending(op,hub:effectiveChannelHub,target:ch.id),id == "test" ? "Testing…" : id == "clear" ? "Clearing…" : "Unpairing…") }
+                    if let op = recoveryOp { pendingLabel(button,isPending(op,hub:renderedHub,target:ch.id),id == "test" ? "Testing…" : id == "clear" ? "Clearing…" : "Unpairing…") }
                     button.pressed={ [weak self] in guard let self=self else{return}; switch id {
-                    case "clear": self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false])
-                    case "test": self.emit(["op":"channel_test","hub":self.effectiveChannelHub,"channel_id":ch.id,"values":collectValues("user").merging(collectValues("hub")) { _, new in new }])
-                    case "unpair": self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_user":true])
-                    default: self.channelUiStates[channelKey,default:ChannelUiState()].editingGateway = id == "change"; self.emit(["op":"open_settings","hub":self.effectiveChannelHub])
+                    case "clear": self.emit(["op":"disconnect_human_channel","hub":renderedHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false])
+                    case "test": self.emit(["op":"channel_test","hub":renderedHub,"channel_id":ch.id,"values":collectValues("user").merging(collectValues("hub")) { _, new in new }])
+                    case "unpair": self.emit(["op":"channel_unpair","hub":renderedHub,"channel_id":ch.id,"reset_user":true])
+                    default: self.channelUiStates[channelKey,default:ChannelUiState()].editingGateway = id == "change"; self.emit(["op":"open_settings","hub":renderedHub])
                     } }
                     recoveryBar.addSubview(button); recovery.append(button)
                 }
@@ -828,8 +890,8 @@ extension Companion {
                 clear.label.font = .systemFont(ofSize:10.5)
                 clear.style = .destructiveHover
                 clear.identifier=NSUserInterfaceItemIdentifier("clear_channel_service:\(ch.id)")
-                clear.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
-                pendingLabel(clear,isPending("disconnect_human_channel",hub:effectiveChannelHub,target:ch.id) || isPending("clear_channel_service",hub:effectiveChannelHub,target:ch.id),"Clearing…")
+                clear.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"disconnect_human_channel","hub":renderedHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
+                pendingLabel(clear,isPending("disconnect_human_channel",hub:renderedHub,target:ch.id) || isPending("clear_channel_service",hub:renderedHub,target:ch.id),"Clearing…")
                 hubStratum.addSubview(clear)
                 if hubGatewayExpanded { gatewayLeading.append(clear) } else { gatewayTop.append(clear) }
             }
@@ -862,6 +924,7 @@ extension Companion {
                     labelView.toolTip=f.label; container.addSubview(labelView)
                     let initialVal=channelUi.drafts[f.key] ?? (f.value ?? "")
                     let inputField=makeEditableField(fieldId,frame:NSRect(x:inputX,y:fieldY,width:inputW,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret",accessibilityLabel:f.label)
+                    inputField.delegate = channelsView
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     fieldY-=26
                 }
@@ -887,13 +950,13 @@ extension Companion {
                 if hubGatewayExpanded {
                     let save = MenuControl("Save Gateway Token",frame:NSRect(x:304,y:6,width:140,height:24))
                     save.identifier=NSUserInterfaceItemIdentifier("save_hub_service:\(ch.id)"); save.style = .prominent
-                    save.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"save_hub_service","hub":self.effectiveChannelHub,"channel_id":ch.id,"scope":"hub","values":collectValues("hub")]) }
-                    pendingLabel(save,channelSavePending("save_hub_service",hub:effectiveChannelHub,channel:ch.id,scope:"hub"),"Saving…")
+                    save.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"save_hub_service","hub":renderedHub,"channel_id":ch.id,"scope":"hub","values":collectValues("hub")]) }
+                    pendingLabel(save,channelSavePending("save_hub_service",hub:renderedHub,channel:ch.id,scope:"hub"),"Saving…")
                     hubStratum.addSubview(save); gatewayTrailing.append(save)
                     if gatewayActive {
                         let cancel=MenuControl("Cancel",frame:NSRect(x:232,y:6,width:66,height:24))
                         cancel.identifier=NSUserInterfaceItemIdentifier("cancel_edit_hub_service:\(ch.id)")
-                        cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch, scope:"hub"); self?.channelUiStates[channelKey]?.resetGateway(); self?.rebuildSettingsPanel() }
+                        cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch, scope:"hub", hub:renderedHub); self?.channelUiStates[channelKey]?.resetGateway(); self?.rebuildSettingsPanel() }
                         hubStratum.addSubview(cancel); gatewayTrailing.insert(cancel, at: 0)
                     }
                 } else {
@@ -921,7 +984,7 @@ extension Companion {
                 pairBtn.identifier = NSUserInterfaceItemIdentifier("pair_channel:\(ch.id)")
                 pairBtn.pressed = { [weak self] in
                     guard let self = self else { return }
-                    self.emit(["op": "channel_pair", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues("user")])
+                    self.emit(["op": "channel_pair", "hub": renderedHub, "channel_id": chId, "values": collectValues("user")])
                 }
                 gate(pairBtn); pendingLabel(pairBtn,channelUi.pendingPairRequest != nil,"Pairing…"); pairBtn.style = ch.configured ? .neutral : .prominent; userStratum.addSubview(pairBtn); personalActions.append(pairBtn)
             }
@@ -945,9 +1008,9 @@ extension Companion {
                 cancel.identifier=NSUserInterfaceItemIdentifier("cancel_pair_channel:\(ch.id)")
                 cancel.pressed={ [weak self] in
                     guard let self=self else{return}
-                    self.emit(["op":"channel_cancel_pair","hub":self.effectiveChannelHub,"channel_id":chId])
+                    self.emit(["op":"channel_cancel_pair","hub":renderedHub,"channel_id":chId])
                 }
-                pendingLabel(cancel,isPending("channel_cancel_pair",hub:effectiveChannelHub,target:ch.id),"Cancelling…")
+                pendingLabel(cancel,isPending("channel_cancel_pair",hub:renderedHub,target:ch.id),"Cancelling…")
                 userStratum.addSubview(cancel); pairingActions.append(cancel)
             }
             if ch.configured {
@@ -957,26 +1020,26 @@ extension Companion {
                 toggle.identifier=NSUserInterfaceItemIdentifier("toggle_channel:\(ch.id)")
                 toggle.maximumWidth=170
                 toggle.style = ch.enabled ? .neutral : .prominent
-                toggle.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_toggle","hub":self.effectiveChannelHub,"channel_id":chId,"enabled":!ch.enabled]) }
-                pendingLabel(toggle,isPending("channel_toggle",hub:effectiveChannelHub,target:ch.id),ch.enabled ? "Pausing…" : "Resuming…")
+                toggle.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_toggle","hub":renderedHub,"channel_id":chId,"enabled":!ch.enabled]) }
+                pendingLabel(toggle,isPending("channel_toggle",hub:renderedHub,target:ch.id),ch.enabled ? "Pausing…" : "Resuming…")
                 userStratum.addSubview(toggle); personalActions.append(toggle)
                 let unpair=MenuControl("Unpair",frame:NSRect(x:196,y:6,width:MenuControl.intrinsicWidth("Unpair"),height:24),radius:6)
                 unpair.style = .destructiveHover
                 unpair.identifier=NSUserInterfaceItemIdentifier("unpair_channel:\(ch.id)")
-                unpair.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":chId,"reset_user":true]) }
+                unpair.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_unpair","hub":renderedHub,"channel_id":chId,"reset_user":true]) }
                 unpair.isHidden = ch.can_unpair != true
-                pendingLabel(unpair,isPending("channel_unpair",hub:effectiveChannelHub,target:ch.id),"Unpairing…")
+                pendingLabel(unpair,isPending("channel_unpair",hub:renderedHub,target:ch.id),"Unpairing…")
                 userStratum.addSubview(unpair); personalActions.append(unpair)
             }
             let testBtn = MenuControl("Send Test", frame: NSRect(x: 290, y: 6, width: MenuControl.intrinsicWidth("Send Test"), height: 24), radius: 6)
             testBtn.identifier = NSUserInterfaceItemIdentifier("test_channel:\(ch.id)")
             testBtn.pressed = { [weak self] in
                 guard let self = self else { return }
-                self.emit(["op": "channel_test", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues("user").merging(collectValues("hub")) { _,new in new }])
+                self.emit(["op": "channel_test", "hub": renderedHub, "channel_id": chId, "values": collectValues("user").merging(collectValues("hub")) { _,new in new }])
             }
             testBtn.isHidden = ch.can_test != true || (ch.status == "error" && !ch.configured) || (disclosure && !ch.configured && !manualExpanded)
             testBtn.isEnabled = ch.canSendTest(drafts:channelUi.drafts,visibleFields:formFields)
-            pendingLabel(testBtn,isPending("channel_test",hub:effectiveChannelHub,target:ch.id),"Testing…")
+            pendingLabel(testBtn,isPending("channel_test",hub:renderedHub,target:ch.id),"Testing…")
             userStratum.addSubview(testBtn)
 
             let saveBtn = MenuControl("Save", frame: NSRect(x: 376, y: 6, width: 68, height: 24), radius: 6)
@@ -986,12 +1049,12 @@ extension Companion {
             saveBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 let values = collectValues("user")
-                self.emit(["op": "channel_save", "hub": self.effectiveChannelHub, "channel_id": chId, "enabled": true, "values": values])
+                self.emit(["op": "channel_save", "hub": renderedHub, "channel_id": chId, "enabled": true, "values": values])
             }
             gate(saveBtn)
             if ch.can_edit_personal == true && !personalCollapsed && gatewayActive && (!disclosure || manualExpanded) { userStratum.addSubview(saveBtn) } else { saveBtn.isHidden=true }
             if let until = channelUi.savedUntil["user"], Date() < until { saveBtn.copied("✓ Saved", for: max(0.01, until.timeIntervalSinceNow)) }
-            pendingLabel(saveBtn,channelSavePending("channel_save",hub:effectiveChannelHub,channel:ch.id,scope:"user"),"Saving…")
+            pendingLabel(saveBtn,channelSavePending("channel_save",hub:renderedHub,channel:ch.id,scope:"user"),"Saving…")
 
             layoutBar(in: hubStratum, y: hubStratumH-29, height: 22, flexible: hubTitle, trailing: [gatewayStatus] + gatewayTop)
             if hubGatewayExpanded { layoutBar(in: hubStratum, y: 8, height: 24, leading: gatewayLeading, trailing: gatewayTrailing) }
@@ -1020,7 +1083,7 @@ extension Companion {
                 if channelUi.editingPersonal && ch.configured {
                     let cancel=MenuControl("Cancel",frame:NSRect(x:0,y:8,width:62,height:24))
                     cancel.identifier=NSUserInterfaceItemIdentifier("cancel_edit_user_channel:\(ch.id)")
-                    cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch,scope:"user"); self?.channelUiStates[channelKey]?.resetPersonal(); self?.rebuildSettingsPanel() }
+                    cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch,scope:"user",hub:renderedHub); self?.channelUiStates[channelKey]?.resetPersonal(); self?.rebuildSettingsPanel() }
                     userStratum.addSubview(cancel); trailing.insert(cancel,at:0)
                 }
                 if testBtn.isHidden && saveBtn.isHidden && personalActions.count == 1 {
@@ -1138,10 +1201,11 @@ extension Companion {
         let auth=MenuControl(authMode=="none" ? "Access: Trusted" : "Access: Token",frame:NSRect(x:286,y:12,width:112,height:24),radius:6)
         auth.style = .neutral
         auth.identifier=NSUserInterfaceItemIdentifier("toggle_host_hub_auth")
+        // Only Start/Stop owns `enabled`; Access and Apply can run before it settles.
         auth.pressed={ [weak self] in
             guard let self=self else{return}
             guard let port = self.validHostPort(fallback:hostHub.port) else { return }
-            self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"auth_mode":authMode=="none" ? "token" : "none"])
+            self.emit(["op":"set_host_hub","port":port,"auth_mode":authMode=="none" ? "token" : "none"])
         }
         pendingLabel(auth,isPending("set_host_hub",target:"access"),"Applying…")
         hostCard.addSubview(auth)
@@ -1156,7 +1220,7 @@ extension Companion {
             let requestId = UUID().uuidString
             self.hostPort.error=nil; self.hostPort.pending=true; self.hostPort.savedUntil=nil; self.hostPort.submittedPort=port
             self.hostPort.requestId = requestId
-            self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"request_id":requestId])
+            self.emit(["op":"set_host_hub","port":port,"request_id":requestId])
             self.rebuildSettingsPanel()
         }
         hostCard.addSubview(apply)
@@ -1380,7 +1444,8 @@ extension Companion {
                     pendingLabel(loginBtn,isPending("hub_action",hub:hub.name),"Signing In…")
                     let hubName = hub.name
                     loginBtn.pressed = { [weak self] in
-                        self?.emit(["op": "hub_action", "hub": hubName, "action": "login"])
+                        guard let self = self, !self.isPending("hub_action", hub: hubName) else { return }
+                        self.emit(["op": "hub_action", "hub": hubName, "action": "login"])
                     }
                     row.addSubview(loginBtn)
                 }
@@ -1392,7 +1457,8 @@ extension Companion {
                 let hubName = hub.name
                 let nextEnabled = !hub.enabled
                 toggleBtn.pressed = { [weak self] in
-                    self?.emit(["op": "setup_toggle_hub", "hub": hubName, "enabled": nextEnabled])
+                    guard let self = self, !self.isPending("setup_toggle_hub", hub: hubName) else { return }
+                    self.emit(["op": "setup_toggle_hub", "hub": hubName, "enabled": nextEnabled])
                 }
                 toggleBtn.isHidden = resolvedHubs.filter { $0.enabled }.count <= 1 && hub.enabled
                 if !toggleBtn.isHidden { row.addSubview(toggleBtn) }
@@ -1403,7 +1469,8 @@ extension Companion {
                     removeBtn.style = .destructiveHover
                     pendingLabel(removeBtn,isPending("setup_remove_hub",hub:hub.name),"Removing…")
                     removeBtn.pressed = { [weak self] in
-                        self?.emit(["op": "setup_remove_hub", "hub": hubName])
+                        guard let self = self, !self.isPending("setup_remove_hub", hub: hubName) else { return }
+                        self.emit(["op": "setup_remove_hub", "hub": hubName])
                     }
                     row.addSubview(removeBtn)
                 }

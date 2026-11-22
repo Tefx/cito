@@ -1,11 +1,11 @@
 use super::*;
 
-struct Fixture {
+pub(super) struct Fixture {
     root: std::path::PathBuf,
-    service: DaemonService,
+    pub(super) service: DaemonService,
 }
 impl Fixture {
-    fn new() -> Result<Self, String> {
+    pub(super) fn new() -> Result<Self, String> {
         let root = std::env::temp_dir().join(format!("cito-demand-{}", random_uuid_v4()));
         fs::create_dir_all(root.join("home")).map_err(|e| e.to_string())?;
         let script = root.join("provider.py");
@@ -19,7 +19,7 @@ if request['op'] in ('discover_sessions', 'resolve_caller') and (root/'delay').e
     import time
     time.sleep(json.loads((root/'delay').read_text())[request['op']])
 result = dict(ok=True)
-if request['op'] == 'setup_inspect': result.update(installed=True, configured=harness=='agent', paths=[])
+if request['op'] == 'setup_inspect': result.update(installed=True, configured=harness=='agent' and not (root/'unconfigured').exists(), paths=[])
 elif request['op'] == 'discover_sessions':
     result['sessions'] = [dict(harness=harness, session_id=(root/'session').read_text(), cwd='/workspace', title='Work')]
 elif request['op'] == 'resolve_caller': result['caller'] = dict(harness=harness, session_id='initial', cwd='/workspace')
@@ -72,7 +72,8 @@ print(json.dumps(result))
             default_hub: "local".into(),
         };
         fs::write(&config.config_path,json!({"hubs":{"local":{"url":"local://","autoListen":false},"work":{"url":"local://","autoListen":false}}}).to_string()).map_err(|e|e.to_string())?;
-        let service = DaemonService::open(&config, &plugins)?;
+        let mut service = DaemonService::open(&config, &plugins)?;
+        service.refresh_initial_setup_until(Instant::now() + Duration::from_secs(3));
         service.local.set_plugin_roots(&[])?;
         Ok(Self { root, service })
     }
@@ -166,6 +167,41 @@ fn save_hub_honors_outer_default_selection_before_nested_config() -> Result<(), 
         }
         f.service.action(&action)?;
         assert_eq!(f.service.raw_config()?["default_hub"], expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn hub_saves_cancel_only_the_edited_and_saved_profiles() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    let s = &mut f.service;
+    s.action(&json!({"op":"save_hub","name":"work","url":"local://","set_default":true}))?;
+    let work = s.logins.entry("work".into()).or_default().clone();
+    s.active_settings_hub = Some("work".into());
+    for action in [
+        json!({"op":"setup_save_hub","name":"personal","url":"local://","user":"bob"}),
+        json!({"op":"save_hub","edit":true,"original_name":"","name":"personal","hub":"work","autoListen":false}),
+    ] {
+        let personal = s.logins.entry("personal".into()).or_default().clone();
+        s.action(&action)?;
+        assert!(personal.cancelled.load(Ordering::SeqCst));
+        assert!(!s.logins.contains_key("personal"));
+        assert!(!work.cancelled.load(Ordering::SeqCst));
+        assert_eq!(s.active_settings_hub.as_deref(), Some("work"));
+        assert_eq!(s.raw_config()?["hubs"]["personal"]["user"], "bob");
+    }
+    for (original, name, selected) in [
+        ("personal", "office", "personal"),
+        ("office", "personal", "personal"),
+    ] {
+        s.active_settings_hub = Some(selected.into());
+        let from = s.logins.entry(original.into()).or_default().clone();
+        let to = s.logins.entry(name.into()).or_default().clone();
+        s.action(&json!({"op":"setup_save_hub","edit":true,"original_name":original,"name":name}))?;
+        assert!(from.cancelled.load(Ordering::SeqCst) && to.cancelled.load(Ordering::SeqCst));
+        assert!(s.active_settings_hub.is_none());
+        assert!(Arc::ptr_eq(&s.logins["work"], &work));
+        assert!(!work.cancelled.load(Ordering::SeqCst));
     }
     Ok(())
 }
@@ -414,6 +450,113 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
         .probes
         .values()
         .any(|probe| probe.calm > 0 && probe.due > Instant::now() + Duration::from_secs(1)));
+    Ok(())
+}
+
+#[test]
+fn serves_health_during_setup_and_cleans_up_on_fatal_io() -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    // The daemon installs process-wide signal handlers. Isolate them from other tests.
+    let Some(home) = std::env::var_os("CITO_RUNTIME_TEST_HOME") else {
+        let dir = crate::core::hub::TestDirectory(
+            std::env::temp_dir().join(format!("cito-runtime-{}", random_uuid_v4())),
+        );
+        fs::create_dir_all(dir.join("bundled")).unwrap();
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "core::daemon::event_tests::serves_health_during_setup_and_cleans_up_on_fatal_io",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &dir.0)
+        .env("CITO_RUNTIME_TEST_HOME", &dir.0)
+        .env("CITO_BUILTIN_PLUGINS_DIR", dir.join("bundled"))
+        .env("CITO_DISABLE_UI", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let output = crate::support::run_command_with_timeout(cmd, Duration::from_secs(15))?
+            .ok_or("Daemon cleanup timed out")?;
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for fault in ["accept", "poll"] {
+            let state = dir.join(fault);
+            let health: Value = serde_json::from_slice(
+                &fs::read(state.join("plugins/agent/health.json"))
+                    .map_err(|e| format!("{fault}: setup did not receive /health: {e}"))?,
+            )
+            .unwrap();
+            assert_eq!(health["version"], CITO_VERSION);
+            assert_eq!(health["stateDir"], json!(state));
+        }
+        return Ok(());
+    };
+    let home = std::path::PathBuf::from(home);
+    for fault in ["accept", "poll"] {
+        let state = home.join(fault);
+        let plugin = state.join("plugins/agent");
+        fs::create_dir_all(&plugin).unwrap();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = NativeConfig {
+            state_dir: state.clone(),
+            config_path: state.join("config.json"),
+            home_dir: home.clone(),
+            daemon_port: port,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        let observed = plugin.join("health.json");
+        // The inspection cannot finish until the production HTTP handler answers.
+        fs::write(plugin.join("plugin.json"), json!({"id":"agent","kind":"agent","displayName":"Agent","command":["python3","./driver.py",port.to_string()]}).to_string()).unwrap();
+        fs::write(plugin.join("driver.py"), r#"import http.client, json, pathlib, sys
+if json.loads(sys.stdin.readline())['op'] == 'setup_inspect':
+    http = http.client.HTTPConnection('127.0.0.1', int(sys.argv[1]), timeout=1.5)
+    http.request('GET', '/health')
+    response = http.getresponse()
+    if response.status == 200: pathlib.Path(__file__).with_name('health.json').write_bytes(response.read())
+    http.close()
+print(json.dumps(dict(ok=True, configured=False, installed=True, paths=[])))
+"#).unwrap();
+        let plugins = LoadedPlugins {
+            plugins: vec![crate::plugins::parse_manifest_dir(&plugin, false)?],
+            rejected_ids: Default::default(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let fail = || observed.exists() || Instant::now() >= deadline;
+        let error = run_daemon_inner(
+            &config,
+            &plugins,
+            |listener| {
+                if fault == "accept" && fail() {
+                    return Err(std::io::Error::other("test failure"));
+                }
+                listener.accept()
+            },
+            |fds, due| {
+                if fault == "poll" && fail() {
+                    return Err("test failure".into());
+                }
+                crate::support::poll_until(fds, due)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, format!("{fault}: test failure"));
+        assert_eq!(SIGNAL_PIPE.load(Ordering::SeqCst), -1);
+        assert!(LocalState::open(&state)?
+            .db
+            .query("SELECT * FROM daemon_owner", &[])?
+            .is_empty());
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
     Ok(())
 }
 

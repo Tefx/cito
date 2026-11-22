@@ -159,6 +159,37 @@ fn missing_kid_selects_only_an_unambiguous_eligible_signing_key() {
 }
 
 #[test]
+fn shared_kid_selects_only_one_compatible_verification_key() {
+    use jsonwebtoken::jwk::{KeyAlgorithm, PublicKeyUse};
+    let (v, key) = verifier(Algorithm::RS256);
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-key".into());
+    let jwt = encode(&header, &json!({"iss":"https://id.example.com","aud":"client","sub":"alice","exp":crate::plugins::now_ms()/1000+600}), &key).unwrap();
+    {
+        let mut cache = v.cache.lock().unwrap();
+        let keys = &mut cache.keys.as_mut().unwrap().keys;
+        let signing = keys[0].clone();
+        let mut encryption = signing.clone();
+        encryption.common.public_key_use = Some(PublicKeyUse::Encryption);
+        let mut different_alg = signing.clone();
+        different_alg.common.key_algorithm = Some(KeyAlgorithm::RS512);
+        let mut unrelated = signing.clone();
+        unrelated.common.key_id = Some("other-key".into());
+        *keys = vec![encryption, different_alg, unrelated, signing];
+    }
+    assert_eq!(v.verify(&jwt).unwrap()["sub"], "alice");
+    {
+        let mut cache = v.cache.lock().unwrap();
+        let keys = &mut cache.keys.as_mut().unwrap().keys;
+        keys.insert(0, keys.last().unwrap().clone());
+    }
+    assert!(v
+        .verify(&jwt)
+        .unwrap_err()
+        .starts_with("AUTHORIZATION_VIOLATION:"));
+}
+
+#[test]
 fn real_supported_asymmetric_signatures_and_claim_validation() {
     for alg in [
         Algorithm::RS256,

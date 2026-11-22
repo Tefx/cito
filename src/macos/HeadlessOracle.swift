@@ -71,6 +71,12 @@ extension Companion {
                     "status_image": statusImage.map { String(describing: ObjectIdentifier($0)) } ?? "",
                     "button_tooltip": (status?.button ?? headlessStatusButton)?.toolTip ?? "",
                     "listeners": listeners.count, "directory_peers": directoryAllPeers.count,
+                    "collection_counts": [
+                        "activity": activityAllItems.count, "available": available.count, "discovery": discovery.count,
+                        "my_remote_listeners": myRemote.count, "hubs": hubs.count,
+                        "settings.apps": settings?.apps.count ?? 0, "settings.hubs": settings?.hubs.count ?? 0,
+                        "settings.channels": settings?.channels?.count ?? 0
+                    ],
                     "settings_launch_at_login": settings?.launch_at_login ?? false,
                     "hover_watch_active": MenuControl.hoverWatchActive,
                     "hovered": MenuControl.activeHovered?.identifier?.rawValue ?? "",
@@ -274,7 +280,8 @@ extension Companion {
             if ["test_focus_field", "test_settings_input"].contains(op), let id = object["id"] as? String, id.hasPrefix("channel_field:") {
                 let parts = id.split(separator: ":")
                 if parts.count > 1 {
-                    channelUiStates["\(effectiveChannelHub)|\(parts[1])", default: ChannelUiState()].editingPersonal = true
+                    let hub = mountedChannelsSettings?.hub ?? effectiveChannelHub
+                    channelUiStates["\(hub)|\(parts[1])", default: ChannelUiState()].editingPersonal = true
                     if settingsFieldControls[id] == nil { rebuildSettingsPanel() }
                 }
             }
@@ -334,20 +341,18 @@ extension Companion {
                 return true
             }
             if op == "test_settings_input", let id = object["id"] as? String, let value = object["value"] as? String {
-                if id == "composer_input" {
-                    composerDraftIdempotencyKey = UUID().uuidString
-                    composerInputField?.stringValue = value
-                    return true
-                }
-                if let field = settingsFieldControls[id] ?? (settingsPanel?.contentView.flatMap { findView(in: $0, id: id, as: NSTextField.self) }) ?? cardMenu.items.compactMap({ $0.view }).compactMap({ findView(in: $0, id: id, as: NSTextField.self) }).first {
+                let composerField = id == "composer_input" ? composerInputField : nil
+                if let field = composerField ?? settingsFieldControls[id] ?? (settingsPanel?.contentView.flatMap { findView(in: $0, id: id, as: NSTextField.self) }) ?? cardMenu.items.compactMap({ $0.view }).compactMap({ findView(in: $0, id: id, as: NSTextField.self) }).first {
                     field.stringValue = value
-                    controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+                    field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
                 }
                 return true
             }
             if op == "test_composer_input", let value = object["value"] as? String {
-                composerDraftIdempotencyKey = UUID().uuidString
-                composerInputField?.stringValue = value
+                if let field = composerInputField {
+                    field.stringValue = value
+                    controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+                }
                 return true
             }
             if op == "test_clipboard", let text = object["text"] as? String {
@@ -365,10 +370,13 @@ extension Companion {
             if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
                 let window = op == "test_settings_key" ? settingsPanel : directoryPanel
                 if object["via"] as? String == "field", let editor = window?.firstResponder as? NSTextView,
-                   let field = editor.delegate as? NSTextField, ["up", "down"].contains(key) {
-                    let selector = key == "up" ? #selector(NSResponder.moveUp(_:)) : #selector(NSResponder.moveDown(_:))
-                    _ = control(field, textView: editor, doCommandBy: selector)
-                    return true
+                   let field = editor.delegate as? NSTextField {
+                    let commands = ["up": #selector(NSResponder.moveUp(_:)), "down": #selector(NSResponder.moveDown(_:)),
+                                    "return": #selector(NSResponder.insertNewline(_:)), "escape": #selector(NSResponder.cancelOperation(_:))]
+                    if let selector = commands[key] {
+                        _ = field.delegate?.control?(field, textView: editor, doCommandBy: selector)
+                        return true
+                    }
                 }
                 if object["via"] as? String == "panel" {
                     let character = key.hasSuffix("comma") ? "," : String(key.suffix(1))
@@ -681,8 +689,9 @@ extension Companion {
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
                 case "settings_channels_tab":
-                    let hub = effectiveChannelHub
-                    let channels = channelSettingsByHub[hub] ?? []
+                    let mounted = scroll.documentView as? ChannelsSettingsView
+                    let hub = mounted?.hub ?? effectiveChannelHub
+                    let channels = mounted?.channels ?? []
                     defaultLayout = channelInventoryErrorsByHub[hub] == nil && channels.count == 1 && channels.allSatisfy { channel in
                         let ui = channelUiStates["\(hub)|\(channel.id)"] ?? ChannelUiState()
                         return !ui.editingGateway && !ui.editingPersonal && !ui.manualEntry && ui.pairingInstruction.isEmpty &&
@@ -1023,6 +1032,7 @@ extension Companion {
             "pending_channel_resets": pendingControls.filter { $0.value.channelReset != nil }.keys.sorted(),
             "pending_controls": pendingControls.filter { !$0.value.awaitingPairSettings }.keys.sorted(),
             "settings_rebuild_deferred": settingsRebuildDeferred,
+            "settings_channel_hub": mountedChannelsSettings?.hub ?? "",
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
             "icon_height": statusImage?.size.height ?? 0, "clipboard": effectiveClipboard,

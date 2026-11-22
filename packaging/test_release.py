@@ -21,6 +21,28 @@ release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
 
+def bundle_fixture(app, version, plugin_ids):
+    contents = app / "Contents"
+    files = {
+        "Info.plist": plistlib.dumps({"CFBundleShortVersionString": version, "CFBundleVersion": version}),
+        "MacOS/Cito": b"launcher", "Helpers/cito-native": b"helper", "Helpers/cito-ui": b"helper",
+        "Resources/AppIcon.icns": b"icon",
+        "Resources/plugins/pi/package.json": b'{"pi":{"extensions":["./cito-bridge.ts"]}}',
+        "Resources/plugins/pi/cito-bridge.ts": b"export {};",
+    }
+    for plugin in plugin_ids:
+        files[f"Resources/plugins/{plugin}/plugin.json"] = json.dumps({"version": version, "command": ["./driver"]}).encode()
+        files[f"Resources/plugins/{plugin}/driver"] = b"plugin driver"
+    for name, data in files.items():
+        path = contents / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o755 if name.startswith(("MacOS/", "Helpers/")) or name.endswith("/driver") else 0o644)
+    for path in (app, *app.rglob("*")):
+        if path.is_dir():
+            path.chmod(0o755)
+
+
 class BundleVerificationTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -32,20 +54,38 @@ class BundleVerificationTests(unittest.TestCase):
         root_patch = patch.object(release, "ROOT", source)
         root_patch.start()
         self.addCleanup(root_patch.stop)
-        for name in ("Contents/Helpers/cito-native", "Contents/Helpers/cito-ui", "Contents/Resources/AppIcon.icns"):
-            path = self.app / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"fixture")
-        with (self.app / "Contents/Info.plist").open("wb") as stream:
-            plistlib.dump({"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3"}, stream)
+        bundle_fixture(self.app, "1.2.3", ["sample"])
         self.plugin = self.app / "Contents/Resources/plugins/sample"
-        self.plugin.mkdir(parents=True)
-        (self.plugin / "plugin.json").write_text(json.dumps({"version": "1.2.3", "command": ["./driver"]}))
         self.driver = self.plugin / "driver"
 
+    def test_pi_extension_requires_a_readable_package_and_declared_file(self):
+        pi = self.plugin.parent / "pi"
+        with patch.object(release, "run", side_effect=self.command):
+            for name in ("package.json", "cito-bridge.ts"):
+                path = pi / name
+                original = path.read_bytes()
+                path.unlink()
+                with self.subTest(name=name, missing=True), self.assertRaisesRegex(release.ReleaseError, name):
+                    release.verify_bundle(self.app, "1.2.3")
+                path.write_bytes(original)
+                path.chmod(0o600)
+                with self.subTest(name=name, private=True), self.assertRaisesRegex(release.ReleaseError, name):
+                    release.verify_bundle(self.app, "1.2.3")
+                path.chmod(0o644)
+            (pi / "package.json").write_text('{"pi":{"extensions":["./other.ts"]}}')
+            with self.assertRaisesRegex(release.ReleaseError, "must declare"):
+                release.verify_bundle(self.app, "1.2.3")
+
+    def test_private_directories_and_executables_fail_before_native_checks(self):
+        with patch.object(release, "run") as native:
+            for path in (self.app, self.plugin, self.driver, self.app / "Contents/Helpers/cito-ui"):
+                path.chmod(0o744)
+                with self.subTest(path=path), self.assertRaisesRegex(release.ReleaseError, "public permissions"):
+                    release.verify_bundle(self.app, "1.2.3")
+                path.chmod(0o755)
+            native.assert_not_called()
+
     def test_all_builtin_plugins_must_be_present_at_the_expected_version(self):
-        self.driver.write_text("fixture")
-        self.driver.chmod(0o755)
         missing = release.ROOT / "plugins/second/plugin.json"
         missing.parent.mkdir()
         missing.write_text('{}')
@@ -64,6 +104,7 @@ class BundleVerificationTests(unittest.TestCase):
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     def test_missing_and_nonexecutable_manifest_commands_are_rejected(self):
+        self.driver.unlink()
         with patch.object(release, "run", side_effect=self.command):
             for exists in (False, True):
                 if exists:
@@ -194,19 +235,11 @@ class ReleaseAssetTests(unittest.TestCase):
         self.local.mkdir()
         self.tag = f"v{release.version()}"
         self.archive = self.local / release.ARCHIVE
+        app = self.root / "Cito.app"
+        bundle_fixture(app, release.version(), [path.parent.name for path in (release.ROOT / "plugins").glob("*/plugin.json")])
         with zipfile.ZipFile(self.archive, "w") as archive:
-            archive.writestr("Cito.app/Contents/Info.plist", plistlib.dumps({
-                "CFBundleShortVersionString": release.version(),
-                "CFBundleVersion": release.version(),
-            }))
-            for name in ("Helpers/cito-native", "Helpers/cito-ui", "Resources/AppIcon.icns"):
-                archive.writestr(f"Cito.app/Contents/{name}", b"component fixture")
-            for manifest in (release.ROOT / "plugins").glob("*/plugin.json"):
-                prefix = f"Cito.app/Contents/Resources/plugins/{manifest.parent.name}"
-                archive.writestr(f"{prefix}/plugin.json", json.dumps({
-                    "version": release.version(), "command": ["./driver"],
-                }))
-                archive.writestr(f"{prefix}/driver", b"executable fixture")
+            for path in (app, *app.rglob("*")):
+                archive.write(path, path.relative_to(self.root))
         release.write_checksum(self.archive)
         self.remote = {
             path.name: path.read_bytes() for path in self.local.iterdir()
@@ -250,8 +283,8 @@ class ReleaseAssetTests(unittest.TestCase):
         elif argv[:3] == ["/usr/bin/ditto", "-x", "-k"]:
             with zipfile.ZipFile(argv[3]) as archive:
                 archive.extractall(argv[4])
-            for driver in Path(argv[4]).glob("Cito.app/Contents/Resources/plugins/*/driver"):
-                driver.chmod(0o755)
+                for entry in archive.infolist():
+                    (Path(argv[4]) / entry.filename).chmod(entry.external_attr >> 16)
         elif argv[:2] == ["/usr/bin/codesign", "--verify"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         elif argv[:3] == ["/usr/bin/xcrun", "stapler", "validate"]:
@@ -465,6 +498,19 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(checked, ["cito", "cito-mcp"])
             self.assertEqual((work / "home/.cito/keep-on-uninstall").read_text(), "preserve\n")
 
+    def test_release_cli_preserves_caller_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for mask, mode in ((0o022, 0o644), (0o077, 0o600)):
+                path = Path(directory) / f"cask-{mask}.rb"
+                with self.subTest(mask=mask), patch.object(sys, "argv", ["release.py", "render-cask", "--output", str(path), "--sha256", "a" * 64]):
+                    previous = os.umask(mask)
+                    try:
+                        self.assertEqual(release.main(), 0)
+                    finally:
+                        observed = os.umask(previous)
+                    self.assertEqual(observed, mask)
+                    self.assertEqual(path.stat().st_mode & 0o777, mode)
+
     def test_renderer_rejects_bad_checksum_or_ambiguous_template(self):
         template = (release.ROOT / "packaging/homebrew/cito.rb").read_text()
         for checksum in ("a" * 63, "A" * 64, 'a"; exit'):
@@ -518,20 +564,8 @@ class ArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Cito.app"
             resources = app / "Contents/Resources"
-            (resources / "plugins").mkdir(parents=True)
-            (app / "Contents/Helpers").mkdir()
-            with (app / "Contents/Info.plist").open("wb") as stream:
-                plistlib.dump({"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3"}, stream)
+            bundle_fixture(app, "1.2.3", [path.parent.name for path in (release.ROOT / "plugins").glob("*/plugin.json")])
             helper = app / "Contents/Helpers/cito-ui"
-            for path in (helper, app / "Contents/Helpers/cito-native", resources / "AppIcon.icns"):
-                path.write_bytes(b"component fixture")
-
-            for source in (release.ROOT / "plugins").glob("*/plugin.json"):
-                directory = resources / "plugins" / source.parent.name
-                directory.mkdir(parents=True)
-                (directory / "plugin.json").write_text(json.dumps({"version": "1.2.3", "command": ["./driver"]}))
-                (directory / "driver").write_bytes(b"executable fixture")
-                (directory / "driver").chmod(0o755)
             plugin = resources / "plugins/fixture/bin/channel"
             plugin.parent.mkdir(parents=True)
             plugin.write_bytes(b"executable fixture")

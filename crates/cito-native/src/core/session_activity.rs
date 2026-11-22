@@ -427,8 +427,8 @@ impl SessionActivity {
                     }
                 }
             }
-            // One short transaction captures both rows and counts. Persisted ACTIVE
-            // rows alone never establish liveness and never add unread to a badge.
+            // Persisted rows identify endpoints to clear. Only live agent receivers
+            // contribute unread signals to an endpoint's badge.
             let mut desired = desired_badges(state, live_active)?;
             // Historical endpoints need one bounded clear after startup, not a fresh
             // retry lifecycle on every DB scan once their badge entry has retired.
@@ -822,11 +822,7 @@ fn desired_badges(
     state: &LocalState,
     live_active: &[Value],
 ) -> Result<BTreeMap<Target, Intent>, String> {
-    let mut rows = state.db.query("SELECT * FROM local_listeners ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC", &[])?;
-    for row in &mut rows {
-        row["badge_unread"] =
-            json!(state.unread_count(string(row, "hub"), string(row, "listener_id"), true)?);
-    }
+    let rows = state.db.query("SELECT * FROM local_listeners WHERE harness != 'human' ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC", &[])?;
     let is_live = |row: &Value| {
         row["status"] == "ACTIVE"
             && live_active.iter().any(|live| {
@@ -851,24 +847,16 @@ fn desired_badges(
     for (key, rows) in groups {
         // Input ordering preserves the baseline's ACTIVE/generation/hub tie-break.
         // A live session outranks historical rows sharing a switched endpoint.
-        let target = rows
-            .iter()
-            .copied()
-            .find(|row| is_live(row))
-            .unwrap_or(rows[0]);
-        let active: Vec<_> = rows
-            .iter()
-            .copied()
-            .filter(|row| is_live(row) && row["session_id"] == target["session_id"])
-            .collect();
-        let badge = if active.is_empty() {
-            None
+        let mut live = rows.iter().copied().filter(|row| is_live(row)).peekable();
+        let (target, badge) = if let Some(target) = live.peek().copied() {
+            let mut unread = 0;
+            for row in live.filter(|row| row["session_id"] == target["session_id"]) {
+                unread +=
+                    state.unread_count(string(row, "hub"), string(row, "listener_id"), true)?;
+            }
+            (target, Some(format_badge(target, unread)))
         } else {
-            let unread: u64 = active
-                .iter()
-                .map(|r| r["badge_unread"].as_u64().unwrap_or(0))
-                .sum();
-            Some(format_badge(target, unread))
+            (rows[0], None)
         };
         desired.insert(
             key,
@@ -1827,6 +1815,48 @@ print(json.dumps(response), flush=True)
         assert!(activity.discovery.iter().all(|p| p.flight.worker.is_none()));
         assert!(activity.badges.values().all(|p| p.worker.is_none()));
         assert_reaped(&f);
+        Ok(())
+    }
+
+    #[test]
+    fn only_live_agent_badges_read_signals() -> Result<(), String> {
+        let f = Fixture::new()?;
+        let agent = f.listener("work", "session", Some(42), 1)?;
+        f.seed("work", "one", "RECEIVED", Value::Null, now_ms() + 60_000)?;
+        f.seed(
+            "work",
+            "two",
+            "STORED_PASSIVE",
+            Value::Null,
+            now_ms() + 60_000,
+        )?;
+        f.listener("personal", "default", None, 1)?;
+        f.state.db.execute(
+            "UPDATE local_listeners SET harness='human' WHERE hub='personal'",
+            &[],
+        )?;
+        let human = f
+            .state
+            .listener("personal", "c_abcdefghijkl")?
+            .ok_or("Missing human")?;
+        let fenced = f.listener("old", "previous", None, 1)?;
+        f.state.fence_listener_for(&fenced, "disconnected")?;
+        let live = [agent.clone(), human];
+        let desired = desired_badges(&f.state, &live)?;
+        assert_eq!(
+            desired[&Target::of(&agent)].badge.as_deref(),
+            Some("Cito · abcdefghijk (2)")
+        );
+
+        f.state.pause_listener_for(&agent)?;
+        // Any unread lookup now fails, even one whose result would be discarded.
+        f.state
+            .db
+            .execute("ALTER TABLE local_signals RENAME TO hidden_signals", &[])?;
+        let desired = desired_badges(&f.state, &live)?;
+        assert_eq!(desired[&Target::of(&agent)].badge, None);
+        assert_eq!(desired[&Target::of(&fenced)].badge, None);
+        assert!(!desired.contains_key(&Target::of(&live[1])));
         Ok(())
     }
 

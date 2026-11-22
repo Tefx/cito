@@ -26,7 +26,7 @@ fn cap_text(s: &str, limit: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated: &mut bool) {
+fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
     match v {
         Value::String(s) => {
             if matches!(
@@ -65,16 +65,15 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
             let cap = match key {
                 "activity" => 80,
                 "peers" => 100,
-                "sessions" | "listeners" | "my_remote_listeners" => 64,
+                "listeners" | "my_remote_listeners" => 64,
                 "available" => 32,
                 _ => 128,
             };
             if !preserve_collections {
-                *truncated |= a.len() > cap;
                 a.truncate(cap);
             }
             for item in a {
-                bound_fields(item, "", preserve_collections, truncated);
+                bound_fields(item, "", preserve_collections);
             }
         }
         Value::Object(m) => {
@@ -82,7 +81,7 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool, truncated:
                 return;
             }
             for (k, v) in m {
-                bound_fields(v, k, preserve_collections, truncated)
+                bound_fields(v, k, preserve_collections)
             }
         }
         _ => {}
@@ -109,13 +108,10 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     // Full-message copy uses correlated bounded chunks rather than preview caps.
     if frame["op"] != "activity_message" {
         let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
-        let mut truncated = false;
-        bound_fields(&mut frame, "", correlated, &mut truncated);
-        if truncated {
-            frame["truncated"] = json!(true);
-        }
+        bound_fields(&mut frame, "", correlated);
     }
     let mut receipt_only = false;
+    let mut shed = Vec::new();
     loop {
         let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
         if bytes.len() + 1 < FRAME_LIMIT {
@@ -144,40 +140,32 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
             frame = json!({"op":"error","ok":false,"request_id":frame["request_id"],"hub":frame["hub"],"channel":frame["channel"],"channel_id":frame["channel_id"],"action":frame["action"],"source_op":frame.get("source_op").unwrap_or(&frame["op"]),"error":"Response exceeds the UI frame budget; retry with a smaller selection"});
             continue;
         }
-        let mut removed = false;
-        for key in [
-            "activity",
-            "peers",
-            "my_remote_listeners",
-            "available",
-            "sessions",
-            "listeners",
-            "harnesses",
-            "hubs",
-        ] {
-            if let Some(list) = frame.get_mut(key).and_then(Value::as_array_mut) {
-                if list.pop().is_some() {
-                    removed = true;
-                    break;
-                }
+        let removed = [
+            ("activity", "/activity"),
+            ("peers", "/peers"),
+            ("my_remote_listeners", "/my_remote_listeners"),
+            ("available", "/available"),
+            ("listeners", "/listeners"),
+            ("harnesses", "/harnesses"),
+            ("hubs", "/hubs"),
+            ("apps", "/apps"),
+            ("channels", "/channels"),
+            ("apps", "/settings/apps"),
+            ("channels", "/settings/channels"),
+            // State carries both enabled Hubs and the complete settings profiles.
+            ("settings.hubs", "/settings/hubs"),
+        ]
+        .into_iter()
+        .find_map(|(key, path)| frame.pointer_mut(path)?.as_array_mut()?.pop().map(|_| key));
+        if let Some(key) = removed {
+            if !shed.contains(&key) {
+                shed.push(key);
             }
-        }
-        if !removed {
-            if let Some(settings) = frame.get_mut("settings").and_then(Value::as_object_mut) {
-                for key in ["apps", "channels", "hubs"] {
-                    if let Some(list) = settings.get_mut(key).and_then(Value::as_array_mut) {
-                        if list.pop().is_some() {
-                            removed = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if !removed && !shed_large_strings(&mut frame) {
+        } else if !shed_large_strings(&mut frame) {
             return Err("UI frame exceeds 256 KiB after collection shedding".into());
         }
         frame["truncated"] = json!(true);
+        frame["truncated_collections"] = json!(shed);
     }
 }
 

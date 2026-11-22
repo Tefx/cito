@@ -268,7 +268,9 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     let empty = inspect(&f, p);
     let client = node(&empty, "settings_items", "settings_hub_client_id");
     assert_eq!(client["text"], "");
-    assert!(client["label_measured_width"].as_f64().unwrap() <= 110.0);
+    assert!(
+        client["label_measured_width"].as_f64().unwrap() <= client["label_width"].as_f64().unwrap()
+    );
     for key in ["issuer", "client_id", "redirect_port"] {
         assert_eq!(cleared.get(key), Some(&Value::Null));
     }
@@ -506,6 +508,17 @@ fn passive_bounded_hubs_preserve_complete_nested_attachments_and_update_scalars(
     assert_eq!(inspect(&f, p)["hub_attachment_counts"]["personal"], 129);
     frame["unread_count"] = json!(9);
     frame["hubs"][0]["status"] = json!("disconnected");
+    // A normal 128-row preview fits on the wire. Force byte-budget shedding
+    // of the second Hub so the retained first row is a partial Hub projection.
+    let preview: Value =
+        serde_json::from_slice(&cito_native::core::daemon::bounded_frame(frame.clone()).unwrap())
+            .unwrap();
+    assert_eq!(
+        preview["hubs"][0]["attachments"].as_array().unwrap().len(),
+        128
+    );
+    assert!(preview.get("truncated").is_none());
+    frame["hubs"][1]["attachments"] = json!((0..128).map(|i| json!({"channel_id":format!("remote-{i}"),"location":"device","display_name":"x".repeat(2048),"availability":"ACTIVE","is_local":false})).collect::<Vec<_>>());
     let bounded: Value =
         serde_json::from_slice(&cito_native::core::daemon::bounded_frame(frame).unwrap()).unwrap();
     assert_eq!(
@@ -513,6 +526,11 @@ fn passive_bounded_hubs_preserve_complete_nested_attachments_and_update_scalars(
         128
     );
     assert_eq!(bounded["truncated"], true);
+    assert_eq!(bounded["hubs"].as_array().unwrap().len(), 1);
+    assert!(bounded["truncated_collections"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hubs")));
     f.send(p, bounded);
     let s = inspect(&f, p);
     assert_eq!(s["hub_attachment_counts"]["personal"], 129);

@@ -7,6 +7,7 @@ use super::{
     DaemonService,
 };
 use crate::core::{
+    hub::HubServer,
     identity::{iso, string},
     state::LocalState,
     transport::HubClient,
@@ -14,7 +15,7 @@ use crate::core::{
 use crate::plugins::now_ms;
 use crate::setup::inspect_launch_at_login;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 const SESSION_FIELDS: &[&str] = &[
@@ -192,31 +193,56 @@ impl DaemonService {
             .unwrap_or(&self.config.default_hub)
     }
 
-    fn enabled_hub_dto(&self, name: &str, slot: &HubClient, sample: &HubSample) -> Value {
-        let capabilities = &sample.capabilities;
-        let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
-            "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(capabilities,"status")),
-            "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==self.config.default_hub,
-            "is_builtin":slot.config["url"] == "local://","supports_workspace_scope":slot.config["url"] != "local://",
-            "can_login":slot.config["authMode"] == "oidc" && capabilities["status"] != "connected",
-            "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
-        let record = sample.directory.iter().find(|row| {
-            row["harness"] == "human"
-                && crate::core::auth::principal_matches(string(row, "principal_id"), &slot.identity)
+    fn hub_dto(&self, name: &str, config: &Value, live: Option<(&HubClient, &HubSample)>) -> Value {
+        let status = live.map_or("disconnected", |(_, sample)| {
+            wire_status(string(&sample.capabilities, "status"))
         });
-        let projection = self.project_human(
-            record,
-            sample.human_current,
-            capabilities["auth_valid"] == true && slot.config["url"] != "local://",
-        );
-        if let (Some(out), Some(fields)) = (hub.as_object_mut(), projection.as_object()) {
-            out.extend(fields.clone());
+        let enabled = config["enabled"].as_bool().unwrap_or(true);
+        let builtin = config["url"] == "local://";
+        let mut hub = json!({"name":name,"url":config["url"],"auth_mode":config["authMode"],"enabled":enabled,
+            "redirect_port":config["redirectPort"],"issuer":config["issuer"],"client_id":config["clientId"],
+            "auto_listen":config["autoListen"].as_bool().unwrap_or(false),"status":status,"connected":enabled && status == "connected",
+            "is_default":name==self.config.default_hub,"is_builtin":builtin,"supports_workspace_scope":!builtin,
+            "can_login":enabled && config["authMode"] == "oidc" && status != "connected",
+            "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
+        let projection = if let Some((slot, sample)) = live {
+            hub["user"] = slot.identity["owner_user"].clone();
+            hub["capabilities"] = sample.capabilities.clone();
+            let record = sample.directory.iter().find(|row| {
+                row["harness"] == "human"
+                    && crate::core::auth::principal_matches(
+                        string(row, "principal_id"),
+                        &slot.identity,
+                    )
+            });
+            hub["attachments"] = json!(record
+                .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
+                .unwrap_or_default());
+            self.project_human(
+                record,
+                sample.human_current,
+                sample.capabilities["auth_valid"] == true && !builtin,
+            )
+        } else {
+            hub["user"] = json!(self.config.effective_user(name).ok());
+            self.human_projection(name)
+        };
+        if let (Some(out), Value::Object(fields)) = (hub.as_object_mut(), projection) {
+            out.extend(fields);
         }
-        hub["attachments"] = json!(record
-            .as_ref()
-            .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
-            .unwrap_or_default());
         hub
+    }
+
+    fn enabled_hubs<'a>(&'a self, samples: &HashMap<&str, HubSample>) -> BTreeMap<&'a str, Value> {
+        self.slots
+            .iter()
+            .map(|(name, slot)| {
+                (
+                    name.as_str(),
+                    self.hub_dto(name, &slot.config, Some((slot, &samples[name.as_str()]))),
+                )
+            })
+            .collect()
     }
 
     pub(super) fn hub_samples(&self) -> HashMap<&str, HubSample> {
@@ -228,8 +254,8 @@ impl DaemonService {
     pub(super) fn settings_for_hub(&self, channel_hub: &str) -> Value {
         self.settings_sample(channel_hub, &self.hub_samples())
     }
-    fn settings_sample(&self, channel_hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
-        let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p| {
+    fn settings_apps(&self) -> Vec<Value> {
+        self.plugins.agent_plugins().into_iter().map(|p| {
             let inspection = self.inspect_setup(p);
             if let Err(error) = &inspection {
                 return json!({"id":p.id,"display_name":p.display_name,"tier":p.tier,"installed":false,"paths":[],"configured":Value::Null,"status":"error","detail":error});
@@ -243,35 +269,33 @@ impl DaemonService {
                 else if installed { "Click Set Up to connect" } else { "Not detected; Set Up to pre-configure" };
             json!({"id":p.id,"display_name":p.display_name,"tier":p.tier,"installed":installed,"configured":configured,"paths":paths,
                 "status":if repair{"repair_needed"}else if configured{"ready"}else{"not_configured"},"detail":detail})
-        }).collect();
-        let mut hubs = Vec::new();
+        }).collect()
+    }
+
+    fn settings_sample(&self, channel_hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
+        let apps = self.settings_apps();
+        let mut hubs = self.enabled_hubs(samples);
         let mut channels = Vec::new();
         let mut channel_inventory_error: Option<String> = None;
-        for (name, slot) in &self.slots {
-            hubs.push(self.enabled_hub_dto(name, slot, &samples[name.as_str()]));
-            if name == channel_hub {
-                let inventory = if slot.local.is_some() {
-                    slot.rpc("human_channels_list", &json!({}))
-                        .unwrap_or_else(|e| json!({"status":"error","detail":e}))
-                } else {
-                    self.channel_inventories
-                        .get(name)
-                        .filter(|entry| entry.identity == remote_channels_identity(slot))
-                        .and_then(|entry| {
-                            entry.cached.lock().ok().map(|cached| cached.value.clone())
-                        })
-                        .unwrap_or_else(|| json!({"status":"loading"}))
-                };
-                channels = inventory["channels"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                if inventory["status"] == "error" {
-                    channel_inventory_error = Some(string(&inventory, "detail").to_owned());
-                }
+        if let Some(slot) = self.slots.get(channel_hub) {
+            let inventory = if slot.local.is_some() {
+                slot.rpc("human_channels_list", &json!({}))
+                    .unwrap_or_else(|e| json!({"status":"error","detail":e}))
+            } else {
+                self.channel_inventories
+                    .get(channel_hub)
+                    .filter(|entry| entry.identity == remote_channels_identity(slot))
+                    .and_then(|entry| entry.cached.lock().ok().map(|cached| cached.value.clone()))
+                    .unwrap_or_else(|| json!({"status":"loading"}))
+            };
+            channels = inventory["channels"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if inventory["status"] == "error" {
+                channel_inventory_error = Some(string(&inventory, "detail").to_owned());
             }
-        }
-        if channel_hub == "local" && !self.slots.contains_key("local") {
+        } else if channel_hub == "local" {
             let inventory = self
                 .local
                 .rpc(
@@ -294,8 +318,7 @@ impl DaemonService {
             }
         }
         let channel_human = hubs
-            .iter()
-            .find(|hub| hub["name"] == channel_hub)
+            .get(channel_hub)
             .cloned()
             .unwrap_or_else(|| self.human_projection(channel_hub));
         if let Some(inbox_paused) = channel_human["human_paused"].as_bool() {
@@ -304,20 +327,20 @@ impl DaemonService {
             }
         }
         let raw = self.raw_config().unwrap_or_else(|_| json!({}));
-        if let Ok((_, configured, _)) =
-            crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))
-        {
-            for (name, cfg) in &configured {
-                if !self.slots.contains_key(name) {
-                    hubs.push(json!({"name":name,"url":cfg["url"],"auth_mode":cfg.get("authMode").or_else(||cfg.get("auth_mode")).or_else(||cfg.get("auth")).and_then(Value::as_str).unwrap_or("none").to_ascii_lowercase(),"enabled":cfg["enabled"].as_bool().unwrap_or(true),"auto_listen":cfg["autoListen"].as_bool().unwrap_or(false),"status":"disconnected","user":self.config.effective_user(name).ok(),"is_default":name==&self.config.default_hub,"error":null}));
-                }
+        let configured = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()));
+        if let Ok((_, configured, _)) = &configured {
+            for (name, cfg) in configured {
+                hubs.entry(name)
+                    .or_insert_with(|| self.hub_dto(name, cfg, None));
             }
         }
+        let hubs: Vec<_> = hubs.into_values().collect();
         let host = raw
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
-        let host = if self.host_server.is_some() {
+        let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
+        let host = if running {
             self.applied_host_config.as_ref().unwrap_or(host)
         } else {
             host
@@ -325,43 +348,9 @@ impl DaemonService {
         let port = self
             .host_server
             .as_ref()
+            .filter(|_| running)
             .map(|server| u64::from(server.port()))
             .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
-        for item in &mut hubs {
-            if item.get("capabilities").is_none() {
-                item["error"] = json!(self
-                    .last_hub_errors
-                    .get(string(item, "name"))
-                    .map(|(error, _)| error));
-                item["is_builtin"] = json!(item["url"] == "local://");
-                item["supports_workspace_scope"] = json!(item["url"] != "local://");
-                item["can_login"] = json!(
-                    item["enabled"] != false
-                        && item["auth_mode"] == "oidc"
-                        && item["status"] != "connected"
-                );
-            }
-            let cfg = self
-                .slots
-                .get(string(item, "name"))
-                .map(|s| &s.config)
-                .or_else(|| raw["hubs"].get(string(item, "name")));
-            if let Some(cfg) = cfg {
-                let mut cfg = cfg.clone();
-                crate::core::config::canonicalize_hub_aliases(&mut cfg);
-                item["redirect_port"] = cfg["redirectPort"].clone();
-                item["issuer"] = cfg["issuer"].clone();
-                item["client_id"] = cfg["clientId"].clone();
-            }
-            if item.get("human_state_status").is_none() {
-                let projection = self.human_projection(string(item, "name"));
-                if let (Some(item), Some(fields)) = (item.as_object_mut(), projection.as_object()) {
-                    item.extend(fields.clone());
-                }
-            }
-
-            item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
-        }
         let token = string(host, "token");
         let endpoint = |host: &str| {
             let authority = if host.contains(':') {
@@ -399,7 +388,7 @@ impl DaemonService {
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.host_hub_error.as_ref().map(super::HostHubError::message)},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":running,"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.host_hub_error.as_ref().map(super::HostHubError::message)},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
     }
 
     pub(super) fn display_address(&self, hub: &str, row: &Value) -> String {
@@ -520,13 +509,6 @@ impl DaemonService {
         samples: &HashMap<&str, HubSample>,
     ) -> Result<Value, String> {
         let settings = self.settings_sample(self.selected_settings_hub(), samples);
-        let unconfigured_harnesses: HashSet<&str> = settings["apps"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|app| app["configured"] == false && app["status"] != "error")
-            .filter_map(|app| app["id"].as_str())
-            .collect();
         let (activity, activity_total, activity_unread) = self
             .state
             .query_activity(&self.activity_filter, &self.activity_query)?;
@@ -537,15 +519,37 @@ impl DaemonService {
                 let (_, total, unread) = self.state.query_activity("all", "")?;
                 (total, unread)
             };
+        let addresses = self.sample_addresses(samples);
+        let sessions = self.local_sessions(samples, &addresses)?;
+        let (available, discovery) =
+            self.discovery_rows(&sessions, settings["apps"].as_array().into_iter().flatten())?;
+        let activity = self.activity_dto(activity, &addresses);
+        let (remote, online) = self.remote_listeners(samples, &sessions, &addresses);
+        let harnesses:Vec<Value>=self.plugins.agent_plugins().into_iter().enumerate().map(|(order,p)|json!({"kind":"agent","id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order,"pid_bound":p.pid_bound,"idle_timeout_ms":p.auto_listen.idle_timeout_ms})).collect();
+        let enabled_hubs: Vec<_> = settings["hubs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|hub| self.slots.contains_key(string(hub, "name")))
+            .collect();
+        Ok(
+            json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"available":available,"discovery":discovery,"my_remote_listeners":remote,"activity":activity,"activity_total":activity_total,"activity_all_total":activity_all_total,"activity_has_any":activity_all_total>0,"activity_unread_count":activity_unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":unread,"total_online":online,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),
+        )
+    }
+
+    fn local_sessions(
+        &self,
+        samples: &HashMap<&str, HubSample>,
+        addresses: &HashMap<&str, Vec<Value>>,
+    ) -> Result<Vec<Value>, String> {
         let mut sessions: Vec<Value> = self
             .state
             .active()?
             .into_iter()
             .filter(|row| self.slots.contains_key(string(row, "hub")))
             .collect();
-        let addresses = self.sample_addresses(samples);
         for row in &mut sessions {
-            self.project_local_session(row, &addresses, &samples[string(row, "hub")].capabilities)?;
+            self.project_local_session(row, addresses, &samples[string(row, "hub")].capabilities)?;
             if row["harness"] == "human" {
                 let directory = &samples[string(row, "hub")].directory;
                 if let Some(peer) = directory
@@ -566,10 +570,23 @@ impl DaemonService {
                 }
             }
         }
+        Ok(sessions)
+    }
+
+    fn discovery_rows<'a>(
+        &self,
+        sessions: &[Value],
+        apps: impl IntoIterator<Item = &'a Value>,
+    ) -> Result<(Vec<Value>, Vec<Value>), String> {
+        let unconfigured_harnesses: HashSet<_> = apps
+            .into_iter()
+            .filter(|app| app["configured"] == false && app["status"] != "error")
+            .filter_map(|app| app["id"].as_str())
+            .collect();
         let mut available = self
             .session_activity
             .as_ref()
-            .map(|activity| activity.available(&sessions, self.slots.len()))
+            .map(|activity| activity.available(sessions, self.slots.len()))
             .unwrap_or_default()
             .into_iter()
             .filter(|session| !unconfigured_harnesses.contains(string(session, "harness")))
@@ -584,20 +601,17 @@ impl DaemonService {
                 row["custom_title"] = json!(true);
             }
         }
-        let activity = self.activity_dto(activity, &addresses);
-        let (remote, online) = self.remote_listeners(samples, &sessions, &addresses);
-        let harnesses:Vec<Value>=self.plugins.agent_plugins().into_iter().enumerate().map(|(order,p)|json!({"kind":"agent","id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order,"pid_bound":p.pid_bound,"idle_timeout_ms":p.auto_listen.idle_timeout_ms})).collect();
-
-        let enabled_hubs: Vec<Value> = settings["hubs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|hub| hub["enabled"] != false && self.slots.contains_key(string(hub, "name")))
-            .cloned()
-            .collect();
-        Ok(
-            json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"sessions":sessions,"available":available,"discovery":self.session_activity.as_ref().map(|a|a.discovery_status().into_iter().filter(|r|!unconfigured_harnesses.contains(string(r,"harness"))).collect::<Vec<_>>()).unwrap_or_default(),"my_remote_listeners":remote,"activity":activity,"activity_total":activity_total,"activity_all_total":activity_all_total,"activity_has_any":activity_all_total>0,"activity_unread_count":activity_unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":unread,"total_online":online,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),
-        )
+        let discovery = self
+            .session_activity
+            .as_ref()
+            .map(|a| {
+                a.discovery_status()
+                    .into_iter()
+                    .filter(|r| !unconfigured_harnesses.contains(string(r, "harness")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((available, discovery))
     }
 
     fn sample_addresses(&self, samples: &HashMap<&str, HubSample>) -> HashMap<&str, Vec<Value>> {
@@ -810,7 +824,14 @@ impl DaemonService {
             })
             .collect::<Result<_, _>>()?;
         inventories.sort_by_key(Value::to_string);
-        Ok(json!([
+        let inspections: BTreeMap<_, _> = self
+            .setup_inspections
+            .iter()
+            .map(|(id, entry)| (id, &entry.value))
+            .collect();
+        Ok(json!({"inspections": inspections, "state": [
+            self.last_app_action,
+            self.host_server.as_ref().is_some_and(HubServer::is_running),
             inventories,
             self.last_hub_errors,
             self.host_hub_error
@@ -826,13 +847,12 @@ impl DaemonService {
             self.menu_open,
             self.directory_open,
             self.active_settings_hub
-        ]))
+        ]}))
     }
 
     /// Keep the existing state wire shape while omitting histories and inventories.
     /// Closed surfaces retain their last full model until an explicit open refresh.
-    fn status_frame(&self, cached: &Value) -> Result<Value, String> {
-        let mut frame = cached.clone();
+    fn status_frame(&self, mut frame: Value, inspections_changed: bool) -> Result<Value, String> {
         if let Some(fields) = frame.as_object_mut() {
             for key in [
                 "settings",
@@ -848,12 +868,13 @@ impl DaemonService {
                 fields.remove(key);
             }
         }
-        let mut sessions = self.state.active()?;
         let samples = self.hub_samples();
         let addresses = self.sample_addresses(&samples);
-        sessions.retain(|row| self.slots.contains_key(string(row, "hub")));
-        for row in &mut sessions {
-            self.project_local_session(row, &addresses, &samples[string(row, "hub")].capabilities)?;
+        let sessions = self.local_sessions(&samples, &addresses)?;
+        if inspections_changed {
+            let (available, discovery) = self.discovery_rows(&sessions, &self.settings_apps())?;
+            frame["available"] = json!(available);
+            frame["discovery"] = json!(discovery);
         }
         let (total, unread) = self.state.activity_counts()?;
         frame["unread_count"] = json!(unread);
@@ -869,12 +890,7 @@ impl DaemonService {
         frame["total_online"] = json!(online);
         frame["directory_online_count"] = json!(online);
         frame["listeners"] = json!(sessions);
-        frame["sessions"] = frame["listeners"].clone();
-        let hubs: Vec<_> = self
-            .slots
-            .iter()
-            .map(|(name, slot)| self.enabled_hub_dto(name, slot, &samples[name.as_str()]))
-            .collect();
+        let hubs: Vec<_> = self.enabled_hubs(&samples).into_values().collect();
         frame["hubs"] = json!(hubs);
         frame["hub"] = json!(self.config.default_hub);
         Ok(frame)
@@ -888,14 +904,16 @@ impl DaemonService {
             Ok(revision) => revision,
             Err(_) => return,
         };
-        if action.is_none()
-            && self
-                .last_ui_revision
-                .lock()
-                .is_ok_and(|previous| previous.as_ref() == Some(&revision))
-        {
-            return;
-        }
+        let inspections_changed = if let Ok(previous) = self.last_ui_revision.lock() {
+            if action.is_none() && previous.as_ref() == Some(&revision) {
+                return;
+            }
+            previous
+                .as_ref()
+                .is_none_or(|old| old["inspections"] != revision["inspections"])
+        } else {
+            true
+        };
         let cached = self
             .last_ui_frame
             .lock()
@@ -909,10 +927,10 @@ impl DaemonService {
         let result = if full {
             self.snapshot()
         } else {
-            self.status_frame(cached.as_ref().unwrap_or(&Value::Null))
+            self.status_frame(cached.unwrap_or_default(), inspections_changed)
         };
         if let Ok(mut frame) = result {
-            let full_frame = full.then(|| frame.clone());
+            let cache_update = (full || inspections_changed).then(|| frame.clone());
             if let Some(action) = action {
                 frame["ok"] = json!(true);
                 frame["request_id"] = action["request_id"].clone();
@@ -932,9 +950,9 @@ impl DaemonService {
             if !self.ui.as_ref().is_some_and(|ui| ui.emit(frame)) {
                 return;
             }
-            if let Some(full) = full_frame {
+            if let Some(update) = cache_update {
                 if let Ok(mut cached) = self.last_ui_frame.lock() {
-                    *cached = Some(full);
+                    *cached = Some(update);
                 }
             }
             if let Ok(mut previous) = self.last_ui_revision.lock() {

@@ -130,7 +130,7 @@ location / {
 
 ## OIDC sign-in (PKCE)
 
-Register a public/native OIDC client supporting Authorization Code with PKCE (`S256`), discovery, and ID tokens. Use an HTTPS issuer such as `https://id.example.com`; do not embed a client secret. Register `http://127.0.0.1:8400/callback` as an allowed loopback redirect. This callback runs on each client Mac, independently of the public Hub URL and Hub port. Client `redirectPort` accepts `0..=65535`; explicit `0` selects an ephemeral loopback port. When absent, `CITO_OIDC_REDIRECT_PORT` supplies a fallback; if both are absent, Cito selects an ephemeral port, which requires provider support for dynamic loopback redirects.
+Register a public/native OIDC client supporting Authorization Code with PKCE (`S256`), discovery, and ID tokens. Use an HTTPS issuer such as `https://id.example.com`; do not embed a client secret. Register `http://127.0.0.1:8400/callback` as an allowed loopback redirect. This callback runs on each client Mac, independently of the public Hub URL and Hub port. Client `redirectPort` accepts `0..=65535`; explicit `0` selects an ephemeral loopback port. When the port is omitted during setup, Cito uses the port advertised by the Hub. If the configuration still has no port at sign-in, Cito uses `CITO_OIDC_REDIRECT_PORT` or selects an ephemeral port. Ephemeral ports require provider support for dynamic loopback redirects.
 
 Set `CITO_AUTH_MODE=oidc`, `CITO_OIDC_ISSUER=https://id.example.com`, and `CITO_OIDC_CLIENT_ID=cito` on the server. Optionally set `CITO_OIDC_REDIRECT_PORT=8400` or pass `cito hub --redirect-port 8400` to advertise the callback port via `/health`; the server accepts `1..=65535`. Set `CITO_OIDC_ADMIN_USERS=alice,bob` to grant shared channel administration to those verified owner usernames or OIDC subjects. Other users can pair their own accounts after an administrator configures the shared service.
 
@@ -196,7 +196,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | `CITO_OIDC_CLIENT_ID` | Required public client ID in OIDC mode; standalone `--client-id`. |
 | `CITO_OIDC_REDIRECT_PORT` | Optional advertised OIDC callback port, `1..=65535`; standalone `--redirect-port` takes precedence. |
 | `CITO_OIDC_ADMIN_USERS` | Empty by default; comma-separated verified owner usernames or OIDC subjects allowed to administer shared channel fields. |
-| `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum cooldown between forced JWKS refreshes for unknown signing keys. |
+| `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum interval between JWKS refresh attempts, including after an unknown key ID or an invalid signature with a cached key. |
 | `CITO_PLUGIN_<ID>_<KEY>` | No default; seeds declared Hub-scoped channel fields at startup, including `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. |
 
 ### Client & Daemon

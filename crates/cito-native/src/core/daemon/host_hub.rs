@@ -365,9 +365,11 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
-        if self.applied_host_config.as_ref() == Some(host)
-            && (host["enabled"] != true || self.host_server.is_some())
-        {
+        let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
+        if !running {
+            self.host_server.take();
+        }
+        if self.applied_host_config.as_ref() == Some(host) && (host["enabled"] != true || running) {
             // Restoring the applied config resolves reload errors, not rejected UI actions.
             if matches!(self.host_hub_error, Some(super::HostHubError::Reload(_))) {
                 self.host_hub_error = None;

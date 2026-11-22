@@ -5,19 +5,19 @@ fn sigterm_wakes_an_active_oidc_callback_after_browser_exit() {
     use std::io::Write;
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let provider = f.spawn("python3", &["-u", "-c", r#"import http.server,json
+    let provider = f.spawn("python3", &["-u", "-c", r#"import http.server,json,socketserver
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
-  issuer='http://127.0.0.1:'+str(self.server.server_port)
+  issuer='http://127.0.0.1:'+str(self.server.server_address[1])
   raw=json.dumps({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','scopes_supported':['openid']}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-s=http.server.HTTPServer(('127.0.0.1',0),Handler)
-print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
+s=socketserver.TCPServer(('127.0.0.1',0),Handler)
+print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
 "#], &[]);
     wait(|| !f.frames(provider).is_empty());
     let issuer = format!("http://127.0.0.1:{}", f.frames(provider)[0]["port"]);
-    fs::write(&f.config, json!({"default_hub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":issuer,"clientId":"client","redirectPort":0}}}).to_string()).unwrap();
+    fs::write(&f.config, json!({"default_hub":"work","hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":issuer,"clientId":"client","redirectPort":0}}}).to_string()).unwrap();
     // The opener records its URL and exits successfully without sending a callback.
     let opener = f.dir.join("browser");
     script(
@@ -38,6 +38,14 @@ print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
         .1
         .into_owned();
     let callback = url::Url::parse(&callback).unwrap();
+    // Creating or editing a different Hub must leave the default Hub's callback live.
+    for action in [
+        json!({"op":"setup_save_hub","name":"personal","url":"local://"}),
+        json!({"op":"save_hub","edit":true,"name":"personal","autoListen":false}),
+    ] {
+        let result = f.action(action);
+        assert_eq!(result.0, 200, "{result:?}");
+    }
     // A bad callback proves the login worker is inside the callback accept loop.
     let mut probe = std::net::TcpStream::connect(("127.0.0.1", callback.port().unwrap())).unwrap();
     probe

@@ -107,6 +107,17 @@ try {
   assert.equal(badges.length,badgeCount,'Stale command must not restore a badge');
   assert.equal(notices.length,noticeCount,'Stale command must not overwrite current feedback');
  }
+ // Both transitions retain the previous badge when the daemon sends no usable receipt.
+ for(const [op,badge] of [['on',undefined],['off','active']]) {
+  await request({op:'status',session_id:session,badge});
+  for(const content of [undefined,[],[{type:'text',text:''}],...['{}','[]','null','1','not JSON'].map(text=>[{type:'text',text}])]) {
+   const before=badges.length;
+   const {response,done}=await begin(op);
+   response.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content}}));await done;
+   assert.equal(notices.at(-1).t,'error');assert.match(notices.at(-1).s,/Invalid cito_(un)?listen receipt/);
+   assert.equal(badges.length,before);assert.equal((await request({op:'identify'})).badge,badge??null);
+  }
+ }
  holdHttp=false;
  const configPath=join(process.env.HOME,'bridge-config.json'), beforeMalformed=calls.length;
  writeFileSync(configPath,'{invalid');await command.handler('on',context);
@@ -150,6 +161,27 @@ try {
   assert(interrupted>=2,'A second unlink during repair must start another bind');
   assert.equal((await request({op:'identify'})).session_id,session);
  } finally {fs.chmodSync=chmod;syncBuiltinESMExports();}
+ // Run real socket repairs, shortening only the scheduled retry intervals.
+ const schedule=globalThis.setTimeout, delays=[];
+ let failures=0;
+ fs.chmodSync=(file,mode)=>{
+  if(file===join(state,'sockets') && failures>0){failures--;throw Error('Directory unavailable');}
+  chmod(file,mode);
+ };
+ syncBuiltinESMExports();
+ globalThis.setTimeout=(callback,ms,...args)=>{
+  if(ms===10000)return schedule(callback,ms,...args); // Directory-event watchdog.
+  delays.push(ms);return schedule(callback,1,...args);
+ };
+ try {
+  for(const expected of [[50,100,200,400,800,1600,3200,5000,5000],[50]]) {
+   failures=expected.length;delays.length=0;
+   await unlinkAndObserve();
+   for(let i=0;i<100&&!existsSync(path);i++)await new Promise(r=>schedule(r,5));
+   assert.equal((await request({op:'identify'})).session_id,session);
+   assert.deepEqual(delays,expected,'Retry delays must grow, cap, and reset after a healthy bind');
+  }
+ } finally {globalThis.setTimeout=schedule;fs.chmodSync=chmod;syncBuiltinESMExports();}
  for(const packages of [[],[join(process.env.HOME,'unrelated-package')]]) {
   writeFileSync(join(home,'settings.json'),JSON.stringify({packages}));
   if(existsSync(path))await unlinkAndObserve();

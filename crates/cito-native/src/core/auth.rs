@@ -221,19 +221,33 @@ impl OidcVerifier {
                 .filter(|at| Some(*at) > refresh_after && at.elapsed() < Duration::from_secs(300))
             {
                 if let Some(keys) = &cache.keys {
-                    let selected = match header.kid.as_deref() {
-                        Some(kid) => keys.find(kid),
-                        None => {
-                            let mut eligible = keys
-                                .keys
-                                .iter()
-                                .filter(|key| signing_key(key, header.alg).is_ok());
-                            let first = eligible.next();
-                            first.filter(|_| eligible.next().is_none())
+                    let mut selected = None;
+                    let mut rejected = None;
+                    for key in keys
+                        .keys
+                        .iter()
+                        .filter(|key| header.kid.is_none() || key.common.key_id == header.kid)
+                    {
+                        match signing_key(key, header.alg) {
+                            Ok(()) if selected.is_some() => {
+                                if header.kid.is_some() {
+                                    return Err(
+                                        "AUTHORIZATION_VIOLATION: ambiguous JWT signing key".into(),
+                                    );
+                                }
+                                selected = None;
+                                break;
+                            }
+                            Ok(()) => selected = Some(key),
+                            Err(reason) if header.kid.is_some() => rejected = Some(reason),
+                            Err(_) => {}
                         }
-                    };
+                    }
                     if let Some(key) = selected {
                         return Ok((key.clone(), at));
+                    }
+                    if let Some(reason) = rejected {
+                        return Err(reason.into());
                     }
                 }
             }
@@ -333,7 +347,6 @@ impl OidcVerifier {
         }
         let (jwk, loaded_at) = self.verification_key(&header, deadline, None)?;
         let decoding_key = |jwk: &jsonwebtoken::jwk::Jwk| -> Result<DecodingKey, String> {
-            signing_key(jwk, header.alg)?;
             DecodingKey::from_jwk(jwk)
                 .map_err(|_| "AUTHORIZATION_VIOLATION: invalid verification key".into())
         };

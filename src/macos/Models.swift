@@ -308,6 +308,7 @@ struct HubInviteConfig: Decodable {
 struct Frame: Decodable {
     let config: HubInviteConfig?
     let truncated: Bool?
+    let truncated_collections: [String]?
     let op: String
     let hub: String?
     let ok: Bool?
@@ -350,25 +351,48 @@ struct Frame: Decodable {
     let message: String?
     let part: Int?
     let complete: Bool?
+
+    func preservesCollection(_ key: String, alias: String? = nil) -> Bool {
+        guard request_id == nil, truncated == true else { return false }
+        // Older producers only reported a frame-wide flag.
+        guard let collections = truncated_collections else { return true }
+        return collections.contains(key) || alias.map { collections.contains($0) } == true
+    }
 }
 
 struct ChannelUiState: Equatable {
+    struct PairingAttempt: Equatable {
+        let request: String?
+        let instruction: String
+        let command: String?
+        let url: String?
+
+        func matches(_ current: Self) -> Bool {
+            request.map { $0 == current.request } ?? (self == current)
+        }
+    }
+
     var editingGateway = false
     var editingPersonal = false
     var manualEntry = false
     var drafts: [String: String] = [:]
     var pendingPairRequest: String?
+    var pairingPreviewRequest: String?
     var pairingInstruction = ""
     var pairingCommand: String?
     var pairingURL: String?
     var pairCopiedUntil = Date.distantPast
+    var pairingAttempt: PairingAttempt {
+        PairingAttempt(request: pendingPairRequest ?? (pairingInstruction.isEmpty ? nil : pairingPreviewRequest),
+                       instruction: pairingInstruction, command: pairingCommand, url: pairingURL)
+    }
     var savedUntil: [String: Date] = [:]
     var testResult: (ok: Bool, detail: String)?
     var testResultIsLatest = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.editingGateway == rhs.editingGateway && lhs.editingPersonal == rhs.editingPersonal && lhs.manualEntry == rhs.manualEntry &&
-        lhs.drafts == rhs.drafts && lhs.pendingPairRequest == rhs.pendingPairRequest && lhs.pairingInstruction == rhs.pairingInstruction &&
+        lhs.drafts == rhs.drafts && lhs.pendingPairRequest == rhs.pendingPairRequest && lhs.pairingPreviewRequest == rhs.pairingPreviewRequest && lhs.pairingInstruction == rhs.pairingInstruction &&
         lhs.pairingCommand == rhs.pairingCommand && lhs.pairingURL == rhs.pairingURL && lhs.pairCopiedUntil == rhs.pairCopiedUntil &&
         lhs.savedUntil == rhs.savedUntil && lhs.testResult?.ok == rhs.testResult?.ok && lhs.testResult?.detail == rhs.testResult?.detail &&
         lhs.testResultIsLatest == rhs.testResultIsLatest
@@ -378,15 +402,18 @@ struct ChannelUiState: Equatable {
         editingPersonal = false
         manualEntry = false
         if !preservePendingPair { pendingPairRequest = nil }
+        clearPairingInstructions()
+        savedUntil.removeValue(forKey: "user")
+    }
+    mutating func clearPairingInstructions() {
+        pairingPreviewRequest = nil
         pairingInstruction = ""
         pairingCommand = nil
         pairingURL = nil
         pairCopiedUntil = .distantPast
-        savedUntil.removeValue(forKey: "user")
     }
     mutating func resetGateway() {
         editingGateway = false
         savedUntil.removeValue(forKey: "hub")
     }
-    mutating func resetAll() { self = ChannelUiState() }
 }

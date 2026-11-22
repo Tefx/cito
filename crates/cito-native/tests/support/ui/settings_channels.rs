@@ -1,6 +1,77 @@
 use super::*;
 
 #[test]
+fn deferred_channel_editor_keeps_its_rendered_hub_across_passive_reselection() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let field = "channel_field:channel:account";
+    let mut personal = settings();
+    personal["channels"][0]["fields"][1]["value"] = json!("Personal account");
+    let mut frame = state();
+    frame["settings"] = personal.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "channel_hub_selector:personal");
+    let input = |value: &str| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":field,"value":value}),
+        )
+    };
+    input("Personal draft");
+    f.send(p, json!({"op":"test_focus_field","id":field}));
+    let before = inspect(&f, p);
+    assert_eq!(before["field_editors"][0]["id"], field);
+
+    let mut work = personal;
+    work["hubs"][0]["enabled"] = json!(false);
+    work["channels"][0]["fields"][1]["value"] = json!("Work account");
+    f.send(p, json!({"op":"settings","hub":"work","settings":work}));
+    let deferred = inspect(&f, p);
+    assert_eq!(deferred["settings_rebuild_deferred"], true);
+    assert_eq!(deferred["settings_channel_hub"], "personal");
+    assert_eq!(
+        node(&deferred, "settings_items", field)["instance"],
+        node(&before, "settings_items", field)["instance"]
+    );
+    assert!(f
+        .frames(p)
+        .iter()
+        .any(|a| a["op"] == "open_settings" && a["hub"] == "work"));
+
+    // Both a continued edit and Return belong to the still-mounted field.
+    input("Latest personal draft");
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"return","via":"field"}),
+    );
+    inspect(&f, p);
+    let saves: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|a| a["op"] == "channel_save")
+        .collect();
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0]["hub"], "personal");
+    assert_eq!(
+        saves[0]["values"],
+        json!({"account":"Latest personal draft"})
+    );
+
+    f.send(p, json!({"op":"test_end_editing"}));
+    let work = inspect(&f, p);
+    assert_eq!(work["settings_rebuild_deferred"], false);
+    assert_eq!(work["settings_channel_hub"], "work");
+    assert_eq!(node(&work, "settings_items", field)["text"], "Work account");
+    assert_eq!(
+        node(&work, "settings_items", "save_channel:channel")["enabled"],
+        true
+    );
+}
+
+#[test]
 fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

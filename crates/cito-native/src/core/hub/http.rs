@@ -7,16 +7,23 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 pub struct HubServer {
     pub address: SocketAddr,
     pub(in crate::core) auth: Arc<HubAuth>,
-    stop: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     wake: Arc<crate::support::WakePipe>,
     sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
+struct ListenerLifetime(Arc<AtomicBool>);
+impl Drop for ListenerLifetime {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 impl HubServer {
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
     pub fn shutdown(&self) {
-        if self.stop.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        self.running.store(false, Ordering::Release);
         self.wake.notify();
         if let Ok(sockets) = self.sockets.lock() {
             for socket in sockets.values() {
@@ -48,17 +55,21 @@ impl HubEngine {
         let listener = TcpListener::bind((bind, port)).map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(true));
         let wake = Arc::new(crate::support::WakePipe::new()?);
         let worker_wake = wake.clone();
         let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
         let auth = auth.into();
-        let (engine, st, ss, worker_auth) =
-            (self.clone(), stop.clone(), sockets.clone(), auth.clone());
+        let (engine, lifetime, ss, worker_auth) = (
+            self.clone(),
+            ListenerLifetime(running.clone()),
+            sockets.clone(),
+            auth.clone(),
+        );
         let handle = thread::spawn(move || {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
             let mut next_socket = 0u64;
-            while !st.load(Ordering::SeqCst) {
+            while lifetime.0.load(Ordering::Acquire) {
                 use std::os::fd::AsRawFd;
                 let mut ready = [
                     libc::pollfd {
@@ -73,7 +84,7 @@ impl HubEngine {
                     },
                 ];
                 if crate::support::poll_until(&mut ready, None).is_err()
-                    || st.load(Ordering::SeqCst)
+                    || !lifetime.0.load(Ordering::Acquire)
                 {
                     break;
                 }
@@ -84,7 +95,7 @@ impl HubEngine {
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        if st.load(Ordering::SeqCst) {
+                        if !lifetime.0.load(Ordering::Acquire) {
                             let _ = stream.shutdown(Shutdown::Both);
                             break;
                         }
@@ -104,8 +115,12 @@ impl HubEngine {
                                 list.insert(socket_id, clone);
                             }
                         }
-                        let (e, a, s, connections) =
-                            (engine.clone(), worker_auth.clone(), st.clone(), ss.clone());
+                        let (e, a, s, connections) = (
+                            engine.clone(),
+                            worker_auth.clone(),
+                            lifetime.0.clone(),
+                            ss.clone(),
+                        );
                         let shutdown_wake = worker_wake.clone();
                         workers.push(thread::spawn(move || {
                             handle_http(stream, e, a, s, address, shutdown_wake);
@@ -121,6 +136,8 @@ impl HubEngine {
                     }
                 }
             }
+            drop(lifetime);
+            worker_wake.notify();
             if let Ok(sockets) = ss.lock() {
                 for socket in sockets.values() {
                     let _ = socket.shutdown(Shutdown::Both);
@@ -133,7 +150,7 @@ impl HubEngine {
         Ok(HubServer {
             address,
             auth,
-            stop,
+            running,
             wake,
             sockets,
             thread: Mutex::new(Some(handle)),
@@ -171,7 +188,7 @@ fn handle_http(
     mut stream: TcpStream,
     engine: HubEngine,
     auth: Arc<HubAuth>,
-    stop: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     bound: SocketAddr,
     shutdown_wake: Arc<crate::support::WakePipe>,
 ) {
@@ -224,7 +241,7 @@ fn handle_http(
             let expires_at = principal["token_expires_at"].as_f64();
             let events = engine.subscribe(Some(principal))?;
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n\r\n:ok\n\n").map_err(|e|e.to_string())?;
-            while !stop.load(Ordering::SeqCst)
+            while running.load(Ordering::Acquire)
                 && !engine.inner.closed.load(Ordering::SeqCst)
                 && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
             {
@@ -263,7 +280,7 @@ fn handle_http(
                                     &mut fds,
                                     Some(std::time::Instant::now() + wait),
                                 )?;
-                                if fds[1].revents != 0 || stop.load(Ordering::SeqCst) {
+                                if fds[1].revents != 0 || !running.load(Ordering::Acquire) {
                                     break;
                                 }
                                 events.try_recv()

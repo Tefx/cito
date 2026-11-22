@@ -86,6 +86,90 @@ fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banne
 }
 
 #[test]
+fn settings_shedding_respects_flat_and_dotted_keys_without_freezing_other_collections() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let original = settings();
+    for (key, preserved) in [
+        ("apps", "apps"),
+        ("settings.apps", "apps"),
+        ("channels", "channels"),
+        ("settings.channels", "channels"),
+        ("hubs", "hubs"),
+        ("settings.hubs", "hubs"),
+    ] {
+        f.send(
+            p,
+            json!({"op":"settings","hub":"personal","settings":original}),
+        );
+        let mut update = original.clone();
+        for collection in ["apps", "channels", "hubs"] {
+            update[collection] = json!([]);
+        }
+        f.send(p, json!({"op":"settings","hub":"personal","settings":update,"truncated":true,"truncated_collections":[key]}));
+        let projection = render_state(&f, p);
+        for collection in ["apps", "channels", "hubs"] {
+            let count = if collection == preserved {
+                original[collection].as_array().unwrap().len()
+            } else {
+                0
+            };
+            assert_eq!(
+                projection["collection_counts"][format!("settings.{collection}")],
+                count,
+                "{key}: {collection}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hub_only_disconnect_discards_only_its_submitted_gateway_draft() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    open_settings(&f, p, &cfg, "channels");
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "edit_user_channel:channel");
+    for (key, value) in [
+        ("secret", "Old gateway draft"),
+        ("account", "Unsaved account"),
+    ] {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{key}"),"value":value}));
+    }
+    let before = inspect(&f, p);
+    assert_eq!(
+        node(&before, "settings_items", "channel_field:channel:account")["text"],
+        "Unsaved account"
+    );
+    control(&f, p, "clear_channel_service:channel");
+    confirm_channel_action(&f, p, "disconnect_human_channel");
+    let after = inspect(&f, p);
+    assert_eq!(after["pending_channel_resets"], json!([]));
+    assert_eq!(
+        node(&after, "settings_items", "channel_field:channel:account")["text"],
+        "Unsaved account"
+    );
+    assert!(node(&after, "settings_items", "channel_field:channel:secret").is_null());
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rfind(|a| a["op"] == "save_hub_service")
+        .unwrap();
+    assert!(
+        action["values"]["secret"].is_null(),
+        "Cleared gateway draft must not be resubmitted"
+    );
+}
+
+#[test]
 fn channel_receipts_without_channel_ids_settle_resets_and_retire_only_committed_secrets() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

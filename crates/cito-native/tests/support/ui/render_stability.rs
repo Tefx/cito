@@ -63,6 +63,106 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
 }
 
 #[test]
+fn passive_state_only_preserves_collections_named_by_the_frame_budget() {
+    use super::lazy_rendering::render_state;
+
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut before = state();
+    before["available"] =
+        json!([{"harness":"fixture","session_id":"s2","title":"Available","cwd":"/tmp"}]);
+    before["discovery"] = json!([{"harness":"fixture","status":"ready"}]);
+    before["my_remote_listeners"] = json!([peer("remote")]);
+    before["activity"] = json!([{"hub":"personal","signal_id":"message","listener_id":"c_target",
+        "from_user":"bob","from_host_name":"laptop","from_title":"Review","target_harness":"human",
+        "target_title":"You","target_scoped_id":"personal:target","message":"Hello", "created_at":"2030-01-01T00:00:00Z",
+        "unread":true,"for_me":true}]);
+    before["settings"] = settings();
+    f.send(p, before.clone());
+    let initial = render_state(&f, p);
+    assert_eq!(initial["listeners"], 1);
+    for key in ["activity", "available", "discovery", "my_remote_listeners"] {
+        assert_eq!(initial["collection_counts"][key], 1, "{key}");
+    }
+
+    let mut update = before;
+    for key in [
+        "activity",
+        "available",
+        "discovery",
+        "my_remote_listeners",
+        "listeners",
+    ] {
+        update[key] = json!([]);
+    }
+    update["settings"]["apps"] = json!([]);
+    update["settings"]["channels"] = json!([]);
+    update["settings"]["launch_at_login"] = json!(true);
+    update["unread_count"] = json!(2);
+    update["truncated"] = json!(true);
+    update["truncated_collections"] = json!(["activity"]);
+    f.send(p, update.clone());
+    let partial = render_state(&f, p);
+    assert_eq!(partial["listeners"], 0);
+    assert_eq!(partial["unread_count"], 2);
+    assert_eq!(partial["settings_launch_at_login"], true);
+    assert_eq!(partial["collection_counts"]["activity"], 1);
+    for key in [
+        "available",
+        "discovery",
+        "my_remote_listeners",
+        "settings.apps",
+        "settings.channels",
+    ] {
+        assert!(
+            initial["collection_counts"][key].as_u64().unwrap() > 0,
+            "{key}"
+        );
+        assert_eq!(partial["collection_counts"][key], 0, "{key}");
+    }
+
+    update["truncated_collections"] = json!([]);
+    f.send(p, update);
+    assert_eq!(render_state(&f, p)["collection_counts"]["activity"], 0);
+}
+
+#[test]
+fn wire_shedding_preserves_only_the_affected_hub_list() {
+    use super::lazy_rendering::render_state;
+    use cito_native::core::daemon::{bounded_frame, FRAME_LIMIT};
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut initial = state();
+    initial["settings"] = settings();
+    for nested in [false, true] {
+        f.send(p, initial.clone());
+        let old = render_state(&f, p)["collection_counts"].clone();
+        let mut update = initial.clone();
+        update["hubs"] = json!([]);
+        update["settings"]["hubs"] = json!([]);
+        update["listeners"] = json!([]);
+        let path = if nested { "/settings/hubs" } else { "/hubs" };
+        let mut row = initial.pointer(path).unwrap()[0].clone();
+        row["cwd"] = json!("x".repeat(FRAME_LIMIT));
+        *update.pointer_mut(path).unwrap() = json!([row]);
+        let wire = bounded_frame(update).unwrap();
+        f.send(p, serde_json::from_slice(&wire).unwrap());
+        let new = render_state(&f, p);
+        for (key, preserve) in [("hubs", !nested), ("settings.hubs", nested)] {
+            assert!(old[key].as_u64().unwrap() > 0);
+            assert_eq!(
+                new["collection_counts"][key],
+                if preserve { old[key].clone() } else { json!(0) },
+                "{path}: {key}"
+            );
+        }
+        assert_eq!(new["listeners"], 0);
+    }
+}
+
+#[test]
 fn pushed_remote_and_online_changes_requery_only_the_open_directory() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -278,10 +378,24 @@ fn v45_pairing_instruction_survives_pending_health_updates_and_receipts_settle()
         "copy_pair_command:channel"
     )
     .is_null());
+    f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"Unsaved account"}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:account"
+        )["text"],
+        "Unsaved account"
+    );
     control(&f, p, "cancel_pair_channel:channel");
+    assert_eq!(inspect(&f, p)["pending_channel_resets"], json!([]));
     confirm_channel_action(&f, p, "channel_cancel_pair");
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "copy_pair_command:channel").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:account")["text"],
+        "Unsaved account"
+    );
     control(&f, p, "settings_tab:apps");
     control(&f, p, "setup_app:codex");
     inspect(&f, p);

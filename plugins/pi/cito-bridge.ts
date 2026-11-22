@@ -172,18 +172,23 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (!jsonText) throw new Error(raw.trim() || `HTTP ${res.status}`);
     const rpc = JSON.parse(jsonText) as { error?: { message?: unknown }; result?: { isError?: boolean; content?: { type?: string; text?: string }[] } };
     if (rpc.error) throw new Error(typeof rpc.error.message === "string" ? rpc.error.message : JSON.stringify(rpc.error));
-    const text = rpc.result?.content?.find(part => part?.type === "text" && typeof part.text === "string")?.text;
-    let payload: Record<string, unknown> = {};
+    const content = rpc.result?.content;
+    const text = Array.isArray(content) ? content.find(part => part?.type === "text" && typeof part.text === "string")?.text : undefined;
+    let payload: Record<string, unknown> | undefined;
     if (text) {
-      try { payload = JSON.parse(text) as Record<string, unknown>; }
-      catch { if (rpc.result?.isError || !res.ok) throw new Error(text); }
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length) payload = parsed;
+      } catch { /* Plain text can carry an error, never a success receipt. */ }
     }
-    if (rpc.result?.isError || payload.ok === false || !res.ok) {
-      const errObj = payload.error as { message?: unknown } | string | undefined;
+    if (rpc.result?.isError || payload?.ok === false || !res.ok) {
+      const errObj = payload?.error as { message?: unknown } | string | undefined;
       const msg = typeof errObj === "object" && errObj && typeof errObj.message === "string"
         ? errObj.message : typeof errObj === "string" ? errObj : text || `HTTP ${res.status}`;
       throw new Error(msg);
     }
+    if (!payload || (name === "cito_listen" && !(typeof payload.listener_id === "string" && payload.listener_id.trim()
+      && typeof payload.scope === "string" && payload.scope.trim()))) throw new Error(`Invalid ${name} receipt`);
     return payload;
   }
 
@@ -262,6 +267,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
     || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
   const discoveryAllowed = process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY === "1" || !headless && !!process.stdin.isTTY;
+  const initialRepairDelay = 50;
+  let repairDelay = initialRepairDelay;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let repairing = false;
   let serverReady: Promise<void> | undefined;
@@ -342,6 +349,9 @@ export default function citoBridge(pi: BridgeAPI): void {
         await listen();
       }
       chmodSync(socketPath, 0o600);
+      repairDelay = initialRepairDelay;
+      clearTimeout(retry);
+      retry = undefined;
       // Listen errors after startup must not become unhandled process errors.
       instance.on("error", () => { for (const socket of connections) socket.destroy(); });
     } catch (error) {
@@ -355,7 +365,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   // Load-time startup also serves hosts that loaded the extension after session_start.
   void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
   function repairMissingSocket(): void {
-    if (shuttingDown || repairing || existsSync(socketPath)) return;
+    if (shuttingDown || repairing || retry || existsSync(socketPath)) return;
     let configured = false;
     try {
       const settings = JSON.parse(readFileSync(join(piHome, "settings.json"), "utf8")) as { packages?: unknown[] };
@@ -385,7 +395,8 @@ export default function citoBridge(pi: BridgeAPI): void {
       // Recheck even when the last unlink was delivered during bind/chmod.
       // Back off on failed binds; no timer is armed for a healthy socket.
       if (!shuttingDown && !existsSync(socketPath) && !retry) {
-        retry = setTimeout(() => { retry = undefined; repairMissingSocket(); }, 50).unref();
+        retry = setTimeout(() => { retry = undefined; repairMissingSocket(); }, repairDelay).unref();
+        repairDelay = Math.min(repairDelay * 2, 5000);
       }
     });
   }
@@ -476,7 +487,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         const payload = await callMcpTool(tool, toolArgs, commandSessionId);
         if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
         if (tool === "cito_listen") {
-          const publicId = String(payload.listener_id ?? "cito").trim().split(":").at(-1)!;
+          const publicId = String(payload.listener_id).trim().split(":").at(-1)!;
           const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
           const short = Array.from(slug).slice(0, 12).join("").replace(/-+$/, "") || "cito";
           activeBadge ??= `Cito · ${short}`;

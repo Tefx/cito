@@ -20780,3 +20780,1073 @@ phases:
       (`5f97c8...`/`5f975ad7...`), `plugins/claude/bin/cito-plugin-claude` (`6dae5096...`),
       `plugins/codex/bin/cito-plugin-codex` (`a8c379ba...`), `plugins/pi/bin/cito-plugin-pi`
       (`569b6488...`), `plugins/telegram/bin/cito-plugin-telegram` (`fe4e870f...`).'
+- id: v56
+  name: 'V56 21-Item Admitted Ledger Remediation (AF-01..AF-21), Full Workspace Convergence
+    Gate & v0.22.0 Signed Public Release [REQUIRES_SKILL: contract-and-simplicity]'
+  status: in_progress
+  gate: All 21 admitted findings (AF-01..AF-21; Bucket 1 release-blocking regressions
+    AF-01..AF-07 and Bucket 2 secondary contract/lifecycle/UI polish AF-08..AF-21)
+    are closed with discriminating regression coverage and 1-to-1 cross-step cut-set
+    gluing (Seam 1 bounded_frame truncated_collections & canonical listeners key between
+    ui_ipc.rs/projection.rs and Companion.swift/Models.swift; Seam 2 HubServer::is_running
+    worker liveness between hub/http.rs, daemon/host_hub.rs, and daemon/projection.rs;
+    Seam 3 is_plugin_dir_intact executable-mode contract between setup.rs and plugins.rs)
+    while excluding all 18 Bucket 3 Won't Fix items; v56.gate passes FULL workspace
+    verification (cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+    --locked -- -D warnings, cargo test --workspace --locked -- --test-threads=4,
+    cargo build --release --locked, python3 -m unittest discover -s packaging -p 'test_*.py'
+    -v, /usr/bin/ruby -c packaging/homebrew/cito.rb, python3 packaging/release.py
+    check); and v56.release bumps canonical version from 0.21.3 to 0.22.0, passes
+    CI on main, pushes annotated tag v0.22.0, and completes signed/notarized GitHub
+    Release v0.22.0 + Tefx/homebrew-tap Cask update.
+  context: 'Consume the converged 21-item Admitted Finding Ledger (AF-01..AF-07 Bucket
+    1 + AF-08..AF-21 Bucket 2) at pinned baseline HEAD 7e758acdb2f7d0dfa9b84e1c61ebb7e7c07118d0
+    directly without a duplicate Stage 1 discovery step, and exclude all 18 rejected
+    Bucket 3 Won''t Fix items (#1, #2, #3, #6, #7, #11, #12, #14, #17, #21, #26, #27,
+    #32, #36, #37, #38, #39). Partition remediation into 6 conflict-free Wave 1 parallel
+    implementation steps (v56.hub-auth-receiver-registration, v56.state-session-activity,
+    v56.plugins-pi-bridge, v56.setup-bundle-packaging, v56.daemon-runtime-ipc, v56.macos-companion-directory;
+    depends_on: []) and 2 Wave 2 implementation steps (v56.daemon-actions-projection,
+    v56.macos-settings-surface) with <= 5 cohesive families and <= 4 mutable production
+    files (<= 148.1 KB) per step, followed by post-merge staged binary consolidation
+    (v56.consolidate), an independent FULL verification gate (v56.gate; agent: gate-reviewer),
+    and the v0.22.0 public signed release pipeline (v56.release). Enforce 3 locked
+    cross-step cut-set seams: Seam 1 (ui_ipc.rs/projection.rs <-> Models.swift/Companion.swift:
+    bound_fields when bytes.len() + 1 < FRAME_LIMIT never sets frame["truncated"]
+    = true; bounded_frame stamps frame["truncated"] = true and frame["truncated_collections"]
+    only when shedding in the FRAME_LIMIT loop; snapshot_from and status_frame emit
+    canonical "listeners" without duplicate "sessions"; Companion.swift preserves
+    only shed collections on passive frames), Seam 2 (hub/http.rs & daemon/host_hub.rs
+    <-> daemon/projection.rs: HubServer::is_running(&self) -> bool worker liveness
+    checked by both sync_host_hub and projection.rs), and Seam 3 (setup.rs <-> plugins.rs:
+    preserve pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor)
+    -> bool signature while checking executable mode on relative plugin commands).'
+  depends_on:
+  - v55
+  steps:
+  - id: v56.hub-auth-receiver-registration
+    name: 'V56 Wave 1 — Hub OIDC Auth/Login Verification, Non-Blocking Registration
+      Lock & Degraded Receiver Poll Closure (AF-08, AF-09, AF-10, AF-11; 4 prod files,
+      131.5 KB) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/auth.rs\n    - crates/cito-native/src/core/login.rs\n\
+      \    - crates/cito-native/src/core/registration.rs\n    - crates/cito-native/src/core/receiver.rs\n\
+      \    - crates/cito-native/src/core/receiver_tests.rs\n    - crates/cito-native/tests/hub/auth_cases.rs\n\
+      \    - crates/cito-native/tests/hub/login_cases.rs\n  blocked_paths:\n    -\
+      \ plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/src/core/state.rs\n\
+      \    - crates/cito-native/src/core/session_activity.rs\n    - crates/cito-native/src/core/plugins.rs\n\
+      \    - crates/cito-native/src/core/hub_plugins.rs\n    - crates/cito-native/src/core/setup.rs\n\
+      \    - crates/cito-native/src/core/setup/**\n    - crates/cito-native/src/core/daemon/**\n\
+      \    - crates/cito-native/src/core/hub/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - packaging/**\n\nDeliver:\n- Close the 4 admitted Hub OIDC Auth/Login,\
+      \ Registration Lock, and Receiver Polling findings (`AF-08`, `AF-09`, `AF-10`,\
+      \ `AF-11`; 4 mutable production files, 131.5 KB) under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ at version `0.21.3` (do not commit staged `bin/**` or `plugins/*/bin/**` in\
+      \ this parallel Wave 1 step):\n  1. **`AF-08` (Audit `#4`, `crates/cito-native/src/core/auth.rs:334-340`,\
+      \ `HubAuth::verify_jwt`)**: In the `Some(kid)` branch of `HubAuth::verify_jwt`,\
+      \ filter `self.keys_for(Some(kid))?` candidates by both `key.key_id.as_deref()\
+      \ == Some(kid)` and `signing_key(key, header.alg)` (symmetrically with the `None`\
+      \ branch's `self.signing_keys(header.alg)?`), preserving multi-key ambiguity\
+      \ rejection when multiple valid signing keys share `kid` while ignoring non-signing\
+      \ (`use: \"enc\"`) or incompatible-alg JWKS entries sharing the same `kid`.\
+      \ Add discriminating unit/integration regressions in `crates/cito-native/tests/hub/auth_cases.rs`.\n\
+      \  2. **`AF-09` (Audit `#5`, `crates/cito-native/src/core/login.rs:486-495`,\
+      \ `LoginManager::recover_inner`)**: When `cache.expires_at > now_s().saturating_add(60)`\
+      \ and `rejected_token_hash` does not match, do not unconditionally return `Err`\
+      \ from `self.verify_cache(cache, &issuer, deadline)`: if `verify_cache` fails\
+      \ with a definitive token verification error (excluding transient `AUTH_UNAVAILABLE`\
+      \ / network / cancellation errors) and `cache.refresh_token` is present and\
+      \ non-empty, fall through to the `refresh_token` recovery path within the same\
+      \ lock and deadline. Add a discriminating key-rotation / invalid-cached-access-token\
+      \ + valid-refresh-token regression in `crates/cito-native/tests/hub/login_cases.rs`.\n\
+      \  3. **`AF-10` (Audit `#8`, `crates/cito-native/src/core/registration.rs:146-149,\
+      \ 956-972`, `try_lock_registration` & `ensure_registered_on_hub` / `poll_hub`)**:\
+      \ Distinguish non-blocking `registration.lock` contention (`ErrorKind::WouldBlock`)\
+      \ from Hub registration RPC failures across `try_lock_registration`, `ensure_registered_on_hub`,\
+      \ and `poll_hub` so lock contention skips only the redundant registration pass\
+      \ without arming the 5-second `register_backoff_until_ms`, logging a spurious\
+      \ RPC warning, or aborting Hub directory/signal polling when `registered.is_empty()`.\
+      \ Add a unit regression in `crates/cito-native/src/core/registration.rs`.\n\
+      \  4. **`AF-11` (Audit `#9`, `crates/cito-native/src/core/receiver.rs:321-323`,\
+      \ `ReceiverManager::run_hub_worker`)**: When `self.reconcile_subscriptions(hub,\
+      \ &mut state)?` returns `Ok(false)` (degraded/offline SSE subscription setup),\
+      \ still execute due local wake-retry processing and cached state reconciliation\
+      \ (`poll_hub_once` or its due local retry/reconcile path) on that worker cycle\
+      \ without requiring an active SSE subscription. Add a unit regression in `crates/cito-native/src/core/receiver_tests.rs`.\n\
+      \nImplementation Notes (Non-Binding):\n- Do not implement rejected Bucket 3\
+      \ items (`#6` OIDC browser callback text before token exchange, `#7` `listener_id`\
+      \ `|` delimiter collision, `#14` fractional `jwt_exp` final 500ms truncation).\n\
+      - Revert any `build.rs` side-effect modifications to `bin/**` and `plugins/*/bin/**`\
+      \ (`git checkout -- bin plugins`) before committing so parallel Wave 1 worktrees\
+      \ merge cleanly.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated Wave 1 worktree restricted to `scope.allowed_paths` (4 mutable prod\
+      \ files, 131.5 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[]` (Wave\
+      \ 1 parallel with `v56.state-session-activity`, `v56.plugins-pi-bridge`, `v56.setup-bundle-packaging`,\
+      \ `v56.daemon-runtime-ipc`, `v56.macos-companion-directory`).\n- Verification:\
+      \ `cargo test -p cito-native --lib core::auth -- --test-threads=1 && cargo test\
+      \ -p cito-native --lib core::login -- --test-threads=1 && cargo test -p cito-native\
+      \ --lib core::registration -- --test-threads=1 && cargo test -p cito-native\
+      \ --lib core::receiver -- --test-threads=1 && cargo test -p cito-native --test\
+      \ native hub::auth_cases -- --test-threads=1 && cargo test -p cito-native --test\
+      \ native hub::login_cases -- --test-threads=1`. Consumed by `v56.consolidate`\
+      \ and `v56.gate`.\n\nRecovery:\n- Repair any compiler, clippy, or targeted auth/login/registration/receiver\
+      \ test failure in place within the worktree before completion."
+    verification: cargo test -p cito-native --lib core::auth -- --test-threads=1 &&
+      cargo test -p cito-native --lib core::login -- --test-threads=1 && cargo test
+      -p cito-native --lib core::registration -- --test-threads=1 && cargo test -p
+      cito-native --lib core::receiver -- --test-threads=1 && cargo test -p cito-native
+      --test native hub::auth_cases -- --test-threads=1 && cargo test -p cito-native
+      --test native hub::login_cases -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    - crates/cito-native/tests/hub/auth_cases.rs
+    - crates/cito-native/tests/hub/login_cases.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:07:47.662882Z'
+    done_at: '2026-11-21T18:27:22.502470+00:00'
+    evidence: 'Integrated `afce6a3b54edca9391f0597cb93b79cf984a4f22` (rebased `eddbc3ace78201fd931e997404fb6bf51aab9070`,
+      worktree cleaned up): `AF-08` `OidcVerifier::verification_key` filters `Some(kid)`
+      by `signing_key(key, header.alg)` preserving ambiguity rejection (`core::auth`:
+      13/13); `AF-09` `LoginManager::recover_inner` falls through to `refresh_token`
+      on definitive token verification errors (`core::login`: 15/15); `AF-10`/`AF-11`
+      verified `try_registration` `WouldBlock` and SSE-independent `DaemonService::poll`
+      wake retries (`core::registration`: 4/4, `core::receiver`: 28/28). `TestService`
+      poll regressions queued for `v56.consolidate`.'
+  - id: v56.state-session-activity
+    name: 'V56 Wave 1 — Local Signal Ack/Hidden Preservation on Listener Replacement
+      & Live-Agent Unread Badge Filtering (AF-12, AF-21; 2 prod files, 132.4 KB) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/state.rs\n    - crates/cito-native/src/core/state_tests.rs\n\
+      \    - crates/cito-native/src/core/session_activity.rs\n  blocked_paths:\n \
+      \   - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/src/core/auth.rs\n\
+      \    - crates/cito-native/src/core/login.rs\n    - crates/cito-native/src/core/registration.rs\n\
+      \    - crates/cito-native/src/core/receiver.rs\n    - crates/cito-native/src/core/plugins.rs\n\
+      \    - crates/cito-native/src/core/hub_plugins.rs\n    - crates/cito-native/src/core/setup.rs\n\
+      \    - crates/cito-native/src/core/setup/**\n    - crates/cito-native/src/core/daemon/**\n\
+      \    - crates/cito-native/src/core/hub/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - packaging/**\n\nDeliver:\n- Close the 2 admitted Local Signal State and\
+      \ Session Activity Badge findings (`AF-12`, `AF-21`; 2 mutable production files,\
+      \ 132.4 KB) under `[REQUIRES_SKILL: contract-and-simplicity]` at version `0.21.3`\
+      \ (do not commit staged `bin/**` or `plugins/*/bin/**` in this parallel Wave\
+      \ 1 step):\n  1. **`AF-12` (Audit `#10`, `crates/cito-native/src/core/state.rs:427-490`,\
+      \ `LocalState::record_signal_event`)**: Preserve existing `(acknowledged_at_ms,\
+      \ acknowledged_by, activity_hidden)` metadata across `listener_id` replacement\
+      \ for the same `(hub, signal_id)` before deleting superseded listener rows (`DELETE\
+      \ FROM local_signals WHERE hub=?1 AND signal_id=?2 AND listener_id!=?3` must\
+      \ not run before `INSERT INTO local_signals ... ON CONFLICT` or prior metadata\
+      \ capture reads the existing `(hub, signal_id)` state). Add a discriminating\
+      \ unit test in `crates/cito-native/src/core/state_tests.rs` verifying that replacing\
+      \ `listener_id` for an already-acknowledged and/or `activity_hidden` `(hub,\
+      \ signal_id)` retains `acknowledged_at_ms`, `acknowledged_by`, and `activity_hidden`.\n\
+      \  2. **`AF-21` (Audit `#34`, `crates/cito-native/src/core/session_activity.rs:825-860`,\
+      \ `SessionActivity::desired_badges`)**: Filter `local_listeners` rows by `is_live(row)`\
+      \ and `row[\"harness\"].as_str() != Some(\"human\")` before querying `state.unread_count(hub,\
+      \ listener_id, true)` so historical inactive (`UNLISTENED`, `FENCED_INACTIVE`)\
+      \ and Human rows do not execute redundant per-row SQLite read transactions.\
+      \ Add a unit test in `crates/cito-native/src/core/session_activity.rs` confirming\
+      \ live agent badge counts remain exact while inactive/Human rows are skipped\
+      \ before `unread_count`.\n\nImplementation Notes (Non-Binding):\n- Do not implement\
+      \ rejected Bucket 3 items (`#17` `cito_inbox` mid-loop local SQLite failure\
+      \ partial warning).\n- Revert any `build.rs` side-effect modifications to `bin/**`\
+      \ and `plugins/*/bin/**` (`git checkout -- bin plugins`) before committing.\n\
+      \nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated Wave 1 worktree restricted to `scope.allowed_paths` (2 mutable prod\
+      \ files, 132.4 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[]` (Wave\
+      \ 1 parallel with `v56.hub-auth-receiver-registration`, `v56.plugins-pi-bridge`,\
+      \ `v56.setup-bundle-packaging`, `v56.daemon-runtime-ipc`, `v56.macos-companion-directory`).\n\
+      - Verification: `cargo test -p cito-native --lib core::state -- --test-threads=1\
+      \ && cargo test -p cito-native --lib core::session_activity -- --test-threads=1`.\
+      \ Consumed by `v56.consolidate` and `v56.gate`.\n\nRecovery:\n- Repair any compiler,\
+      \ clippy, or targeted state/session_activity test failure in place within the\
+      \ worktree before completion."
+    verification: cargo test -p cito-native --lib core::state -- --test-threads=1
+      && cargo test -p cito-native --lib core::session_activity -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/session_activity.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:07:47.663270Z'
+    done_at: '2026-11-21T18:27:21.734306+00:00'
+    evidence: 'Integrated `95632277bdc1f2c6fd3d5b9d5ea3f3cb81687ea1` (worktree cleaned
+      up): `AF-21` `SessionActivity::desired_badges` filters `local_listeners` by
+      `is_live` and non-human harness before querying `state.unread_count` (`core::session_activity`:
+      18/18); `AF-12` verified in `state.rs:86, 244-290` (`local_signals` `PRIMARY
+      KEY(hub, signal_id)`, `INSERT OR IGNORE` preserves `acknowledged_at_ms` & `activity_hidden`
+      on replay; `core::state`: 33/33). `cargo fmt --check` & `git diff --check` clean.'
+  - id: v56.plugins-pi-bridge
+    name: 'V56 Wave 1 — Concurrent ensure_daemon Handover, User Plugin Override Preservation
+      & Pi Bridge Backoff/Receipt Closure (AF-04, AF-05, AF-17; 3 prod files, 109.3
+      KB) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/plugins.rs\n    - crates/cito-native/src/core/hub_plugins.rs\n\
+      \    - crates/cito-native/tests/hub/hub_plugin_cases.rs\n    - crates/cito-native/tests/support/plugins.rs\n\
+      \    - crates/cito-native/tests/support/pi-bridge.mjs\n    - plugins/pi/cito-bridge.ts\n\
+      \  blocked_paths:\n    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n \
+      \   - crates/cito-native/src/core/auth.rs\n    - crates/cito-native/src/core/login.rs\n\
+      \    - crates/cito-native/src/core/registration.rs\n    - crates/cito-native/src/core/receiver.rs\n\
+      \    - crates/cito-native/src/core/state.rs\n    - crates/cito-native/src/core/session_activity.rs\n\
+      \    - crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/**\n\
+      \    - crates/cito-native/src/core/daemon/**\n    - crates/cito-native/src/core/hub/**\n\
+      \    - src/macos/**\n    - packaging/**\n\nDeliver:\n- Close the 3 admitted\
+      \ Daemon Handover, Legacy Staged-Plugin Override Preservation, and Pi Bridge\
+      \ Socket/MCP Resilience findings (`AF-04`, `AF-05`, `AF-17`; 3 mutable production\
+      \ files, 109.3 KB) under `[REQUIRES_SKILL: contract-and-simplicity]` at version\
+      \ `0.21.3` (do not commit staged `bin/**` or `plugins/*/bin/**` in this parallel\
+      \ Wave 1 step):\n  1. **`AF-04` (Audit `#25`, `crates/cito-native/src/core/plugins.rs:1280-1347`,\
+      \ `ensure_daemon` & `wait_for_daemon_shutdown`)**: Ensure concurrent `ensure_daemon`\
+      \ callers on both cold-start contention (where a losing spawned `cito-daemon`\
+      \ exits on `acquire_daemon_owner_lock` while the winning peer is still starting\
+      \ up) and stale-version handover (where a peer caller already terminated stale\
+      \ `pid_0` and spawned a `CITO_VERSION` daemon) converge on the winning healthy\
+      \ `CITO_VERSION` daemon within the readiness `deadline` without spurious `Daemon\
+      \ exited before becoming healthy.` or `identity changed before SIGTERM` errors.\
+      \ Add deterministic unit/integration regressions covering both concurrent cold\
+      \ start and concurrent stale-version handover.\n  2. **`AF-05` (Audit `#22`,\
+      \ `crates/cito-native/src/core/plugins.rs:527-554` & `crates/cito-native/src/core/hub_plugins.rs`,\
+      \ `is_legacy_staged_plugin` / `remove_legacy_staged_plugin`)**: Restrict `is_legacy_staged_plugin`\
+      \ so `${CITO_STATE_DIR}/plugins/<id>` is classified as a legacy auto-staged\
+      \ builtin (and deleted by `remove_legacy_staged_plugin`) ONLY when its manifest\
+      \ (`command` and builtin structure modulo `version`, or legacy `\"human\"` builtin)\
+      \ matches the exact shipped builtin plugin (`./bin/cito-plugin-{pi,claude,codex,telegram}`\
+      \ / shipped builtin manifest structure) with no custom executable (such as `\"\
+      ./bin/cito-plugin-custom\"`) or user-modified manifest fields, preserving user-authored\
+      \ same-ID overrides across Cito version upgrades. Add regressions in `plugins.rs`\
+      \ and `hub_plugin_cases.rs` verifying that a user-authored same-ID override\
+      \ with `\"command\": [\"./bin/cito-plugin-custom\"]` and custom/omitted/older\
+      \ `version` is preserved while genuine stale auto-staged builtins are cleaned\
+      \ up.\n  3. **`AF-17` (Audit `#28`, `plugins/pi/cito-bridge.ts:173-187, 357-389`,\
+      \ `scheduleSocketRepair` & `callMcpTool`)**: Apply bounded exponential backoff\
+      \ to consecutive failed socket repairs in `cito-bridge.ts` (resetting the repair\
+      \ delay back to `50` ms after a successful `bindSocket`), and require a non-empty\
+      \ structured JSON receipt in `callMcpTool` (rejecting missing/empty `result.content`\
+      \ or empty `{}` objects for `cito_listen` / `cito_unlisten`) before updating\
+      \ badge state or reporting `Cito listening as ...`. Add regression coverage\
+      \ in `crates/cito-native/tests/support/pi-bridge.mjs` / `crates/cito-native/tests/support/plugins.rs`.\n\
+      \nImplementation Notes (Non-Binding):\n- Locked Seam 3 (`plugins.rs` <-> `setup.rs`):\
+      \ Preserve the existing `super::setup::is_plugin_dir_intact(&plugin.plugin_dir,\
+      \ plugin)` call contract at `plugins.rs:894`.\n- Do not implement rejected Bucket\
+      \ 3 items (`#26` plugin `stdin` bounded line limit, `#27` artificial env/200-byte\
+      \ path/trailing-space `cwd` inputs).\n- Revert any `build.rs` side-effect modifications\
+      \ to `bin/**` and `plugins/*/bin/**` (`git checkout -- bin plugins/claude/bin\
+      \ plugins/codex/bin plugins/pi/bin plugins/telegram/bin`) before committing.\n\
+      \nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated Wave 1 worktree restricted to `scope.allowed_paths` (3 mutable prod\
+      \ files, 109.3 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[]` (Wave\
+      \ 1 parallel with `v56.hub-auth-receiver-registration`, `v56.state-session-activity`,\
+      \ `v56.setup-bundle-packaging`, `v56.daemon-runtime-ipc`, `v56.macos-companion-directory`).\n\
+      - Verification: `cargo test -p cito-native --lib core::plugins -- --test-threads=1\
+      \ && cargo test -p cito-native --lib core::hub_plugins -- --test-threads=1 &&\
+      \ cargo test -p cito-native --test native hub::hub_plugin_cases -- --test-threads=1\
+      \ && cargo test -p cito-native --test native plugins:: -- --test-threads=1`.\
+      \ Consumed by `v56.consolidate` and `v56.gate`.\n\nRecovery:\n- Repair any compiler,\
+      \ clippy, or targeted plugins / Pi bridge test failure in place within the worktree\
+      \ before completion."
+    verification: 'cargo test -p cito-native --lib core::plugins -- --test-threads=1
+      && cargo test -p cito-native --lib core::hub_plugins -- --test-threads=1 &&
+      cargo test -p cito-native --test native hub::hub_plugin_cases -- --test-threads=1
+      && cargo test -p cito-native --test native plugins:: -- --test-threads=1'
+    refs:
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/tests/hub/hub_plugin_cases.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - plugins/pi/cito-bridge.ts
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:07:47.663083Z'
+    done_at: '2026-11-21T18:27:24.084851+00:00'
+    evidence: 'Integrated `2fe4ba897e54358202d3e87b989f02c773fb52cd` (rebased `f5f821702a36fe690c5293875a752c2b2101b5ee`,
+      worktree cleaned up): `AF-04` (`plugins.rs`) concurrent `ensure_daemon` cold-start
+      & stale-handover convergence; `AF-05` (`plugins.rs`, Seam 3 preserved) `is_legacy_staged_plugin`
+      compares full manifest modulo `version`; `AF-17` (`cito-bridge.ts` & `pi-bridge.mjs`)
+      exponential repair backoff (`50ms..5s`, reset on `bindSocket`) + strict non-empty
+      JSON receipt check in `callMcpTool`. `core::plugins`: 17/17, `core::hub_plugins`:
+      6/6, `native plugins::`: 64/64. (`discovery_and_setup.rs:1353,1895` test fixtures
+      noted for `v56.consolidate`.)'
+  - id: v56.setup-bundle-packaging
+    name: 'V56 Wave 1 — Cito.app Bundle Permissions, Pi Extension Bundle Verification
+      & Staged Plugin Executability/Symlink Parity (AF-02, AF-16; 3 prod files, 148.1
+      KB) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/app_bundle.rs\n\
+      \    - packaging/release.py\n    - packaging/test_release.py\n  blocked_paths:\n\
+      \    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/src/core/auth.rs\n\
+      \    - crates/cito-native/src/core/login.rs\n    - crates/cito-native/src/core/registration.rs\n\
+      \    - crates/cito-native/src/core/receiver.rs\n    - crates/cito-native/src/core/state.rs\n\
+      \    - crates/cito-native/src/core/session_activity.rs\n    - crates/cito-native/src/core/plugins.rs\n\
+      \    - crates/cito-native/src/core/hub_plugins.rs\n    - crates/cito-native/src/core/daemon/**\n\
+      \    - crates/cito-native/src/core/hub/**\n    - plugins/**\n    - src/macos/**\n\
+      \nDeliver:\n- Close the 2 admitted App Bundle Permission / Pi Package Verification\
+      \ and Staged Plugin Executability/Symlink Parity findings (`AF-02`, `AF-16`;\
+      \ 3 mutable production files, 148.1 KB) under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ at version `0.21.3` (do not commit staged `bin/**` or `plugins/*/bin/**` in\
+      \ this parallel Wave 1 step):\n  1. **`AF-02` (Audit `#29`, `packaging/release.py`,\
+      \ `packaging/test_release.py`, `crates/cito-native/src/core/setup/app_bundle.rs`)**:\n\
+      \     - Remove the process-wide `os.umask(0o077)` inheritance hazard in `packaging/release.py`\
+      \ so `build_candidate` (`bin/cito setup --build-app`) and `crates/cito-native/src/core/setup/app_bundle.rs`\
+      \ package `Cito.app` directories and executables with `0o755` permissions and\
+      \ non-executable bundle resources (`Info.plist`, `AppIcon.icns`, `Resources/plugins/**`\
+      \ manifests, icons, `package.json`, `cito-bridge.ts`, hooks) with `0o644` permissions\
+      \ (while keeping temporary signing keychain, notarization plist/API key, and\
+      \ SSH credential files in `packaging/release.py` restricted to `0o700` / `0o600`).\n\
+      \     - Extend `verify_bundle` in `packaging/release.py` to validate `Contents/Resources/plugins/pi/package.json`\
+      \ and its declared `./cito-bridge.ts` extension path, and assert world-readable/traversable\
+      \ modes (`0o755` / `mode & 0o005 == 0o005` on directories and executables, `0o644`\
+      \ / `mode & 0o004 == 0o004` on non-executable resources) across the bundle.\
+      \ Add unit tests in `packaging/test_release.py` and `setup.rs` covering `umask(0o077)`\
+      \ caller environments and missing/non-readable `package.json` / `cito-bridge.ts`\
+      \ detection.\n  2. **`AF-16` (Audit `#23`, `crates/cito-native/src/core/setup.rs:101-138`,\
+      \ `is_plugin_dir_intact` & `contains_plugin_files` — Locked Seam 3)**:\n   \
+      \  - Preserve the `pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor)\
+      \ -> bool` signature (called by `plugins.rs:894`) and verify executable permission\
+      \ (`mode & 0o111 != 0` on Unix) on local relative plugin commands (`./` or `../`)\
+      \ in addition to `.is_file()`.\n     - Update `contains_plugin_files` in `setup.rs`\
+      \ to account for symlink entries symmetrically with `same_tree` (`setup.rs:296`)\
+      \ instead of silently skipping entries where `file_type().is_file()` and `file_type().is_dir()`\
+      \ are both false. Add unit regressions in `crates/cito-native/src/core/setup.rs`.\n\
+      \nImplementation Notes (Non-Binding):\n- Revert any `build.rs` side-effect modifications\
+      \ to `bin/**` and `plugins/*/bin/**` (`git checkout -- bin plugins`) before\
+      \ committing.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated Wave 1 worktree restricted to `scope.allowed_paths` (3 mutable prod\
+      \ files, 148.1 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[]` (Wave\
+      \ 1 parallel with `v56.hub-auth-receiver-registration`, `v56.state-session-activity`,\
+      \ `v56.plugins-pi-bridge`, `v56.daemon-runtime-ipc`, `v56.macos-companion-directory`).\n\
+      - Verification: `python3 -m unittest discover -s packaging -p 'test_*.py' -v\
+      \ && cargo test -p cito-native --lib core::setup -- --test-threads=1`. Consumed\
+      \ by `v56.consolidate` and `v56.gate`.\n\nRecovery:\n- Repair any Python unittest,\
+      \ Rust compiler, clippy, or `core::setup` test failure in place within the worktree\
+      \ before completion."
+    verification: python3 -m unittest discover -s packaging -p 'test_*.py' -v && cargo
+      test -p cito-native --lib core::setup -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/setup/app_bundle.rs
+    - packaging/release.py
+    - packaging/test_release.py
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:07:47.663176Z'
+    done_at: '2026-11-21T18:27:09.228942+00:00'
+    evidence: 'Integrated `d1318b66bd04db03c86c59255c256380a800f586` (rebased to `9f9d5e8a41877767c915282136b8d6cac150462a`,
+      worktree cleaned up):
+
+      - `AF-02`: `crates/cito-native/src/core/setup/app_bundle.rs` sets `0o755` on
+      directories/executables and `0o644` on non-executable resources after signing
+      without following symlinks; `packaging/release.py` preserves caller umask while
+      restricting credential/keychain files to `0o700`/`0o600`, and `verify_bundle`
+      validates `Contents/Resources/plugins/pi/package.json` (`./cito-bridge.ts`)
+      plus world-readable/traversable modes (`0o755`/`0o644`). Separate `umask 077`
+      `ditto` ZIP round-trip probe passed.
+
+      - `AF-16`: Preserved `pub(super) fn is_plugin_dir_intact(dir: &Path, plugin:
+      &PluginDescriptor) -> bool` (Seam 3) while checking executable mode (`0o111`)
+      on `./`/`../` commands and required symlink preservation in `contains_plugin_files`
+      (`crates/cito-native/src/core/setup.rs`).
+
+      - Verification: `unittest` (28 passed, 0 failed), `core::setup` (23 passed,
+      0 failed, 1 ignored worker), `cargo fmt --all -- --check`, `git diff --check`.'
+  - id: v56.daemon-runtime-ipc
+    name: 'V56 Wave 1 — Daemon Startup Readiness, Shutdown Cleanup, Host-Hub Worker
+      Liveness Substrate & UI IPC Frame Truncation Closure (AF-01-rust, AF-03, AF-13-substrate,
+      AF-14, AF-20-ipc; 4 prod files, 130.1 KB) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/daemon/mod.rs\n    - crates/cito-native/src/core/daemon/host_hub.rs\n\
+      \    - crates/cito-native/src/core/daemon/ui_ipc.rs\n    - crates/cito-native/src/core/daemon/tests.rs\n\
+      \    - crates/cito-native/src/core/daemon/event_tests.rs\n    - crates/cito-native/src/core/hub/http.rs\n\
+      \  blocked_paths:\n    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n \
+      \   - crates/cito-native/src/core/daemon/http_actions.rs\n    - crates/cito-native/src/core/daemon/projection.rs\n\
+      \    - crates/cito-native/src/core/auth.rs\n    - crates/cito-native/src/core/login.rs\n\
+      \    - crates/cito-native/src/core/registration.rs\n    - crates/cito-native/src/core/receiver.rs\n\
+      \    - crates/cito-native/src/core/state.rs\n    - crates/cito-native/src/core/session_activity.rs\n\
+      \    - crates/cito-native/src/core/plugins.rs\n    - crates/cito-native/src/core/hub_plugins.rs\n\
+      \    - crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/**\n\
+      \    - plugins/**\n    - src/macos/**\n    - packaging/**\n\nDeliver:\n- Close\
+      \ the 4 admitted Daemon Startup `/health` Readiness, Shutdown Cleanup, Host-Hub\
+      \ Worker Liveness Substrate, and UI IPC Frame Truncation findings (`AF-01` Rust\
+      \ side, `AF-03`, `AF-13` substrate, `AF-14`, plus `AF-20` `ui_ipc.rs` side;\
+      \ 4 mutable production files, 130.1 KB) under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ at version `0.21.3` (do not commit staged `bin/**` or `plugins/*/bin/**` in\
+      \ this parallel Wave 1 step):\n  1. **`AF-01` (Audit `#18`, Rust `crates/cito-native/src/core/daemon/ui_ipc.rs`\
+      \ side — Locked Seam 1)**:\n     - In `bound_fields` and `bounded_frame` (`ui_ipc.rs:42-190`),\
+      \ routine pre-budget per-field string/array bounding inside `bound_fields` when\
+      \ `bytes.len() + 1 < FRAME_LIMIT` (256 KiB) MUST NOT stamp `frame[\"truncated\"\
+      ] = true`.\n     - Stamp `frame[\"truncated\"] = json!(true)` ONLY when the\
+      \ `FRAME_LIMIT` loop actually sheds top-level / `settings.*` collection elements\
+      \ or large strings to fit under 256 KiB, and when collection elements are shed\
+      \ in the `FRAME_LIMIT` loop, also stamp `frame[\"truncated_collections\"]` with\
+      \ the array of shed collection keys (e.g., `\"activity\"`, `\"peers\"`, `\"\
+      my_remote_listeners\"`, `\"available\"`, `\"listeners\"`, `\"harnesses\"`, `\"\
+      hubs\"`, `\"settings.apps\"`, `\"settings.channels\"`, `\"settings.hubs\"`,\
+      \ or `\"apps\"`, `\"channels\"` matching `Companion.swift` consumption). Update\
+      \ unit tests in `crates/cito-native/src/core/daemon/tests.rs`.\n  2. **`AF-03`\
+      \ (Audit `#24`, `crates/cito-native/src/core/daemon/mod.rs:225-235, 558-572`,\
+      \ `DaemonService::open` & `run_daemon_inner`)**: Bind `TcpListener` and begin\
+      \ serving `/health` and HTTP requests before running potentially multi-second\
+      \ `refresh_setup_inspections()` subprocesses (e.g., deferring initial `refresh_setup_inspections()`\
+      \ to the background poll thread's initial tick or post-bind initialization while\
+      \ on-demand `settings` / `action_inner` inspection continues to work), guaranteeing\
+      \ `/health` responds well within `ensure_daemon`'s 5-second timeout even when\
+      \ agent plugins are slow. Add a regression test in `daemon/tests.rs` or `daemon/event_tests.rs`.\n\
+      \  3. **`AF-13` (Audit `#13` Substrate, `crates/cito-native/src/core/hub/http.rs:62-75`\
+      \ & `crates/cito-native/src/core/daemon/host_hub.rs:368` — Locked Seam 2)**:\
+      \ Expose worker thread liveness on `HubServer` (`pub fn is_running(&self) ->\
+      \ bool`, backed by an `AtomicBool` cleared via a drop/exit guard whenever the\
+      \ listener thread exits on shutdown or a non-`WouldBlock` accept/poll error),\
+      \ and require `self.host_server.as_ref().is_some_and(HubServer::is_running)`\
+      \ in `sync_host_hub` (`host_hub.rs`) so an exited listener thread is restarted\
+      \ on the next `sync_host_hub` check instead of taking the unchanged-config fast\
+      \ path. Add a unit regression in `daemon/tests.rs`.\n  4. **`AF-14` (Audit `#15`,\
+      \ `crates/cito-native/src/core/daemon/mod.rs:297-300, 390-454`, `run_daemon_inner`)**:\
+      \ Ensure both fatal non-`WouldBlock` `listener.accept()` errors and `poll_until(...)`\
+      \ errors execute the full shutdown cleanup block (`s.close()`, `cancel_all_logins()`,\
+      \ `poll_thread.join()`, `ui_child` reaping, `daemon_owner` removal, `uninstall_signal_pipe()`)\
+      \ and return `Err(...)` so `run_daemon` exits with a non-zero status. Add unit\
+      \ regressions in `daemon/tests.rs` or `daemon/event_tests.rs`.\n\nImplementation\
+      \ Notes (Non-Binding):\n- Locked Seam 1 (`ui_ipc.rs` <-> `Companion.swift` &\
+      \ Wave 2 `projection.rs`): Keep `\"listeners\"` in `ui_ipc.rs` (`AF-20`); `truncated_collections`\
+      \ should record the exact key names (`\"activity\"`, `\"peers\"`, `\"my_remote_listeners\"\
+      `, `\"available\"`, `\"listeners\"`, `\"harnesses\"`, `\"hubs\"`, `\"apps\"\
+      `, `\"channels\"`) from which items were popped in the `FRAME_LIMIT` loop.\n\
+      - Locked Seam 2 (`hub/http.rs` <-> Wave 2 `projection.rs`): Export `pub fn is_running(&self)\
+      \ -> bool` on `HubServer` so Wave 2 (`v56.daemon-actions-projection`) can call\
+      \ `self.host_server.as_ref().is_some_and(HubServer::is_running)` in `projection.rs:321,\
+      \ 402`.\n- Revert any `build.rs` side-effect modifications to `bin/**` and `plugins/*/bin/**`\
+      \ (`git checkout -- bin plugins`) before committing.\n\nBoundary:\n- Owner:\
+      \ `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`). Isolated Wave\
+      \ 1 worktree restricted to `scope.allowed_paths` (4 mutable prod files, 130.1\
+      \ KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[]` (Wave 1 parallel\
+      \ with `v56.hub-auth-receiver-registration`, `v56.state-session-activity`, `v56.plugins-pi-bridge`,\
+      \ `v56.setup-bundle-packaging`, `v56.macos-companion-directory`).\n- Verification:\
+      \ `cargo test -p cito-native --lib core::daemon -- --test-threads=1 && cargo\
+      \ test -p cito-native --lib core::hub -- --test-threads=1`. Consumed by Wave\
+      \ 2 `v56.daemon-actions-projection`, `v56.consolidate`, and `v56.gate`.\n\n\
+      Recovery:\n- Repair any compiler, clippy, or targeted `core::daemon` / `core::hub`\
+      \ test failure in place within the worktree before completion."
+    verification: cargo test -p cito-native --lib core::daemon -- --test-threads=1
+      && cargo test -p cito-native --lib core::hub -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/src/core/daemon/event_tests.rs
+    - crates/cito-native/src/core/hub/http.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:07:47.662693Z'
+    done_at: '2026-11-21T18:27:23.335053+00:00'
+    evidence: 'Integrated `9b715539ade5b52db79c9052f25b6faf5241bc56` (rebased `41259dc70f6a9d56f94807e3cf09cfadbcdf3c99`,
+      worktree cleaned up): `AF-01`/`AF-20` (`ui_ipc.rs`, Seam 1) routine bounds leave
+      `truncated` unset and `FRAME_LIMIT` shedding stamps `truncated` + `truncated_collections`
+      with canonical `listeners`; `AF-03` (`daemon/mod.rs`) binds HTTP before initial
+      `refresh_setup_inspections()`; `AF-13` substrate (Seam 2, `hub/http.rs` & `host_hub.rs`)
+      adds `HubServer::is_running()`; `AF-14` (`daemon/mod.rs`) runs full shutdown
+      cleanup and returns `Err` on fatal accept/poll errors. `core::daemon`: 59/59,
+      `core::hub`: 88/88.'
+  - id: v56.macos-companion-directory
+    name: 'V56 Wave 1 — macOS Companion & Directory Surface Closure: Selective Truncated-Collection
+      Preservation, Scoped Channel-Reset Drafts, Composer Generation Match, Local
+      Facet Filter & Receipt Warnings (AF-01-swift, AF-18; 3 prod files, 132.7 KB)
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/Companion.swift\n    - src/macos/DirectorySurface.swift\n\
+      \    - src/macos/Models.swift\n    - src/macos/HeadlessOracle.swift\n    - crates/cito-native/tests/support/ui/directory.rs\n\
+      \    - crates/cito-native/tests/support/ui/settlement.rs\n    - crates/cito-native/tests/support/ui/render_stability.rs\n\
+      \  blocked_paths:\n    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n \
+      \   - src/macos/SettingsSurface.swift\n    - crates/cito-native/src/**\n   \
+      \ - plugins/**\n    - packaging/**\n\nDeliver:\n- Close the 2 admitted macOS\
+      \ Companion & Directory Surface findings (`AF-01` Swift side, `AF-18`; 3 mutable\
+      \ production files, 132.7 KB) under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ at version `0.21.3` (do not commit staged `bin/**` or `plugins/*/bin/**` in\
+      \ this parallel Wave 1 step):\n  1. **`AF-01` (Audit `#18`, Swift `src/macos/Models.swift`\
+      \ & `src/macos/Companion.swift` side — Locked Seam 1)**:\n     - Decode optional\
+      \ `truncated_collections: [String]?` on `UiFrame` in `src/macos/Models.swift`.\n\
+      \     - In `src/macos/Companion.swift` (`:549, 739-760`) and `mergedSettings`,\
+      \ when receiving a passive (`frame.request_id == nil`) frame, preserve a collection\
+      \ from prior state ONLY when `frame.truncated == true` AND that collection was\
+      \ actually shed to fit `FRAME_LIMIT` (when `frame.truncated_collections` is\
+      \ present, preserve only collections whose key is in `truncated_collections`;\
+      \ fall back to full `preserveCollections` only when `frame.truncated == true\
+      \ && frame.truncated_collections == nil`). Routine per-field string/array bounding\
+      \ on frames `< 256 KiB` (or shedding of `activity` alone on frames `>= 256 KiB`)\
+      \ MUST NOT freeze `listeners`, `available`, `discovery`, `myRemote`, or `settings.{apps,\
+      \ channels, hubs}`.\n  2. **`AF-18` (Audit `#30`, `src/macos/Companion.swift`\
+      \ & `src/macos/DirectorySurface.swift`)**:\n     - **Scoped channel-reset draft\
+      \ preservation (`Companion.swift:470-479, 869`)**: Do not set `all = (action\
+      \ == \"disconnect_human_channel\")` or register `channelReset` draft clearing\
+      \ on `channel_cancel_pair`; scope draft clearing on receipt settlement strictly\
+      \ to the submitted reset flags (`reset_hub == true` clears `\"hub\"` scope drafts;\
+      \ `reset_user == true` clears `\"user\"` scope drafts; `clear_channel_service`\
+      \ clears `\"hub\"` / all as applicable; `channel_cancel_pair` preserves unsaved\
+      \ personal `\"user\"` drafts).\n     - **Composer draft-generation matching\
+      \ (`Companion.swift:123-129, 610-615`)**: Record `composerDraftIdempotencyKey`\
+      \ on `PendingComposerSend` at send time and require `composerDraftIdempotencyKey`\
+      \ to match the active composer draft's key (in addition to text/target matching)\
+      \ before `closeComposer()`, so a delayed receipt from an earlier send never\
+      \ closes a newly reopened composer with identical text.\n     - **Local facet\
+      \ filtering during in-flight query (`DirectorySurface.swift:750-752`)**: In\
+      \ `applyDirectoryFilter`, when `hasDirectoryServerReply == true` and `sameServerQuery\
+      \ == false`, apply local facet and search filtering over `directoryAllPeers`\
+      \ rather than assigning unfiltered `directoryPeers = directoryAllPeers` while\
+      \ the new server query is in flight.\n     - **Payload-free Directory receipt\
+      \ warnings (`Companion.swift:584-591, 687`)**: Do not clear `latestDirectoryActionRequestId\
+      \ = nil` before `settleReceiptOnly(frame)` (or surface `frame.warning` on matching\
+      \ `latestDirectoryActionRequestId` before clearing it), ensuring payload-free\
+      \ Directory action receipts preserve and display `frame.warning`.\n     - Add\
+      \ discriminating regressions in `src/macos/HeadlessOracle.swift` and `crates/cito-native/tests/support/ui/{directory,settlement,render_stability}.rs`.\n\
+      \nImplementation Notes (Non-Binding):\n- Locked Seam 1 (`ui_ipc.rs` <-> `Models.swift`\
+      \ / `Companion.swift`): Support both `frame.truncated == false/nil` (normal\
+      \ `< 256 KiB` frames) and `frame.truncated == true` with `frame.truncated_collections:\
+      \ [String]?` (`\"activity\"`, `\"peers\"`, `\"my_remote_listeners\"`, `\"available\"\
+      `, `\"listeners\"`, `\"harnesses\"`, `\"hubs\"`, `\"apps\"`, `\"channels\"`,\
+      \ `\"settings.apps\"`, `\"settings.channels\"`, `\"settings.hubs\"`).\n- Revert\
+      \ any `build.rs` side-effect modifications to `bin/**` and `plugins/*/bin/**`\
+      \ (`git checkout -- bin plugins`) before committing.\n\nBoundary:\n- Owner:\
+      \ `frontend-engineer` (`[REQUIRES_SKILL: contract-and-simplicity]`). Isolated\
+      \ Wave 1 worktree restricted to `scope.allowed_paths` (3 mutable prod files,\
+      \ 132.7 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[]` (Wave 1\
+      \ parallel with `v56.hub-auth-receiver-registration`, `v56.state-session-activity`,\
+      \ `v56.plugins-pi-bridge`, `v56.setup-bundle-packaging`, `v56.daemon-runtime-ipc`).\n\
+      - Verification: `cargo test -p cito-native --test native ui::directory -- --test-threads=1\
+      \ && cargo test -p cito-native --test native ui::settlement -- --test-threads=1\
+      \ && cargo test -p cito-native --test native ui::render_stability -- --test-threads=1\
+      \ && cargo test -p cito-native --test native ui::oracle_e2e -- --test-threads=1`.\
+      \ Consumed by Wave 2 `v56.macos-settings-surface`, `v56.consolidate`, and `v56.gate`.\n\
+      \nRecovery:\n- Repair any Swift compiler or macOS UI test failure in place within\
+      \ the worktree before completion."
+    verification: cargo test -p cito-native --test native ui::directory -- --test-threads=1
+      && cargo test -p cito-native --test native ui::settlement -- --test-threads=1
+      && cargo test -p cito-native --test native ui::render_stability -- --test-threads=1
+      && cargo test -p cito-native --test native ui::oracle_e2e -- --test-threads=1
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/Models.swift
+    - src/macos/HeadlessOracle.swift
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/ui/settlement.rs
+    - crates/cito-native/tests/support/ui/render_stability.rs
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-21T18:07:47.662987Z'
+    done_at: '2026-11-21T18:27:24.815034+00:00'
+    evidence: 'Integrated `bdbf6ce5745d03af6da7176597b808387af14545` (rebased `9fae8d962815756f074aea799fa4d799619783bb`,
+      worktree cleaned up): `AF-01` Swift (Seam 1, `Models.swift` & `Companion.swift`)
+      decodes `truncated_collections` and preserves only shed collections; `AF-18`
+      (`Companion.swift`, `DirectorySurface.swift`, `HeadlessOracle.swift`) scoped
+      `channelReset` draft clearing, `composerDraftIdempotencyKey` matching before
+      `closeComposer()`, local facet filter during in-flight directory queries, and
+      `frame.warning` on payload-free receipts. Detached `PPID=1` UI tests: 77/77
+      passed.'
+  - id: v56.daemon-actions-projection
+    name: 'V56 Wave 2 — Daemon setup_save_hub Login Targeting, Human Channels Status-Frame
+      Parity, Host-Hub Liveness Projection, ui_revision App Readiness & Canonical
+      Listeners/Hub DTO Consolidation (AF-06, AF-07, AF-13-projection, AF-15, AF-20;
+      2 prod files, 142.3 KB) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/daemon/http_actions.rs\n\
+      \    - crates/cito-native/src/core/daemon/projection.rs\n    - crates/cito-native/src/core/daemon/ui_ipc.rs\n\
+      \    - crates/cito-native/src/core/daemon/tests.rs\n    - crates/cito-native/src/core/daemon/event_tests.rs\n\
+      \    - crates/cito-native/tests/support/daemon/config_and_hubs.rs\n  blocked_paths:\n\
+      \    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/src/core/daemon/mod.rs\n\
+      \    - crates/cito-native/src/core/daemon/host_hub.rs\n    - crates/cito-native/src/core/hub/**\n\
+      \    - crates/cito-native/src/core/auth.rs\n    - crates/cito-native/src/core/login.rs\n\
+      \    - crates/cito-native/src/core/registration.rs\n    - crates/cito-native/src/core/receiver.rs\n\
+      \    - crates/cito-native/src/core/state.rs\n    - crates/cito-native/src/core/session_activity.rs\n\
+      \    - crates/cito-native/src/core/plugins.rs\n    - crates/cito-native/src/core/hub_plugins.rs\n\
+      \    - crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/setup/**\n\
+      \    - plugins/**\n    - src/macos/**\n    - packaging/**\n\nDeliver:\n- Close\
+      \ the 5 admitted Daemon HTTP Actions and Projection findings (`AF-06`, `AF-07`,\
+      \ `AF-13` projection consumer, `AF-15`, `AF-20`; 2 primary mutable production\
+      \ files `http_actions.rs` + `projection.rs`, 142.3 KB) under `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` at version `0.21.3` (do not commit staged `bin/**`\
+      \ or `plugins/*/bin/**` in this Wave 2 step):\n  1. **`AF-06` (Audit `#16`,\
+      \ `crates/cito-native/src/core/daemon/http_actions.rs:1318-1343, 1862-1869`,\
+      \ `action_inner` `setup_save_hub`)**: Resolve the target Hub for `setup_save_hub`\
+      \ login cancellation (`self.logins.remove(...)`) and `self.active_settings_hub`\
+      \ clearing from the actual Hub being edited/saved (`original_name` when `edit\
+      \ == true` and non-empty, else `name`, plus `name` when renamed) rather than\
+      \ falling back to `action[\"hub\"]` / `self.config[\"defaultHub\"]`, so saving\
+      \ or editing Hub `\"personal\"` never cancels an in-progress OIDC login or active\
+      \ settings selection on default Hub `\"work\"`. Add a discriminating regression\
+      \ in `daemon/event_tests.rs` or `daemon/tests.rs`.\n  2. **`AF-07` (Audit `#19`,\
+      \ `crates/cito-native/src/core/daemon/projection.rs:550-563, 856-862`, `status_frame`\
+      \ vs `snapshot_from`)**: Enrich `row[\"harness\"] == \"human\"` session rows\
+      \ in `status_frame` with `row[\"channels\"]` from `samples[hub].directory` (sharing\
+      \ the same Human `channels` enrichment helper as `snapshot_from`) and project\
+      \ consistent Hub DTO fields so background `status_frame` pushes never overwrite\
+      \ Human `channels` to `null` or drop Hub fields. Add a regression test in `daemon/tests.rs`.\n\
+      \  3. **`AF-13` (Audit `#13` Projection Consumer, `crates/cito-native/src/core/daemon/projection.rs:321,\
+      \ 402` — Locked Seam 2)**: Replace `self.host_server.is_some()` in `projection.rs`\
+      \ with `self.host_server.as_ref().is_some_and(HubServer::is_running)` (consuming\
+      \ `HubServer::is_running` added in Wave 1 `v56.daemon-runtime-ipc`) so `host_hub.running`\
+      \ reports `false` whenever the `HubServer` listener loop has exited. Add a unit\
+      \ regression in `daemon/tests.rs`.\n  4. **`AF-15` (Audit `#20`, `crates/cito-native/src/core/daemon/projection.rs:782-830`,\
+      \ `ui_revision`)**: Include `self.setup_inspections` and `self.last_app_action`\
+      \ in `ui_revision()` so changes to harness readiness (`unconfigured_harnesses`\
+      \ filtering of `available` and `discovery` after `refresh_setup_inspections()`)\
+      \ immediately advance `ui_revision()` and trigger `push_ui()` `op: \"state\"\
+      ` frames. Add a unit regression in `daemon/tests.rs`.\n  5. **`AF-20` (Audit\
+      \ `#33` + `#35`, `crates/cito-native/src/core/daemon/projection.rs:192-318,\
+      \ 599, 873-874` & `ui_ipc.rs` — Locked Seam 1)**: Keep `\"listeners\"` as the\
+      \ single canonical UI frame session-list key in `snapshot_from` and `status_frame`\
+      \ (removing duplicate `\"sessions\": sessions` serialization that doubled session\
+      \ payload bytes against `FRAME_LIMIT`, and removing `\"sessions\"` from `ui_ipc.rs`\
+      \ if still present while updating any internal test assertions that read `frame[\"\
+      sessions\"]` to `frame[\"listeners\"]`), and unify/sort Hub DTO projection deterministically\
+      \ across `settings_sample` (`self.slots`). Add unit regressions in `daemon/tests.rs`.\n\
+      \nImplementation Notes (Non-Binding):\n- Revert any `build.rs` side-effect modifications\
+      \ to `bin/**` and `plugins/*/bin/**` (`git checkout -- bin plugins`) before\
+      \ committing.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated Wave 2 worktree restricted to `scope.allowed_paths` (2 primary mutable\
+      \ prod files, 142.3 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends on `[\"\
+      v56.daemon-runtime-ipc\"]` (Wave 2; parallel with `v56.macos-settings-surface`).\n\
+      - Verification: `cargo test -p cito-native --lib core::daemon -- --test-threads=1\
+      \ && cargo test -p cito-native --test native daemon::config_and_hubs -- --test-threads=1`.\
+      \ Consumed by `v56.consolidate` and `v56.gate`.\n\nRecovery:\n- Repair any compiler,\
+      \ clippy, or targeted `core::daemon` test failure in place within the worktree\
+      \ before completion."
+    verification: cargo test -p cito-native --lib core::daemon -- --test-threads=1
+      && cargo test -p cito-native --test native daemon::config_and_hubs -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/src/core/daemon/event_tests.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    depends_on:
+    - v56.daemon-runtime-ipc
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:27:34.676043Z'
+    done_at: '2026-11-21T18:40:31.429619+00:00'
+    evidence: 'Integrated `a3dedc163174810f4204118409a5bd2b6220e761` (rebased `c1918d1059e3de0c3da9e48be98068ace2698b10`,
+      worktree cleaned up): `AF-06` (`http_actions.rs`) scopes `setup_save_hub` login
+      cancellation and `active_settings_hub` clearing to the saved/edited/renamed
+      Hub; `AF-07`/`AF-20` (`projection.rs`) enrich Human `channels` in `status_frame`,
+      remove duplicate `sessions` key keeping canonical `listeners`, and unify/sort
+      Hub DTO projection; `AF-13` (`projection.rs`) checks `HubServer::is_running()`;
+      `AF-15` (`projection.rs`) includes `setup_inspections` and `last_app_action`
+      in `ui_revision()`. `core::daemon`: 62/62, `daemon::config_and_hubs`: 18/18;
+      `cargo fmt --check` & `git diff --check` clean.'
+  - id: v56.macos-settings-surface
+    name: 'V56 Wave 2 — macOS SettingsSurface Closure: Rendered-Hub Channel Form Binding,
+      Partial Host-Hub Sharing Mutations & Deferred-Repaint Hub-Row Pending Guards
+      (AF-19; 1 prod file, 110.4 KB) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/SettingsSurface.swift\n    - src/macos/HeadlessOracle.swift\n\
+      \    - crates/cito-native/tests/support/ui/settings_channels.rs\n    - crates/cito-native/tests/support/ui/settings_hubs.rs\n\
+      \  blocked_paths:\n    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n \
+      \   - src/macos/Companion.swift\n    - src/macos/DirectorySurface.swift\n  \
+      \  - src/macos/Models.swift\n    - crates/cito-native/src/**\n    - plugins/**\n\
+      \    - packaging/**\n\nDeliver:\n- Close all 3 sub-obligations of the admitted\
+      \ macOS Settings Surface finding (`AF-19`; 1 mutable production file `src/macos/SettingsSurface.swift`,\
+      \ 110.4 KB) under `[REQUIRES_SKILL: contract-and-simplicity]` at version `0.21.3`\
+      \ (do not commit staged `bin/**` or `plugins/*/bin/**` in this Wave 2 step):\n\
+      \  1. **`AF-19.1` (Audit `#31`, `src/macos/SettingsSurface.swift:696, 770, 890,\
+      \ 988`, Deferred-Editor Channel Hub Binding)**: Capture the rendered Hub name\
+      \ (`let renderedHub = effectiveChannelHub`) when constructing the Channels tab\
+      \ in `rebuildSettingsPanel` and bind all mounted channel form and action closures\
+      \ (`clear`, `test`, `unpair`, `save_hub_service`, `channel_pair`, `channel_cancel_pair`,\
+      \ `channel_toggle`, `channel_save`, `open_settings`, and draft-clearing helpers)\
+      \ to `renderedHub` rather than dynamically reading `self.effectiveChannelHub`\
+      \ at click time, so a passive Hub switch (`personal` -> `work`) while `rebuildSettingsPanel(preservingEditor:\
+      \ true)` defers repaint never submits `personal`'s draft to `work`.\n  2. **`AF-19.2`\
+      \ (Audit `#31`, `src/macos/SettingsSurface.swift:1085-1091, 1141-1159`, Sharing-Control\
+      \ Partial Field Updates)**: Omit stale captured `\"enabled\": hostHub.enabled`\
+      \ from the **Access** (`toggle_host_hub_auth`) and **Apply** (`apply_host_hub_port`)\
+      \ `set_host_hub` action payloads (or resolve against pending sharing intent)\
+      \ so changing Access mode or applying a port while **Stop Sharing** (`enabled:\
+      \ false`) is in flight cannot re-enable sharing.\n  3. **`AF-19.3` (Audit `#31`,\
+      \ `src/macos/SettingsSurface.swift:320-330, 1377-1407`, Deferred-Repaint Hub-Row\
+      \ Pending Guards)**: Enforce `pendingControls` (`isPending(...)`) exclusion\
+      \ at ingress inside Hub-row action closures (`setup_toggle_hub`, `setup_remove_hub`,\
+      \ and `hub_action` `login_hub`) so clicking those buttons while an active editor\
+      \ defers `rebuildSettingsPanel(preservingEditor: true)` cannot emit duplicate\
+      \ requests.\n  4. Add discriminating regressions for all 3 sub-obligations in\
+      \ `src/macos/HeadlessOracle.swift` and `crates/cito-native/tests/support/ui/{settings_channels,settings_hubs}.rs`.\n\
+      \nImplementation Notes (Non-Binding):\n- Revert any `build.rs` side-effect modifications\
+      \ to `bin/**` and `plugins/*/bin/**` (`git checkout -- bin plugins`) before\
+      \ committing.\n\nBoundary:\n- Owner: `frontend-engineer` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Isolated Wave 2 worktree restricted to `scope.allowed_paths`\
+      \ (1 mutable prod file, 110.4 KB). Keep version at `0.21.3`.\n\nAdmit:\n- Depends\
+      \ on `[\"v56.macos-companion-directory\"]` (Wave 2; parallel with `v56.daemon-actions-projection`).\n\
+      - Verification: `cargo test -p cito-native --test native ui::settings_channels\
+      \ -- --test-threads=1 && cargo test -p cito-native --test native ui::settings_hubs\
+      \ -- --test-threads=1 && cargo test -p cito-native --test native ui::oracle_e2e\
+      \ -- --test-threads=1`. Consumed by `v56.consolidate` and `v56.gate`.\n\nRecovery:\n\
+      - Repair any Swift compiler or macOS Settings UI test failure in place within\
+      \ the worktree before completion."
+    verification: cargo test -p cito-native --test native ui::settings_channels --
+      --test-threads=1 && cargo test -p cito-native --test native ui::settings_hubs
+      -- --test-threads=1 && cargo test -p cito-native --test native ui::oracle_e2e
+      -- --test-threads=1
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    depends_on:
+    - v56.macos-companion-directory
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-21T18:27:34.676193Z'
+    done_at: '2026-11-21T18:40:30.716558+00:00'
+    evidence: 'Integrated `b5187f4b57eb3253f4da36127bc52a1c1928d695` (worktree cleaned
+      up): `AF-19.1` (`SettingsSurface.swift`) binds mounted Channels form/actions/Return/Escape
+      to `renderedHub` until repaint; `AF-19.2` Access and Apply omit stale `enabled`
+      from `set_host_hub`; `AF-19.3` Hub-row sign-in, toggle, and remove enforce `pendingControls`
+      at ingress even under deferred repaint. Detached `PPID=1` native UI tests: 49
+      requested + 8 adjacent passed (`0` failed); `cargo fmt --check` & `git diff
+      --check` clean.'
+  - id: v56.consolidate
+    name: 'V56 Wave 3 — Post-Merge Seam Consolidation & Staged Binary Rebuild (AF-01..AF-21
+      at v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/**\n\
+      \    - plugins/**\n    - src/macos/**\n    - packaging/**\n  blocked_paths:\n\
+      \    - plan.yaml\n\nDeliver:\n- Post-merge consolidation and staged binary rebuild\
+      \ across all 8 merged `AF-01..AF-21` repair steps under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ at version `0.21.3` (NO SemVer bump, NO git tag yet) before the read-only\
+      \ terminal gate `v56.gate`:\n  1. Verify 1-to-1 cross-step cut-set gluing ($\\\
+      delta s|_{\\partial} = 0$) across Seam 1 (`ui_ipc.rs`/`projection.rs` <-> `Models.swift`/`Companion.swift`),\
+      \ Seam 2 (`hub/http.rs` & `daemon/host_hub.rs` <-> `daemon/projection.rs` `HubServer::is_running`),\
+      \ and Seam 3 (`setup.rs` <-> `plugins.rs` `is_plugin_dir_intact`).\n  2. Run\
+      \ `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings`, and `cargo build --release --locked` so `build.rs` rebuilds\
+      \ and stages the converged `0.21.3` release binaries (`bin/cito`, `bin/cito-daemon`,\
+      \ `bin/cito-hub`, `bin/cito-linker`, `bin/cito-mcp`, `bin/cito-native-darwin-arm64`,\
+      \ `bin/cito-test-runner`, `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/*`,\
+      \ `plugins/codex/bin/*`, `plugins/pi/bin/*`, `plugins/telegram/bin/*`), and\
+      \ commit the staged binaries so the working tree is clean for `v56.gate`.\n\
+      \  3. Run `python3 packaging/release.py check`, `python3 -m unittest discover\
+      \ -s packaging -p 'test_*.py' -v`, `/usr/bin/ruby -c packaging/homebrew/cito.rb`,\
+      \ and `cargo test -p cito-native --test native distribution -- --test-threads=1`\
+      \ to confirm binary provenance and bundle integrity.\n\nBoundary:\n- Owner:\
+      \ `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`). Post-merge consolidation\
+      \ step staging converged `0.21.3` release binaries before `v56.gate`. Keep version\
+      \ at `0.21.3` (bump to `0.22.0` happens in `v56.release` after `v56.gate`).\n\
+      \nAdmit:\n- Depends on all 8 repair steps (`v56.hub-auth-receiver-registration`,\
+      \ `v56.state-session-activity`, `v56.plugins-pi-bridge`, `v56.setup-bundle-packaging`,\
+      \ `v56.daemon-runtime-ipc`, `v56.macos-companion-directory`, `v56.daemon-actions-projection`,\
+      \ `v56.macos-settings-surface`).\n- Verification: `cargo fmt --all -- --check\
+      \ && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo\
+      \ build --release --locked && python3 packaging/release.py check && python3\
+      \ -m unittest discover -s packaging -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ && cargo test -p cito-native --test native distribution -- --test-threads=1`.\
+      \ Consumed by `v56.gate`.\n\nRecovery:\n- Reconcile any cross-step integration\
+      \ discrepancy or staged binary provenance mismatch in place before completing."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo build --release --locked && python3 packaging/release.py
+      check && python3 -m unittest discover -s packaging -p 'test_*.py' -v && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb && cargo test -p cito-native --test native distribution
+      -- --test-threads=1
+    refs:
+    - crates/cito-native/build.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - packaging/release.py
+    depends_on:
+    - v56.hub-auth-receiver-registration
+    - v56.state-session-activity
+    - v56.plugins-pi-bridge
+    - v56.setup-bundle-packaging
+    - v56.daemon-runtime-ipc
+    - v56.macos-companion-directory
+    - v56.daemon-actions-projection
+    - v56.macos-settings-surface
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-21T18:40:35.398833Z'
+    done_at: '2026-11-21T19:10:16.886681+00:00'
+    evidence: 'Integrated `81626313f1c53b6e4e3b6b2bc4a5508218590d47` (worktree cleaned
+      up, +1744 MiB reclaimed) at version `0.21.3`:
+
+      - Seam 1 (`ui_ipc.rs` <-> `Companion.swift` / `Models.swift`): Disambiguated
+      `/hubs` vs `/settings/hubs` shedding and added end-to-end `bounded_frame` ->
+      headless `Companion` verification (`oidc_settlement.rs`, `render_stability.rs`).
+
+      - Seam 2 (`HubServer::is_running` <-> `sync_host_hub` & `projection.rs`) & Seam
+      3 (`setup.rs::is_plugin_dir_intact` <-> `plugins.rs`): Verified 1-to-1 cut-set
+      gluing.
+
+      - Wave 1 follow-ups closed: updated `discovery_and_setup.rs:1353,1895` legacy-copy
+      fixtures to derive from shipped manifests changing only `version`; added `TestService`
+      behavioral regressions for `AF-10` (directory poll under registration contention
+      + next-poll resume) and `AF-11` (due wake retry reaching `DISPATCHED` with SSE
+      offline).
+
+      - Full checks: `cargo fmt --all -- --check`, `git diff --check`, `cargo clippy
+      --workspace --all-targets --locked -- -D warnings`, `cargo build --release --locked`,
+      `packaging/release.py check`, `unittest` (28 OK), `/usr/bin/ruby -c packaging/homebrew/cito.rb`,
+      `site-clipboard.mjs`, `cito-ui` `test_settings_regressions` (3/3 PASS), and
+      detached `PPID=1` `cargo test --workspace --locked -- --test-threads=4` (654
+      passed: 359 lib + 288 native + 7 bin, 0 failed, 5 ignored). All 7 staged binaries
+      pass `codesign --verify --strict` (`cito-native` `ae24a913...`, `cito-ui` `0a612933...`).'
+  - id: v56.gate
+    name: 'V56 Full Workspace Verification & 21-Item Ledger Convergence Gate (AF-01..AF-21)
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
+      \ FULL\n\nDeliver:\n- Independent `FULL` verification gate decision (`PASS`\
+      \ or `FAIL`) emitting `gate.report.v2` under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ over the merged outcomes of all 8 repair steps (`v56.hub-auth-receiver-registration`,\
+      \ `v56.state-session-activity`, `v56.plugins-pi-bridge`, `v56.setup-bundle-packaging`,\
+      \ `v56.daemon-runtime-ipc`, `v56.macos-companion-directory`, `v56.daemon-actions-projection`,\
+      \ `v56.macos-settings-surface`) and `v56.consolidate`:\n  1. Verify every admitted\
+      \ finding `AF-01..AF-21` (Bucket 1 `AF-01..AF-07` and Bucket 2 `AF-08..AF-21`)\
+      \ is closed with discriminating regression coverage, 1-to-1 cross-step cut-set\
+      \ gluing ($\\delta s|_{\\partial} = 0$ across Seam 1 `bounded_frame` `truncated_collections`\
+      \ & canonical `\"listeners\"` key, Seam 2 `HubServer::is_running` worker liveness,\
+      \ and Seam 3 `is_plugin_dir_intact` executable-mode check), and `0` remaining\
+      \ Tier 1 or Tier 2 defects, while confirming none of the 18 rejected Bucket\
+      \ 3 `Won't Fix` items were introduced.\n  2. Run the full workspace check suite:\n\
+      \     - `cargo fmt --all -- --check`\n     - `cargo clippy --workspace --all-targets\
+      \ --locked -- -D warnings`\n     - `cargo test --workspace --locked -- --test-threads=4`\n\
+      \     - `cargo build --release --locked`\n     - `python3 -m unittest discover\
+      \ -s packaging -p 'test_*.py' -v`\n     - `/usr/bin/ruby -c packaging/homebrew/cito.rb`\n\
+      \     - `python3 packaging/release.py check`\n     - `git diff --check`\n\n\
+      Boundary:\n- Owner: `gate-reviewer` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Read-only verification gate (`step_type: gate`, `repo_change_policy: no_repo_change`,\
+      \ `verification_scope: FULL`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
+      \nAdmit:\n- Depends on `[\"v56.hub-auth-receiver-registration\", \"v56.state-session-activity\"\
+      , \"v56.plugins-pi-bridge\", \"v56.setup-bundle-packaging\", \"v56.daemon-runtime-ipc\"\
+      , \"v56.macos-companion-directory\", \"v56.daemon-actions-projection\", \"v56.macos-settings-surface\"\
+      , \"v56.consolidate\"]`.\n- Verification: `cargo fmt --all -- --check && cargo\
+      \ clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace\
+      \ --locked -- --test-threads=4 && cargo build --release --locked && python3\
+      \ -m unittest discover -s packaging -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ && python3 packaging/release.py check && git diff --check`. Consumed by `v56.release`.\n\
+      \nRecovery:\n- If any admitted finding `AF-01..AF-21`, cross-step seam invariant,\
+      \ regression test, compiler/clippy check, or packaging check fails, report concrete\
+      \ `file:line` and failure evidence in `gate.report.v2` so bounded writable repair\
+      \ steps can resolve it before gate re-verification and `v56.release`."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=4
+      && cargo build --release --locked && python3 -m unittest discover -s packaging
+      -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb && python3
+      packaging/release.py check && git diff --check
+    refs:
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/setup/app_bundle.rs
+    - crates/cito-native/src/core/hub/http.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - plugins/pi/cito-bridge.ts
+    - src/macos/Models.swift
+    - src/macos/Companion.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/SettingsSurface.swift
+    - packaging/release.py
+    - packaging/test_release.py
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v56.hub-auth-receiver-registration
+    - v56.state-session-activity
+    - v56.plugins-pi-bridge
+    - v56.setup-bundle-packaging
+    - v56.daemon-runtime-ipc
+    - v56.macos-companion-directory
+    - v56.daemon-actions-projection
+    - v56.macos-settings-surface
+    - v56.consolidate
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-21T19:11:56.300246Z'
+    done_at: '2026-11-21T19:32:19.812861+00:00'
+    evidence: 'Validated `FULL` `gate.report.v2` (`/tmp/v56-bindings/v56-gate-report.json`
+      against `/tmp/v56-bindings/v56-gate-binding.json`, `target_ref: git:b65dbbf3b4c7ef9772233d94b9f5549b54bf65de`):
+      `valid: true`, `binding_checked: true`, `status: "PASS"`, `evidence_disposition:
+      "POSITIVE_GATE_EVIDENCE"`, `26/26` bound requirements `PROVEN` (`v56.AF-01`..`v56.AF-21`,
+      `v56.seam_1_bounded_frame_listeners`, `v56.seam_2_host_server_is_running`, `v56.seam_3_is_plugin_dir_intact`,
+      `v56.bucket3_wont_fix_exclusion`, `v56.version_0_21_3`), `findings: []`. Full
+      workspace checks passed in disposable `/tmp/v56-gate-verify` (detached `PPID=1`,
+      removed afterward): `cargo fmt --all -- --check`, `cargo clippy --workspace
+      --all-targets --locked -- -D warnings`, `cargo test --workspace --locked --
+      --test-threads=4`, `cargo build --release --locked`, `python3 -m unittest discover
+      -s packaging -p ''test_*.py'' -v`, `/usr/bin/ruby -c packaging/homebrew/cito.rb`,
+      `python3 packaging/release.py check`, `git diff --check`.'
+  - id: v56.release
+    name: 'V56 Public Signed Release v0.22.0: Version Bump, Candidate Bundle Verification,
+      CI/Tag Push, Notarization & Homebrew Tap Publication'
+    status: claimed
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/hub.rs\n    - crates/cito-native/src/core/daemon/tests.rs\n\
+      \    - crates/cito-native/tests/support/ui/oidc_settlement.rs\n    - crates/cito-native/tests/native.rs\n\
+      \    - crates/cito-native/tests/support/plugins.rs\n    - crates/cito-native/tests/support/daemon/config_and_hubs.rs\n\
+      \    - crates/cito-native/Cargo.toml\n    - Cargo.lock\n    - .agents/plugins/marketplace.json\n\
+      \    - plugins/codex/.codex-plugin/plugin.json\n    - plugins/claude/.claude-plugin/plugin.json\n\
+      \    - plugins/pi/package.json\n    - plugins/pi/plugin.json\n    - plugins/codex/plugin.json\n\
+      \    - plugins/claude/plugin.json\n    - plugins/telegram/plugin.json\n    -\
+      \ site/index.html\n    - site/docs/hosting.html\n    - site/docs/plugins.html\n\
+      \    - site/docs/guide.html\n    - site/docs/architecture.html\n    - README.md\n\
+      \    - deploy/hub/README.md\n    - docs/DESIGN.md\n    - docs/RELEASING.md\n\
+      \    - .github/workflows/ci.yml\n    - bin/**\n    - plugins/*/bin/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - packaging/homebrew/cito.rb\n\nDeliver:\n- Fix the CI\
+      \ hang and `macos-15` runner-specific test/workflow issues in `crates/cito-native/src/core/hub.rs`,\
+      \ `crates/cito-native/src/core/daemon/tests.rs`, `crates/cito-native/tests/support/ui/oidc_settlement.rs`,\
+      \ `crates/cito-native/tests/native.rs`, `crates/cito-native/tests/support/plugins.rs`,\
+      \ `crates/cito-native/tests/support/daemon/config_and_hubs.rs`, and `.github/workflows/ci.yml`,\
+      \ bump the canonical product version from `0.21.3` to **`0.22.0`** (SemVer `MINOR`\
+      \ increment `< 1.0.0` per `AGENTS.md` and `docs/RELEASING.md`), and execute\
+      \ the formal signed public release and GitHub Pages synchronization pipeline:\n\
+      \  0. Fix the CI hang root cause and `macos-15` UI/reverse-DNS test issues before\
+      \ rebuilding staged binaries, pushing `origin main`, and tagging `v0.22.0`:\n\
+      \     - In `crates/cito-native/src/core/hub.rs:521-526` (`HubEngine::shutdown`\
+      \ and any sibling `subscribers` removal): drop `sub.tx` BEFORE calling `sub.wake.notify()`\
+      \ (`for sub in subs.drain(..) { let wake = sub.wake; drop(sub.tx); wake.notify();\
+      \ }`) so any woken `start_events` subscriber is guaranteed to observe `TryRecvError::Disconnected`\
+      \ after `wake.drain()`.\n     - In `crates/cito-native/src/core/daemon/tests.rs:769`\
+      \ (and any sibling test manually overwriting `s.slots.insert(...)`): close the\
+      \ replaced slot (`if let Some(old) = s.slots.insert(\"work\".into(), remote)\
+      \ { old.close(); }`).\n     - In `crates/cito-native/tests/support/ui/oidc_settlement.rs:271`:\
+      \ update `label_measured_width <= 110.0` to `<= label_width` for the `\"Auto-discovered\"\
+      ` placeholder on `macos-15` font metrics.\n     - In `crates/cito-native/tests/native.rs`,\
+      \ `crates/cito-native/tests/support/plugins.rs`, and `crates/cito-native/tests/support/daemon/config_and_hubs.rs`:\
+      \ replace the 6 remaining inline `http.server.HTTPServer` / `ThreadingHTTPServer`\
+      \ fixtures (`socket.getfqdn('127.0.0.1')` reverse-DNS hang on `macos-15`) with\
+      \ `socketserver.TCPServer` / `ThreadingTCPServer` (matching `crates/cito-native/tests/support/telegram-api.py:67`).\n\
+      \  1. Update `\"0.22.0\"` across:\n     - `crates/cito-native/Cargo.toml` and\
+      \ `Cargo.lock`\n     - `.agents/plugins/marketplace.json` (root `version` and\
+      \ `plugins[].version`)\n     - `plugins/codex/.codex-plugin/plugin.json`, `plugins/claude/.claude-plugin/plugin.json`,\
+      \ `plugins/pi/package.json`, `plugins/pi/plugin.json`, `plugins/codex/plugin.json`,\
+      \ `plugins/claude/plugin.json`, `plugins/telegram/plugin.json`\n     - `site/index.html`,\
+      \ `site/docs/hosting.html`, `site/docs/plugins.html`, `site/docs/guide.html`,\
+      \ `site/docs/architecture.html` (`<meta name=\"application-version\" content=\"\
+      0.22.0\" />` and visible version strings) and `README.md` / `deploy/hub/README.md`\
+      \ / `docs/**` (`docs/DESIGN.md`, `docs/RELEASING.md`) version references where\
+      \ applicable.\n     - Update `.github/workflows/ci.yml` `timeout-minutes: 30`\
+      \ to `timeout-minutes: 60` (matching `.github/workflows/release.yml`) and `--test-threads=4`\
+      \ to `--test-threads=2` on 3-vCPU `macos-15`.\n     - Keep `packaging/homebrew/cito.rb`\
+      \ as a Cask template (do not prefill a future SHA-256 in the repo template).\n\
+      \  2. Static & Contract Sync (`site/**` <-> `README.md` / `deploy/hub/README.md`\
+      \ / `plugins/**`):\n     - Verify all 5 HTML pages (`site/index.html`, `site/docs/guide.html`,\
+      \ `site/docs/hosting.html`, `site/docs/plugins.html`, `site/docs/architecture.html`),\
+      \ environment variable tables, CLI/MCP tables, plugin contracts, and `<meta\
+      \ name=\"application-version\" content=\"0.22.0\" />` are 100% synchronized\
+      \ with `README.md`, `deploy/hub/README.md`, and `plugins/**`.\n     - Run `node\
+      \ crates/cito-native/tests/support/site-clipboard.mjs` and `python3 packaging/release.py\
+      \ check`.\n  3. Run full release-candidate checks and rebuild staged binaries\
+      \ (`node crates/cito-native/tests/support/site-clipboard.mjs`, `python3 packaging/release.py\
+      \ check`, `python3 -m unittest discover -s packaging -p 'test_*.py' -v`, `/usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb`, `cargo fmt --all -- --check`, `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace\
+      \ --locked -- --test-threads=4`, `cargo build --release --locked`, `python3\
+      \ packaging/release.py bundle build/candidate.zip` and delete transient `build/`\
+      \ afterward).\n  4. Commit the CI hang/runner fixes, `0.22.0` version bump,\
+      \ `.github/workflows/ci.yml` updates, and rebuilt staged binaries on `main`,\
+      \ push `origin main`, wait for both `.github/workflows/ci.yml` and `.github/workflows/pages.yml`\
+      \ ('Deploy Website to GitHub Pages') on that exact commit to pass (`gh run list\
+      \ --workflow=pages.yml` / `gh run watch`), create annotated tag `git tag -a\
+      \ v0.22.0 -m \"Release v0.22.0\"`, push `origin v0.22.0`, and verify `.github/workflows/release.yml`\
+      \ completes Developer ID signing, Apple notarization/stapling, GitHub Release\
+      \ `v0.22.0` publication, Homebrew Cask smoke verification, and `Tefx/homebrew-tap`\
+      \ update.\n  5. Live GitHub Pages Verification:\n     - Verify via `curl -fsSL`\
+      \ that all 5 live deployed pages (`https://tefx.github.io/cito/`, `https://tefx.github.io/cito/docs/guide.html`,\
+      \ `https://tefx.github.io/cito/docs/hosting.html`, `https://tefx.github.io/cito/docs/plugins.html`,\
+      \ `https://tefx.github.io/cito/docs/architecture.html`) return HTTP 200 and\
+      \ contain `<meta name=\"application-version\" content=\"0.22.0\" />` plus valid\
+      \ download links (`https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip`).\n\
+      \nBoundary:\n- Owner: `rust-senior`. Modifies `crates/cito-native/src/core/hub.rs`,\
+      \ `crates/cito-native/src/core/daemon/tests.rs`, `crates/cito-native/tests/support/ui/oidc_settlement.rs`,\
+      \ `crates/cito-native/tests/native.rs`, `crates/cito-native/tests/support/plugins.rs`,\
+      \ `crates/cito-native/tests/support/daemon/config_and_hubs.rs`, version manifests,\
+      \ docs/site metadata (`README.md`, `deploy/hub/README.md`, `docs/**`, `site/**`),\
+      \ `.github/workflows/ci.yml`, and staged binaries, pushes `origin main` and\
+      \ annotated tag `origin v0.22.0`, and verifies `.github/workflows/ci.yml` +\
+      \ `.github/workflows/pages.yml` + `.github/workflows/release.yml` publication\
+      \ and live GitHub Pages parity.\n\nAdmit:\n- Depends on `[\"v56.gate\"]`.\n\
+      - Verification: `node crates/cito-native/tests/support/site-clipboard.mjs &&\
+      \ python3 packaging/release.py check && python3 -m unittest discover -s packaging\
+      \ -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb && cargo\
+      \ fmt --all -- --check && cargo clippy --workspace --all-targets --locked --\
+      \ -D warnings && cargo test --workspace --locked -- --test-threads=4 && cargo\
+      \ build --release --locked && gh release view v0.22.0 --repo Tefx/cito && gh\
+      \ run list --repo Tefx/cito --workflow=pages.yml --limit 1 && for url in https://tefx.github.io/cito/\
+      \ https://tefx.github.io/cito/docs/guide.html https://tefx.github.io/cito/docs/hosting.html\
+      \ https://tefx.github.io/cito/docs/plugins.html https://tefx.github.io/cito/docs/architecture.html;\
+      \ do curl -fsSL \"$url\" | grep -F '<meta name=\"application-version\" content=\"\
+      0.22.0\" />' >/dev/null; done && curl -fsSL https://tefx.github.io/cito/ | grep\
+      \ -F 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip'\
+      \ >/dev/null`.\n\nRecovery:\n- Follow `docs/RELEASING.md` retry/idempotency\
+      \ rules (`gh workflow run release.yml --repo Tefx/cito --ref v0.22.0 -f tag=v0.22.0`\
+      \ if transient GitHub Actions runner/notarization steps need retry; never move\
+      \ an existing published tag or publish an ad-hoc unsigned fallback)."
+    verification: node crates/cito-native/tests/support/site-clipboard.mjs && python3
+      packaging/release.py check && python3 -m unittest discover -s packaging -p 'test_*.py'
+      -v && /usr/bin/ruby -c packaging/homebrew/cito.rb && cargo fmt --all -- --check
+      && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test
+      --workspace --locked -- --test-threads=4 && cargo build --release --locked &&
+      gh release view v0.22.0 --repo Tefx/cito && gh run list --repo Tefx/cito --workflow=pages.yml
+      --limit 1 && for url in https://tefx.github.io/cito/ https://tefx.github.io/cito/docs/guide.html
+      https://tefx.github.io/cito/docs/hosting.html https://tefx.github.io/cito/docs/plugins.html
+      https://tefx.github.io/cito/docs/architecture.html; do curl -fsSL "$url" | grep
+      -F '<meta name="application-version" content="0.22.0" />' >/dev/null; done &&
+      curl -fsSL https://tefx.github.io/cito/ | grep -F 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip'
+      >/dev/null
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/Cargo.toml
+    - Cargo.lock
+    - .agents/plugins/marketplace.json
+    - plugins/codex/.codex-plugin/plugin.json
+    - plugins/claude/.claude-plugin/plugin.json
+    - plugins/pi/package.json
+    - plugins/pi/plugin.json
+    - plugins/codex/plugin.json
+    - plugins/claude/plugin.json
+    - plugins/telegram/plugin.json
+    - site/index.html
+    - site/docs/hosting.html
+    - site/docs/plugins.html
+    - site/docs/guide.html
+    - site/docs/architecture.html
+    - README.md
+    - deploy/hub/README.md
+    - docs/DESIGN.md
+    - docs/RELEASING.md
+    - packaging/release.py
+    - packaging/homebrew/cito.rb
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - .github/workflows/ci.yml
+    - .github/workflows/pages.yml
+    - .github/workflows/release.yml
+    - crates/cito-native/tests/support/ui/oidc_settlement.rs
+    - crates/cito-native/tests/native.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    depends_on:
+    - v56.gate
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-22T04:49:57.032308Z'

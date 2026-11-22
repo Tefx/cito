@@ -27,6 +27,7 @@ struct ProviderState {
     authorization_requests: usize,
     code_requests: usize,
     refresh_status: u16,
+    jwks_unavailable: bool,
     subject: String,
     omit_refresh: bool,
     bad_signature: bool,
@@ -121,6 +122,10 @@ impl Provider {
                                     reply(&mut stream,200,&discovery.to_string(),None);
                                 }
                                 "/jwks" => {
+                                    if state.lock().unwrap().jwks_unavailable {
+                                        reply(&mut stream,503,"{}",None);
+                                        return;
+                                    }
                                     let der = include_bytes!("fixtures/ec-public.der");
                                     let point = &der[der.len()-65..];
                                     let keys = json!({"keys":[{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"login-key","x":URL_SAFE_NO_PAD.encode(&point[1..33]),"y":URL_SAFE_NO_PAD.encode(&point[33..])}]});
@@ -413,6 +418,37 @@ fn refresh_identity_and_rejected_bearer_generation() {
         assert_eq!(provider.state.lock().unwrap().refresh_requests, 1);
     }
 }
+#[test]
+fn fresh_cache_refreshes_only_after_definitive_token_rejection() {
+    let dir = Temp::new();
+    let provider = Provider::new();
+    provider.seed(&dir.0, crate::plugins::now_ms() / 1000 + 600);
+    let path = cache_path(&dir.0, "work").unwrap();
+    let mut cache = read(&dir.0);
+    let invalid = sign(&provider.issuer, "subject", "", true);
+    cache["id_token"] = json!(invalid);
+    cache["token_sha256"] = json!(hash(&invalid));
+    fs::write(&path, cache.to_string()).unwrap();
+    let recover = || recover(&dir.0, "work", &provider.config(), None, false);
+
+    provider.state.lock().unwrap().jwks_unavailable = true;
+    assert!(recover().unwrap_err().starts_with("AUTH_UNAVAILABLE:"));
+    assert_eq!(read(&dir.0), cache);
+    assert_eq!(provider.state.lock().unwrap().refresh_requests, 0);
+
+    provider.state.lock().unwrap().jwks_unavailable = false;
+    let (token, identity) = recover().unwrap();
+    assert_ne!(token, invalid);
+    assert_eq!(
+        identity["principal_id"],
+        format!("oidc:{}|subject", provider.issuer)
+    );
+    assert_eq!(read(&dir.0)["id_token"], token);
+    let state = provider.state.lock().unwrap();
+    assert_eq!(state.refresh_requests, 1);
+    assert_eq!(state.authorization_requests, 0);
+}
+
 #[test]
 fn concurrent_expired_cache_waiters_refresh_once() {
     let dir = Temp::new();

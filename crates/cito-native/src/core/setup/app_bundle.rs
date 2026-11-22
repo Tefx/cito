@@ -13,15 +13,24 @@ use std::{
     process::Command,
 };
 
-fn dir_bytes(path: &Path) -> u64 {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if !meta.is_dir() {
-        return meta.len();
+// Finalize the private candidate, including resources created by codesign.
+// Never follow a copied symlink when changing permissions.
+fn finalize_bundle(path: &Path) -> std::io::Result<u64> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(meta.len());
     }
-    let Ok(rd) = fs::read_dir(path) else { return 0 };
-    rd.flatten().map(|e| dir_bytes(&e.path())).sum()
+    let executable = meta.is_dir() || meta.permissions().mode() & 0o111 != 0;
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+    )?;
+    if !meta.is_dir() {
+        return Ok(meta.len());
+    }
+    fs::read_dir(path)?.try_fold(0, |bytes, entry| {
+        Ok(bytes + finalize_bundle(&entry?.path())?)
+    })
 }
 
 pub fn build_mac_app_bundle_native(
@@ -118,12 +127,14 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
 "#;
     let launcher_path = macos_dir.join("Cito");
     fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));
+    fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())?;
 
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let helper_native = helpers_dir.join("cito-native");
     fs::copy(&exe, &helper_native).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&helper_native, fs::Permissions::from_mode(0o755));
+    fs::set_permissions(&helper_native, fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())?;
 
     for ui_cand in [
         pkg_root.join("bin/cito-ui-darwin-arm64"),
@@ -198,7 +209,7 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
         ));
     }
 
-    let bytes = dir_bytes(&app_path);
+    let bytes = finalize_bundle(&app_path).map_err(|e| e.to_string())?;
     publish_directory(&app_path, &destination)?;
     // The candidate guard removes the exchanged previous generation non-fatally.
     Ok((destination, bytes))

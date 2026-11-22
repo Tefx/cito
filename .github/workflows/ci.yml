@@ -17,7 +17,7 @@ jobs:
   check:
     name: Check and build arm64 candidate
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,7 +48,7 @@ jobs:
       - name: Lint, test, and build
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --locked -- --test-threads=4
+          cargo test --workspace --locked -- --test-threads=2
           cargo build --release --locked
       - name: Build and verify relocatable candidate
         run: python3 packaging/release.py bundle build/candidate.zip

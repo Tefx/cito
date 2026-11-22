@@ -20,7 +20,7 @@ fn hub_http_errors_keep_retryability_through_tools_call() {
         &[
             "-u",
             "-c",
-            r#"import http.server, json
+            r#"import http.server, json, socketserver
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -35,8 +35,8 @@ class Hub(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
-server = http.server.HTTPServer(('127.0.0.1', 0), Hub)
-print(json.dumps({'port': server.server_port}), flush=True)
+server = socketserver.TCPServer(('127.0.0.1', 0), Hub)
+print(json.dumps({'port': server.server_address[1]}), flush=True)
 server.serve_forever()
 "#,
         ],

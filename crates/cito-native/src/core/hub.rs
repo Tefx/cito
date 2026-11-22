@@ -286,6 +286,13 @@ struct Subscriber {
     wake: Arc<crate::support::WakePipe>,
     identity: Arc<()>,
 }
+impl Subscriber {
+    fn disconnect(self) {
+        // A receiver awakened for the last time must observe disconnection after draining.
+        drop(self.tx);
+        self.wake.notify();
+    }
+}
 pub struct Subscription {
     pub wake: Arc<crate::support::WakePipe>,
     receiver: mpsc::Receiver<Value>,
@@ -519,10 +526,9 @@ impl HubEngine {
         }
         self.wake_worker();
         if let Ok(mut subs) = self.inner.subscribers.lock() {
-            for sub in subs.iter() {
-                sub.wake.notify();
+            for sub in subs.drain(..) {
+                sub.disconnect();
             }
-            subs.clear();
         }
         let processes = self
             .inner
@@ -568,25 +574,23 @@ impl HubEngine {
     fn emit(&self, frame: Value) {
         self.wake_worker();
         if let Ok(mut subs) = self.inner.subscribers.lock() {
-            subs.retain(|sub| {
+            for sub in subs.extract_if(.., |sub| {
                 let permitted = self
                     .inner
                     .db
                     .transaction(|c| event_allowed(c, &frame, sub.principal.as_ref()))
                     .unwrap_or(false);
                 if !permitted {
+                    return false;
+                }
+                if sub.tx.try_send(frame.clone()).is_err() {
                     return true;
                 }
-                match sub.tx.try_send(frame.clone()) {
-                    Ok(()) => {
-                        sub.wake.notify();
-                        true
-                    }
-                    Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
-                        false
-                    }
-                }
-            });
+                sub.wake.notify();
+                false
+            }) {
+                sub.disconnect();
+            }
         }
     }
     pub fn rpc(

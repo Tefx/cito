@@ -17,6 +17,115 @@ fn wait_for_connection(listener: &impl std::os::fd::AsRawFd) {
     );
 }
 
+// Hold individual health responses to put real stdio clients on opposite sides
+// of a handover, without relying on overlapping process startup timings.
+fn health_probe(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    wait_for_connection(listener);
+    let (stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut headers = BufReader::new(&stream).lines();
+    assert_eq!(headers.next().unwrap().unwrap(), "GET /health HTTP/1.1");
+    while !headers.next().unwrap().unwrap().is_empty() {}
+    stream
+}
+
+fn reply_health(mut connection: std::net::TcpStream, body: &Value) {
+    let body = body.to_string();
+    write!(
+        connection,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+}
+
+fn assert_clients_ready(f: &Fixture, callers: [usize; 2]) {
+    for client in callers {
+        f.send(
+            client,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        );
+        wait(|| {
+            assert!(!f.exited(client), "{}", f.output(client, true));
+            !f.frames(client).is_empty()
+        });
+        assert_eq!(
+            f.frames(client)[0]["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+}
+
+#[test]
+fn cold_start_client_waits_for_peer_after_its_daemon_loses_the_owner_lock() {
+    use std::os::fd::AsRawFd;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let lock = fs::File::create(f.state.join("daemon.lock")).unwrap();
+    lock.try_lock().unwrap();
+    let endpoint = std::net::TcpListener::bind(("127.0.0.1", f.port)).unwrap();
+    let caller = f.spawn(NATIVE, &["mcp-stdio"], &[]);
+    reply_health(health_probe(&endpoint), &Value::Null);
+    // The client and its daemon now both have an outstanding probe. Observe
+    // the actual child's exit before allowing the real peer to take the lock.
+    let pending = [health_probe(&endpoint), health_probe(&endpoint)];
+    let child = f
+        .command_builder("pgrep", &["-P", &f.pid(caller).to_string()])
+        .output()
+        .unwrap();
+    assert!(child.status.success());
+    let pid = std::str::from_utf8(&child.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let exited = cito_native::support::child_exit_fd(pid).unwrap();
+    for stream in pending {
+        reply_health(stream, &Value::Null);
+    }
+    assert!(cito_native::support::poll_until(
+        &mut [libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0
+        }],
+        Some(Instant::now() + Duration::from_secs(2))
+    )
+    .unwrap());
+    reply_health(health_probe(&endpoint), &Value::Null);
+    drop(endpoint);
+    drop(lock);
+    let winner = f.spawn(NATIVE, &["mcp-stdio"], &[]);
+    assert_clients_ready(&f, [caller, winner]);
+}
+
+#[test]
+fn concurrent_stale_handover_keeps_the_peers_current_daemon() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let stale = f.spawn("/bin/sleep", &["20"], &[]);
+    let health = json!({"ok":true,"pid":f.pid(stale),"stateDir":f.state,"version":"0.0.0"});
+    let endpoint = std::net::TcpListener::bind(("127.0.0.1", f.port)).unwrap();
+    let caller = f.spawn(NATIVE, &["mcp-stdio"], &[]);
+    reply_health(health_probe(&endpoint), &health);
+    let revalidation = health_probe(&endpoint);
+    let winner = f.spawn(NATIVE, &["mcp-stdio"], &[]);
+    reply_health(health_probe(&endpoint), &health);
+    let final_stale = health_probe(&endpoint);
+    drop(endpoint);
+    reply_health(final_stale, &health);
+    wait(|| f.exited(stale));
+    wait(|| std::net::TcpStream::connect(("127.0.0.1", f.port)).is_ok());
+    let (_, current) = http(f.port, "/health", None);
+    assert_eq!(current["version"], env!("CARGO_PKG_VERSION"));
+    assert_ne!(current["pid"], health["pid"]);
+    reply_health(revalidation, &current);
+    assert_clients_ready(&f, [caller, winner]);
+    assert_eq!(http(f.port, "/health", None).1["pid"], current["pid"]);
+}
+
 #[test]
 fn claude_wake_distinguishes_session_switch_from_transient_socket_failure() {
     let _lock = serial();
@@ -335,7 +444,7 @@ fn two_unhooked_claude_endpoints_never_adopt_a_shared_workspace_transcript() {
 fn claude_fallback_hook_handoff_and_descendant_session_fence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let ack_server = r#"import http.server,json
+    let ack_server = r#"import http.server,json,socketserver
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_POST(self):
@@ -343,8 +452,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
   print(json.dumps({'ack':req}),flush=True)
   raw=json.dumps({'result':{'content':[{'text':json.dumps({'ok':True,'acknowledged_count':1})}]}}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-s=http.server.HTTPServer(('127.0.0.1',0),Handler)
-print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
+s=socketserver.TCPServer(('127.0.0.1',0),Handler)
+print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
 "#;
     let server = f.spawn("python3", &["-c", ack_server], &[]);
     wait(|| !f.frames(server).is_empty());
@@ -814,7 +923,7 @@ fn claude_hook_only_http_ack_and_shell_cli_keep_transport_pids_out_of_identity()
         fs::read_to_string(&queue).is_ok_and(|text| !text.is_empty())
     });
     // Observe the actual hook HTTP exchange without replacing the daemon ACK path.
-    let proxy = f.spawn("python3", &["-c", r#"import http.server,http.client,json,sys
+    let proxy = f.spawn("python3", &["-c", r#"import http.server,http.client,json,socketserver,sys
 class Proxy(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_POST(self):
@@ -824,8 +933,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
   response=conn.getresponse();data=response.read();conn.close()
   print(json.dumps({'path':self.path,'request':json.loads(body),'status':response.status,'response':json.loads(data)}),flush=True)
   self.send_response(response.status);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(data)
-server=http.server.HTTPServer(('127.0.0.1',0),Proxy)
-print(json.dumps({'port':server.server_port}),flush=True);server.serve_forever()
+server=socketserver.TCPServer(('127.0.0.1',0),Proxy)
+print(json.dumps({'port':server.server_address[1]}),flush=True);server.serve_forever()
 "#, &f.port.to_string()], &[]);
     wait(|| !f.frames(proxy).is_empty());
     let proxy_port = f.frames(proxy)[0]["port"].as_u64().unwrap().to_string();
@@ -3846,7 +3955,7 @@ fn setup_reports_committed_config_after_staging_failure() {
 fn setup_cli_exposes_removal_receipts_and_post_save_reload_errors() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}));
-    let daemon = f.spawn("python3", &["-c", r#"import http.server,json,os,sys
+    let daemon = f.spawn("python3", &["-c", r#"import http.server,json,os,socketserver,sys
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def reply(self,status,obj):
@@ -3856,7 +3965,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
   op=json.loads(self.rfile.read(int(self.headers['Content-Length'])))['op']
   if op=='set_host_hub': self.reply(503,dict(ok=False,error='Reload refused'))
   else: self.reply(200,dict(ok=True,warning=op+' incomplete',warnings=['Remote unavailable'],detach_status='pending'))
-s=http.server.HTTPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
+s=socketserver.TCPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
 "#,env!("CARGO_PKG_VERSION")], &[]);
     wait(|| f.output(daemon, false).contains("ready"));
     for (flag, value, op) in [
@@ -3959,7 +4068,7 @@ for (const reject of [false,true]) {
   let run, shutdown, settle, urls=[], ui=[];
   bridge({on:(name,fn)=>{if(name==='session_shutdown') shutdown=fn},registerCommand:(_,cmd)=>run=cmd.handler});
   const ctx={cwd:'/repo',sessionManager:{getSessionId:()=>'test',getSessionName:()=>'Test'},ui:{notify:(...v)=>ui.push(v),setStatus:(...v)=>ui.push(v)}};
-  globalThis.fetch=(url)=>{urls.push(url);return new Promise((yes,no)=>{settle=()=>reject?no(Error('late failure')):yes(new Response(JSON.stringify({result:{content:[]}})))})};
+  globalThis.fetch=(url)=>{urls.push(url);return new Promise((yes,no)=>{settle=()=>reject?no(Error('late failure')):yes(new Response(JSON.stringify({result:{content:[{type:'text',text:JSON.stringify({listener_id:'test',scope:'self'})}]}})))})};
   for (const invalid of [null,[],0,'text',{daemonPort:0},{daemon_port:65536},{daemonPort:null},{daemon_port:'1234'},{daemonPort:4321,daemon_port:false}]) {
     writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify(invalid));
     const result=run('on',ctx);
@@ -4250,7 +4359,7 @@ fn telegram_oversized_poll_retries_one_update_then_advances_cursor() {
 # usage: python3 -c CODE
 # effects: sandbox-owned loopback HTTP server and JSON request receipts on stdout.
 # requires: Python standard library.
-import http.server,json,threading
+import http.server,json,socketserver
 interrupted=False
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
@@ -4277,8 +4386,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
   self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers()
   try: self.wfile.write(raw)
   except OSError: pass
-server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
-print(json.dumps({'port':server.server_port}),flush=True)
+server=socketserver.ThreadingTCPServer(('127.0.0.1',0),Handler)
+server.daemon_threads = True
+print(json.dumps({'port':server.server_address[1]}),flush=True)
 server.serve_forever()
 "#;
     let server = f.spawn("python3", &["-c", server_code], &[]);

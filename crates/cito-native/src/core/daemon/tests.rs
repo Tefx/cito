@@ -16,6 +16,11 @@ impl TestService {
     fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
         DaemonService::open(config, plugins).map(|service| Self(Some(service)))
     }
+    fn replace_slot(&mut self, client: HubClient) {
+        if let Some(old) = self.slots.insert(client.name.clone(), client) {
+            old.close();
+        }
+    }
     fn into_inner(mut self) -> DaemonService {
         self.0.take().unwrap()
     }
@@ -77,6 +82,7 @@ fn ui_frame_bounds_preserve_cwd_receipt_authority_and_mailbox_liveness() {
     assert!(mailbox.emit(json!({"op":"settings","cwd":"x".repeat(FRAME_LIMIT)})));
     let reduced: Value = serde_json::from_slice(&mailbox.next().unwrap()).unwrap();
     assert_eq!(reduced["truncated"], true);
+    assert_eq!(reduced["truncated_collections"], json!([]));
     assert!(reduced["cwd"].as_str().unwrap().ends_with('…'));
     assert!(!mailbox.closed.load(Ordering::SeqCst));
     mailbox.emit(json!({"op":"state","status":"idle"}));
@@ -556,10 +562,7 @@ fn delayed_remote_account_rpc_allows_local_requests_and_rejects_replaced_authori
         "UPDATE local_listeners SET hub_url=? WHERE hub='work'",
         &[json!(url)],
     )?;
-    s.slots.insert(
-        "work".into(),
-        HubClient::new("work".into(), remote, "alice", None),
-    );
+    s.replace_slot(HubClient::new("work".into(), remote, "alice", None));
     let service = Arc::new(Mutex::new(s.into_inner()));
     let _cleanup = ServiceCleanup {
         service: service.clone(),
@@ -765,7 +768,7 @@ fn mcp_http_releases_service_for_directory_enrollment_publication_and_retirement
         remote.registration = s.state.registration_lock("work")?;
         let principal = remote.identity.clone();
         let engine = s.local.clone();
-        s.slots.insert("work".into(), remote);
+        s.replace_slot(remote);
         let service = Arc::new(Mutex::new(s.into_inner()));
         let _cleanup = ServiceCleanup {
             service: service.clone(),
@@ -1164,14 +1167,65 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
 }
 
 #[test]
-fn ipc_marks_collection_shedding_but_not_display_previews() {
-    for frame in [
-        json!({"op":"state","activity":vec![json!({"message":"short"});81]}),
-        json!({"op":"state","listeners":vec![json!({});65]}),
-    ] {
-        let bytes = ui_ipc::bounded_frame(frame).unwrap();
-        let bounded: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(bounded["truncated"], true);
+fn ipc_marks_only_collections_shed_to_fit_the_wire_budget() {
+    let frame = json!({"op":"state","activity":vec![json!({"message":"short"});81],"listeners":vec![json!({});65]});
+    let bounded: Value = serde_json::from_slice(&bounded_frame(frame).unwrap()).unwrap();
+    assert_eq!(bounded["activity"].as_array().unwrap().len(), 80);
+    assert_eq!(bounded["listeners"].as_array().unwrap().len(), 64);
+    assert!(bounded.get("truncated").is_none());
+    assert!(bounded.get("truncated_collections").is_none());
+
+    // The final newline counts toward the budget. One extra byte sheds the
+    // activity row; peers still fit with the resulting diagnostic fields.
+    let mut edge =
+        json!({"cwd":"", "activity":[{"message":"a".repeat(128)}], "peers":[{"name":"alice"}]});
+    let padding = FRAME_LIMIT - 2 - serde_json::to_vec(&edge).unwrap().len();
+    edge["cwd"] = json!("x".repeat(padding));
+    assert_eq!(
+        bounded_frame(edge.clone()).unwrap(),
+        serde_json::to_vec(&edge).unwrap()
+    );
+    edge["cwd"] = json!("x".repeat(padding + 1));
+    let partial: Value = serde_json::from_slice(&bounded_frame(edge.clone()).unwrap()).unwrap();
+    assert_eq!(partial["truncated"], true);
+    assert_eq!(partial["truncated_collections"], json!(["activity"]));
+    assert_eq!(partial["activity"], json!([]));
+    assert_eq!(partial["peers"], edge["peers"]);
+    assert_eq!(partial["cwd"], edge["cwd"]);
+
+    let keys = [
+        "activity",
+        "peers",
+        "my_remote_listeners",
+        "available",
+        "listeners",
+        "harnesses",
+        "hubs",
+        "apps",
+        "channels",
+    ];
+    let mut frame = json!({"settings":{"hubs":[1]},"cwd":"x".repeat(FRAME_LIMIT)});
+    for key in keys {
+        let root = if matches!(key, "apps" | "channels") {
+            &mut frame["settings"]
+        } else {
+            &mut frame
+        };
+        root[key] = json!([1, 2]);
+    }
+    let bytes = bounded_frame(frame).unwrap();
+    assert!(bytes.len() + 1 < FRAME_LIMIT);
+    let bounded: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(bounded["truncated"], true);
+    let mut shed = keys.to_vec();
+    shed.push("settings.hubs");
+    assert_eq!(bounded["truncated_collections"], json!(shed));
+    assert_eq!(bounded["settings"]["hubs"], json!([]));
+    for key in keys {
+        assert_eq!(
+            bounded.get(key).unwrap_or(&bounded["settings"][key]),
+            &json!([])
+        );
     }
     let bounded: Value = serde_json::from_slice(
         &ui_ipc::bounded_frame(json!({"op":"state","activity":[{"message":"x".repeat(513)}],"listeners":[{"cwd":"x".repeat(129),"title":"x".repeat(513),"about":"x".repeat(257)}]})).unwrap(),
@@ -1181,6 +1235,7 @@ fn ipc_marks_collection_shedding_but_not_display_previews() {
 }
 
 fn settle_setup_inspections(service: &mut DaemonService) {
+    service.refresh_setup_inspections();
     let deadline = Instant::now() + Duration::from_secs(3);
     while service
         .setup_inspections
@@ -1191,6 +1246,129 @@ fn settle_setup_inspections(service: &mut DaemonService) {
         service.refresh_setup_inspections();
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+fn take_state_frame(ui: &UiMailbox) -> Value {
+    ui.pending
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(|(_, bytes)| serde_json::from_slice::<Value>(&bytes).unwrap())
+        .rfind(|frame| frame["op"] == "state")
+        .expect("Missing state frame")
+}
+
+#[test]
+fn background_push_projects_current_human_channels_and_complete_ordered_hubs() -> Result<(), String>
+{
+    let mut fixture = event_tests::Fixture::new()?;
+    let service = &mut fixture.service;
+    service.mutate_config(|raw| {
+        raw["hubs"]["archive"] = json!({"url":"local://","enabled":false});
+        raw["hubs"]["work"]["redirect_port"] = json!(4321);
+        Ok(())
+    })?;
+    service.reload_slots()?;
+    let ui = Arc::new(UiMailbox::default());
+    service.ui = Some(ui.clone());
+    service.push_ui();
+    let initial = take_state_frame(&ui);
+    let names = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&initial["settings"]["hubs"]),
+        ["archive", "local", "work"]
+    );
+    assert_eq!(names(&initial["hubs"]), ["local", "work"]);
+    assert_eq!(initial["hubs"][1]["redirect_port"], 4321);
+    let channels = |frame: &Value| {
+        frame["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hub"] == "work" && r["harness"] == "human")
+            .unwrap()["channels"]
+            .clone()
+    };
+    assert_ne!(channels(&initial), json!(["Laptop"]));
+    service.slot("work")?.human_request("human_device_attach", &json!({"channel_id":"second:human","host_id":"second","host_name":"Laptop","binding_generation":1,"owner_token":"fixture"}))?;
+    service.push_ui();
+    let status = take_state_frame(&ui);
+    let full = service.snapshot()?;
+    assert!(status.get("settings").is_none());
+    for frame in [&status, &full] {
+        assert!(frame.get("sessions").is_none());
+        assert_eq!(channels(frame), json!(["Laptop"]));
+    }
+    assert_eq!(status["hubs"], full["hubs"]);
+    assert_eq!(
+        status["hubs"].as_array().unwrap(),
+        &full["settings"]["hubs"].as_array().unwrap()[1..]
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_completion_invalidates_discovery_and_app_action_invalidates_settings() -> Result<(), String>
+{
+    let mut fixture = event_tests::Fixture::new()?;
+    let service = &mut fixture.service;
+    service.refresh_available()?;
+    for slot in service.slots.values() {
+        slot.close();
+    }
+    for event in service.events.drain(..) {
+        event.join().unwrap();
+    }
+    let ui = Arc::new(UiMailbox::default());
+    service.ui = Some(ui.clone());
+    service.push_ui();
+    let initial = take_state_frame(&ui);
+    for key in ["available", "discovery"] {
+        assert_eq!(initial[key][0]["harness"], "agent", "{initial}");
+    }
+    fs::write(
+        service.config.config_path.with_file_name("unconfigured"),
+        "",
+    )
+    .unwrap();
+    service.invalidate_setup("agent");
+    settle_setup_inspections(service);
+    service.push_ui();
+    let closed = take_state_frame(&ui);
+    assert!(closed.get("settings").is_none());
+    for key in ["available", "discovery"] {
+        assert_eq!(closed[key], json!([]));
+    }
+    service.state.db.execute(
+        "UPDATE local_listeners SET title='Updated' WHERE harness='human'",
+        &[],
+    )?;
+    service.push_ui();
+    assert_eq!(take_state_frame(&ui)["available"], json!([]));
+    service.menu_open = true;
+    service.push_ui();
+    take_state_frame(&ui);
+    service
+        .last_app_action
+        .insert("agent".into(), "disconnect".into());
+    service.push_ui();
+    let frame = take_state_frame(&ui);
+    let app = frame["settings"]["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "agent")
+        .unwrap();
+    assert!(string(app, "detail").contains("Disconnected"));
+    service.push_ui();
+    assert!(ui.pending.lock().unwrap().is_empty());
+    Ok(())
 }
 
 #[test]
@@ -1257,6 +1435,189 @@ fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profi
         Ok(())
     })();
     result
+}
+
+fn poll_config(dir: &TestDirectory, profile: Value) -> NativeConfig {
+    fs::create_dir_all(dir.join("home")).unwrap();
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, profile.to_string()).unwrap();
+    config
+}
+
+#[test]
+fn poll_skips_contended_enrollment_without_delaying_directory_or_next_enrollment(
+) -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-poll-lock-{}", random_uuid_v4())));
+    let config = poll_config(&dir, json!({}));
+    let mut service = TestService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    let slot = service.slot("local")?.clone();
+    let row = service.state.active()?.pop().unwrap();
+    let id = string(&row, "listener_id");
+    service.state.db.execute(
+        "DELETE FROM local_listeners WHERE listener_id=?",
+        &[json!(id)],
+    )?;
+    // Change the Hub directly so only a directory read can populate this client's cache.
+    service.local.rpc("human_device_attach", &json!({"channel_id":"second:human","host_id":"second","host_name":"Laptop","binding_generation":1,"owner_token":"fixture"}), Some(&slot.identity))?;
+    let observed = || {
+        slot.cached_directory()
+            .iter()
+            .any(|r| r["channels"]["second:human"].is_object())
+    };
+    assert!(!observed());
+    thread::scope(|scope| -> Result<(), String> {
+        let guard = slot.registration.lock().unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+        let service = &mut *service;
+        scope.spawn(move || {
+            let _ = finished.send(service.poll());
+        });
+        result
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|_| "Poll waited for enrollment")??;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !observed() {
+            assert!(
+                Instant::now() < deadline,
+                "Directory RPC stalled behind enrollment"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            slot.kv_get(id)?.unwrap().0["channels"][format!("{}:human", string(&row, "host_id"))]
+                ["binding_generation"],
+            row["binding_generation"]
+        );
+        drop(guard);
+        Ok(())
+    })?;
+    assert!(service.state.listener("local", id)?.is_none());
+    // No backoff: the first uncontended poll may enroll immediately.
+    if let Some(worker) = service.receivers.remove("directory:local") {
+        worker.join().unwrap();
+    }
+    service.poll()?;
+    assert_eq!(
+        service.state.listener("local", id)?.unwrap()["status"],
+        "ACTIVE"
+    );
+    Ok(())
+}
+
+#[test]
+fn poll_dispatches_due_wake_retry_without_live_sse() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-poll-wake-{}", random_uuid_v4())));
+    let engine = TestEngine(HubEngine::open(&dir.join("hub"))?);
+    let server = engine.start_server(
+        "127.0.0.1",
+        0,
+        crate::core::auth::HubAuth::new("none", None, None, None)?,
+    )?;
+    let config = poll_config(
+        &dir,
+        json!({"hubs":{"work":{"url":format!("http://{}",server.address)}}}),
+    );
+    let provider = dir.join("fixture");
+    fs::create_dir_all(&provider).unwrap();
+    fs::write(provider.join("plugin.json"), json!({"id":"fixture","kind":"agent","displayName":"Fixture","command":["python3","-c","import json,sys; r=json.load(sys.stdin); print(json.dumps({'ok':True,'outcome':'delivered'} if r.get('queue_written') else {'ok':True,'queue_written':True,'continue_wake':True}))"]}).to_string()).unwrap();
+    let mut service = TestService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![crate::plugins::parse_manifest_dir(&provider, false)?],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    if let Some(worker) = service.receivers.remove("auto:work") {
+        worker.join().unwrap();
+    }
+    // Model a disconnected stream while preserving the real HTTP/RPC Hub and its bindings.
+    let old = service.slot("work")?.clone();
+    let mut slot = HubClient::new(old.name.clone(), old.config.clone(), "alice", None);
+    slot.registration = old.registration;
+    service.replace_slot(slot.clone());
+    let binding = service.listen(
+        "work",
+        &json!({"about":"Retry test"}),
+        &json!({"harness":"fixture","session_id":"review"}),
+    )?;
+    let id = string(&binding, "canonical_listener_id");
+    let key = format!("work:{id}");
+    let sent = service.tool(
+        "cito_send",
+        &json!({"to":format!("work:{id}"),"message":"Wake once"}),
+        &json!({}),
+    )?;
+    assert_eq!(sent["ok"], true, "{sent}");
+    service.poll()?;
+    service
+        .receivers
+        .remove(&key)
+        .expect("initial receiver")
+        .join()
+        .unwrap();
+    let rows = || {
+        service.state.db.query(
+            "SELECT state,queue_written FROM local_signals WHERE hub='work' AND listener_id=?",
+            &[json!(id)],
+        )
+    };
+    assert_eq!(rows()?, [json!({"state":"DISPATCHING","queue_written":1})]);
+    assert_eq!(slot.capabilities()["sse_live"], false);
+    let set_due = |state: &LocalState, due| -> Result<(), String> {
+        assert_eq!(
+            state.db.execute(
+                "UPDATE wake_retries SET retry_at_ms=? WHERE hub='work' AND listener_id=?",
+                &[json!(due), json!(id)]
+            )?,
+            1
+        );
+        Ok(())
+    };
+    set_due(&service.state, now_ms() + 60_000)?;
+    service.poll()?;
+    assert!(
+        !service.receivers.contains_key(&key),
+        "Regular interval and retry are not due"
+    );
+    set_due(&service.state, 0)?;
+    service.poll()?;
+    service
+        .receivers
+        .remove(&key)
+        .expect("due retry receiver")
+        .join()
+        .unwrap();
+    assert_eq!(
+        service.state.db.query(
+            "SELECT state FROM local_signals WHERE hub='work' AND listener_id=?",
+            &[json!(id)]
+        )?,
+        [json!({"state":"DISPATCHED"})]
+    );
+    assert!(service
+        .state
+        .db
+        .query(
+            "SELECT 1 FROM wake_retries WHERE hub='work' AND listener_id=?",
+            &[json!(id)]
+        )?
+        .is_empty());
+    Ok(())
 }
 
 #[test]
@@ -1821,7 +2182,7 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
     service
         .channel_inventories
         .insert("work".into(), inventory.clone());
-    service.slots.insert("work".into(), old);
+    service.replace_slot(old);
     service
         .receivers
         .insert("auto:work".into(), thread::spawn(|| {}));
@@ -2669,15 +3030,12 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
                 .execute(&s.access)
         };
         let fanout_result = (|| -> Result<(), String> {
-            service.slots.insert(
+            service.replace_slot(HubClient::new(
                 "work".into(),
-                HubClient::new(
-                    "work".into(),
-                    json!({"url":"local://"}),
-                    "alice",
-                    Some(Arc::new(other.clone())),
-                ),
-            );
+                json!({"url":"local://"}),
+                "alice",
+                Some(Arc::new(other.clone())),
+            ));
             service
                 .slots
                 .get_mut("work")
@@ -3596,9 +3954,7 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         service
             .channel_inventories
             .insert("local".into(), inventory);
-        if let Some(old) = service.slots.insert("local".into(), remote) {
-            old.close();
-        }
+        service.replace_slot(remote);
         assert_eq!(
             service.human_projection("local")["human_state_status"],
             "unknown"
@@ -3765,6 +4121,17 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             assert_eq!(service.host_server.as_ref().unwrap().address, address);
             rpc(address, "previous-token")?;
 
+            // An unchanged profile still has to recover a listener that has exited.
+            let stopped = service.host_server.as_ref().unwrap();
+            stopped.shutdown();
+            assert!(!stopped.is_running());
+            assert_eq!(service.settings()["host_hub"]["running"], false);
+            assert!(TcpStream::connect(address).is_err());
+            service.sync_host_hub()?;
+            assert!(service.host_server.as_ref().unwrap().is_running());
+            assert_eq!(service.settings()["host_hub"]["running"], true);
+            rpc(address, "previous-token")?;
+
             // A write failure after binding must restore the old socket and credentials.
             // Obstruct the publication lock, independent of exclusive temporary names.
             let mut lock_name = config.config_path.as_os_str().to_os_string();
@@ -3917,17 +4284,16 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         let active = service.state.active()?;
         assert!(!active.is_empty());
         let snapshot = service.snapshot()?;
-        for key in ["listeners", "sessions"] {
-            assert!(!snapshot[key].as_array().unwrap().is_empty());
-            for row in snapshot[key].as_array().unwrap() {
-                assert!(row.get("owner_token").is_none());
-                assert!(row.get("dispatcher_token").is_none());
-                assert!(row.get("hub_url").is_none());
-                assert_eq!(row["is_self_principal"], true);
-                assert_eq!(row["can_set_scope"], false);
-                for control in ["can_pin", "can_rename", "can_stop"] {
-                    assert_eq!(row[control], row["harness"] != "human", "{row}");
-                }
+        let listeners = snapshot["listeners"].as_array().unwrap();
+        assert!(!listeners.is_empty());
+        for row in listeners {
+            assert!(row.get("owner_token").is_none());
+            assert!(row.get("dispatcher_token").is_none());
+            assert!(row.get("hub_url").is_none());
+            assert_eq!(row["is_self_principal"], true);
+            assert_eq!(row["can_set_scope"], false);
+            for control in ["can_pin", "can_rename", "can_stop"] {
+                assert_eq!(row[control], row["harness"] != "human", "{row}");
             }
         }
         for hubs in [&snapshot["hubs"], &snapshot["settings"]["hubs"]] {
@@ -4173,7 +4539,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
             .to_string(),
     )
     .map_err(|e| e.to_string())?;
-    service.slots.insert("work".into(), client.clone());
+    service.replace_slot(client.clone());
     let snapshot = service.snapshot()?;
     let hub = snapshot["hubs"]
         .as_array()
@@ -4292,6 +4658,7 @@ fn channel_inventory_diagnostic_survives_collection_shedding() -> Result<(), Str
     assert!(bytes.len() < FRAME_LIMIT);
     let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     assert_eq!(frame["truncated"], true);
+    assert_eq!(frame["truncated_collections"], json!(["channels"]));
     assert_eq!(
         frame["settings"]["channel_inventory_error"],
         "Inventory unavailable"
