@@ -17,6 +17,17 @@ fn wait_for_connection(listener: &impl std::os::fd::AsRawFd) {
     );
 }
 
+fn bridge_request(listener: &UnixListener) -> (std::os::unix::net::UnixStream, Value) {
+    wait_for_connection(listener);
+    let (stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line).unwrap();
+    (stream, serde_json::from_str(&line).unwrap())
+}
+
 // Hold individual health responses to put real stdio clients on opposite sides
 // of a handover, without relying on overlapping process startup timings.
 fn health_probe(listener: &std::net::TcpListener) -> std::net::TcpStream {
@@ -1071,7 +1082,6 @@ finally:
 
 #[test]
 fn live_bridge_rejections_survive_identification_and_wake() {
-    use std::io::{BufRead, BufReader, Write};
     let _lock = serial();
     let f = Fixture::new(json!({}));
     fs::create_dir_all(f.state.join("sockets")).unwrap();
@@ -1083,33 +1093,16 @@ fn live_bridge_rejections_survive_identification_and_wake() {
         let endpoint = f.pid(process);
         let path = f.state.join(format!("sockets/{id}-pid-{endpoint}.sock"));
         let listener = UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-            let mut count = 0;
-            while count < if id == "pi" { 5 } else { 2 } && std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                            .unwrap();
-                        let mut line = String::new();
-                        BufReader::new(stream.try_clone().unwrap())
-                            .read_line(&mut line)
-                            .unwrap();
-                        let response = if count == 4 {
-                            json!({"ok":true})
-                        } else {
-                            json!({"ok":false,"error_code":"BRIDGE_REJECTED","message":"Session is unavailable"})
-                        };
-                        writeln!(stream, "{response}").unwrap();
-                        count += 1;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(2))
-                    }
-                    Err(e) => panic!("{e}"),
-                }
+            let count = if id == "pi" { 5 } else { 2 };
+            for index in 0..count {
+                let (mut stream, _) = bridge_request(&listener);
+                let response = if index == 4 {
+                    json!({"ok":true})
+                } else {
+                    json!({"ok":false,"error_code":"BRIDGE_REJECTED","message":"Session is unavailable"})
+                };
+                writeln!(stream, "{response}").unwrap();
             }
             count
         });
@@ -1310,31 +1303,9 @@ fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
     fs::create_dir_all(f.state.join("sockets")).unwrap();
     let listener =
         UnixListener::bind(f.state.join(format!("sockets/claude-pid-{pid}.sock"))).unwrap();
-    listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(4);
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                        .unwrap();
-                    let mut line = String::new();
-                    BufReader::new(stream.try_clone().unwrap())
-                        .read_line(&mut line)
-                        .unwrap();
-                    writeln!(stream, "{}", json!({"ok":false,"message":"Session closed"})).unwrap();
-                    break;
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < until =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(2))
-                }
-                Err(error) => panic!("Socket fixture: {error}"),
-            }
-        }
+        let (mut stream, _) = bridge_request(&listener);
+        writeln!(stream, "{}", json!({"ok":false,"message":"Session closed"})).unwrap();
     });
     let rejected = f.plugin(CLAUDE, request);
     server.join().unwrap();
@@ -1350,7 +1321,6 @@ fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
 
 #[test]
 fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
-    use std::io::{BufRead, BufReader, Write};
     let _lock = serial();
     let f = Fixture::new(json!({}));
     fs::create_dir_all(f.state.join("sockets")).unwrap();
@@ -1379,33 +1349,18 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         };
         let path = f.state.join(format!("sockets/{id}-pid-{pid}.sock"));
         let listener = UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            for turn in 0..4 {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(pair) => break pair,
-                        Err(e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                && std::time::Instant::now() < deadline =>
-                        {
-                            std::thread::sleep(std::time::Duration::from_millis(2))
-                        }
-                        Err(e) => panic!("Socket fixture: {e}"),
-                    }
-                };
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                    .unwrap();
-                let mut line = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut line)
-                    .unwrap();
-                match turn {
-                    0 => writeln!(stream,"{}",json!({"ok":true,"session_id":published,"cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
-                    1 | 3 => { let _ = release_rx.recv_timeout(std::time::Duration::from_secs(4)); },
+            let responses = if id == "pi" {
+                &['Y', 'T', 'T', 'N', 'T'][..]
+            } else {
+                &['Y', 'T', 'N', 'T'][..]
+            };
+            for response in responses {
+                let (mut stream, _) = bridge_request(&listener);
+                match response {
+                    'Y' => writeln!(stream,"{}",json!({"ok":true,"session_id":published,"cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
+                    'T' => { let _ = release_rx.recv_timeout(std::time::Duration::from_secs(4)); },
                     _ => writeln!(stream,"{}",json!({"ok":false,"message":"Session closed"})).unwrap(),
                 }
             }
@@ -1421,6 +1376,15 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         assert_eq!(slow["sessions"][0]["session_id"], published, "{id}: {slow}");
         assert_eq!(slow["sessions"][0]["updated_at_ms"], 1000);
         assert_ne!(slow["sessions"][0]["needs_reload"], true);
+        if id == "pi" {
+            let probe = f.plugin(
+                bin,
+                json!({"op":"probe","endpoint_pid":pid,"session_id":published}),
+            );
+            release_tx.send(()).unwrap();
+            assert_eq!(probe["status"], "alive", "{probe}");
+            assert_eq!(probe["current_session_id"], published);
+        }
         let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
         assert_eq!(
             rejected["sessions"],
@@ -1535,36 +1499,10 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         }
         fs::remove_file(&live).unwrap();
         let listener = UnixListener::bind(&live).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-            loop {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                            .unwrap();
-                        let mut line = String::new();
-                        BufReader::new(stream.try_clone().unwrap())
-                            .read_line(&mut line)
-                            .unwrap();
-                        assert_eq!(
-                            serde_json::from_str::<Value>(&line).unwrap()["op"],
-                            "identify"
-                        );
-                        stream.write_all(b"{\"ok\":false,\"error\":\"DELIVERY_FAILED\",\"message\":\"Cannot persist bridge identity\"}\n").unwrap();
-                        break;
-                    }
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            && std::time::Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(5))
-                    }
-                    Err(error) => panic!("Bridge fixture accept failed: {error}"),
-                }
-            }
+            let (mut stream, request) = bridge_request(&listener);
+            assert_eq!(request["op"], "identify");
+            stream.write_all(b"{\"ok\":false,\"error\":\"DELIVERY_FAILED\",\"message\":\"Cannot persist bridge identity\"}\n").unwrap();
         });
         let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
         server.join().unwrap();
@@ -3730,7 +3668,7 @@ fn setup_status_exposes_top_level_inspection_failure_in_both_formats() {
 fn setup_reports_only_committed_config_on_disconnect_apply_and_login_failure() {
     let _lock = serial();
     let before = br#"{"host_hub":{"enabled":true,"port":4291}}"#;
-    let saved = format!("{}\n", serde_json::to_string_pretty(&json!({"default_hub":"local", "hubs":{"local":{"url":"local://","natsUrl":"local://","authMode":"none","enabled":true,"defaultScope":"workspace"}}, "host_hub":{"enabled":false,"port":4291}})).unwrap());
+    let saved = format!("{}\n", serde_json::to_string_pretty(&json!({"default_hub":"local", "hubs":{"local":{"url":"local://","natsUrl":"local://","authMode":"none","enabled":true,"defaultScope":"workspace"}}, "host_hub":{"enabled":false,"port":4291,"bind":"0.0.0.0"}})).unwrap());
     for (operation, state, failure) in [
         ("--disable", "created", "Invalid host-id UUID"),
         ("--enable", "updated", "Sample setup refused"),
@@ -3808,12 +3746,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def reply(self,status,obj):
   raw=json.dumps(obj).encode();self.send_response(status);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
- def do_GET(self): self.reply(200,dict(ok=True,pid=os.getpid(),stateDir=os.environ['CITO_STATE_DIR'],version=sys.argv[1]))
+ def do_GET(self): self.reply(200,dict(ok=True,pid=os.getpid(),stateDir=os.environ['CITO_STATE_DIR'],version='0.0.0' if os.path.exists('stale') else sys.argv[1]))
  def do_POST(self):
   op=json.loads(self.rfile.read(int(self.headers['Content-Length'])))['op']
-  if op=='set_host_hub': self.reply(503,dict(ok=False,error='Reload refused'))
+  if op=='refresh_available':
+   print(op, flush=True); self.reply(200,dict(ok=True))
+  elif op=='set_host_hub': self.reply(503,dict(ok=False,error='Reload refused'))
   else: self.reply(200,dict(ok=True,warning=op+' incomplete',warnings=['Remote unavailable'],detach_status='pending'))
-s=socketserver.TCPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
+s=http.server.HTTPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
 "#,env!("CARGO_PKG_VERSION")], &[]);
     wait(|| f.output(daemon, false).contains("ready"));
     for (flag, value, op) in [
@@ -3835,6 +3775,15 @@ s=socketserver.TCPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handl
             "{receipt}"
         );
     }
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.output(daemon, false)
+            .lines()
+            .filter(|line| *line == "refresh_available")
+            .count(),
+        3
+    );
     let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3021"], "");
     assert!(
         !ok && err.contains("Configuration saved") && err.contains("Reload refused"),
@@ -3842,6 +3791,226 @@ s=socketserver.TCPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handl
     );
     let config: Value = read_json(&f.config);
     assert_eq!(config["host_hub"]["port"], 3021);
+
+    fs::write(f.dir.join("stale"), "").unwrap();
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--build-app", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert!(f.exited(daemon));
+    assert_eq!(
+        http(f.port, "/health", None).1["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+#[test]
+fn malformed_config_does_not_prevent_uninstall_or_purge() {
+    let _lock = serial();
+    for purge in [false, true] {
+        let f = Fixture::new(json!({}));
+        fs::write(&f.config, "{invalid").unwrap();
+        fs::create_dir_all(f.state.join("bin")).unwrap();
+        fs::write(f.state.join("bin/cito-mcp"), "shim").unwrap();
+        let mut args = vec!["setup", "--uninstall", "--json"];
+        if purge {
+            args.push("--purge-data");
+        }
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(ok, "{out} {err}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["defaultHub"],
+            "local"
+        );
+        assert!(!f.state.join("bin/cito-mcp").exists());
+        assert_eq!(f.config.exists(), !purge);
+        if !purge {
+            assert_eq!(fs::read(&f.config).unwrap(), b"{invalid");
+        }
+    }
+}
+
+#[test]
+fn offline_disconnect_removes_integrations_and_only_purge_resets_damaged_profiles() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = serial();
+    for unreadable in [false, true] {
+        for purge in [false, true] {
+            let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"}}}));
+            if unreadable {
+                let meta = f.provider("delivered");
+                let daemon = f.daemon(&[]);
+                f.tool("cito_listen", json!({"about":"Offline disconnect"}), meta);
+                assert!(!f
+                    .rows(
+                        "SELECT 1 FROM local_listeners WHERE harness!='human' AND status='ACTIVE'"
+                    )
+                    .is_empty());
+                f.signal(daemon, libc::SIGTERM);
+                wait(|| f.exited(daemon));
+            }
+            assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+            assert_eq!(
+                f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+                true
+            );
+            fs::write(f.state.join("keep"), "unrelated").unwrap();
+            fs::write(f.state.join("oidc-token-work.json"), "cached").unwrap();
+            if !unreadable {
+                fs::write(&f.config, "{invalid").unwrap();
+            }
+            let original = fs::read(&f.config).unwrap();
+            if unreadable {
+                fs::set_permissions(&f.config, fs::Permissions::from_mode(0o000)).unwrap();
+                assert_eq!(
+                    fs::read(&f.config).unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+            let mut args = vec!["setup", "--disconnect-all", "--json"];
+            if purge {
+                args.push("--purge-data");
+            }
+            let (ok, out, err) = f.command(NATIVE, &args, "");
+            assert!(ok, "unreadable={unreadable} purge={purge}: {out} {err}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&out).unwrap()["committed"],
+                true
+            );
+            assert_eq!(
+                f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+                false
+            );
+            assert_eq!(fs::read(f.state.join("keep")).unwrap(), b"unrelated");
+            assert_eq!(f.state.join("oidc-token-work.json").exists(), !purge);
+            if unreadable {
+                assert!(f
+                    .rows(
+                        "SELECT 1 FROM local_listeners WHERE harness!='human' AND status='ACTIVE'"
+                    )
+                    .is_empty());
+                assert_eq!(
+                    f.rows("SELECT 1 FROM local_listeners WHERE harness='human'")
+                        .is_empty(),
+                    purge
+                );
+                assert_eq!(
+                    f.rows("SELECT 1 FROM pending_hub_detaches").is_empty(),
+                    purge
+                );
+                assert_eq!(
+                    f.db("hub.sqlite")
+                        .query("SELECT 1 FROM hub_kv", &[])
+                        .unwrap()
+                        .is_empty(),
+                    purge
+                );
+            }
+            if purge {
+                assert_eq!(
+                    read_json(&f.config),
+                    json!({"default_hub":"local","hubs":{},"host_hub":{"enabled":false}})
+                );
+            } else {
+                if unreadable {
+                    assert_eq!(
+                        fs::metadata(&f.config).unwrap().permissions().mode() & 0o777,
+                        0
+                    );
+                    fs::set_permissions(&f.config, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                assert_eq!(fs::read(&f.config).unwrap(), original);
+            }
+        }
+    }
+}
+
+#[test]
+fn offline_disconnect_refuses_foreign_endpoint_and_concurrent_config_replacement() {
+    use std::os::fd::AsRawFd;
+    let _lock = serial();
+    let foreign = Fixture::new(json!({}));
+    let daemon = foreign.daemon(&[]);
+    let mut f = Fixture::new(json!({}));
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+    // A damaged Hub map can still identify a live endpoint in the same file.
+    let damaged = json!({"hubs":false,"daemonPort":foreign.port}).to_string();
+    fs::write(&f.config, &damaged).unwrap();
+    let args = ["setup", "--disconnect-all", "--purge-data", "--json"];
+    f.env.remove("CITO_DAEMON_PORT");
+    let (ok, _, err) = f.command(NATIVE, &args, "");
+    assert!(!ok && err.contains("daemon endpoint"), "{err}");
+    assert!(!foreign.exited(daemon));
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+        true
+    );
+    assert_eq!(fs::read_to_string(&f.config).unwrap(), damaged);
+
+    f.env.insert("CITO_DAEMON_PORT".into(), f.port.to_string());
+    let writer =
+        cito_native::support::FileLock::acquire(&f.state.join("config.json.lock")).unwrap();
+    let child = f.spawn(NATIVE, &args, &[]);
+    wait(|| {
+        fs::File::open(f.state.join("daemon.lock")).is_ok_and(|file| {
+            // SAFETY: closing the descriptor releases any probe lock.
+            (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }) != 0
+        })
+    });
+    let replacement = br#"{"user":"bob"}"#;
+    cito_native::support::atomic_write(&f.config, replacement).unwrap();
+    drop(writer);
+    wait(|| f.exited(child));
+    assert!(f.output(child, true).contains("Configuration changed"));
+    assert_eq!(fs::read(&f.config).unwrap(), replacement);
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+        true
+    );
+}
+
+#[test]
+fn malformed_config_does_not_prevent_disconnect_from_running_daemon() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let daemon = f.daemon(&[]);
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+    fs::write(&f.config, "{invalid").unwrap();
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--disconnect-all", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+        false
+    );
+    assert!(!f.exited(daemon));
+    assert_eq!(fs::read(&f.config).unwrap(), b"{invalid");
+
+    // The daemon must also retire integrations when it can stat the profile
+    // but cannot read it. Disconnect alone must leave its bytes and mode intact.
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+    fs::set_permissions(&f.config, fs::Permissions::from_mode(0o000)).unwrap();
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--disconnect-all", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+        false
+    );
+    assert_eq!(
+        fs::metadata(&f.config).unwrap().permissions().mode() & 0o777,
+        0
+    );
+    fs::set_permissions(&f.config, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read(&f.config).unwrap(), b"{invalid");
+
+    fs::write(f.state.join("oidc-token-work.json"), "obsolete").unwrap();
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &["setup", "--disconnect-all", "--purge-data", "--json"],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    assert_eq!(read_json(&f.config)["default_hub"], "local");
+    assert!(!f.state.join("oidc-token-work.json").exists());
+    assert!(!f.exited(daemon));
 }
 
 #[test]

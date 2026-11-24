@@ -245,40 +245,32 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     }
     Ok(())
 }
-fn socket_candidates(req: &Value, searched: Option<&[u32]>) -> Result<Vec<(u32, Value)>> {
+fn cached_session(req: &Value, p: u32) -> Result<Value> {
+    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
+    let identity = process_identity(p)?;
+    if cached["identity"] != identity
+        || !matches_process(str_at(&identity, "command").unwrap_or(""))
+    {
+        return Err("Endpoint identity changed".into());
+    }
+    Ok(cached["session"].clone())
+}
+fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
     let request = req.clone();
-    let searched = searched.map(<[u32]>::to_vec);
     inspect_socket_endpoints(req, "pi-pid-", move |p, _| {
-        if searched.as_ref().is_some_and(|pids| !pids.contains(&p)) {
-            return None;
-        }
         let req = &request;
         let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
-        let response = socket_response_or_cached(identify(req, p), p, || {
-            let cached = read_json(&cache_path)?;
-            let identity = process_identity(p)?;
-            if cached["identity"] != identity
-                || !matches_process(str_at(&identity, "command").unwrap_or(""))
-            {
-                return Err("Endpoint identity changed".into());
-            }
-            Ok(cached["session"].clone())
-        });
-        let response = match response {
-            Ok(v) => {
-                if v["ok"] == true {
-                    if let Ok(identity) = process_identity(p) {
-                        let entry = json!({"identity":identity,"session":v});
-                        if read_json(&cache_path).ok().as_ref() != Some(&entry) {
-                            let _ = atomic_write(&cache_path, entry.to_string().as_bytes());
-                        }
-                    }
+        let reply = identify(req, p);
+        let live = reply.is_ok();
+        let v = socket_response_or_cached(reply, p, || cached_session(req, p)).ok()?;
+        if live && v["ok"] == true {
+            if let Ok(identity) = process_identity(p) {
+                let entry = json!({"identity":identity,"session":v});
+                if read_json(&cache_path).ok().as_ref() != Some(&entry) {
+                    let _ = atomic_write(&cache_path, entry.to_string().as_bytes());
                 }
-                Ok(v)
             }
-            Err(error) => Err(error),
-        };
-        let v = response.ok()?;
+        }
         (v["ok"] == true
             && interactive_candidate(req, p).unwrap_or(false)
             && raw_str_at(&v, "session_id").is_some()
@@ -289,7 +281,7 @@ fn socket_candidates(req: &Value, searched: Option<&[u32]>) -> Result<Vec<(u32, 
 type Candidates = (Vec<(u32, Value)>, bool, Option<String>);
 fn candidates(req: &Value) -> Result<Candidates> {
     let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
-    if resolve || pid(req).is_some() {
+    if resolve || req["op"] == "probe" || pid(req).is_some() {
         let roots = if resolve {
             caller_pid_roots(req).unwrap_or_default()
         } else {
@@ -299,51 +291,44 @@ fn candidates(req: &Value) -> Result<Candidates> {
         let mut searched = Vec::new();
         for p in endpoint_pid_walk(roots, if resolve { 5 } else { 0 }, matches_process) {
             searched.push(p);
-            if let Ok(v) = identify(req, p) {
-                responded = true;
-                if v["ok"] != true {
+            let reply = identify(req, p);
+            let live = reply.is_ok();
+            let bridge = live || state(req).join(format!("sockets/pi-pid-{p}.sock")).exists();
+            let response = if bridge {
+                socket_response_or_cached(reply, p, || cached_session(req, p))
+            } else if req["op"] == "probe" && allow_process_only(req) {
+                let mut inspection = req.clone();
+                inspection["op"] = json!("setup_inspect");
+                if setup(&inspection)?["configured"] == true {
+                    cached_session(req, p)
+                } else {
+                    reply
+                }
+            } else {
+                reply
+            };
+            if let Ok(v) = response {
+                responded |= live;
+                if live && v["ok"] != true {
                     return Ok((
                         vec![],
                         true,
                         Some(response_diagnostic(&v, "Pi bridge rejected identification")),
                     ));
                 }
-                if v["ok"] == true
+                if (v["ok"] == true || (!bridge && v.get("ok").is_none()))
                     && raw_str_at(&v, "session_id").is_some()
                     && str_at(&v, "cwd").is_some()
                     && v.get("pi_pid")
                         .is_none_or(|id| id.as_u64() == Some(p as u64))
                 {
-                    return Ok((vec![(p, v)], true, None));
+                    return Ok((vec![(p, v)], live, None));
                 }
             }
         }
-        if !resolve && req["op"] == "probe" {
-            let mut inspection = req.clone();
-            inspection["op"] = json!("setup_inspect");
-            let configured = setup(&inspection)?["configured"] == true;
-            let cached = pid(req)
-                .filter(|p| {
-                    configured
-                        && allow_process_only(req)
-                        && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
-                })
-                .and_then(|p| {
-                    let cached =
-                        read_json(&state(req).join(format!("pi/endpoints/{p}.json"))).ok()?;
-                    let identity = process_identity(p).ok()?;
-                    (cached["identity"] == identity
-                        && matches_process(str_at(&identity, "command").unwrap_or("")))
-                    .then_some((p, cached["session"].clone()))
-                })
-                .into_iter()
-                .collect();
-            return Ok((cached, responded, None));
-        }
         // A responding bridge with no open session must not be bypassed.
         let mut live = vec![];
-        if !responded && !searched.is_empty() {
-            live = socket_candidates(req, Some(&searched))?;
+        if req["op"] != "probe" && !responded && !searched.is_empty() {
             process_candidates(req, &mut live)?;
             // Prefer the nearest caller ancestor, just as socket resolution does.
             // An explicit endpoint must not become ambiguous with its host ancestors.
@@ -355,7 +340,7 @@ fn candidates(req: &Value) -> Result<Candidates> {
         }
         return Ok((live, responded, None));
     }
-    let mut out = socket_candidates(req, None)?;
+    let mut out = socket_candidates(req)?;
     process_candidates(req, &mut out)?;
     Ok((out, false, None))
 }

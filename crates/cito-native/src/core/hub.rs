@@ -355,7 +355,22 @@ impl HubEngine {
         for id in ids {
             self.stop_process(&id)?;
         }
-        self.inner.db.transaction(|db| {
+        Self::clear_tables(&self.inner.db)
+    }
+
+    pub(super) fn reset_offline(dir: &Path) -> Result<(), String> {
+        if dir
+            .join("hub.sqlite")
+            .try_exists()
+            .map_err(|e| e.to_string())?
+        {
+            Self::clear_tables(&Self::open_database(dir)?)?;
+        }
+        Ok(())
+    }
+
+    fn clear_tables(db: &Database) -> Result<(), String> {
+        db.transaction(|db| {
             for table in [
                 "hub_channel_delivery_msgs",
                 "hub_channel_deliveries",
@@ -377,10 +392,7 @@ impl HubEngine {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         Self::open_with_auth_mode(data_dir, "none")
     }
-    pub fn open_with_auth_mode(data_dir: &Path, auth_mode: &str) -> Result<Self, String> {
-        if !matches!(auth_mode, "none" | "token" | "oidc") {
-            return Err("INVALID_INPUT: Unknown Hub auth mode".into());
-        }
+    fn open_database(data_dir: &Path) -> Result<Database, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
         std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
@@ -400,9 +412,16 @@ impl HubEngine {
             for row in c.query("SELECT seq,CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id IS NULL",&[])?{let data=parse(&row,"data");if let Some(id)=data["signal_id"].as_str(){c.execute("UPDATE hub_signals SET signal_id=? WHERE seq=?",&[json!(id),row["seq"].clone()])?;}}
             Ok(())
         })?;
+        Ok(db)
+    }
+
+    pub fn open_with_auth_mode(data_dir: &Path, auth_mode: &str) -> Result<Self, String> {
+        if !matches!(auth_mode, "none" | "token" | "oidc") {
+            return Err("INVALID_INPUT: Unknown Hub auth mode".into());
+        }
         let engine = Self {
             inner: Arc::new(Inner {
-                db,
+                db: Self::open_database(data_dir)?,
                 user_plugins_dir: data_dir.join("plugins"),
                 closed: AtomicBool::new(false),
                 subscribers: Mutex::new(Vec::new()),

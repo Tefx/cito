@@ -25,7 +25,7 @@ fn focus(f: &Fixture, p: usize, id: &str) {
 #[test]
 fn real_host_and_invite_receipts_settle_the_initiating_request() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let f = Fixture::new(json!({"host_hub":{"bind":"127.0.0.1","port":port()}}));
     f.recording_daemon();
     let p = start(&f);
     f.send(p, f.snapshot());

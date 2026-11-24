@@ -1258,11 +1258,57 @@ pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), S
     Ok(())
 }
 
+// Only the numeric release tuple determines daemon compatibility. Validate SemVer
+// suffixes before ignoring them so a malformed health response cannot claim a release.
+fn parse_semver(version: &str) -> Option<[(usize, &str); 3]> {
+    let identifiers = |text: &str, prerelease: bool| {
+        text.split('.').all(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !(prerelease
+                    && id.len() > 1
+                    && id.starts_with('0')
+                    && id.bytes().all(|b| b.is_ascii_digit()))
+        })
+    };
+    let mut core = version;
+    if let Some((prefix, build)) = core.split_once('+') {
+        identifiers(build, false).then_some(())?;
+        core = prefix;
+    }
+    if let Some((prefix, pre)) = core.split_once('-') {
+        identifiers(pre, true).then_some(())?;
+        core = prefix;
+    }
+    let mut parts = core.split('.');
+    let mut tuple = [(0, ""); 3];
+    for part in &mut tuple {
+        let digits = parts.next()?;
+        if digits.is_empty()
+            || (digits.len() > 1 && digits.starts_with('0'))
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        // Length then lexicographic order compares canonical decimal integers without overflow.
+        *part = (digits.len(), digits);
+    }
+    parts.next().is_none().then_some(tuple)
+}
+
+pub fn daemon_version_satisfies(running: Option<&str>, required: &str) -> bool {
+    running == Some(required)
+        || running
+            .and_then(parse_semver)
+            .zip(parse_semver(required))
+            .is_some_and(|(have, need)| have[0] == need[0] && have >= need)
+}
+
 /// Direct daemon entry and spawning clients use the same stale-version handover.
 /// Returns true when a current daemon is already running.
 pub fn handover_stale_daemon(config: &NativeConfig) -> Result<bool, String> {
     if let Some(existing) = probe_daemon_health(config) {
-        if existing.version.as_deref() == Some(CITO_VERSION) {
+        if daemon_version_satisfies(existing.version.as_deref(), CITO_VERSION) {
             return Ok(true);
         }
         if let Err(error) = stop_daemon(config, &existing) {
@@ -1270,7 +1316,7 @@ pub fn handover_stale_daemon(config: &NativeConfig) -> Result<bool, String> {
             // Never signal a replacement. An empty endpoint follows the cold-start path;
             // the daemon owner lock still arbitrates who gets to start.
             return match probe_daemon_health(config) {
-                Some(h) if h.version.as_deref() == Some(CITO_VERSION) => Ok(true),
+                Some(h) if daemon_version_satisfies(h.version.as_deref(), CITO_VERSION) => Ok(true),
                 None => Ok(false),
                 _ => Err(error),
             };
@@ -1285,7 +1331,8 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
     }
 
     let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(exe);
+    let stable = exe.to_str().map(crate::setup::resolve_stable_package_root);
+    let mut cmd = Command::new(stable.as_deref().map(Path::new).unwrap_or(&exe));
     cmd.arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1315,7 +1362,7 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
         while Instant::now() < deadline {
             let probe_deadline = deadline.min(Instant::now() + HEALTH_PROBE_TIMEOUT);
             if probe_daemon_health_until(config, probe_deadline)
-                .is_some_and(|h| h.version.as_deref() == Some(CITO_VERSION))
+                .is_some_and(|h| daemon_version_satisfies(h.version.as_deref(), CITO_VERSION))
             {
                 return Ok(());
             }
@@ -1350,6 +1397,41 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn daemon_compatibility_is_monotonic_within_a_major_release() {
+        use super::daemon_version_satisfies;
+        assert!(daemon_version_satisfies(Some("development"), "development"));
+        for running in [
+            "1.9.10",
+            "1.10.0",
+            "1.9.11-rc.1+build.01",
+            "1.99999999999999999999.0",
+        ] {
+            assert!(
+                daemon_version_satisfies(Some(running), "1.9.10"),
+                "{running}"
+            );
+        }
+        for running in [
+            "0.99.0",
+            "2.0.0",
+            "1.9.9",
+            "1.010.0",
+            "1.10",
+            "1.10.0.0",
+            "1.10.0-beta..1",
+            "1.10.0-01",
+            "1.10.0+",
+            "1.10.0+@",
+        ] {
+            assert!(
+                !daemon_version_satisfies(Some(running), "1.9.10"),
+                "{running}"
+            );
+        }
+        assert!(!daemon_version_satisfies(None, "1.0.0"));
+    }
+
     #[test]
     fn builtin_cli_flags_cannot_be_claimed_by_plugin_manifests() {
         for id in [

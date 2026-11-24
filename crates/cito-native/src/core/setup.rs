@@ -585,9 +585,7 @@ pub fn inspect_setup_json(
     plugins: &LoadedPlugins,
 ) -> Value {
     let config_exists = config_path.exists();
-    let normalized = crate::plugins::read_config_text(config_path)
-        .and_then(|raw| try_normalize_existing_config(raw.as_deref()));
-    let (default_hub, hubs_obj, rest_obj) = match normalized {
+    let (default_hub, hubs_obj, rest_obj) = match read_normalized_config(config_path) {
         Ok(config) => config,
         Err(error) => return json!({"ok":false,"error":error,"configPath":config_path}),
     };
@@ -657,6 +655,7 @@ pub fn inspect_setup_json(
     })
 }
 
+use super::config::ConfigSnapshot;
 use crate::plugins::try_normalize_existing_config;
 
 mod app_bundle;
@@ -675,13 +674,23 @@ fn resolve_app_bundle_path(dest_dir: Option<&str>, state_dir: &Path) -> Result<P
     })
 }
 
+fn read_normalized_config(path: &Path) -> Result<super::config::NormalizedConfig, String> {
+    crate::plugins::read_config_text(path)
+        .and_then(|raw| try_normalize_existing_config(raw.as_deref()))
+}
+
 fn daemon_control_config(
     state_dir: &Path,
     config_path: &Path,
     home_dir: &Path,
+    recovery: Option<&ConfigSnapshot>,
 ) -> Result<crate::plugins::NativeConfig, String> {
-    let raw = crate::plugins::read_config_text(config_path)?;
-    let (default_hub, _, rest) = try_normalize_existing_config(raw.as_deref())?;
+    let (default_hub, _, rest) = match recovery {
+        Some(before) => before
+            .normalized()
+            .unwrap_or_else(|_| ("local".into(), Map::new(), before.recovery_object())),
+        None => read_normalized_config(config_path)?,
+    };
     // Setup can repair a profile with an invalid saved port using an explicit control endpoint.
     let endpoint = env::var("CITO_DAEMON_PORT").ok();
     let endpoint = endpoint.as_deref().filter(|s| !s.trim().is_empty());
@@ -696,6 +705,107 @@ fn daemon_control_config(
         daemon_port,
         user: String::new(),
         default_hub,
+    })
+}
+
+// A serving daemon and offline cleanup must exclude each other through settlement.
+pub(super) fn acquire_daemon_owner(state_dir: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
+    let owner = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(state_dir.join("daemon.lock"))
+        .map_err(|e| e.to_string())?;
+    // SAFETY: the returned descriptor owns the lock until drop.
+    if unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("Daemon owner lock is held".into());
+    }
+    Ok(owner)
+}
+
+pub(super) fn purge_disconnected_data(
+    dir: &Path,
+    state: Option<&super::state::LocalState>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("oidc-token-")
+        {
+            fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+        }
+    }
+    match fs::remove_dir_all(dir.join("activity")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("STATE_ERROR: Cannot remove session activity metadata".into()),
+    }
+    let Some(state) = state else {
+        return Ok(());
+    };
+    state.db.transaction(|db| {
+        db.execute("DELETE FROM local_sent_idempotency; DELETE FROM pending_hub_acks; DELETE FROM pending_hub_detaches; DELETE FROM wake_retries; DELETE FROM local_signals; DELETE FROM local_listeners; DELETE FROM session_custom_titles;", &[])?;
+        Ok(())
+    })
+}
+
+fn disconnect_offline(
+    config: &crate::plugins::NativeConfig,
+    before: &ConfigSnapshot,
+    purge: bool,
+) -> Result<Value, String> {
+    let dir = &config.state_dir;
+    let _owner = acquire_daemon_owner(dir)?;
+    // An absent matching health response can also mean a foreign or unhealthy listener.
+    let _endpoint = std::net::TcpListener::bind(("127.0.0.1", config.daemon_port))
+        .map_err(|e| format!("Cannot reserve daemon endpoint for disconnect: {e}"))?;
+    let target = crate::support::publication_target(&config.config_path)?;
+    crate::plugins::with_config_lock(&target, || {
+        before.check_current(&config.config_path)?;
+        let state = dir
+            .join("state.sqlite")
+            .try_exists()
+            .map_err(|e| e.to_string())?
+            .then(|| super::state::LocalState::open(dir))
+            .transpose()?;
+        let plugins = crate::plugins::load_plugins_readonly(dir);
+        for plugin in plugins.agent_plugins() {
+            remove_plugin_setup(plugin)?;
+        }
+        let mut receipt = json!({"ok":true,"committed":true});
+        if purge {
+            set_launch_at_login(false, dir, &config.home_dir, &plugins)?;
+            before.reset_hubs_locked(&config.config_path, &target)?;
+            let clear = || {
+                super::hub::HubEngine::reset_offline(dir)?;
+                purge_disconnected_data(dir, state.as_ref())
+            };
+            clear().map_err(|e| {
+                format!(
+                    "RESET_INCOMPLETE: Configuration reset committed; local data purge failed: {e}"
+                )
+            })?;
+        } else if let Some(state) = state {
+            for row in state
+                .active()?
+                .into_iter()
+                .filter(|row| row["harness"] != "human")
+            {
+                // Only the persisted binding can identify a remote cleanup target.
+                if row["hub_url"].is_string() {
+                    state.db.execute("INSERT OR REPLACE INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?)", &[row["hub"].clone(), row["listener_id"].clone(), row["hub_url"].clone()])?;
+                }
+                state.pause_listener_for(&row)?;
+                receipt["warning"] =
+                    json!("Local bindings stopped; Hub detach could not be confirmed offline");
+            }
+        }
+        Ok(receipt)
     })
 }
 
@@ -716,7 +826,12 @@ pub(crate) fn uninstall_setup_with_owner(
     purge_data: bool,
     owner: Option<&fs::File>,
 ) -> Result<(String, Vec<SetupAction>), String> {
-    let config = daemon_control_config(state_dir, config_path, home_dir)?;
+    let config = daemon_control_config(
+        state_dir,
+        config_path,
+        home_dir,
+        Some(&ConfigSnapshot::read(config_path)?),
+    )?;
     let daemon_port = config.daemon_port;
     let default_hub = config.default_hub.clone();
     if let Some(health) = owner
@@ -741,27 +856,10 @@ pub(crate) fn uninstall_setup_with_owner(
         crate::plugins::stop_daemon(&config, &health)?;
     }
 
-    fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
-    let acquired;
-    let lock = if let Some(owner) = owner {
-        owner
-    } else {
-        acquired = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(state_dir.join("daemon.lock"))
-            .map_err(|e| e.to_string())?;
-        // SAFETY: the descriptor remains owned through all cleanup. A busy owner
-        // (including an unhealthy daemon) makes uninstall fail without deleting data.
-        if unsafe { libc::flock(acquired.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("Daemon owner lock is held; uninstall aborted".into());
-        }
-        &acquired
-    };
-    let _owner = lock;
+    let _owner = owner
+        .is_none()
+        .then(|| acquire_daemon_owner(state_dir))
+        .transpose()?;
     let state = fs::canonicalize(state_dir).map_err(|e| e.to_string())?;
     let resolved_config = crate::support::publication_target(config_path)?;
     let mut config_targets = vec![resolved_config.clone()];
@@ -1191,8 +1289,28 @@ pub fn run_setup_cli(args: &[String]) {
                 println!("{}", json!({"ok":true,"dry_run":true,"op":action["op"]}));
                 return Ok(None);
             }
-            let (config, _) = crate::plugins::load_native_config()?;
-            crate::plugins::ensure_daemon(&config)?;
+            let config = match crate::plugins::load_native_config() {
+                Ok((config, _)) => {
+                    crate::plugins::ensure_daemon(&config)?;
+                    config
+                }
+                Err(error) if disconnect_all => {
+                    let before = ConfigSnapshot::read(&config_path)?;
+                    if before.normalized().is_ok() {
+                        return Err(error);
+                    }
+                    let config =
+                        daemon_control_config(&state_dir, &config_path, &home_dir, Some(&before))?;
+                    // A replacement cannot start against a damaged profile. Prefer the
+                    // running owner and its registrations, even across versions.
+                    if crate::plugins::probe_daemon_health(&config).is_none() {
+                        println!("{}", disconnect_offline(&config, &before, purge_data)?);
+                        return Ok(None);
+                    }
+                    config
+                }
+                Err(error) => return Err(error),
+            };
             let result = super::cli::control_request(&config, &action)?;
             if print_invite {
                 if result["settings"]["host_hub"]["enabled"] != true {
@@ -1213,8 +1331,12 @@ pub fn run_setup_cli(args: &[String]) {
         }
         let plugins = crate::plugins::load_plugins_readonly(&state_dir);
         if dry_run && (build_app || uninstall) {
-            let raw_config = crate::plugins::read_config_text(&config_path)?;
-            let (current_default, _, _) = try_normalize_existing_config(raw_config.as_deref())?;
+            let before = uninstall
+                .then(|| ConfigSnapshot::read(&config_path))
+                .transpose()?;
+            let current_default =
+                daemon_control_config(&state_dir, &config_path, &home_dir, before.as_ref())?
+                    .default_hub;
             let action = SetupAction {
                 target: "cito".to_string(),
                 path: if build_app {
@@ -1300,11 +1422,47 @@ pub fn run_setup_cli(args: &[String]) {
             return Ok(None);
         }
 
+        if uninstall && !build_app {
+            let (default_hub, actions) =
+                uninstall_setup_native(&state_dir, &config_path, &home_dir, &plugins, purge_data)?;
+            emit_setup_result(&config_path, &default_hub, false, &actions, json_output);
+            return Ok(None);
+        }
         let raw_config = crate::plugins::read_config_text(&config_path)?;
-        try_normalize_existing_config(raw_config.as_deref())?;
+        let (default_hub, existing_hubs, rest) =
+            try_normalize_existing_config(raw_config.as_deref())?;
+        let host_edit = share_hub.is_some() || share_port.is_some();
+        let refresh_apps =
+            !host_edit || !enable_harnesses.is_empty() || !disable_harnesses.is_empty();
+        let reconcile = || -> Result<(), String> {
+            let config = daemon_control_config(&state_dir, &config_path, &home_dir, None)?;
+            if crate::plugins::probe_daemon_health(&config).is_some() {
+                crate::plugins::ensure_daemon(&config)?;
+                for op in [
+                    host_edit.then_some("set_host_hub"),
+                    refresh_apps.then_some("refresh_available"),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let result = super::cli::control_request(&config, &json!({"op":op}))?;
+                    if let Some(warning) = result["warning"]
+                        .as_str()
+                        .or_else(|| result["maintenance_warning"].as_str())
+                    {
+                        return Err(warning.to_owned());
+                    }
+                }
+            }
+            Ok(())
+        };
         if build_app {
             let (app_path, bytes) =
                 build_mac_app_bundle_native(build_app_dest.as_deref(), &state_dir, &plugins)?;
+            if !uninstall {
+                reconcile()
+                    .map_err(|e| format!("Application built; daemon update incomplete: {e}"))?;
+            }
             if json_output {
                 let out = json!({
                     "appPath": app_path.to_string_lossy(),
@@ -1314,13 +1472,6 @@ pub fn run_setup_cli(args: &[String]) {
             } else {
                 println!("Built {} ({} bytes)", app_path.display(), bytes);
             }
-            return Ok(Some(state_dir));
-        }
-
-        if uninstall {
-            let (default_hub, actions) =
-                uninstall_setup_native(&state_dir, &config_path, &home_dir, &plugins, purge_data)?;
-            emit_setup_result(&config_path, &default_hub, false, &actions, json_output);
             return Ok(Some(state_dir));
         }
 
@@ -1346,13 +1497,14 @@ pub fn run_setup_cli(args: &[String]) {
             && share_port.is_none();
 
         if only_disable {
-            let raw = crate::plugins::read_config_text(&config_path)?;
-            let (default_hub, _, _) = try_normalize_existing_config(raw.as_deref())?;
             let mut actions = Vec::new();
             for h in &disable_harnesses {
                 if let Some(p) = plugins.find_by_id(h) {
                     actions.extend(disconnect_plugin(p, dry_run)?);
                 }
+            }
+            if !dry_run {
+                reconcile()?;
             }
             emit_setup_result(&config_path, &default_hub, dry_run, &actions, json_output);
             return Ok((!dry_run).then_some(state_dir));
@@ -1382,7 +1534,6 @@ pub fn run_setup_cli(args: &[String]) {
             if name == "local" && url != "local://" {
                 return Err("INVALID_INPUT: The local hub must use local://".into());
             }
-            let (_, existing_hubs, _) = try_normalize_existing_config(raw_config.as_deref())?;
             let base = existing_hubs.get(name).unwrap_or(&Value::Null);
             let def_scope = if url == "local://" {
                 "workspace"
@@ -1396,17 +1547,6 @@ pub fn run_setup_cli(args: &[String]) {
             }
             if let Some(ref auth) = hub_auth {
                 entry.insert("authMode".into(), json!(auth));
-            } else if hub_issuer.as_deref().is_some_and(|value| !value.is_empty())
-                || hub_client_id
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-            {
-                entry.insert("authMode".into(), json!("oidc"));
-            } else if hub_token
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                entry.insert("authMode".into(), json!("token"));
             }
             if let Some(ref t) = hub_token {
                 entry.insert("token".to_string(), json!(t.trim()));
@@ -1440,6 +1580,35 @@ pub fn run_setup_cli(args: &[String]) {
             validated_hub = Some((name.clone(), super::config::discover_hub_config(entry)?));
         }
 
+        let editing_endpoints = validated_hub.is_some()
+            || !enable_hubs.is_empty()
+            || !disable_hubs.is_empty()
+            || !remove_hubs.is_empty()
+            || host_edit;
+        // An existing ephemeral listener has no usable port in the file. Ask
+        // its owner before taking the config lock; never start a daemon here.
+        let live_port = if editing_endpoints
+            && share_hub != Some(false)
+            && share_port.is_none()
+            && rest
+                .get("host_hub")
+                .is_some_and(|host| host["enabled"] == true && host["port"] == 0)
+        {
+            let control = daemon_control_config(&state_dir, &config_path, &home_dir, None)?;
+            if crate::plugins::probe_daemon_health(&control).is_some() {
+                let snapshot =
+                    super::cli::control_request(&control, &json!({"op":"get_snapshot"}))?;
+                let host = &snapshot["settings"]["host_hub"];
+                host["port"]
+                    .as_u64()
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|_| host["running"] == true)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut resolved_default_hub = "local".to_string();
         let config_action = mutate_file("cito", &config_path, dry_run, Some(0o600), |existing| {
             let (mut def_hub, mut hubs, mut rest) = try_normalize_existing_config(existing)?;
@@ -1451,12 +1620,11 @@ pub fn run_setup_cli(args: &[String]) {
                         != Some("local://")
             });
 
+            if (validated_hub.is_some() || live_port.is_some()) && existing != raw_config.as_deref()
+            {
+                return Err("INVALID_INPUT: Configuration changed during discovery; retry".into());
+            }
             if let Some((ref hname, ref hentry)) = validated_hub {
-                if existing != raw_config.as_deref() {
-                    return Err(
-                        "INVALID_INPUT: Configuration changed during discovery; retry".into(),
-                    );
-                }
                 hubs.insert(hname.clone(), hentry.clone());
                 if set_default || (!had_remote_before && def_hub == "local" && hname != "local") {
                     def_hub = hname.clone();
@@ -1483,36 +1651,18 @@ pub fn run_setup_cli(args: &[String]) {
             }
 
             if share_hub.is_some() || share_port.is_some() {
-                let mut prev = rest
-                    .remove("host_hub")
-                    .or_else(|| rest.remove("hostHub"))
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                rest.remove("hostHub");
-                let en = share_hub.unwrap_or_else(|| {
-                    prev.get("enabled")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                });
-                let p = share_port
-                    .unwrap_or_else(|| prev.get("port").and_then(|v| v.as_i64()).unwrap_or(4291));
-                if !(0..=65535).contains(&p) {
-                    return Err("host_hub.port must be an integer in 0..65535".to_string());
+                let mut patch = json!({});
+                if let Some(enabled) = share_hub {
+                    patch["enabled"] = json!(enabled);
                 }
-                prev.insert("enabled".into(), json!(en));
-                prev.insert("port".into(), json!(p));
-                if share_hub != Some(false) {
-                    let token = match prev
-                        .get("token")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                    {
-                        Some(token) => token.to_owned(),
-                        None => try_random_hex(32)?,
-                    };
-                    prev.insert("token".into(), json!(token));
+                if let Some(port) = share_port {
+                    patch["port"] = json!(port);
                 }
-                rest.insert("host_hub".to_string(), Value::Object(prev));
+                let host = super::config::apply_host_hub_patch(
+                    rest.get("host_hub").unwrap_or(&Value::Null),
+                    &patch,
+                )?;
+                rest.insert("host_hub".into(), host);
             }
 
             let mut next_obj = Map::new();
@@ -1523,6 +1673,15 @@ pub fn run_setup_cli(args: &[String]) {
             }
             let mut next = Value::Object(next_obj);
             super::config::repair_default_hub(&mut next);
+            if editing_endpoints {
+                super::daemon::host_hub::validate_hub_edit(
+                    &next,
+                    live_port,
+                    hub_name
+                        .as_deref()
+                        .or_else(|| enable_hubs.first().map(String::as_str)),
+                )?;
+            }
             resolved_default_hub = next["default_hub"].as_str().unwrap_or("local").to_owned();
             let next_content = format!("{}\n", serde_json::to_string_pretty(&next).unwrap());
             match existing {
@@ -1567,29 +1726,6 @@ pub fn run_setup_cli(args: &[String]) {
                 super::cli::presentation_error(&error)
             )
         };
-        if !dry_run
-            && (hub_name.is_some()
-                || !enable_hubs.is_empty()
-                || !disable_hubs.is_empty()
-                || share_hub.is_some()
-                || share_port.is_some())
-        {
-            let config =
-                daemon_control_config(&state_dir, &config_path, &home_dir).map_err(&saved_error)?;
-            if crate::plugins::probe_daemon_health(&config).is_some() {
-                let result = super::cli::control_request(&config, &json!({"op":"set_host_hub"}))
-                    .map_err(&saved_error)?;
-                if let Some(warning) = result["warning"]
-                    .as_str()
-                    .or_else(|| result["maintenance_warning"].as_str())
-                {
-                    return Err(format!(
-                        "Configuration saved; daemon reload incomplete: {}",
-                        super::cli::presentation_error(warning)
-                    ));
-                }
-            }
-        }
 
         let mut actions = vec![config_action];
         if !dry_run && !remove_hubs.is_empty() {
@@ -1670,6 +1806,7 @@ pub fn run_setup_cli(args: &[String]) {
             if let Some(en) = launch_at_login {
                 set_launch_at_login(en, &state_dir, &home_dir, &plugins).map_err(setup_error)?;
             }
+            reconcile().map_err(setup_error)?;
         }
 
         emit_setup_result(
@@ -2287,6 +2424,34 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn setup_uses_discovery_auth_precedence_for_mixed_credentials() {
+        let (root, _) = fixture();
+        let result = cli_child(
+            &root,
+            &root,
+            &[
+                "--hub",
+                "work",
+                "--url",
+                "local://",
+                "--token",
+                "secret",
+                "--issuer",
+                "https://id.example.com",
+            ],
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(root.join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved["hubs"]["work"]["authMode"], "token");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cli_rejects_malformed_config_before_writes() {
         let (root, _) = fixture();

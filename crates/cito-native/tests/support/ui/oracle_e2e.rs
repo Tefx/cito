@@ -568,7 +568,7 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
 #[test]
 fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() {
     let _lock = serial();
-    let f = Fixture::new(json!({"host_hub":{"bind":"127.0.0.1"}}));
+    let f = Fixture::new(json!({"host_hub":{"bind":"127.0.0.1","port":port()}}));
     f.provider("delivered_unconfirmed");
     let plugin = f.state.join("plugins/channel");
     fs::create_dir_all(&plugin).unwrap();
@@ -724,7 +724,11 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     });
     l.snapshot("settings", "r3_add_hub_daemon_error.png");
     for (name, url, canonical) in [
-        ("Office Mac", "http://127.0.0.1:4291/", "office-mac"),
+        (
+            "Office Mac",
+            format!("http://127.0.0.1:{}/", port()).as_str(),
+            "office-mac",
+        ),
         ("", "  https://studio.example.com/  ", "studio"),
     ] {
         if name.is_empty() {

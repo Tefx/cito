@@ -23153,3 +23153,479 @@ phases:
       and git diff --check. Net LOC vs e4c1d28: excluding plan.yaml -6,741 LOC (4,232+
       / 10,973-); vs d81a325 (initial v57 plan commit) -6,359 LOC (4,651+ / 11,010-);
       total including plan.yaml vs e4c1d28 -5,493 LOC (5,480+ / 10,973-).'
+- id: v58
+  name: 'V58 DSE Subgraph Closure — Self-Loop & Duplicate Hub Authority, Pi Probe
+    Equivalence & Monotonic Daemon Handover [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: All 10 admitted DSE and Gauge-Reduction obligations (DSE-1..DSE-6, GR-1..GR-4)
+    are closed across Wave 1 (v58.config_plugins_pi), Wave 2 (v58.daemon_hub_authority),
+    and post-merge consolidation (v58.consolidate); self-loop host_hub invites and
+    duplicate remote (url, principal_id) hub entries are rejected at config/setup/action
+    admission boundaries and fenced in reload_slots without spawning competing HubClient
+    instances; Pi discover_sessions and probe share identical socket_response_or_cached
+    endpoint-cache fallback equivalence without busy-session ACTIVE <-> UNLISTENED
+    (hard_exit) oscillation; daemon_version_satisfies enforces monotonic same-major
+    SemVer handover so older mcp-stdio clients never terminate newer running daemons;
+    setup recovery commands (--purge-data, --uninstall, --disconnect-all) tolerate
+    malformed config.json and active setup runs reconcile running daemons and invalidate
+    stale setup_inspections; channel heartbeats no longer overwrite shared Node listen_mode;
+    and v58.gate passes FULL workspace verification (cargo fmt --all -- --check, cargo
+    clippy --workspace --all-targets --locked -- -D warnings, cargo build --release
+    --locked, cargo test --workspace --locked -- --test-threads=4, python3 -m unittest
+    packaging/test_release.py, node --test crates/cito-native/tests/support/site-clipboard.mjs,
+    git diff --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**' 'plugins/**').
+  context: 'Consume the converged DSE-1..DSE-6 and GR-1..GR-4 ledger on baseline HEAD
+    befcc1e directly without re-running Stage 1 discovery. Execute Wave 1 (v58.config_plugins_pi)
+    -> Wave 2 (v58.daemon_hub_authority) -> Wave 3 post-merge staged binary consolidation
+    (v58.consolidate) -> bounded gate point repair (v58.gate_repair closing V58-GATE-1
+    and V58-GATE-2) -> independent verification gate (v58.gate; agent: gate-reviewer).'
+  depends_on:
+  - v57
+  steps:
+  - id: v58.config_plugins_pi
+    name: 'V58 Wave 1 — Config host_hub Normalization, Pi Probe Cache Equivalence,
+      Monotonic SemVer Daemon Handover & Setup Recovery Independence (GR-1, GR-2,
+      DSE-2+GR-4, DSE-3, DSE-4, DSE-6; 4 prod files) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/config.rs\n    - crates/cito-native/src/core/plugins.rs\n\
+      \    - crates/cito-native/src/core/setup.rs\n    - plugins/pi/native.rs\n  \
+      \  - crates/cito-native/tests/support/plugins.rs\n  blocked_paths:\n    - plan.yaml\n\
+      \    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/src/core/daemon/**\n\
+      \    - crates/cito-native/src/core/hub.rs\n    - src/macos/**\n\nDeliver:\n\
+      - Close `GR-1`, `GR-2`, `DSE-2` + `GR-4`, `DSE-3`, `DSE-4`, and `DSE-6` across\
+      \ the 4 mutable production files (`crates/cito-native/src/core/config.rs`, `crates/cito-native/src/core/plugins.rs`,\
+      \ `crates/cito-native/src/core/setup.rs`, `plugins/pi/native.rs`) and `crates/cito-native/tests/support/plugins.rs`\
+      \ under `[REQUIRES_SKILL: contract-and-simplicity]`:\n  1. **`GR-1` (`crates/cito-native/src/core/config.rs`\
+      \ & `crates/cito-native/src/core/setup.rs`)**: In `try_normalize_existing_config`\
+      \ (`config.rs`), fold `hostHub` -> `host_hub` in `rest` and expose a shared\
+      \ `apply_host_hub_patch` helper (normalizing `enabled`, `port` default `4291`\
+      \ in `0..=65535`, `bind` default `\"0.0.0.0\"`, `auth_mode`, and auto-generating\
+      \ a 32-hex `token` when enabled/token-mode with an empty token); replace the\
+      \ duplicate 32-line `share_hub`/`share_port` map block in `setup.rs:1469-1501`\
+      \ and remove `.or_else(|| rest.get(\"hostHub\"))` in `setup.rs`.\n  2. **`GR-2`\
+      \ (`crates/cito-native/src/core/setup.rs:1395-1407`)**: Delete the 11 lines\
+      \ of manual `authMode` inference (`else if hub_issuer ... else if hub_token\
+      \ ...`) before `discover_hub_config`, since `discover_hub_config` (`config.rs:226-237`)\
+      \ already performs that exact inference.\n  3. **`DSE-2` + `GR-4` (`plugins/pi/native.rs:290-355`)**:\
+      \ Fix the timeout asymmetry between `discover_sessions` and `probe` that causes\
+      \ busy Pi sessions to oscillate `ACTIVE <-> UNLISTENED (hard_exit)`. In `candidates(req)`\
+      \ (`plugins/pi/native.rs:298-336`), wrap `identify(req, p)` with `socket_response_or_cached(identify(req,\
+      \ p), p, ...)` (validating `state(req).join(format!(\"pi/endpoints/{p}.json\"\
+      ))` against `process_identity(p)` and `matches_process` when `sockets/pi-pid-{p}.sock`\
+      \ exists, or when `allow_process_only(req)` and `configured` hold), and delete\
+      \ the split duplicate `if !resolve && req[\"op\"] == \"probe\"` block (`lines\
+      \ 317-336`) while still avoiding `process_candidates` during `probe`.\n  4.\
+      \ **`DSE-3` (`crates/cito-native/src/core/plugins.rs:828-899`)**: Add `parse_semver`\
+      \ and `pub fn daemon_version_satisfies(running: Option<&str>, required: &str)\
+      \ -> bool` (returning `true` when `running == Some(required)` or when both parse\
+      \ as SemVer with the same `major` and `(major, minor, patch)_running >= (major,\
+      \ minor, patch)_required`). Replace all 3 `== Some(CITO_VERSION)` checks in\
+      \ `handover_stale_daemon` and `ensure_daemon` with `daemon_version_satisfies(...,\
+      \ CITO_VERSION)` so a long-lived older `mcp-stdio` process never kills a newer\
+      \ running daemon, and resolve `env::current_exe()` via `crate::setup::resolve_stable_package_root`\
+      \ when spawning the daemon in `ensure_daemon`.\n  5. **`DSE-4` & `DSE-6` (`crates/cito-native/src/core/setup.rs`)**:\n\
+      \     - (`DSE-6` Recovery Independence): In `daemon_control_config` (`setup.rs:648-672`)\
+      \ and the `--disconnect-all` branch (`setup.rs:1165`), when `purge_data`, `uninstall`,\
+      \ or `disconnect_all` is running and `config.json` is malformed/unreadable,\
+      \ fall back gracefully to `default_hub = \"local\"` and `daemon_port` from `CITO_DAEMON_PORT`\
+      \ (or `4290`) instead of aborting before cleanup/reset.\n     - (`DSE-4` Setup\
+      \ Daemon Reconciliation): When `!dry_run && !status_only && !uninstall`, if\
+      \ a daemon is running on `daemon_port` for `state_dir`, run `handover_stale_daemon`\
+      \ / `ensure_daemon` so stale daemons are upgraded after `--build-app` or `cito\
+      \ setup`, and send a control refresh (`{\"op\":\"refresh_available\"}` or `{\"\
+      op\":\"set_host_hub\"}` when `share_hub`/`share_port` was passed) so the running\
+      \ daemon invalidates stale `setup_inspections` and reloads slots.\n\nImplementation\
+      \ Notes (Non-Binding):\n- Inner-Loop Verification Discipline: Run ONLY fast\
+      \ targeted checks (`cargo check --workspace --all-targets`, `cargo test --lib\
+      \ config::tests`, `cargo test --lib plugins::tests`, `cargo test --lib setup::tests`,\
+      \ `cargo test --test integration plugins` / `cargo test -p cito-native --test\
+      \ native support::plugins -- --test-threads=1`)—never run full `cargo test --workspace`\
+      \ here. Revert any `build.rs` staging side effects to `bin/**` and `plugins/*/bin/**`\
+      \ before committing.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Isolated Wave 1 worktree restricted to `scope.allowed_paths`\
+      \ (4 mutable prod files, ~122 KB).\n\nAdmit:\n- Depends on `[]` (Wave 1 root\
+      \ step of Phase `v58`).\n- Verification: `cargo check --workspace --all-targets\
+      \ && cargo test --lib config::tests && cargo test --lib plugins::tests && cargo\
+      \ test --lib setup::tests && cargo test -p cito-native --test native support::plugins\
+      \ -- --test-threads=1`. Consumed by `v58.daemon_hub_authority`, `v58.consolidate`,\
+      \ and `v58.gate`.\n\nRecovery:\n- Repair any compiler, clippy, or targeted unit/integration\
+      \ test failure in place within the worktree before completion."
+    verification: cargo check --workspace --all-targets && cargo test --lib config::tests
+      && cargo test --lib plugins::tests && cargo test --lib setup::tests && cargo
+      test -p cito-native --test native support::plugins -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/setup.rs
+    - plugins/pi/native.rs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-22T16:31:30.446953Z'
+    done_at: '2026-11-22T16:52:58.036544+00:00'
+    evidence: 'Merged v58.config_plugins_pi (commit 4e0f4f2b8f857e0042f83c198ba086533c787a4c)
+      into main across the 5 allowed files. Closed GR-1 (hostHub->host_hub normalization
+      & shared apply_host_hub_patch in config.rs/setup.rs), GR-2 (removed redundant
+      authMode inference in setup.rs), DSE-2+GR-4 (unified socket_response_or_cached
+      in plugins/pi/native.rs candidates(req), removing duplicate probe block), DSE-3
+      (monotonic same-major daemon_version_satisfies & resolve_stable_package_root
+      in plugins.rs), DSE-4 (setup daemon handover/refresh_available reconciliation),
+      and CLI-side DSE-6 (malformed config fallback in setup.rs). Verification: cargo
+      check --workspace --all-targets --locked passed; config::tests 10 passed, 1
+      ignored; plugins::tests 23 passed, 1 ignored; setup::tests 23 passed, 1 ignored;
+      native plugins:: 63 passed, 2 failed (reproducible DSE-6 daemon-side --disconnect-all
+      failure at daemon/http_actions.rs:505 raw_config() handed off to Wave 2 v58.daemon_hub_authority;
+      pi_bridge_real_typescript_host_contract_without_npm timed out once after passing
+      on prior run).'
+  - id: v58.daemon_hub_authority
+    name: 'V58 Wave 2 — Unified Self-Loop & Duplicate Hub Endpoint Authority, Slot
+      Reload Defense-in-Depth, Inspection Cache Invalidation & Heartbeat listen_mode
+      Conservation (DSE-1+GR-3, GR-1+DSE-4, DSE-5; 4 daemon prod files + setup.rs)
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/daemon/host_hub.rs\n  \
+      \  - crates/cito-native/src/core/daemon/http_actions.rs\n    - crates/cito-native/src/core/daemon/mod.rs\n\
+      \    - crates/cito-native/src/core/daemon/projection.rs\n    - crates/cito-native/src/core/setup.rs\n\
+      \    - crates/cito-native/src/core/daemon/tests.rs\n    - crates/cito-native/tests/support/daemon/config_and_hubs.rs\n\
+      \  blocked_paths:\n    - plan.yaml\n    - bin/**\n    - plugins/*/bin/**\n \
+      \   - crates/cito-native/src/core/hub.rs\n    - plugins/**\n    - src/macos/**\n\
+      \nDeliver:\n- Close `DSE-1` + `GR-3`, `GR-1` + `DSE-4` daemon consumers, and\
+      \ `DSE-5` across `crates/cito-native/src/core/daemon/{host_hub.rs,http_actions.rs,mod.rs,projection.rs}`,\
+      \ `crates/cito-native/src/core/setup.rs`, `crates/cito-native/src/core/daemon/tests.rs`,\
+      \ and `crates/cito-native/tests/support/daemon/config_and_hubs.rs` under `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`:\n  1. **`DSE-1` + `GR-3` (`host_hub.rs`, `http_actions.rs`,\
+      \ `daemon/mod.rs`, `setup.rs`)**:\n     - Delete `DaemonService::reject_own_hub_invite`\
+      \ (`http_actions.rs:789-836`) and move/generalize it into `host_hub.rs` as `pub(crate)\
+      \ fn is_own_host_hub_url(url_str: &str, host_cfg: &Value, live_port: Option<u16>)\
+      \ -> bool` and `pub(crate) fn validate_hub_endpoints(raw: &Value, live_port:\
+      \ Option<u16>) -> Result<(), String>`.\n     - `is_own_host_hub_url` checks\
+      \ whether `host_cfg[\"enabled\"] == true` (or `live_port.is_some()`), determines\
+      \ the active port (`live_port.or_else(|| host_cfg[\"port\"].as_u64().and_then(|p|\
+      \ u16::try_from(p).ok()).filter(|&p| p != 0)).unwrap_or(4291)`), and checks\
+      \ whether `url_str` (`!= \"local://\"`) parses to a URL on that port whose host\
+      \ is a loopback IP (`ip.is_loopback()`), `\"localhost\"`, `local_host_name()`,\
+      \ `<hostname>.local`, `advertised_hub_host(bind)`, `lan_advertised_host(bind)`,\
+      \ or `tailscale_advertised_host()`.\n     - `validate_hub_endpoints(raw, live_port)`\
+      \ inspects all enabled hubs in `raw[\"hubs\"]`: (a) if any enabled hub `name\
+      \ != \"local\"` has `is_own_host_hub_url(url, &raw[\"host_hub\"], live_port)`,\
+      \ return `Err(\"INVALID_INPUT: This invite code belongs to this Mac's own shared\
+      \ Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.\"\
+      .into())`; (b) if two distinct enabled hubs (`name_a != name_b`, both `url !=\
+      \ \"local://\"`) have the same normalized `(url, effective_user)` and same OIDC\
+      \ `(issuer, clientId)`, return `Err(format!(\"INVALID_INPUT: Hub URL is already\
+      \ configured under '{existing}'\"))`.\n     - Call `validate_hub_endpoints`\
+      \ in `http_actions.rs` (`execute_action` for both `paste_hub_invite` and `setup_save_hub`,\
+      \ `save_hub`, `setup_toggle_hub`/`hub_action`, and `set_host_hub`) and in `setup.rs`\
+      \ (`run_setup_cli` when mutating hubs/host_hub).\n     - **Runtime Defense-in-Depth\
+      \ (`daemon/mod.rs` `reload_slots`)**: In `reload_slots`, after `self.sync_host_hub()`,\
+      \ track active `(url, principal_id)` pairs and check `if name != \"local\" &&\
+      \ is_own_host_hub_url(string(&hub, \"url\"), &raw[\"host_hub\"], self.host_server.as_ref().map(|s|\
+      \ s.port()))` (or duplicate `(url, principal_id)` with an already-loaded slot\
+      \ in the loop). When triggered (e.g. from a hand-edited or dotfiles-synced `config.json`\
+      \ or `CITO_HUB_URL` override), record the diagnostic in `self.last_hub_errors.insert(name.clone(),\
+      \ (err, false))`, fence any active local rows for `name` once (`fence_listener_for(&row,\
+      \ \"fenced_before_dispatch\")`), and `continue` without inserting a competing\
+      \ `HubClient` into `self.slots`.\n  2. **`GR-1` & `DSE-4` (`http_actions.rs`,\
+      \ `projection.rs`, `host_hub.rs`)**:\n     - Use `apply_host_hub_patch` in `\"\
+      set_host_hub\"` (`http_actions.rs:1700-1731`), remove `.or_else(|| raw.get(\"\
+      hostHub\"))` in `host_hub.rs` and `projection.rs`, call `repair_default_hub(v)`\
+      \ in `save_hub`, and in `\"refresh_available\"` (`http_actions.rs:1765`) invalidate\
+      \ `setup_inspections` for all agent plugins and call `self.refresh_setup_inspections()`\
+      \ so CLI `cito setup --enable <harness>` immediately updates the running daemon's\
+      \ inspection cache.\n  3. **`DSE-5` (`daemon/mod.rs:1402`)**:\n     - In `heartbeat_agent`,\
+      \ remove `remote[\"listen_mode\"] = row[\"listen_mode\"].clone();` so channel\
+      \ heartbeats do not overwrite the shared Node's `listen_mode` on every heartbeat\
+      \ tick.\n\nImplementation Notes (Non-Binding):\n- Inner-Loop Verification Discipline:\
+      \ Run ONLY fast targeted checks (`cargo check --workspace --all-targets`, `cargo\
+      \ test --lib daemon::tests`, `cargo test --test integration config_and_hubs`\
+      \ / `cargo test -p cito-native --test native support::daemon::config_and_hubs\
+      \ -- --test-threads=1`)—do NOT run full `cargo test --workspace` here. Revert\
+      \ any `build.rs` staging side effects to `bin/**` and `plugins/*/bin/**` before\
+      \ committing.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Isolated Wave 2 worktree restricted to `scope.allowed_paths` (4 daemon prod\
+      \ files + `setup.rs` `validate_hub_endpoints` call, ~148 KB).\n\nAdmit:\n- Depends\
+      \ on `[\"v58.config_plugins_pi\"]`.\n- Verification: `cargo check --workspace\
+      \ --all-targets && cargo test --lib daemon::tests && cargo test -p cito-native\
+      \ --test native support::daemon::config_and_hubs -- --test-threads=1`. Consumed\
+      \ by `v58.consolidate` and `v58.gate`.\n\nRecovery:\n- Repair any compiler,\
+      \ clippy, or targeted daemon unit/integration test failure in place within the\
+      \ worktree before completion."
+    verification: cargo check --workspace --all-targets && cargo test --lib daemon::tests
+      && cargo test -p cito-native --test native support::daemon::config_and_hubs
+      -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    depends_on:
+    - v58.config_plugins_pi
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-22T16:52:59.648270Z'
+    done_at: '2026-11-22T17:15:14.251366+00:00'
+    evidence: 'Merged v58.daemon_hub_authority (commit 4b3df08519305253d4d22fbeb5a60c5e930e4fb9)
+      into main across the 7 authorized files. Closed DSE-1+GR-3 (unified is_own_host_hub_url
+      & validate_hub_endpoints in host_hub.rs, enforced across http_actions.rs & setup.rs,
+      plus reload_slots runtime defense-in-depth fencing competing slots), GR-1+DSE-4
+      (apply_host_hub_patch in set_host_hub, removed hostHub fallbacks in host_hub.rs
+      & projection.rs, repair_default_hub in save_hub, refresh_available inspection
+      cache invalidation), DSE-5 (heartbeat_agent no longer overwrites remote listen_mode),
+      and daemon-side DSE-6 (--disconnect-all unlisten_all tolerates malformed config.json
+      while preserving ordinary validation). Verification: cargo check --workspace
+      --all-targets --locked passed; daemon::tests 41 passed; config_and_hubs 19 passed;
+      disconnect 5 passed.'
+  - id: v58.consolidate
+    name: 'V58 Wave 3 — Post-Merge Staged Binary Rebuild, Full Workspace Regression
+      & LOC Delta Consolidation [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - bin/**\n    - plugins/*/bin/**\n    - crates/cito-native/**\n\
+      \    - plugins/**\n    - packaging/**\n  blocked_paths:\n    - plan.yaml\n\n\
+      Deliver:\n- Post-merge consolidation, staged release binary refresh, full workspace\
+      \ verification, and LOC delta verification across `v58.config_plugins_pi` and\
+      \ `v58.daemon_hub_authority` under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ before the read-only terminal gate `v58.gate`:\n  1. Verify clean integration\
+      \ across all 10 obligations (`DSE-1..DSE-6` and `GR-1..GR-4`) with zero compiler\
+      \ or clippy warnings.\n  2. Run `cargo fmt --all -- --check`, `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`, and `cargo build --release\
+      \ --locked` to refresh and commit staged release binaries in `bin/` and `plugins/*/bin/`\
+      \ so the working tree is clean for `v58.gate`.\n  3. Run `cargo test --workspace\
+      \ --locked -- --test-threads=4`, `python3 -m unittest packaging/test_release.py`,\
+      \ and `node --test crates/cito-native/tests/support/site-clipboard.mjs` (or\
+      \ `tests/site-clipboard.mjs` if invoked via relative path), and record `git\
+      \ diff --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**' 'plugins/**'`.\n\
+      \nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Post-merge consolidation step refreshing staged binaries and verifying full-workspace\
+      \ test pass before `v58.gate`. Do not bump version or tag a release.\n\nAdmit:\n\
+      - Depends on `[\"v58.daemon_hub_authority\"]`.\n- Verification: `cargo fmt --all\
+      \ -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings\
+      \ && cargo build --release --locked && cargo test --workspace --locked -- --test-threads=4\
+      \ && python3 -m unittest packaging/test_release.py && node --test crates/cito-native/tests/support/site-clipboard.mjs\
+      \ && git diff --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**' 'plugins/**'`.\
+      \ Consumed by `v58.gate`.\n\nRecovery:\n- Reconcile any cross-step integration\
+      \ discrepancy, test failure, or staged binary provenance mismatch in place before\
+      \ completing."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo build --release --locked && cargo test --workspace
+      --locked -- --test-threads=4 && python3 -m unittest packaging/test_release.py
+      && node --test crates/cito-native/tests/support/site-clipboard.mjs && git diff
+      --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**' 'plugins/**'
+    refs:
+    - crates/cito-native/build.rs
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v58.daemon_hub_authority
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-22T17:15:15.804764Z'
+    done_at: '2026-11-22T17:50:43.872457+00:00'
+    evidence: 'Merged v58.consolidate (commit 74339059e971c60f439bb90f1fbdaff7a452ce81)
+      into main. Closed cross-step integration gaps (discovery waits for invalidated
+      setup inspections before selecting providers; disconnect/purge recovers from
+      damaged profile while checking profile has not changed during reset) and committed
+      refreshed signed release binaries (7/7 codesign --verify --strict passed). Full
+      verification passed: cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, cargo build --release --locked, detached 4-thread cargo
+      test --workspace --locked -- --test-threads=4 (633 passed, 0 failed, 5 ignored;
+      /tmp/v58-consolidate-test.log), python3 -m unittest packaging/test_release.py
+      (26 passed), node --test crates/cito-native/tests/support/site-clipboard.mjs
+      (1 passed), git diff --check. Shortstat befcc1e..HEAD -- ''crates/cito-native/src/**''
+      ''plugins/**'': 14 files changed, 968 insertions(+), 396 deletions(-).'
+  - id: v58.gate
+    name: 'V58 Full Workspace Verification & DSE Subgraph Closure Gate (DSE-1..DSE-6,
+      GR-1..GR-4) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\nverification_scope:\
+      \ FULL\ngate_tier: FULL\n\nDeliver:\n- Independent verification gate decision\
+      \ (`PASS` or `FAIL`) emitting `gate.report.v2` under `[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ over the integrated outcomes of `v58.config_plugins_pi`, `v58.daemon_hub_authority`,\
+      \ `v58.consolidate`, and `v58.gate_repair`:\n  1. Verify all 10 admitted DSE\
+      \ and Gauge-Reduction obligations (`DSE-1..DSE-6` and `GR-1..GR-4`) and both\
+      \ prior gate findings (`V58-GATE-1` and `V58-GATE-2`) are closed with `0` remaining\
+      \ Tier 1 or Tier 2 defects:\n     - `GR-1`: `try_normalize_existing_config`\
+      \ folds `hostHub` -> `host_hub`, shared `apply_host_hub_patch` is used across\
+      \ `config.rs`, `setup.rs`, and `http_actions.rs`, and `.or_else(|| ...get(\"\
+      hostHub\"))` is removed from `setup.rs`, `host_hub.rs`, and `projection.rs`.\n\
+      \     - `GR-2`: redundant manual `authMode` inference before `discover_hub_config`\
+      \ in `setup.rs` is deleted.\n     - `DSE-1` + `GR-3` (`V58-GATE-1`): `is_own_host_hub_url`\
+      \ and `validate_hub_endpoints` in `host_hub.rs` replace `reject_own_hub_invite`,\
+      \ enforce admission across `http_actions.rs` (`paste_hub_invite`, `setup_save_hub`,\
+      \ `save_hub`, `setup_toggle_hub`/`hub_action`, `set_host_hub`) and `setup.rs`,\
+      \ and `reload_slots` in `daemon/mod.rs` enforces runtime defense-in-depth (recording\
+      \ `last_hub_errors`, fencing active local rows once, skipping competing `HubClient`\
+      \ insertion for established duplicate principals, while keeping admitted profiles\
+      \ with unresolved OIDC placeholder identities available for interactive login\
+      \ in either order).\n     - `DSE-2` + `GR-4`: `candidates(req)` in `plugins/pi/native.rs`\
+      \ wraps `identify(req, p)` with `socket_response_or_cached(...)` and deletes\
+      \ the split `if !resolve && req[\"op\"] == \"probe\"` block while still skipping\
+      \ `process_candidates` during `probe`.\n     - `DSE-3`: `daemon_version_satisfies`\
+      \ in `plugins.rs` enforces monotonic same-major SemVer satisfaction across `handover_stale_daemon`\
+      \ and `ensure_daemon`, and `ensure_daemon` resolves `env::current_exe()` via\
+      \ `crate::setup::resolve_stable_package_root`.\n     - `DSE-4`: `setup.rs` upgrades/refreshes\
+      \ running daemons when `!dry_run && !status_only && !uninstall`, `save_hub`\
+      \ calls `repair_default_hub`, and `\"refresh_available\"` invalidates and refreshes\
+      \ `setup_inspections`.\n     - `DSE-5`: `heartbeat_agent` in `daemon/mod.rs`\
+      \ no longer overwrites `remote[\"listen_mode\"]`.\n     - `DSE-6` (`V58-GATE-2`):\
+      \ `daemon_control_config` and `--disconnect-all` (with or without `--purge-data`)\
+      \ in `setup.rs` settle gracefully when `config.json` is malformed or unreadable\
+      \ across both healthy-daemon and no-daemon recovery paths while preserving ownership\
+      \ exclusions.\n  2. Verify the modified reverse-dependency test cone (`core::daemon::tests`,\
+      \ `config_and_hubs`, `plugins`), `cargo fmt --all -- --check`, `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`, `cargo build --release\
+      \ --locked`, and `git diff --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**'\
+      \ 'plugins/**'` (reusing unchanged FULL gate pass evidence from `15ddb94` for\
+      \ untouched suites).\n\nBoundary:\n- Owner: `gate-reviewer` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Read-only verification gate (`step_type: gate`,\
+      \ `repo_change_policy: no_repo_change`, `verification_scope: FULL`, `gate_tier:\
+      \ FULL`) bound to the integrated Git `HEAD` of `/Users/tefx/Projects/cito`.\n\
+      \nAdmit:\n- Depends on `[\"v58.consolidate\", \"v58.gate_repair\"]`.\n- Verification:\
+      \ `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings && cargo build --release --locked && cargo test --package cito-native\
+      \ --lib core::daemon::tests --locked && cargo test --package cito-native --test\
+      \ integration --locked -- config_and_hubs plugins --test-threads=4 && git diff\
+      \ --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**' 'plugins/**'`.\n\n\
+      Recovery:\n- If any obligation, regression test, compiler/clippy check, or staged\
+      \ binary check fails, report concrete `file:line` and failure evidence in `gate.report.v2`\
+      \ so bounded writable repair steps can resolve it before gate re-verification."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo build --release --locked && cargo test --workspace
+      --locked -- --test-threads=4 && python3 -m unittest packaging/test_release.py
+      && node --test crates/cito-native/tests/support/site-clipboard.mjs && git diff
+      --shortstat befcc1e..HEAD -- 'crates/cito-native/src/**' 'plugins/**'
+    refs:
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/setup.rs
+    - plugins/pi/native.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v58.consolidate
+    - v58.gate_repair
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-22T18:34:10.412266Z'
+    done_at: '2026-11-22T19:04:05.573645+00:00'
+    evidence: v58.gate DELTA PASS at f1bdd0e412460a3679373d02f01000afcac9acf9 (review_report_validator.py
+      exit 0, valid:true, binding_checked:true, evidence_disposition:POSITIVE_GATE_EVIDENCE).
+      All 9/9 bound requirements PROVEN (GR-1..GR-4, DSE-1..DSE-6, full workspace
+      checks); V58-GATE-1 and V58-GATE-2 verified closed by source audit + live runtime
+      probes; V58-GATE-3 retracted as attached-Pi-ancestor false positive after double-forked
+      PPID=1 full workspace rerun passed 636/636 (0 failed, 5 ignored; all 67 plugins::,
+      20 config_and_hubs, 41 daemon tests passed). fmt, clippy (-D warnings), cargo
+      build --release --locked (7/7 codesign --verify --strict), packaging/test_release.py
+      (26 passed), site-clipboard.mjs (1 passed), and git diff --check passed.
+  - id: v58.gate_repair
+    name: 'V58 Gate Point Repair — Unresolved OIDC Slot Reload & No-Daemon Malformed
+      Config Disconnect Recovery (V58-GATE-1, V58-GATE-2; 2 prod files) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/core/daemon/mod.rs\n    - crates/cito-native/src/core/daemon/host_hub.rs\n\
+      \    - crates/cito-native/src/core/daemon/http_actions.rs\n    - crates/cito-native/src/core/transport.rs\n\
+      \    - crates/cito-native/src/core/setup.rs\n    - crates/cito-native/src/core/daemon/tests.rs\n\
+      \    - crates/cito-native/tests/support/daemon/config_and_hubs.rs\n    - crates/cito-native/tests/support/plugins.rs\n\
+      \    - bin/**\n    - plugins/*/bin/**\n  blocked_paths:\n    - plan.yaml\n\n\
+      Deliver:\n- `[V58-GATE-1 / v58.DSE-1.GR-3] crates/cito-native/src/core/daemon/mod.rs:reload_slots`\
+      \ (with `transport.rs:HubClient::new` / `host_hub.rs` / `http_actions.rs:hub_action`):\
+      \ Do not treat unresolved OIDC placeholder identities (`none#<user>` before\
+      \ OIDC authentication establishes an authoritative principal) as authoritative\
+      \ duplicate principals in `reload_slots`. Admitted profiles with distinct OIDC\
+      \ client/issuer configurations at one normalized URL must retain their runtime\
+      \ slots and remain interactive-login capable (`hub_action` login) in either\
+      \ login order, while duplicate-principal suppression in `reload_slots` remains\
+      \ enforced once an authoritative matching `(normalized_url, principal_id)` (static\
+      \ token or resolved OIDC subject/issuer principal) is established. Add a regression\
+      \ test in `crates/cito-native/src/core/daemon/tests.rs` (and/or `crates/cito-native/tests/support/daemon/config_and_hubs.rs`)\
+      \ saving two permitted OIDC configurations at one URL, verifying either profile\
+      \ can initiate login without `Unknown or disabled hub`, and verifying duplicate-principal\
+      \ suppression once a real duplicate principal is established.\n- `[V58-GATE-2\
+      \ / v58.DSE-6] crates/cito-native/src/core/setup.rs:run_setup` (`--disconnect-all`\
+      \ with and without `--purge-data`, and `daemon_control_config`): Settle `--disconnect-all`\
+      \ and `--disconnect-all --purge-data` when no daemon is running even when `config.json`\
+      \ is malformed or unreadable, without aborting early on `No running daemon for\
+      \ disconnect` before removing app integrations or resetting the damaged profile.\
+      \ Preserve daemon/config ownership exclusions (foreign live daemon on the target\
+      \ port or concurrent profile replacement) and unrelated state, and add regressions\
+      \ in `crates/cito-native/tests/support/plugins.rs` covering no-daemon malformed\
+      \ and unreadable `config.json` profiles for both `--disconnect-all` and `--disconnect-all\
+      \ --purge-data`.\n- Rebuild and stage signed release binaries via `cargo build\
+      \ --release --locked` (`bin/**` and `plugins/*/bin/**`, `7/7 codesign --verify\
+      \ --strict`) so the worktree is clean for `v58.gate`.\n\nImplementation Notes\
+      \ (Non-Binding):\n- In `reload_slots` (`crates/cito-native/src/core/daemon/mod.rs:862-969`),\
+      \ `HubClient::new` (`crates/cito-native/src/core/transport.rs:119-153`) initializes\
+      \ unauthenticated OIDC profiles without a cached session token to provisional\
+      \ `none#<user>`. Guard duplicate `(url, principal_id)` suppression in `reload_slots`\
+      \ so unauthenticated OIDC placeholder principals do not collide with other profiles\
+      \ before authentication establishes a real principal.\n- In `crates/cito-native/src/core/setup.rs:1198-1215`,\
+      \ when `disconnect_all` runs with `config_load_error.is_some()` and no running\
+      \ daemon owns the state dir, do not return `Err(\"No running daemon for disconnect\"\
+      )` before performing local integration cleanup and (when `purge_data` is set)\
+      \ profile reset under the existing ownership/fingerprint guards (`setup.rs:681-706`).\n\
+      \nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL: contract-and-simplicity]`).\
+      \ Point repair for the 2 `v58.gate` Tier 1 findings plus staged release binary\
+      \ refresh. Do not modify `src/macos/**` or `plan.yaml`.\n\nAdmit:\n- Depends\
+      \ on `[\"v58.consolidate\"]`.\n- Verification: run targeted reverse-dependency\
+      \ tests (`cargo test --package cito-native --lib core::daemon::tests --locked\
+      \ && cargo test --package cito-native --test integration --locked -- config_and_hubs\
+      \ plugins --test-threads=4`), `cargo fmt --all -- --check`, `cargo clippy --workspace\
+      \ --all-targets --locked -- -D warnings`, `cargo build --release --locked`,\
+      \ and `git diff --check` (reusing `v58.consolidate` full-suite evidence for\
+      \ untouched suites, or running detached `cargo test --workspace --locked --\
+      \ --test-threads=4` if shared helpers change). Consumed by `v58.gate`.\n\nRecovery:\n\
+      - Reconcile any test failure, clippy/fmt diagnostic, or staged binary signature\
+      \ mismatch in place before completing."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo build --release --locked && cargo test --package
+      cito-native --lib core::daemon::tests --locked && cargo test --package cito-native
+      --test integration --locked -- config_and_hubs plugins --test-threads=4 && git
+      diff --check
+    evidence_template: '- V58-GATE-1 fix & regression (`reload_slots` unresolved OIDC
+      placeholder vs. established duplicate principal): <file:line & test output>
+
+      - V58-GATE-2 fix & regression (`--disconnect-all` / `--purge-data` with malformed/unreadable
+      `config.json` and no running daemon): <file:line & test output>
+
+      - Staged binaries & checks (`cargo fmt`, `cargo clippy`, `cargo build --release
+      --locked`, `7/7 codesign --verify --strict`, targeted/workspace `cargo test`,
+      `git diff --check`): <command outputs>'
+    refs:
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    - crates/cito-native/tests/support/plugins.rs
+    depends_on:
+    - v58.consolidate
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-22T18:08:14.965793Z'
+    done_at: '2026-11-22T18:34:08.505787+00:00'
+    evidence: 'Merged v58.gate_repair (commit b5600d47e145e6f66c78283abddc06a74b5585d6)
+      into main. Closed V58-GATE-1 (reload_slots no longer suppresses unresolved OIDC
+      none#<user> placeholder identities; distinct OIDC profiles remain login-capable
+      in either order while duplicate-principal suppression triggers once real matching
+      issuer/subject principals resolve) and V58-GATE-2 (setup.rs --disconnect-all
+      and --disconnect-all --purge-data settle cleanly with no daemon running even
+      on malformed/unreadable config.json while preserving ownership exclusions).
+      Verification: cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, cargo build --release --locked (7/7 staged binaries
+      passed codesign --verify --strict), 246 targeted unit/integration tests passed
+      (0 failed, 2 ignored subprocess helpers), git diff --check.'

@@ -569,15 +569,13 @@ fn pi_padded_bridge_identity_survives_live_and_cached_resolution() {
     let app = f.dir.join("pi.mjs");
     fs::write(&app, r#"import fs from 'node:fs';import net from 'node:net';import readline from 'node:readline';
 const dir=process.env.CITO_STATE_DIR+'/sockets';fs.mkdirSync(dir,{recursive:true});
-let failures=0, calls=0;
+let failNext=false, session=' selected-session ';
 net.createServer(c=>c.once('data',()=>{
- calls++;
- if(failures>0){failures--;c.end('unavailable\n');}
- else c.end(JSON.stringify({ok:true,session_id:' selected-session ',cwd:'/repo',pi_pid:process.pid})+'\n');
- console.log(JSON.stringify({op:'identify',calls}));
+ if(failNext){failNext=false;c.end('unavailable\n');}
+ else c.end(JSON.stringify({ok:true,session_id:session,cwd:'/repo',pi_pid:process.pid})+'\n');
 })).listen(dir+'/pi-pid-'+process.pid+'.sock',()=>console.log(JSON.stringify({op:'ready'})));
 readline.createInterface({input:process.stdin}).on('line',line=>{
- const req=JSON.parse(line);failures=req.failures;calls=0;console.log(JSON.stringify({op:'reset',token:req.token}));
+ const req=JSON.parse(line);failNext=req.failNext;session=req.session;console.log(JSON.stringify({op:'reset',token:req.token}));
 });
 "#).unwrap();
     let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
@@ -588,11 +586,14 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     for use_cache in [false, true] {
         for envelope in [None, Some("meta"), Some("_meta")] {
             token += 1;
-            // Fail the ancestor lookup and socket scan only. The third exchange
-            // must validate the cached caller against the live padded identity.
+            // A transient lookup failure exercises cached resolution. Preserve a
+            // distinct cached display title so a fresh resolution cannot pass for it.
+            if use_cache {
+                cached["title"] = json!("Prior display title");
+            }
             f.send(
                 endpoint,
-                json!({"failures":if use_cache {2} else {0},"token":token}),
+                json!({"failNext":use_cache,"session":" selected-session ","token":token}),
             );
             wait(|| {
                 f.frames(endpoint)
@@ -610,16 +611,29 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 "{use_cache}/{envelope:?}: {resolved}"
             );
             assert_eq!(resolved["caller"]["endpoint_pid"], pid, "{resolved}");
+            if use_cache {
+                assert_eq!(resolved["caller"], cached);
+            }
             cached = resolved["caller"].clone();
             assert!(cached["process_identity"].is_object());
-            let calls = if use_cache { 3 } else { 1 };
-            wait(|| {
-                f.frames(endpoint)
-                    .last()
-                    .is_some_and(|v| v["op"] == "identify" && v["calls"] == calls)
-            });
         }
     }
+    // A cache with the same PID and process identity still needs a live session match.
+    token += 1;
+    f.send(
+        endpoint,
+        json!({"failNext":true,"session":"selected-session","token":token}),
+    );
+    wait(|| {
+        f.frames(endpoint)
+            .iter()
+            .any(|v| v["op"] == "reset" && v["token"] == token)
+    });
+    let rejected = f.plugin(PI, json!({"op":"resolve_caller","require_open":false,"endpoint_pid":pid,"cached_caller":cached}));
+    assert_eq!(
+        rejected["error_code"], "PI_BRIDGE_UNAVAILABLE",
+        "{rejected}"
+    );
     f.stop(endpoint);
 }
 

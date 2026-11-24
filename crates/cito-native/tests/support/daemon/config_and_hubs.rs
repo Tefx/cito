@@ -97,6 +97,72 @@ fn ui_retries_after_initial_executable_failure() {
 }
 
 #[test]
+fn shared_endpoint_oidc_profiles_accept_either_login_order_until_subjects_collide() {
+    let _lock = serial();
+    for [first, second] in [["personal", "work"], ["work", "personal"]] {
+        let f = Fixture::new(json!({}));
+        let keys = root().join("crates/cito-native/tests/hub/fixtures");
+        let provider = f.spawn("python3", &["-u", "-c", r#"import base64,http.server,json,pathlib,subprocess,sys,time,urllib.parse as url
+keys=pathlib.Path(sys.argv[1])
+def b64(raw): return base64.urlsafe_b64encode(raw).rstrip(b'=')
+def part(obj): return b64(json.dumps(obj).encode())
+class Provider(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def reply(self,obj):
+  raw=json.dumps(obj).encode(); self.send_response(200); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
+ def do_GET(self):
+  if self.path=='/jwks':
+   n=bytes.fromhex((keys/'rsa-modulus.txt').read_text().strip().split('=')[1]); self.reply({'keys':[{'kty':'RSA','kid':'fixture','alg':'RS256','n':b64(n).decode(),'e':'AQAB'}]})
+  else: self.reply({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','jwks_uri':issuer+'/jwks'})
+ def do_POST(self):
+  p=url.parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode()); claims={'iss':issuer,'sub':'shared','aud':p['client_id'][0],'exp':int(time.time())+600,'nonce':p['code'][0]}
+  payload=part({'alg':'RS256','kid':'fixture'})+b'.'+part(claims); signature=subprocess.check_output(['openssl','dgst','-sha256','-sign',keys/'rsa-private.pem'],input=payload)
+  self.reply({'id_token':(payload+b'.'+b64(signature)).decode()})
+s=http.server.ThreadingHTTPServer(('127.0.0.1',0),Provider); issuer='http://127.0.0.1:'+str(s.server_port); print(json.dumps(issuer),flush=True); s.serve_forever()
+"#, keys.to_str().unwrap()], &[]);
+        wait(|| !f.frames(provider).is_empty());
+        let issuer = f.frames(provider).remove(0);
+        let opener = f.dir.join("browser");
+        script(&opener, "#!/usr/bin/env python3\nimport sys, urllib.parse as u, urllib.request as r\np=u.parse_qs(u.urlparse(sys.argv[1]).query)\nr.urlopen(p['redirect_uri'][0]+'?'+u.urlencode({'state':p['state'][0], 'code':p['nonce'][0]}), timeout=5).read()\n");
+        f.daemon(&[("CITO_BROWSER_BIN", opener.to_str().unwrap())]);
+        for (name, url) in [
+            ("personal", "http://127.0.0.1:1/"),
+            ("work", "http://127.0.0.1:1"),
+        ] {
+            f.action_ok(json!({"op":"setup_save_hub","name":name,"url":url,"authMode":"oidc","issuer":issuer,"clientId":name,"redirectPort":0}));
+        }
+        for name in [first, second] {
+            let result = f.action(json!({"op":"hub_action","action":"login","hub":name}));
+            let cache = f.state.join(format!("oidc-token-{name}.json"));
+            assert!(
+                cache.is_file(),
+                "{name} never finished authentication: {result:?}"
+            );
+            let verified = read_json(cache);
+            assert_eq!(verified["client_id"], name);
+            assert_eq!(
+                verified["verified_principal_id"],
+                format!("oidc:{}|shared", issuer.as_str().unwrap())
+            );
+        }
+        let snapshot = f.snapshot();
+        let runtime = snapshot["hubs"].as_array().unwrap();
+        assert!(runtime.iter().any(|h| h["name"] == first), "{runtime:?}");
+        assert!(!runtime.iter().any(|h| h["name"] == second), "{runtime:?}");
+        let suppressed = snapshot["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == second)
+            .unwrap();
+        assert_eq!(
+            suppressed["error"],
+            format!("INVALID_INPUT: Hub URL is already configured under '{first}'")
+        );
+    }
+}
+
+#[test]
 fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
     use std::{
         io::Write,
@@ -464,9 +530,24 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     );
     let port = hosted["port"].as_u64().unwrap();
     let committed = fs::read(&f.config).unwrap();
+    let endpoint = hosted["endpoint_url"].as_str().unwrap();
+    let (ok, _, err) = f.command(
+        NATIVE,
+        &[
+            "setup", "--hub", "mirror", "--url", endpoint, "--auth", "none", "--json",
+        ],
+        "",
+    );
+    assert!(!ok && err.contains("own shared Hub"), "{err}");
+    let (status, error) =
+        f.action(json!({"op":"setup_save_hub","name":"mirror","url":endpoint,"auth_mode":"none"}));
+    assert_eq!(status, 400);
+    assert!(error["error"].as_str().unwrap().contains("own shared Hub"));
+    assert_eq!(fs::read(&f.config).unwrap(), committed);
     let hostname = f.env["CITO_HOST_NAME"].clone();
     for host in [
         "127.0.0.1",
+        "127.0.0.2",
         "localhost",
         "[::1]",
         &hostname,
@@ -506,7 +587,57 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     let different = if port == 65535 { port - 1 } else { port + 1 };
     let invite = json!({"name":"different-port","url":format!("http://127.0.0.1:{different}"),"auth_mode":"none"});
     f.action_ok(json!({"op":"paste_hub_invite","invite":invite.to_string()}));
+    let url = &invite["url"];
+    f.action_ok(
+        json!({"op":"setup_save_hub","name":"alias","url":url,"authMode":"none","enabled":false}),
+    );
+    let committed = fs::read(&f.config).unwrap();
+    for action in [
+        json!({"op":"hub_action","hub":"alias","action":"reconnect"}),
+        json!({"op":"hub_action","hub":"alias","action":"login"}),
+        json!({"op":"setup_toggle_hub","hub":"alias","enabled":true}),
+        json!({"op":"setup_save_hub","name":"alias","url":url,"authMode":"none"}),
+    ] {
+        let (status, result) = f.action(action);
+        assert_eq!(status, 400, "{result}");
+        assert_eq!(
+            result["error"],
+            "INVALID_INPUT: Hub URL is already configured under 'different-port'"
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), committed);
+    }
+    let (ok, _, err) = f.command(NATIVE, &["setup", "--enable-hub", "alias"], "");
+    assert!(
+        !ok && err.contains("already configured under 'different-port'"),
+        "{err}"
+    );
+    let (status, result) = f.action(json!({"op":"set_host_hub","port":different}));
+    assert_eq!(status, 400);
+    assert!(result["error"].as_str().unwrap().contains("own shared Hub"));
+    assert_eq!(fs::read(&f.config).unwrap(), committed);
+    assert_eq!(f.snapshot()["settings"]["host_hub"]["port"], port);
 }
+
+#[test]
+fn cli_plugin_enable_refreshes_a_running_daemons_cached_inspection() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.daemon(&[]);
+    let configured = || {
+        f.snapshot()["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "pi")
+            .unwrap()["configured"]
+            .clone()
+    };
+    assert_eq!(configured(), false);
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--enable", "pi", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(configured(), true);
+}
+
 #[test]
 fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_errors() {
     let _lock = serial();
@@ -636,6 +767,12 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
         ("default_hub", "setup_remove_hub", json!({}), "local"),
         (
             "defaultHub",
+            "setup_save_hub",
+            json!({"local":{"url":"local://"}}),
+            "local",
+        ),
+        (
+            "defaultHub",
             "setup_remove_hub",
             json!({"personal":{"url":"local://","enabled":false},"shared":{"url":"local://"}}),
             "shared",
@@ -671,13 +808,17 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
         fs::write(&f.config, initial.to_string()).unwrap();
         let daemon = f.daemon(&[]);
         assert_eq!(f.snapshot()["hub"], "work");
-        let (status, response) =
-            f.action(json!({"op":op,"hub":"work","enabled":false,"action":"disconnect"}));
+        let action = if op == "setup_save_hub" {
+            json!({"op":op,"edit":true,"name":"work","enabled":false,"set_default":true})
+        } else {
+            json!({"op":op,"hub":"work","enabled":false,"action":"disconnect"})
+        };
+        let (status, response) = f.action(action);
         assert_eq!(status, 200, "{op}: {response}");
         let saved: Value = read_json(&f.config);
         assert_eq!(saved["default_hub"], expected, "{op}: {saved}");
         assert!(saved.get("defaultHub").is_none());
-        if matches!(op, "setup_toggle_hub" | "hub_action") {
+        if matches!(op, "setup_toggle_hub" | "hub_action" | "setup_save_hub") {
             assert_eq!(saved["hubs"]["work"]["enabled"], false);
         } else {
             assert!(saved["hubs"].get("work").is_none());

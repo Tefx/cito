@@ -89,3 +89,9 @@ Integration subprocess tests share a process-test mutex and an environment-clear
    - `.github/workflows/release.yml` owns formal signing, notarization, stapling, final ZIP/checksum generation, GitHub Release publication, install/uninstall verification, and the scoped `Tefx/homebrew-tap` update. Reuse exact-commit passing main candidates and immutable published assets on retry. Missing signing credentials must fail; never silently publish an ad-hoc fallback. Do not move existing tags or replace their published ZIP/checksum.
    - `packaging/homebrew/cito.rb` is a Cask template. Generate its concrete version and SHA-256 only from the final signed/stapled archive with `packaging/release.py`; do not prefill a future checksum. Never reintroduce a same-name Formula. Keep install and uninstall ownership of the App and both CLI links with Homebrew.
    - Consumer MCP configurations and server deployments SHOULD pin immutable semantic tags (`github:Tefx/cito#v0.10.0`) rather than raw commit hashes. Agents maintaining consumer dotfiles must account for the managed Cask links and the tag-driven release workflow.
+
+## Dogfooding & Field Feedback Tracking
+
+- **Cross-Session Dogfooding**: When coordinating across agent sessions or hosts (such as between Architect and Orchestrator sessions), prefer Cito's native signaling tools (`cito_find`, `cito_send`, `cito_inbox`, `cito_status`, `cito_listen`) to exercise Cito in real workflows.
+- **Feedback Ledger (`docs/FEEDBACK.md`)**: Record incoming usability, discovery, status-bar badge, wake-card, or reliability feedback from peer sessions in `docs/FEEDBACK.md` (in English, using vendor-neutral examples) for periodic architectural review and triage.
+

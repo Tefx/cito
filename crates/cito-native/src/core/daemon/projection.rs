@@ -331,9 +331,10 @@ impl DaemonService {
             }
         }
         let hubs: Vec<_> = hubs.into_values().collect();
-        let host = raw
-            .get("host_hub")
-            .or_else(|| raw.get("hostHub"))
+        let host = configured
+            .as_ref()
+            .ok()
+            .and_then(|(_, _, rest)| rest.get("host_hub"))
             .unwrap_or(&Value::Null);
         let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
         let host = if running {

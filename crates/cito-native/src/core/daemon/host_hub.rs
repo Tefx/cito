@@ -251,6 +251,107 @@ pub(super) fn lan_advertised_host(bind: &str) -> String {
     "127.0.0.1".into()
 }
 
+pub(super) const OWN_HUB_ERROR: &str = "INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.";
+
+pub(crate) fn is_own_host_hub_url(url_str: &str, host_cfg: &Value, live_port: Option<u16>) -> bool {
+    if url_str == "local://" || (host_cfg["enabled"] != true && live_port.is_none()) {
+        return false;
+    }
+    let port = live_port
+        .or_else(|| {
+            u16::try_from(host_cfg["port"].as_u64()?)
+                .ok()
+                .filter(|&p| p != 0)
+        })
+        .unwrap_or(4291);
+    let Ok(url) = url::Url::parse(url_str) else {
+        return false;
+    };
+    if url.port_or_known_default() != Some(port) {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_matches(['[', ']']).trim_end_matches('.');
+    if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        || host.eq_ignore_ascii_case("localhost")
+    {
+        return true;
+    }
+    let hostname = local_host_name();
+    let bind = string(host_cfg, "bind");
+    let matches = |s: &str| host.eq_ignore_ascii_case(s.trim_end_matches('.'));
+    matches(&hostname)
+        || matches(&format!("{}.local", hostname.trim_end_matches(".local")))
+        || matches(&lan_advertised_host(bind))
+        || tailscale_advertised_host().as_deref().is_some_and(matches)
+}
+
+pub(super) fn remote_endpoint(hub: &Value) -> Option<url::Url> {
+    let url = string(hub, "url").trim().trim_end_matches('/');
+    url::Url::parse(url)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+pub(super) const DUPLICATE_HUB_ERROR: &str = "INVALID_INPUT: Hub URL is already configured under";
+
+pub(super) fn duplicate_hub_error(existing: &str) -> String {
+    format!("{DUPLICATE_HUB_ERROR} '{existing}'")
+}
+
+pub(crate) fn validate_hub_endpoints(raw: &Value, live_port: Option<u16>) -> Result<(), String> {
+    validate_hub_edit(raw, live_port, None)
+}
+
+pub(crate) fn validate_hub_edit(
+    raw: &Value,
+    live_port: Option<u16>,
+    edited: Option<&str>,
+) -> Result<(), String> {
+    let (_, hubs, rest) = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+    let global_user = std::env::var("CITO_USER")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| raw["user"].as_str().map(str::to_owned))
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "user".into());
+    let mut endpoints = std::collections::HashMap::new();
+    for (name, hub) in &hubs {
+        if hub["enabled"] == false {
+            continue;
+        }
+        let Some(url) = remote_endpoint(hub) else {
+            continue;
+        };
+        if name != "local"
+            && is_own_host_hub_url(
+                url.as_str(),
+                rest.get("host_hub").unwrap_or(&Value::Null),
+                live_port,
+            )
+        {
+            return Err(OWN_HUB_ERROR.into());
+        }
+        let user = hub["user"]
+            .as_str()
+            .unwrap_or(&global_user)
+            .to_ascii_lowercase();
+        let oidc =
+            (hub["authMode"] == "oidc").then(|| (string(hub, "issuer"), string(hub, "clientId")));
+        if let Some(existing) = endpoints.insert((url, user, oidc), name.as_str()) {
+            // Report the incumbent even when a newly submitted name sorts first.
+            return Err(duplicate_hub_error(if Some(existing) == edited {
+                name
+            } else {
+                existing
+            }));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn hub_name_from_url(raw: &str) -> String {
     let candidate = url::Url::parse(raw.trim())
         .ok()
@@ -356,15 +457,10 @@ pub(super) fn parse_hub_invite(raw: &str) -> Result<Value, String> {
 }
 
 impl DaemonService {
-    pub(super) fn sync_host_hub(&mut self) -> Result<(), String> {
+    pub(super) fn sync_host_hub(&mut self, host: &Value) -> Result<(), String> {
         if self.closing {
             return Ok(());
         }
-        let raw = self.raw_config()?;
-        let host = raw
-            .get("host_hub")
-            .or_else(|| raw.get("hostHub"))
-            .unwrap_or(&Value::Null);
         let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
         if !running {
             self.host_server.take();

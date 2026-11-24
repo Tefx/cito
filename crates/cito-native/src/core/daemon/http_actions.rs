@@ -1,17 +1,17 @@
 use super::{
     channels::{channel_action_kind, dispatch_channel_action},
     host_hub::{
-        advertised_hub_host, host_hub_auth_mode, host_hub_server_config, hub_name_from_url,
-        lan_advertised_host, parse_hub_invite, replace_host_hub_server, tailscale_advertised_host,
+        host_hub_server_config, hub_name_from_url, parse_hub_invite, replace_host_hub_server,
+        validate_hub_edit, validate_hub_endpoints,
     },
     mcp::{run_captured, validate_tool_input, Detaches, ToolCall},
     request_shutdown, shutdown_requested,
     ui_ipc::bounded_frame,
-    wake_daemon, DaemonService, SHUTDOWN_REQUESTED,
+    wake_daemon, ConfigSnapshot, DaemonService, SHUTDOWN_REQUESTED,
 };
 use crate::core::{
-    config::repair_default_hub,
-    identity::{listener_id, local_host_name, normalize_slug, string},
+    config::{apply_host_hub_patch, repair_default_hub},
+    identity::{listener_id, normalize_slug, string},
 };
 use crate::plugins::now_ms;
 use crate::setup::{
@@ -97,6 +97,25 @@ fn invite_hub_name(invite: &Value, raw: &Value) -> String {
     available_hub_name(base, &raw["hubs"], &invite["url"], None)
 }
 
+fn configured_hubs(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, String> {
+    snapshot.normalized().map(|(_, hubs, _)| hubs)
+}
+
+fn set_profile_enabled(
+    raw: &mut Value,
+    name: &str,
+    enabled: bool,
+    live_port: Option<u16>,
+) -> Result<(), String> {
+    let hub = raw["hubs"][name]
+        .as_object_mut()
+        .ok_or("INVALID_INPUT: Hub must be an object")?;
+    hub.insert("enabled".into(), json!(enabled));
+    hub.remove("disabled");
+    repair_default_hub(raw);
+    validate_hub_edit(raw, live_port, Some(name))
+}
+
 fn action_hub(action: &Value) -> Result<&str, String> {
     action["hub"]
         .as_str()
@@ -132,6 +151,44 @@ fn refreshes_setup(action: &Value) -> bool {
     )
 }
 
+/// Wait without holding the service lock. The returned guard pins the inspected
+/// generation while the caller selects discovery providers or publishes a receipt.
+fn settle_setup<'a, S: std::borrow::BorrowMut<DaemonService>>(
+    owner: &'a Mutex<S>,
+    mut guard: std::sync::MutexGuard<'a, S>,
+    ui: Option<u64>,
+) -> Result<(std::sync::MutexGuard<'a, S>, Result<(), String>), String> {
+    let completion = (*guard).borrow_mut().setup_completion.clone();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
+        let s = (*guard).borrow_mut();
+        if let Err(error) = s.check_action(ui) {
+            return Ok((guard, Err(error)));
+        }
+        s.refresh_setup_inspections();
+        if s.setup_inspections.values().all(|e| e.worker.is_none()) {
+            return Ok((guard, Ok(())));
+        }
+        if Instant::now() >= deadline {
+            return Ok((guard, Err("Setup inspection timed out".into())));
+        }
+        drop(guard);
+        let revision = completion.0.lock().unwrap_or_else(|e| e.into_inner());
+        drop(
+            completion
+                .1
+                .wait_timeout_while(
+                    revision,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |v| *v == before,
+                )
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        guard = owner.lock().map_err(|_| "Daemon lock poisoned")?;
+    }
+}
+
 pub(super) fn dispatch_action(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
@@ -157,65 +214,27 @@ pub(super) fn dispatch_action(
         .transpose()?;
     let mut result = dispatch_action_inner(service, action, ui_generation);
     drop(_setup);
-    let refresh_setup = refreshes_setup(action);
-    // Await invalidated inspections without holding service. Retain the final
-    // guard so another mutation cannot invalidate them before receipt publication.
-    let completion = service
-        .lock()
-        .map_err(|_| "Daemon lock poisoned")?
-        .setup_completion
-        .clone();
-    let deadline = Instant::now() + Duration::from_secs(12);
-    let mut s = loop {
-        let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
-        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-        if !refresh_setup {
-            // Composer actions settle under their original guard, including
-            // preflight errors. Do not replace that receipt after re-entry.
-            if action["op"] != "send_signal" {
-                if let Err(error) = s.validate_ui_generation(ui_generation) {
-                    return match result {
-                        Ok(value) if value["committed"] == true => {
-                            Ok(committed_projection(value, Err(error)))
-                        }
-                        _ => Err(error),
-                    };
-                }
-            }
-            break s;
-        }
+    let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+    if refreshes_setup(action) {
+        let (guard, inspection) = settle_setup(service, s, ui_generation)?;
+        s = guard;
         if let Err(error) = s.validate_ui_generation(ui_generation) {
             return result.map(|value| committed_projection(value, Err(error)));
         }
-        if s.closing || shutdown_requested() {
-            result = result.map(|value| {
-                committed_projection(value, Err("Shutting down before local refresh".into()))
-            });
-            break s;
+        if let Err(error) = inspection {
+            result = result.map(|value| committed_projection(value, Err(error)));
         }
-        s.refresh_setup_inspections();
-        if s.setup_inspections
-            .values()
-            .all(|entry| entry.worker.is_none())
-        {
-            break s;
+    } else if action["op"] != "send_signal" {
+        // Composer actions settle under their original guard.
+        if let Err(error) = s.validate_ui_generation(ui_generation) {
+            return match result {
+                Ok(value) if value["committed"] == true => {
+                    Ok(committed_projection(value, Err(error)))
+                }
+                _ => Err(error),
+            };
         }
-        if Instant::now() >= deadline {
-            result = result
-                .map(|value| committed_projection(value, Err("Setup inspection timed out".into())));
-            break s;
-        }
-        drop(s);
-        let revision = completion.0.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = completion
-            .1
-            .wait_timeout_while(
-                revision,
-                deadline.saturating_duration_since(Instant::now()),
-                |revision| *revision == before,
-            )
-            .unwrap_or_else(|e| e.into_inner());
-    };
+    }
     if interactive_login(action) {
         s.record_hub_result(action, &result, None);
     }
@@ -228,7 +247,7 @@ pub(super) fn dispatch_action(
         );
         }
     }
-    if refresh_setup && result.is_ok() {
+    if refreshes_setup(action) && result.is_ok() {
         s.emit_settings_receipt(action, &result);
         s.push_ui_result(Some(action));
     } else {
@@ -336,11 +355,12 @@ fn dispatch_action_inner(
             if !v["hubs"].is_object() || !v["hubs"][&hub].is_object() {
                 return Err("INVALID_INPUT: Unknown hub".into());
             }
-            v["hubs"][&hub]["enabled"] = json!(true);
-            if let Some(m) = v["hubs"][&hub].as_object_mut() {
-                m.remove("disabled");
-            }
-            Ok(())
+            set_profile_enabled(
+                v,
+                &hub,
+                true,
+                s.host_server.as_ref().map(|server| server.port()),
+            )
         })?;
         s.reload_slots()?;
         let config = s.slot(&hub)?.config.clone();
@@ -447,7 +467,6 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
         let mut resolved = None;
         let mut submitted = if op == "paste_hub_invite" {
             let mut parsed = parse_hub_invite(string(action, "invite"))?;
-            s.reject_own_hub_invite(&parsed, &before)?;
             parsed["request_id"] = action["request_id"].clone();
             parsed
         } else {
@@ -465,8 +484,23 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
             .and_then(|original| before["hubs"].get(original))
             .unwrap_or(&Value::Null);
         let merged = crate::core::config::merge_hub_config(base, patch);
+        // Refuse a self-invite before contacting its discovery endpoint. The
+        // locked save rechecks the entire profile with the then-current port.
+        let (_, _, rest) =
+            crate::plugins::try_normalize_existing_config(Some(&before.to_string()))?;
+        let own = merged["enabled"] != false
+            && merged["disabled"] != true
+            && super::host_hub::is_own_host_hub_url(
+                string(&merged, "url"),
+                rest.get("host_hub").unwrap_or(&Value::Null),
+                s.host_server.as_ref().map(|server| server.port()),
+            );
         drop(guard);
-        let discovered = crate::core::config::discover_hub_config(merged);
+        let discovered = if own {
+            Err(super::host_hub::OWN_HUB_ERROR.into())
+        } else {
+            crate::core::config::discover_hub_config(merged)
+        };
         guard = owner.lock().map_err(|_| "Daemon lock poisoned")?;
         let s = (*guard).borrow_mut();
         s.check_action(ui)?;
@@ -491,10 +525,32 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
             action,
             &submitted,
             resolved.as_deref(),
+            None,
             result,
         );
     }
-    let prepared = s.prepare_action(action, ui);
+    if op == "refresh_available" {
+        for entry in s.setup_inspections.values_mut() {
+            entry.invalidate();
+        }
+        let (current, inspected) = settle_setup(owner, guard, ui)?;
+        inspected?;
+        guard = current;
+    }
+    let s = (*guard).borrow_mut();
+    // Compare the actual file across retirement even if its JSON is damaged.
+    let lifecycle = matches!(
+        op,
+        "setup_disconnect_all" | "setup_uninstall_all" | "unlisten_all"
+    )
+    .then(|| s.config_snapshot())
+    .transpose()?;
+    let recover = (matches!(op, "setup_disconnect_all" | "setup_uninstall_all")
+        || (op == "unlisten_all" && action["hub"].is_null()))
+        && lifecycle
+            .as_ref()
+            .is_some_and(|snapshot| configured_hubs(snapshot).is_err());
+    let prepared = s.prepare_action(action, ui, recover);
     let result = match prepared {
         Ok(ToolCall::Ready(value)) => Ok(value),
         Err(error) => Err(error),
@@ -502,9 +558,6 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
             let access = s.access.clone();
             let request = s.directory_request;
             let hub = action["hub"].as_str().unwrap_or(&access.config.default_hub);
-            let lifecycle = matches!(op, "setup_disconnect_all" | "setup_uninstall_all")
-                .then(|| s.raw_config())
-                .transpose()?;
             drop(guard);
             // UI sends publish exactly once; MCP's recovery and poll are specific to tool calls.
             let result = if send || matches!(work, ToolCall::HubControl { .. }) {
@@ -516,9 +569,12 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
             let s = (*guard).borrow_mut();
             let ui_current = s.check_action(ui).is_ok();
             let stale = !ui_current || !work.current(s, &access);
-            if let Some(before) = lifecycle {
+            if let Some(before) = lifecycle
+                .as_ref()
+                .filter(|_| op != "unlisten_all" || recover)
+            {
                 if stale
-                    || s.raw_config()? != before
+                    || s.config_snapshot()? != *before
                     || s.slots.len() != access.slots.len()
                     || access.slots.iter().any(|(hub, old)| {
                         s.slots
@@ -548,7 +604,15 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
             }
         }
     };
-    DaemonService::finish_action(owner, guard, action, action, None, result)
+    DaemonService::finish_action(
+        owner,
+        guard,
+        action,
+        action,
+        None,
+        lifecycle.as_ref(),
+        result,
+    )
 }
 
 pub(super) fn mutating_action(action: &Value) -> bool {
@@ -794,47 +858,6 @@ impl DaemonService {
         Ok(())
     }
 
-    fn reject_own_hub_invite(&self, invite: &Value, raw: &Value) -> Result<(), String> {
-        let Some(server) = &self.host_server else {
-            return Ok(());
-        };
-        let url =
-            url::Url::parse(string(invite, "url")).map_err(|_| "INVALID_INPUT: Invalid Hub URL")?;
-        let host = raw
-            .get("host_hub")
-            .or_else(|| raw.get("hostHub"))
-            .unwrap_or(&Value::Null);
-        let bind = string(host, "bind");
-        let hostname = local_host_name();
-        let mut local_hosts = vec![
-            "127.0.0.1".into(),
-            "localhost".into(),
-            "::1".into(),
-            hostname.clone(),
-            format!("{}.local", hostname.trim_end_matches(".local")),
-            advertised_hub_host(bind),
-            lan_advertised_host(bind),
-        ];
-        if matches!(bind, "" | "0.0.0.0" | "::") {
-            local_hosts.extend(tailscale_advertised_host());
-        }
-        let invite_host = url
-            .host_str()
-            .unwrap_or("")
-            .trim_matches(['[', ']'])
-            .trim_end_matches('.');
-        if url.port_or_known_default() == Some(server.port())
-            && local_hosts.iter().any(|local| {
-                local
-                    .trim_matches(['[', ']'])
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case(invite_host)
-            })
-        {
-            return Err("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.".into());
-        }
-        Ok(())
-    }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
         execute_action(&Mutex::new(self), action, None)
     }
@@ -990,7 +1013,12 @@ impl DaemonService {
                     m.remove("defaultHub");
                 }
             }
-            Ok(())
+            repair_default_hub(v);
+            validate_hub_edit(
+                v,
+                self.host_server.as_ref().map(|server| server.port()),
+                Some(&name),
+            )
         })?;
         if let Some(name) = resolved_hub.as_deref() {
             self.cancel_hub_interaction(name);
@@ -1088,12 +1116,15 @@ impl DaemonService {
         action: &Value,
         operation: &Value,
         resolved_hub: Option<&str>,
+        lifecycle: Option<&ConfigSnapshot>,
         result: Result<Value, String>,
     ) -> Result<Value, String> {
         let ingress_ui = (*guard).borrow_mut().ui_generation;
         let mut result = result;
-        if operation["op"] == "setup_disconnect_all" && result.is_ok() {
-            match (*guard).borrow_mut().begin_disconnect(operation) {
+        if let Some(before) =
+            lifecycle.filter(|_| operation["op"] == "setup_disconnect_all" && result.is_ok())
+        {
+            match (*guard).borrow_mut().begin_disconnect(operation, before) {
                 Err(error) => result = Err(error),
                 Ok(None) => {}
                 Ok(Some(workers)) => {
@@ -1353,6 +1384,7 @@ impl DaemonService {
         &mut self,
         action: &Value,
         ui_generation: Option<u64>,
+        recover: bool,
     ) -> Result<ToolCall, String> {
         if !action.is_object() {
             return Err("INVALID_INPUT: Action must be an object".into());
@@ -1388,7 +1420,9 @@ impl DaemonService {
                 .to_owned();
             self.cancel_hub_interaction(&hub);
         }
-        self.reload_slots()?;
+        if !recover {
+            self.reload_slots()?;
+        }
         if matches!(
             op,
             "set_auto_listen"
@@ -1497,7 +1531,7 @@ impl DaemonService {
                 }
                 self.mutate_config(|v| {
                     v["user"] = json!(user);
-                    Ok(())
+                    validate_hub_endpoints(v, self.host_server.as_ref().map(|s| s.port()))
                 })?;
             }
             "setup_toggle_hub" | "hub_action" => {
@@ -1506,11 +1540,6 @@ impl DaemonService {
                 } else {
                     string(action, "action") != "disconnect"
                 };
-                if op == "hub_action" && action["action"] == "reconnect" {
-                    if let Some(old) = self.slots.remove(&hub) {
-                        old.close_and_drain()?;
-                    }
-                }
                 self.mutate_config(|v| {
                     if v["hubs"].is_null() {
                         v["hubs"] = json!({});
@@ -1524,16 +1553,18 @@ impl DaemonService {
                         }
                         v["hubs"][&hub] = json!({"url":"local://"});
                     }
-                    if !v["hubs"][&hub].is_object() {
-                        return Err("INVALID_INPUT: Hub must be an object".into());
-                    }
-                    v["hubs"][&hub]["enabled"] = json!(enabled);
-                    if let Some(m) = v["hubs"][&hub].as_object_mut() {
-                        m.remove("disabled");
-                    }
-                    repair_default_hub(v);
-                    Ok(())
+                    set_profile_enabled(
+                        v,
+                        &hub,
+                        enabled,
+                        self.host_server.as_ref().map(|server| server.port()),
+                    )
                 })?;
+                if op == "hub_action" && action["action"] == "reconnect" {
+                    if let Some(old) = self.slots.remove(&hub) {
+                        old.close_and_drain()?;
+                    }
+                }
             }
             "setup_remove_hub" => {
                 if hub == "local" {
@@ -1698,37 +1729,24 @@ impl DaemonService {
                     .map(|server| (server.address.ip(), server.port(), server.auth.clone()));
                 let mut applied = false;
                 let result = self.mutate_config(|v| {
-                    let mut host = v
-                        .get("host_hub")
-                        .or_else(|| v.get("hostHub"))
-                        .cloned()
-                        .unwrap_or_else(|| json!({}));
-                    if host.is_null() {
-                        host = json!({});
+                    let (_, _, rest) =
+                        crate::plugins::try_normalize_existing_config(Some(&v.to_string()))?;
+                    v["host_hub"] =
+                        apply_host_hub_patch(rest.get("host_hub").unwrap_or(&Value::Null), action)?;
+                    let settings = host_hub_server_config(&v["host_hub"])?;
+                    let ephemeral = settings.as_ref().is_some_and(|(_, port, _)| *port == 0);
+                    if !ephemeral {
+                        validate_hub_endpoints(v, None)?;
                     }
-                    if !host.is_object() {
-                        return Err("INVALID_INPUT: Host hub must be an object".into());
-                    }
-                    for key in ["enabled", "port", "token", "auth_mode", "bind"] {
-                        if let Some(value) = action.get(key) {
-                            host[key] = value.clone();
-                        }
-                    }
-                    if (host["enabled"] == true || host_hub_auth_mode(&host) == "token")
-                        && host
-                            .get("token")
-                            .is_none_or(|token| token.as_str() == Some(""))
-                    {
-                        host["token"] = json!(crate::plugins::try_random_hex(32)?);
-                    }
-                    let settings = host_hub_server_config(&host)?;
                     if !self.closing {
                         replace_host_hub_server(&self.local, &mut server, settings)?;
                         applied = true;
                     }
-                    v["host_hub"] = host;
                     if let Some(m) = v.as_object_mut() {
                         m.remove("hostHub");
+                    }
+                    if ephemeral {
+                        validate_hub_endpoints(v, server.as_ref().map(|s| s.port()))?;
                     }
                     Ok(())
                 });
@@ -1765,6 +1783,11 @@ impl DaemonService {
             "refresh_available" => {
                 self.refresh_available()?;
                 self.poll()?;
+                // A CLI setup refresh has no requesting UI surface. Let finish_action
+                // publish the normal open/closed projection after poll reloaded the slots.
+                if ui_generation.is_none() && action["request_id"].is_null() {
+                    return Ok(ToolCall::Ready(json!({"ok":true})));
+                }
             }
             "close_settings" => self.active_settings_hub = None,
             "close_directory" => self.directory_open = false,
@@ -1917,15 +1940,19 @@ impl DaemonService {
             }
             "unlisten_all" => {
                 // Bulk stop owns Hub policy even when no listener is active.
-                let raw = self.raw_config()?;
-                let (_, configured, _) =
-                    crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
                 let selected_hub = action.get("hub").filter(|hub| !hub.is_null());
-                let targets: Vec<String> = configured
-                    .keys()
-                    .filter(|name| selected_hub.is_none_or(|hub| *hub == name.as_str()))
-                    .cloned()
-                    .collect();
+                let (targets, damaged) = match configured_hubs(&self.config_snapshot()?) {
+                    Ok(configured) => (
+                        configured
+                            .into_iter()
+                            .map(|(name, _)| name)
+                            .filter(|name| selected_hub.is_none_or(|hub| hub == name.as_str()))
+                            .collect::<Vec<_>>(),
+                        false,
+                    ),
+                    Err(_) if selected_hub.is_none() => (self.registration_targets(action)?, true),
+                    Err(error) => return Err(error),
+                };
                 if targets.is_empty() && action["hub"].is_string() {
                     return Err("INVALID_INPUT: Unknown hub".into());
                 }
@@ -1949,6 +1976,14 @@ impl DaemonService {
                 }
                 for name in targets {
                     self.state.db.execute("UPDATE local_listeners SET user_stopped=1,retirement_reason=NULL WHERE hub=? AND harness!='human' AND status!='FENCED_INACTIVE'", &[json!(name)])?;
+                    // A damaged profile cannot safely receive a policy patch. Keep
+                    // the file intact and stop enrollment in the running authority.
+                    if damaged {
+                        if let Some(slot) = self.slots.get_mut(&name) {
+                            slot.config["autoListen"] = json!(false);
+                        }
+                        continue;
+                    }
                     // Bulk stop reports incomplete detaches across all targets.
                     if let Err(error) = self
                         .set_auto_listen_locked(&name, false, &mut detaches)
@@ -2025,6 +2060,7 @@ impl DaemonService {
     fn begin_disconnect(
         &mut self,
         action: &Value,
+        before: &ConfigSnapshot,
     ) -> Result<Option<Vec<std::thread::JoinHandle<()>>>, String> {
         if self
             .state
@@ -2055,29 +2091,12 @@ impl DaemonService {
                 &self.config.home_dir,
                 &self.plugins,
             )?;
-            let principal =
-                crate::core::auth::local_principal(&self.config.effective_user("local")?);
-            let inventory = self
-                .local
-                .rpc("human_channels_list", &json!({}), Some(&principal))?;
-            for channel in inventory["channels"].as_array().into_iter().flatten() {
-                self.local.rpc(
-                    "human_channels_configure",
-                    &json!({"plugin_id":channel["id"],"reset_hub":true,"reset_user":true}),
-                    Some(&principal),
-                )?;
-            }
-            self.mutate_config(|v| {
-                v["default_hub"] = json!("local");
-                if let Some(object) = v.as_object_mut() {
-                    object.remove("defaultHub");
-                }
-                v["hubs"] = json!({});
-                v["host_hub"] = json!({"enabled":false});
-                if let Some(object) = v.as_object_mut() {
-                    object.remove("hostHub");
-                }
-                Ok(())
+            // The explicit purge replaces Hub settings without needing to parse them.
+            // Retain unrelated settings whenever the original object can be decoded.
+            // finish_purge resets all channel processes and their persistent state.
+            let target = crate::support::publication_target(&self.config.config_path)?;
+            crate::plugins::with_config_lock(&target, || {
+                before.reset_hubs_locked(&self.config.config_path, &target)
             })?;
             let logins = self
                 .hub_controls
@@ -2128,29 +2147,8 @@ impl DaemonService {
         }
         self.cancel_logins();
         self.join_recoveries();
-        for entry in fs::read_dir(&self.config.state_dir).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("oidc-token-")
-            {
-                fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
-            }
-        }
         self.local.reset_data()?;
-        match fs::remove_dir_all(self.config.state_dir.join("activity")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("STATE_ERROR: Cannot remove session activity metadata".into()),
-        }
-        self.state.db.transaction(|db| {
-                        db.execute("DELETE FROM local_sent_idempotency; DELETE FROM pending_hub_acks; DELETE FROM pending_hub_detaches; DELETE FROM wake_retries;", &[])?;
-                        db.execute("DELETE FROM local_signals", &[])?;
-                        db.execute("DELETE FROM local_listeners", &[])?;
-                        db.execute("DELETE FROM session_custom_titles", &[])?;
-                        Ok(())
-                    })?;
+        crate::setup::purge_disconnected_data(&self.config.state_dir, Some(&self.state))?;
         self.clear_disconnected_candidates();
         Ok(())
     }

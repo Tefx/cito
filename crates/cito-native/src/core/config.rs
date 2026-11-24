@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -96,6 +96,82 @@ pub fn with_config_lock_mode<T>(
     // Keep one inode for waiting and newly arriving writers. Unlinking here lets
     // them lock different files and enter the read-modify-write section together.
     result
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) enum ConfigSnapshot {
+    Missing,
+    Read(Vec<u8>),
+    // Bind recovery to the unreadable file across ownership and writer lock waits.
+    Unreadable {
+        dev: u64,
+        ino: u64,
+        ctime: (i64, i64),
+    },
+}
+
+impl ConfigSnapshot {
+    pub(super) fn read(path: &Path) -> Result<Self, String> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(Self::Read(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::Missing),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let m = fs::metadata(path).map_err(|e| e.to_string())?;
+                if !m.is_file() {
+                    return Err(e.to_string());
+                }
+                Ok(Self::Unreadable {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                    ctime: (m.ctime(), m.ctime_nsec()),
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub(super) fn bytes(&self) -> Result<&[u8], String> {
+        match self {
+            Self::Missing => Ok(b"{}"),
+            Self::Read(bytes) => Ok(bytes),
+            Self::Unreadable { .. } => Err("Cannot read config.json: Permission denied".into()),
+        }
+    }
+
+    pub(super) fn normalized(&self) -> Result<NormalizedConfig, String> {
+        let text =
+            std::str::from_utf8(self.bytes()?).map_err(|e| format!("Invalid config.json: {e}"))?;
+        try_normalize_existing_config(Some(text))
+    }
+
+    pub(super) fn check_current(&self, path: &Path) -> Result<(), String> {
+        if *self != Self::read(path)? {
+            return Err("STALE_GENERATION: Configuration changed during reset".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn recovery_object(&self) -> Map<String, Value> {
+        self.bytes()
+            .ok()
+            .and_then(|b| serde_json::from_slice(b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn reset_hubs_locked(&self, path: &Path, target: &Path) -> Result<(), String> {
+        self.check_current(path)?;
+        if crate::support::publication_target(path)? != target {
+            return Err("STALE_GENERATION: Configuration target changed during reset".into());
+        }
+        let mut config = self.recovery_object();
+        config.remove("defaultHub");
+        config.remove("hostHub");
+        config.insert("default_hub".into(), json!("local"));
+        config.insert("hubs".into(), json!({}));
+        config.insert("host_hub".into(), json!({"enabled":false}));
+        let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
+        crate::support::atomic_write_with_mode(target, &bytes, Some(0o600))
+    }
 }
 
 pub fn read_config_text(path: &Path) -> Result<Option<String>, String> {
@@ -210,6 +286,9 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         hm.remove("disabled");
         hm.insert("enabled".to_string(), json!(enabled));
     }
+    if let Some(legacy) = obj.remove("hostHub") {
+        obj.entry("host_hub").or_insert(legacy);
+    }
     let camel = obj.remove("defaultHub");
     let snake = obj.remove("default_hub");
     let default_hub = snake
@@ -221,6 +300,67 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         .or_else(|| hubs.keys().next().cloned())
         .ok_or("No hubs configured")?;
     Ok((default_hub, hubs, obj))
+}
+
+/// Merge only writable host settings; retain extension fields and existing credentials.
+/// The caller publishes the result only after all fields and the listener are validated.
+pub(crate) fn apply_host_hub_patch(base: &Value, patch: &Value) -> Result<Value, String> {
+    let mut host = match base {
+        Value::Null => Map::new(),
+        Value::Object(settings) => settings.clone(),
+        _ => return Err("INVALID_INPUT: Host hub must be an object".into()),
+    };
+    for key in ["enabled", "port", "bind", "auth_mode", "token"] {
+        if let Some(value) = patch.get(key) {
+            host.insert(key.into(), value.clone());
+        }
+    }
+    let enabled = host
+        .entry("enabled")
+        .or_insert(json!(false))
+        .as_bool()
+        .ok_or("INVALID_INPUT: Host hub enabled must be a boolean")?;
+    host.entry("port")
+        .or_insert(json!(4291))
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .ok_or("INVALID_INPUT: Host hub port must be an integer from 0 to 65535")?;
+    host.entry("bind")
+        .or_insert(json!("0.0.0.0"))
+        .as_str()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+        .ok_or("INVALID_INPUT: Invalid host hub bind address")?;
+    let token = host
+        .get("token")
+        .map(|v| {
+            v.as_str()
+                .ok_or("INVALID_INPUT: Host hub token must be a string")
+        })
+        .transpose()?
+        .unwrap_or("");
+    let mode = match host.get("auth_mode") {
+        None if enabled || !token.is_empty() => "token",
+        None => "none",
+        Some(value) => match value.as_str() {
+            Some("token") => "token",
+            Some("none") => "none",
+            _ => return Err("INVALID_INPUT: Host hub auth_mode must be none or token".into()),
+        },
+    };
+    if enabled && mode == "token" && token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(
+            "INVALID_INPUT: Host hub token cannot contain whitespace or control characters".into(),
+        );
+    }
+    if (enabled || mode == "token") && token.is_empty() {
+        host.insert("token".into(), json!(crate::support::try_random_hex(32)?));
+    }
+    // Keep implicit authentication implicit when disabled and tokenless. Persisting
+    // "none" here would opt a future --share-hub into anonymous access.
+    if mode == "token" {
+        host.insert("auth_mode".into(), json!(mode));
+    }
+    Ok(Value::Object(host))
 }
 
 /// Merge a submitted Hub patch before performing discovery or taking a write lock.
@@ -467,6 +607,49 @@ mod tests {
         assert_eq!(hubs["cloud"]["user"], "bob");
         assert_eq!(rest["other"], 7);
     }
+    #[test]
+    fn host_hub_patch_normalizes_aliases_and_admits_only_valid_listener_settings() {
+        for (raw, port) in [
+            (json!({"hostHub":{"port":0}}), 0),
+            (
+                json!({"hostHub":{"port":0},"host_hub":{"port":65535}}),
+                65535,
+            ),
+        ] {
+            let (_, _, rest) = try_normalize_existing_config(Some(&raw.to_string())).unwrap();
+            assert!(!rest.contains_key("hostHub"));
+            let host = apply_host_hub_patch(&rest["host_hub"], &json!({"enabled":true})).unwrap();
+            assert_eq!(host["port"], port);
+            assert_eq!(host["bind"], "0.0.0.0");
+            assert_eq!(host["auth_mode"], "token");
+            let token = host["token"].as_str().unwrap();
+            assert_eq!(token.len(), 64);
+            assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(apply_host_hub_patch(&host, &json!({})).unwrap(), host);
+        }
+        let off = apply_host_hub_patch(&Value::Null, &json!({"enabled":false})).unwrap();
+        assert_eq!(off["port"], 4291);
+        assert!(off["token"].is_null());
+        assert_eq!(
+            apply_host_hub_patch(&off, &json!({"enabled":true})).unwrap()["auth_mode"],
+            "token"
+        );
+        assert!(
+            apply_host_hub_patch(&off, &json!({"auth_mode":"token"})).unwrap()["token"].is_string()
+        );
+        for invalid in [
+            json!({"port":65536}),
+            json!({"port":-1}),
+            json!({"port":"80"}),
+            json!({"enabled":1}),
+            json!({"bind":"?"}),
+            json!({"auth_mode":"oidc"}),
+            json!({"token":42}),
+        ] {
+            assert!(apply_host_hub_patch(&off, &invalid).is_err(), "{invalid}");
+        }
+    }
+
     #[test]
     fn dual_default_hub_aliases_are_removed_from_rest() {
         for snake in ["work", "local"] {

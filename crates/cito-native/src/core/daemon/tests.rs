@@ -1202,7 +1202,7 @@ fn setup_completion_invalidates_discovery() -> Result<(), String> {
         "",
     )
     .unwrap();
-    service.invalidate_setup("agent");
+    service.action(&json!({"op":"refresh_available"}))?;
     settle_setup_inspections(service);
     service.push_ui();
     let closed = take_state_frame(&ui);
@@ -1655,13 +1655,25 @@ print(json.dumps(v))
         )?;
         let client = service.slot("local")?;
         let channel = format!("{}:fixture", service.host_id);
+        assert_eq!(row()?["listen_mode"], "auto");
+        let (mut shared, revision) = client.kv_get(&id)?.unwrap();
+        shared["listen_mode"] = json!("manual");
+        shared["channels"][&channel]["updated_at_ms"] = json!(0);
+        client.kv_save(&id, &shared, Some(revision))?;
         assert!(DaemonService::heartbeat_agent(
             &service.state,
             client,
             &channel,
             &manual
         )?);
-        assert_eq!(client.kv_get(&id)?.unwrap().0["listen_mode"], "auto");
+        let (shared, _) = client.kv_get(&id)?.unwrap();
+        assert_eq!(shared["listen_mode"], "manual");
+        assert!(
+            shared["channels"][&channel]["updated_at_ms"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert!(!DaemonService::heartbeat_agent(
             &service.state,
             client,
@@ -1984,6 +1996,41 @@ fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), Str
     let cached = fresh.cached.lock().map_err(|e| e.to_string())?;
     assert!(cached.value["channels"].is_null());
     assert_eq!(cached.value["status"], "error");
+    Ok(())
+}
+
+#[test]
+fn bulk_disconnect_uses_live_registrations_when_the_profile_is_damaged() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-disconnect-{}", random_uuid_v4())));
+    let raw = json!({"user":"alice","hubs":{"local":{"url":"local://","autoListen":true}}});
+    let config = profile_config(&dir, raw.clone());
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    for (op, broken) in [("unlisten_all", "{broken"), ("setup_disconnect_all", "[]")] {
+        fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+        service.reload_slots()?;
+        let binding = service.listen(
+            "local",
+            &json!({"about":"Test receiver"}),
+            &json!({"harness":"agent","session_id":"a","title":"Example"}),
+        )?;
+        let id = string(&binding, "canonical_listener_id");
+        assert_eq!(
+            service.state.listener("local", id)?.unwrap()["status"],
+            "ACTIVE"
+        );
+        fs::write(&config.config_path, broken).map_err(|e| e.to_string())?;
+        assert!(service
+            .action(&json!({"op":"set_user","user":"bob"}))
+            .is_err());
+        let result = service.action(&json!({"op":op}))?;
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            service.state.listener("local", id)?.unwrap()["status"],
+            "UNLISTENED"
+        );
+        assert_eq!(fs::read(&config.config_path).unwrap(), broken.as_bytes());
+    }
     Ok(())
 }
 
@@ -2727,6 +2774,76 @@ fn sender_addresses_use_readable_metadata_before_directory_arrival() {
     );
 }
 #[test]
+fn endpoint_admission_uses_normalized_urls_users_and_oidc_clients() {
+    let base = json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"one","url":"https://hub.example.com/team","user":"alice"});
+    let mut raw = json!({"hubs":{"a":base,"b":{"auth_mode":"oidc","oidcIssuer":"https://id.example.com","client_id":"one","natsUrl":"https://HUB.example.com:443/team/","user":"ALICE"}}});
+    let validate = |raw: &Value| host_hub::validate_hub_endpoints(raw, None);
+    assert_eq!(
+        validate(&raw).unwrap_err(),
+        host_hub::duplicate_hub_error("a")
+    );
+    for (key, value) in [
+        ("client_id", json!("two")),
+        ("oidcIssuer", json!("https://other.example.com")),
+        ("user", json!("bob")),
+        ("disabled", json!(true)),
+    ] {
+        let mut allowed = raw.clone();
+        allowed["hubs"]["b"][key] = value;
+        validate(&allowed).unwrap();
+    }
+    raw["hubs"]["b"] = json!({"url":"http://127.0.0.9:4291"});
+    raw["hostHub"] = json!({"enabled":true});
+    assert_eq!(validate(&raw).unwrap_err(), host_hub::OWN_HUB_ERROR);
+}
+
+#[test]
+fn reload_fences_existing_aliases_and_skips_competing_slots() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-endpoints-{}", random_uuid_v4())));
+    let config = profile_config(
+        &dir,
+        json!({"hostHub":{"enabled":true,"port":0,"bind":"127.0.0.1","auth_mode":"none","extension":7},"hubs":{"local":{"url":"local://"},"mirror":{"url":"local://"},"work":{"url":"local://"}}}),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    let port = service.host_server.as_ref().unwrap().port();
+    service.action(&json!({"op":"set_host_hub","port":port}))?;
+    assert_eq!(service.raw_config()?["host_hub"]["extension"], 7);
+    let remote = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let url = format!("http://{}", remote.local_addr().map_err(|e| e.to_string())?);
+    drop(remote);
+    let active = service.state.active()?;
+    for name in ["mirror", "work"] {
+        assert!(active.iter().any(|r| r["hub"] == name));
+    }
+    let mut raw = service.raw_config()?;
+    raw["hubs"]["mirror"]["url"] = json!(format!("http://127.0.0.2:{port}"));
+    raw["hubs"]["primary"] = json!({"url":url});
+    raw["hubs"]["work"]["url"] = json!(format!("{url}/"));
+    fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+    for _ in 0..2 {
+        service.reload_slots()?;
+        assert!(service.slots.contains_key("primary"));
+        for (name, error) in [
+            ("mirror", host_hub::OWN_HUB_ERROR.to_owned()),
+            ("work", host_hub::duplicate_hub_error("primary")),
+        ] {
+            assert!(!service.slots.contains_key(name));
+            assert_eq!(service.last_hub_errors[name], (error, false));
+            let id = string(
+                active.iter().find(|r| r["hub"] == name).unwrap(),
+                "listener_id",
+            );
+            assert_eq!(
+                service.state.listener(name, id)?.unwrap()["status"],
+                "FENCED_INACTIVE"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn default_hub_repair_handles_missing_defaults_and_all_disabled_hubs() {
     for (mut config, expected) in [
         (
@@ -3205,7 +3322,7 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             assert!(!stopped.is_running());
             assert_eq!(service.settings()["host_hub"]["running"], false);
             assert!(TcpStream::connect(address).is_err());
-            service.sync_host_hub()?;
+            service.reload_slots()?;
             assert!(service.host_server.as_ref().unwrap().is_running());
             assert_eq!(service.settings()["host_hub"]["running"], true);
             rpc(address, "previous-token")?;

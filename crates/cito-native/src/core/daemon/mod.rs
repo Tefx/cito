@@ -2,7 +2,7 @@ use self::channels::ChannelInventory;
 use self::http_actions::{handle_http, respond, InteractiveLogin};
 use self::ui_ipc::{spawn_ui, UiChild, UiMailbox};
 use crate::core::{
-    config::repair_default_hub,
+    config::{repair_default_hub, ConfigSnapshot},
     hub::HubEngine,
     identity::{listener_id, string},
     receiver::{detach_channel_expected, poll_listener},
@@ -14,7 +14,7 @@ use crate::setup::ensure_cli_shims_native;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 mod channels;
 #[cfg(test)]
 mod event_tests;
-mod host_hub;
+pub(crate) mod host_hub;
 mod http_actions;
 mod mcp;
 mod projection;
@@ -106,6 +106,15 @@ struct SetupInspection {
     value: SetupResult,
     done: Arc<AtomicBool>,
     worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
+}
+
+impl SetupInspection {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.worker.is_none() {
+            self.done.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Default for SetupInspection {
@@ -232,20 +241,9 @@ fn run_daemon_inner(
     if crate::plugins::handover_stale_daemon(config)? {
         return Ok(());
     }
-    fs::create_dir_all(&config.state_dir).map_err(|e| e.to_string())?;
+    let lock = crate::setup::acquire_daemon_owner(&config.state_dir)?;
     fs::set_permissions(&config.state_dir, fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(config.state_dir.join("daemon.lock"))
-        .map_err(|e| e.to_string())?;
-    // SAFETY: descriptor is live for daemon lifetime. Nonblocking lock prevents dual writers.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("Daemon owner lock is held".into());
-    }
     let listener =
         TcpListener::bind(("127.0.0.1", config.daemon_port)).map_err(|e| e.to_string())?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -579,11 +577,10 @@ impl DaemonService {
         if self.plugins.find_by_id(id).is_none() {
             return;
         }
-        let entry = self.setup_inspections.entry(id.to_owned()).or_default();
-        entry.generation = entry.generation.wrapping_add(1);
-        if entry.worker.is_none() {
-            entry.done.store(false, Ordering::SeqCst);
-        }
+        self.setup_inspections
+            .entry(id.to_owned())
+            .or_default()
+            .invalidate();
         self.refresh_setup_inspections();
     }
 
@@ -631,11 +628,12 @@ impl DaemonService {
 }
 impl HubAccess {
     fn raw_config(&self) -> Result<Value, String> {
-        match fs::read_to_string(&self.config.config_path) {
-            Ok(s) => serde_json::from_str(&s).map_err(|e| format!("Invalid config.json: {e}")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
-            Err(e) => Err(e.to_string()),
-        }
+        serde_json::from_slice(self.config_snapshot()?.bytes()?)
+            .map_err(|e| format!("Invalid config.json: {e}"))
+    }
+
+    fn config_snapshot(&self) -> Result<ConfigSnapshot, String> {
+        ConfigSnapshot::read(&self.config.config_path)
     }
 }
 impl DaemonService {
@@ -652,6 +650,22 @@ impl DaemonService {
         Ok(user.to_ascii_lowercase())
     }
 
+    fn reject_slot_authority(&mut self, name: &str, error: String) -> Result<(), String> {
+        self.last_hub_errors.insert(name.to_owned(), (error, false));
+        if let Some(old) = self.slots.remove(name) {
+            old.close_and_drain()?;
+        }
+        self.channel_inventories.remove(name);
+        for row in self.state.db.query(
+            "SELECT * FROM local_listeners WHERE hub=? AND status='ACTIVE'",
+            &[json!(name)],
+        )? {
+            self.state
+                .fence_listener_for(&row, "fenced_before_dispatch")?;
+        }
+        Ok(())
+    }
+
     pub fn reload_slots(&mut self) -> Result<(), String> {
         if self.purging {
             return Err("STATE_ERROR: Local data reset in progress".into());
@@ -661,12 +675,14 @@ impl DaemonService {
         }
         self.retired_auth
             .retain(|recovery| !recovery.worker.is_finished());
-        let _ = self.sync_host_hub();
         let mut raw = self.raw_config()?;
         self.config.user = self.get_effective_user()?;
         repair_default_hub(&mut raw);
-        let (default, hubs, _) =
+        let (default, hubs, rest) =
             crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+        let host = rest.get("host_hub").unwrap_or(&Value::Null);
+        let _ = self.sync_host_hub(host);
+        let live_port = self.host_server.as_ref().map(|server| server.port());
         self.config.default_hub = std::env::var("CITO_HUB")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -682,38 +698,43 @@ impl DaemonService {
         for name in removed {
             self.purge_hub_state(&name)?;
         }
-        let mut keep = Vec::new();
+        // Release disabled authorities before checking new admissions. A profile
+        // can hand an endpoint to another profile in one external config edit.
+        let inactive: Vec<_> = self
+            .slots
+            .keys()
+            .filter(|k| hubs.get(*k).is_none_or(|h| h["enabled"] == false))
+            .cloned()
+            .collect();
+        for name in inactive {
+            self.channel_inventories.remove(&name);
+            if let Some(slot) = self.slots.remove(&name) {
+                slot.close_and_drain()?;
+            }
+        }
+        let mut keep = HashSet::new();
         for (name, mut hub) in hubs {
             crate::plugins::apply_hub_url_override(&name, &self.config.default_hub, &mut hub)?;
             let control = self.hub_controls.entry(name.clone()).or_default();
             if hub["enabled"] == false {
                 continue;
             }
+            if name != "local"
+                && host_hub::is_own_host_hub_url(string(&hub, "url"), host, live_port)
+            {
+                self.reject_slot_authority(&name, host_hub::OWN_HUB_ERROR.into())?;
+                continue;
+            }
             let access = &self.access;
             if control.login.is_some()
                 && access.slots.get(&name).is_some_and(|old| old.config == hub)
             {
-                keep.push(name);
+                keep.insert(name);
                 continue;
             }
-            let auth = hub
-                .get("authMode")
-                .or_else(|| hub.get("auth"))
-                .and_then(Value::as_str)
-                .unwrap_or("none")
-                .to_ascii_lowercase();
-            if !matches!(auth.as_str(), "none" | "token" | "oidc") {
-                return Err("INVALID_INPUT: authMode must be none, token or oidc".into());
-            }
-            hub["authMode"] = json!(auth);
-            if let Some(o) = hub.as_object_mut() {
-                o.remove("auth");
-            }
-            if hub["url"].is_null() {
-                hub["url"] = json!("local://");
-            }
+            let auth = string(&hub, "authMode");
             let user = access.config.effective_user(&name)?.to_ascii_lowercase();
-            keep.push(name.clone());
+            keep.insert(name.clone());
             let old_slot = access.slots.get(&name);
             let rejected_hash = old_slot.filter(|old| old.config == hub).and_then(|old| {
                 old.rejected_bearer
@@ -875,6 +896,40 @@ impl DaemonService {
                     }
                 }
             }
+            // Retained slots already passed admission; check newly resolved identities
+            // before publishing a replacement or starting its event stream.
+            // An OIDC client starts with the static user's placeholder identity.
+            // Both sides of a collision must have an established principal.
+            let established = |slot: &HubClient| {
+                slot.config["authMode"] != "oidc" || slot.identity["oidc"] == true
+            };
+            if let Some(endpoint) = host_hub::remote_endpoint(&hub).filter(|_| established(&client))
+            {
+                if let Some(existing) = self.slots.values().find(|slot| {
+                    slot.name != name
+                        && established(slot)
+                        && host_hub::remote_endpoint(&slot.config).as_ref() == Some(&endpoint)
+                        && super::auth::principal_ids_equal(
+                            string(&slot.identity, "principal_id"),
+                            string(&client.identity, "principal_id"),
+                        )
+                }) {
+                    self.reject_slot_authority(
+                        &name,
+                        host_hub::duplicate_hub_error(&existing.name),
+                    )?;
+                    continue;
+                }
+            }
+            // A formerly suppressed slot has recovered. Preserve unrelated
+            // diagnostics from rejected edits on disabled or disconnected hubs.
+            if previous.is_none()
+                && self.last_hub_errors.get(&name).is_some_and(|(err, _)| {
+                    err == host_hub::OWN_HUB_ERROR || err.starts_with(host_hub::DUPLICATE_HUB_ERROR)
+                })
+            {
+                self.last_hub_errors.remove(&name);
+            }
             let retained = previous.as_ref().is_some_and(|old| {
                 old.config["url"] == client.config["url"]
                     && rejected_hash.is_none()
@@ -953,18 +1008,6 @@ impl DaemonService {
             if let Some(pending) = control.recovery.take() {
                 pending.cancelled.store(true, Ordering::SeqCst);
                 self.retired_auth.push(pending);
-            }
-        }
-        let removed: Vec<String> = self
-            .slots
-            .keys()
-            .filter(|k| !keep.contains(k))
-            .cloned()
-            .collect();
-        for name in removed {
-            self.channel_inventories.remove(&name);
-            if let Some(slot) = self.slots.remove(&name) {
-                slot.close_and_drain()?;
             }
         }
         if self
@@ -1395,8 +1438,7 @@ impl DaemonService {
                 db.execute("UPDATE local_listeners SET scope=?1 WHERE hub=?2 AND listener_id=?3 AND binding_generation=?4 AND owner_token=?5 AND scope IS NOT ?1", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
                 Ok(())
             })?;
-            let mut changed = remote["listen_mode"] != row["listen_mode"];
-            remote["listen_mode"] = row["listen_mode"].clone();
+            let mut changed = false;
             if let Ok(Some(title)) =
                 state.custom_title(string(&row, "harness"), string(&row, "session_id"))
             {
