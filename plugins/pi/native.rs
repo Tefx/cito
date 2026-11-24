@@ -3,18 +3,12 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 fn matches_process(command: &str) -> bool {
-    crate::support::matches_process(command, |entry, name, script| {
-        if !script {
-            return matches!(name, "pi" | "pi-coding-agent");
-        }
-        matches!(name, "pi" | "pi.js" | "pi.mjs")
-            || (entry.contains("/pi-coding-agent/") && matches!(name, "cli.js" | "cli.mjs"))
-    })
+    agent_harness(command) == Some("pi")
 }
 fn paths(req: &Value) -> (PathBuf, PathBuf) {
     (
         config_home(req, "CITO_PI_HOME", "~/.pi/agent"),
-        str_at(req, "plugin_dir")
+        raw_str_at(req, "plugin_dir")
             .map(|s| expand(req, s))
             .unwrap_or_else(|| state(req).join("runtime/plugins/pi")),
     )
@@ -255,26 +249,30 @@ fn cached_session(req: &Value, p: u32) -> Result<Value> {
     }
     Ok(cached["session"].clone())
 }
+fn publish_endpoint(req: &Value, p: u32, identity: &Value, session: &Value) -> Result<()> {
+    let path = state(req).join(format!("pi/endpoints/{p}.json"));
+    let entry = json!({"identity":identity,"session":session});
+    if read_json(&path).ok().as_ref() != Some(&entry) {
+        atomic_write(&path, entry.to_string().as_bytes())?;
+    }
+    Ok(())
+}
 fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
     let request = req.clone();
     inspect_socket_endpoints(req, "pi-pid-", move |p, _| {
         let req = &request;
-        let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
         let reply = identify(req, p);
         let live = reply.is_ok();
         let v = socket_response_or_cached(reply, p, || cached_session(req, p)).ok()?;
         if live && v["ok"] == true {
             if let Ok(identity) = process_identity(p) {
-                let entry = json!({"identity":identity,"session":v});
-                if read_json(&cache_path).ok().as_ref() != Some(&entry) {
-                    let _ = atomic_write(&cache_path, entry.to_string().as_bytes());
-                }
+                let _ = publish_endpoint(req, p, &identity, &v);
             }
         }
         (v["ok"] == true
             && interactive_candidate(req, p).unwrap_or(false)
             && raw_str_at(&v, "session_id").is_some()
-            && str_at(&v, "cwd").is_some())
+            && raw_str_at(&v, "cwd").is_some())
         .then_some(v)
     })
 }
@@ -318,7 +316,7 @@ fn candidates(req: &Value) -> Result<Candidates> {
                 }
                 if (v["ok"] == true || (!bridge && v.get("ok").is_none()))
                     && raw_str_at(&v, "session_id").is_some()
-                    && str_at(&v, "cwd").is_some()
+                    && raw_str_at(&v, "cwd").is_some()
                     && v.get("pi_pid")
                         .is_none_or(|id| id.as_u64() == Some(p as u64))
                 {
@@ -349,7 +347,7 @@ fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
         req,
         "pi",
         raw_str_at(v, "session_id").unwrap_or(""),
-        str_at(v, "cwd").unwrap_or(""),
+        raw_str_at(v, "cwd").unwrap_or(""),
         Some(p),
         str_at(v, "session_name"),
     );
@@ -358,9 +356,29 @@ fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
     }
     result
 }
-fn probe_identity_changed(req: &Value, cached: &Value, current: &Value) -> bool {
-    endpoint_identity_changed(req, current, matches_process)
-        || (cached["identity"].is_object() && cached["identity"] != *current)
+fn probe_fence(req: &Value) -> Result<Option<Value>> {
+    let Some(p) = pid(req) else { return Ok(None) };
+    let current = match probe_process_identity(p) {
+        Ok(identity) => identity,
+        Err(status) => return Ok(Some(status)),
+    };
+    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
+    if endpoint_identity_changed(req, &current, matches_process)
+        || (cached["identity"].is_object() && cached["identity"] != current)
+    {
+        return Ok(Some(
+            json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
+        ));
+    }
+    if cached["identity"] == current
+        && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+        && !allow_process_only(req)
+    {
+        return Ok(Some(
+            json!({"ok":true,"status":"transient_error","reason":"Pi bridge is temporarily unavailable"}),
+        ));
+    }
+    Ok(None)
 }
 
 pub fn handle(req: &Value) -> Result<Value> {
@@ -374,23 +392,8 @@ pub fn handle(req: &Value) -> Result<Value> {
         }
     }
     if op == "probe" {
-        if let Some(p) = pid(req) {
-            if let Ok(current) = process_identity(p) {
-                let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
-                if probe_identity_changed(req, &cached, &current) {
-                    return Ok(
-                        json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
-                    );
-                }
-                if cached["identity"] == current
-                    && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
-                    && !allow_process_only(req)
-                {
-                    return Ok(
-                        json!({"ok":true,"status":"transient_error","reason":"Pi bridge is temporarily unavailable"}),
-                    );
-                }
-            }
+        if let Some(status) = probe_fence(req)? {
+            return Ok(status);
         }
     }
     let (cs, endpoint_responded, rejection) = if matches!(
@@ -467,31 +470,19 @@ pub fn handle(req: &Value) -> Result<Value> {
             if let Err(e) = verify(&c, req, None) {
                 return Ok(error("INVALID_INPUT", e));
             }
-            let c = remember_process(c);
             if c["process_identity"].is_object() {
                 // Manual process-only enrollment has no socket-discovery cache.
                 // Persist the invocation identity for subsequent background probes.
-                let entry = json!({"identity":c["process_identity"],"session":v});
-                atomic_write(
-                    &state(req).join(format!("pi/endpoints/{p}.json")),
-                    entry.to_string().as_bytes(),
-                )?;
+                publish_endpoint(req, *p, &c["process_identity"], v)?;
             }
             Ok(json!({"ok":true,"caller":c}))
         }
         "probe" => {
+            if let Some(status) = probe_fence(req)? {
+                return Ok(status);
+            }
             if let Some(reason) = rejection {
                 return Ok(json!({"ok":true,"status":"transient_error","reason":reason}));
-            }
-            if let Some(p) = pid(req) {
-                if let Ok(current) = process_identity(p) {
-                    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
-                    if probe_identity_changed(req, &cached, &current) {
-                        return Ok(
-                            json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
-                        );
-                    }
-                }
             }
             if endpoint_responded && cs.is_empty() {
                 return Ok(

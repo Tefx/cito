@@ -6,30 +6,31 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub fn repair_default_hub(v: &mut Value) {
-    let hubs = v["hubs"].as_object();
+fn select_default_hub(hubs: &Map<String, Value>, requested: Option<&str>) -> String {
     let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
-    let current = v["default_hub"]
-        .as_str()
-        .or_else(|| v["defaultHub"].as_str())
-        .filter(|name| hubs.and_then(|h| h.get(*name)).is_some_and(enabled));
-    let fallback = current
+    requested
+        .filter(|name| hubs.get(*name).is_some_and(enabled))
         .or_else(|| {
-            let hubs = hubs?;
-            hubs.get_key_value("local")
-                .filter(|(_, cfg)| enabled(cfg))
+            hubs.iter()
+                .min_by_key(|(name, cfg)| (!enabled(cfg), name.as_str() != "local", name.as_str()))
                 .map(|(name, _)| name.as_str())
-                .or_else(|| {
-                    hubs.iter()
-                        .filter(|(_, cfg)| enabled(cfg))
-                        .map(|(name, _)| name.as_str())
-                        .min()
-                })
-                .or_else(|| hubs.get_key_value("local").map(|(name, _)| name.as_str()))
-                .or_else(|| hubs.keys().map(String::as_str).min())
         })
         .unwrap_or("local")
-        .to_string();
+        .to_owned()
+}
+
+pub fn repair_default_hub(v: &mut Value) {
+    let fallback = v["hubs"].as_object().map_or_else(
+        || "local".into(),
+        |hubs| {
+            select_default_hub(
+                hubs,
+                v["default_hub"]
+                    .as_str()
+                    .or_else(|| v["defaultHub"].as_str()),
+            )
+        },
+    );
     if let Some(config) = v.as_object_mut() {
         config.insert("default_hub".into(), json!(fallback));
         config.remove("defaultHub");
@@ -203,6 +204,10 @@ pub fn validate_user(user: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+pub(super) fn valid_hub_token(token: &str) -> bool {
+    !token.is_empty() && !token.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
     let mode = raw.trim().to_ascii_lowercase();
     if matches!(mode.as_str(), "none" | "token" | "oidc") {
@@ -277,6 +282,13 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
             .to_string();
         let auth =
             canonical_auth_mode(hm.get("authMode").and_then(Value::as_str).unwrap_or("none"))?;
+        if hm
+            .get("token")
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.is_empty() && !valid_hub_token(token))
+        {
+            return Err("INVALID_INPUT: Invalid Hub token".into());
+        }
         hm.remove("request_id");
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));
@@ -291,14 +303,11 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
     }
     let camel = obj.remove("defaultHub");
     let snake = obj.remove("default_hub");
-    let default_hub = snake
+    let requested = snake
         .as_ref()
         .and_then(Value::as_str)
-        .or_else(|| camel.as_ref().and_then(Value::as_str))
-        .map(str::to_owned)
-        .filter(|name| hubs.contains_key(name))
-        .or_else(|| hubs.keys().next().cloned())
-        .ok_or("No hubs configured")?;
+        .or_else(|| camel.as_ref().and_then(Value::as_str));
+    let default_hub = select_default_hub(&hubs, requested);
     Ok((default_hub, hubs, obj))
 }
 
@@ -347,7 +356,7 @@ pub(crate) fn apply_host_hub_patch(base: &Value, patch: &Value) -> Result<Value,
             _ => return Err("INVALID_INPUT: Host hub auth_mode must be none or token".into()),
         },
     };
-    if enabled && mode == "token" && token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if !token.is_empty() && !valid_hub_token(token) {
         return Err(
             "INVALID_INPUT: Host hub token cannot contain whitespace or control characters".into(),
         );
@@ -406,6 +415,12 @@ pub fn discover_hub_config(mut config: Value) -> Result<Value, String> {
     config["url"] = json!(crate::plugins::validate_nats_url(&url)
         .map_err(|error| format!("INVALID_INPUT: {error}"))?);
     let nonempty = |key: &str| config[key].as_str().is_some_and(|s| !s.trim().is_empty());
+    if config["token"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && !valid_hub_token(s))
+    {
+        return Err("INVALID_INPUT: Invalid Hub token".into());
+    }
     let explicit = config["authMode"].as_str().map(str::to_ascii_lowercase);
     let mut mode = explicit.clone().unwrap_or_else(|| {
         if nonempty("token") {
@@ -650,6 +665,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn repair_and_normalize_choose_the_same_enabled_default() {
+        for (hubs, expected) in [
+            (json!({"a":{},"local":{}}), "local"),
+            (json!({"b":{},"a":{},"local":{"disabled":true}}), "a"),
+            (
+                json!({"a":{"enabled":false},"local":{"disabled":true}}),
+                "local",
+            ),
+            (json!({"a":{"enabled":false},"z":{"disabled":true}}), "a"),
+        ] {
+            let mut config = json!({"default_hub":"missing","hubs":hubs});
+            assert_eq!(
+                try_normalize_existing_config(Some(&config.to_string()))
+                    .unwrap()
+                    .0,
+                expected
+            );
+            repair_default_hub(&mut config);
+            assert_eq!(config["default_hub"], expected);
+        }
+    }
     #[test]
     fn dual_default_hub_aliases_are_removed_from_rest() {
         for snake in ["work", "local"] {

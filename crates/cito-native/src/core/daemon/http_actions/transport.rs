@@ -85,12 +85,13 @@ pub(in crate::core::daemon) fn handle_http(
     let Ok(bound) = stream.local_addr() else {
         return;
     };
-    if let Err((status, error)) = crate::core::http_boundary::validate(
+    if let Err((status, error)) = crate::core::http_boundary::validate_hub(
         bound,
         method,
         headers.get("host").and_then(Value::as_str),
         headers.get("origin").and_then(Value::as_str),
         headers.get("content-type").and_then(Value::as_str),
+        false,
     ) {
         respond(&mut stream, status, &json!({"error":error}));
         return;

@@ -336,7 +336,7 @@ final class MenuControl: NSControl {
         else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)] }
         else if id == "toggle_host_hub" { states = [("Start Sharing",nil),("Stop Sharing",nil)] }
         else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)] }
-        else if id.hasPrefix("toggle_channel:") {
+        else if id.hasPrefix("toggle_channel:"), title.hasPrefix("Pause ") || title.hasPrefix("Resume ") {
             let name=String(title.dropFirst(title.hasPrefix("Pause ") ? 6 : 7))
             states = [("Pause " + name,nil),("Resume " + name,nil)]
         }

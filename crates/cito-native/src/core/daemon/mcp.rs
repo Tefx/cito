@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const STALE_HUB: &str = "STALE_GENERATION: Hub authority changed during request";
+pub(super) const STALE_HUB: &str = "STALE_GENERATION: Request authority changed";
 
 #[derive(Clone, Default)]
 pub(super) struct Stops {
@@ -102,10 +102,6 @@ pub(super) enum ToolCall {
         args: Value,
         caller: Option<Value>,
     },
-    Retire {
-        hub: String,
-        id: String,
-    },
     HubControl {
         hub: String,
         action: Value,
@@ -191,10 +187,6 @@ impl ToolCall {
                 &snapshot.host_id,
                 action,
             ),
-            Self::Retire { hub, id } => {
-                let removed = snapshot.retire_captured(hub, id, "user")?;
-                Ok(json!({"ok":true,"removed":u8::from(removed)}))
-            }
             Self::Switch { from, to, row } => snapshot.switch_binding(from, to, row),
             Self::Unlisten {
                 hubs,
@@ -220,7 +212,9 @@ impl ToolCall {
                 } else {
                     "warning"
                 };
-                add_warning(&mut value, warning, reason);
+                if !string(&value, warning).split("; ").any(|w| w == reason) {
+                    add_warning(&mut value, warning, reason);
+                }
                 Ok(value)
             }
             Err(e) if e.starts_with("DETACH_PENDING:") => Err(e),
@@ -252,9 +246,7 @@ impl ToolCall {
             Self::RegistrationEdit { hubs, .. } => hubs.iter().any(|hub| hub == name),
             Self::Drain { batch, .. } => batch.0.contains(name),
             Self::Find { args, .. } => args["hub"].as_str().is_none_or(|hub| hub == name),
-            Self::Listen { hub, .. } | Self::Retire { hub, .. } | Self::HubControl { hub, .. } => {
-                hub == name
-            }
+            Self::Listen { hub, .. } | Self::HubControl { hub, .. } => hub == name,
             Self::Rename { .. } => true,
             Self::Switch { from, to, .. } => from == name || to == name,
             Self::Send { hub, args, .. } => {
@@ -306,6 +298,20 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
         ui_generation,
     } = work
     {
+        if action["op"] == "setup_remove_app" {
+            let id = action["harness"]
+                .as_str()
+                .ok_or("INVALID_INPUT: harness required")?;
+            let plugin = access
+                .plugins
+                .find_by_id(id)
+                .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
+            let removed = crate::setup::remove_plugin_setup(plugin);
+            (*service.lock().map_err(|_| "Daemon lock poisoned")?)
+                .borrow_mut()
+                .invalidate_setup(id);
+            super::http_actions::check_setup_actions(removed?)?;
+        }
         // Take the per-hub guards in sorted order, outside service. Only local
         // intent/config commits run under both; detach I/O follows their release.
         let locks = hubs
@@ -363,7 +369,14 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
             if action["op"] == "set_auto_listen" && action["enabled"] == true {
                 s.auto_listen()?;
             }
-            s.reload_slots()
+            if matches!(
+                string(action, "op"),
+                "setup_disconnect_all" | "setup_uninstall_all"
+            ) {
+                Ok(())
+            } else {
+                s.reload_slots()
+            }
         })();
         if let Err(error) = projection {
             value["committed"] = json!(true);
@@ -422,6 +435,44 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
         }
         return Ok(value);
     }
+}
+
+/// Stream ACKs identify the submitted signal by sequence; Human replies also
+/// return the canonical signal ID, which can differ on idempotent replay.
+fn publication_receipt(result: &Value, submitted: Option<&Value>) -> Result<(String, u64), String> {
+    let seq = result["seq"]
+        .as_u64()
+        .filter(|n| (1..=i64::MAX as u64).contains(n))
+        .ok_or("INVALID_INPUT: Invalid publication sequence")?;
+    let id = result
+        .get("signal_id")
+        .or(submitted)
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("INVALID_INPUT: Published signal ID missing")?;
+    Ok((id.to_owned(), seq))
+}
+
+#[cfg(test)]
+#[test]
+fn publication_receipts_require_sqlite_sequences_and_signal_identity() {
+    let submitted = json!("original");
+    for seq in [Value::Null, json!(0), json!(-1), json!(i64::MAX as u64 + 1)] {
+        assert!(publication_receipt(&json!({"seq":seq,"signal_id":"sent"}), None).is_err());
+    }
+    let stream = json!({"seq":i64::MAX});
+    assert_eq!(
+        publication_receipt(&stream, Some(&submitted)).unwrap(),
+        ("original".into(), i64::MAX as u64)
+    );
+    assert!(publication_receipt(&stream, None).is_err());
+    for id in [Value::Null, json!(12), json!("  ")] {
+        assert!(publication_receipt(&json!({"seq":1,"signal_id":id}), Some(&submitted)).is_err());
+    }
+    assert_eq!(
+        publication_receipt(&json!({"seq":1,"signal_id":"canonical"}), None).unwrap(),
+        ("canonical".into(), 1)
+    );
 }
 
 pub(super) fn default_session_title(
@@ -658,9 +709,7 @@ impl DaemonService {
                     {
                         if let Ok(mut cache) = self.caller_cache.lock() {
                             cache.retain(|pid, _| {
-                                i32::try_from(*pid)
-                                    .ok()
-                                    .is_some_and(crate::plugins::pid_alive)
+                                u32::try_from(*pid).is_ok_and(crate::support::alive)
                             });
                             cache.insert(pid, caller.clone());
                             if let Some(requested_pid) = requested_pid {
@@ -890,16 +939,6 @@ impl HubAccess {
         Ok(id)
     }
 }
-impl DaemonService {
-    pub(super) fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
-        self.retire_id(hub, id, "user")
-    }
-
-    pub(super) fn retire_id(&self, hub: &str, id: &str, reason: &str) -> Result<bool, String> {
-        // The service owner can persist stop intent even for an offline transport.
-        self.access.retire_binding(hub, id, reason, None, None)
-    }
-}
 impl HubAccess {
     pub(super) fn retire_captured(
         &self,
@@ -952,7 +991,14 @@ impl HubAccess {
         expected: Option<&Value>,
     ) -> Result<bool, String> {
         let client = self.slots.get(hub);
-        let hub_url = if let Some(client) = client {
+        let row = self.state.listener(hub, id)?;
+        let hub_url = if let Some(url) = row
+            .as_ref()
+            .and_then(|r| r["hub_url"].as_str())
+            .filter(|s| !s.is_empty())
+        {
+            Some(url.to_owned())
+        } else if let Some(client) = client {
             Some(string(&client.config, "url").to_owned())
         } else {
             // Disabled Hubs have no live slot; their normalized configuration
@@ -962,7 +1008,6 @@ impl HubAccess {
                 crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
             hubs.get(hub).map(|config| string(config, "url").to_owned())
         };
-        let row = self.state.listener(hub, id)?;
         let active = row.as_ref().is_some_and(|row| row["status"] == "ACTIVE");
         self.state.db.transaction(|c| {
             if replaced.is_some_and(|closed| closed.load(Ordering::Acquire)) { return Err(STALE_HUB.into()); }
@@ -1658,13 +1703,8 @@ impl HubAccess {
                 let signal = json!({"signal_id":signal_id,"to":canonical,"target_generation":target["binding_generation"],"sender_endpoint_key":endpoint,"from":{"principal_id":slot.identity["principal_id"],"user":slot.identity["owner_user"],"host_id":self.host_id,"host_name":local_host_name(),"harness":caller.as_ref().map(|c|c["harness"].clone()),"listener_id":from_id.as_deref().map(|id| local_sender.as_ref().and_then(|s|s["public_id"].as_str()).filter(|s|!s.is_empty()).map(str::to_string).unwrap_or_else(|| crate::core::identity::public_listener_id(string(&slot.identity,"owner_user"),id))),"title":authoritative_title,"about":local_sender.as_ref().map(|s|s["about"].clone())},"message":message,"in_reply_to":reply_to});
                 slot.rpc("js_publish",&json!({"subject":format!("cito.signal.{canonical}"),"data_b64":STANDARD.encode(serde_json::to_vec(&signal).map_err(|e|e.to_string())?),"opts":{"msgID":dedup}}))?
             };
-            seq = published["seq"].as_u64().unwrap_or(0);
-            if human {
-                signal_id = published["signal_id"]
-                    .as_str()
-                    .ok_or("Published reply ID missing")?
-                    .to_owned();
-            }
+            (signal_id, seq) =
+                publication_receipt(&published, (!human).then_some(&reservation["signal_id"]))?;
             // Publication is committed. Local maintenance must not invite duplicate retries.
             if self.state.db.transaction(|c| {
                 if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
@@ -1695,8 +1735,7 @@ impl DaemonService {
         if !(1..=1000).contains(&limit) {
             return Err("INVALID_INPUT: limit must be 1..1000".into());
         }
-        let mut bindings = Vec::new();
-        let mut rows = Vec::new();
+        let mut bindings = serde_json::Map::new();
         for (name, slot) in &self.slots {
             if args["hub"].is_string() && name != hub {
                 continue;
@@ -1713,81 +1752,106 @@ impl DaemonService {
                 string(&caller, "harness"),
                 string(&caller, "session_id"),
             )?;
-            rows.extend(self.state.current_signals(name, &id, limit as usize)?);
-            bindings.push((name.clone(), id));
+            bindings.insert(name.clone(), json!(id));
         }
-        rows.sort_by_key(|r| {
-            (
-                string(r, "created_at").to_string(),
-                string(r, "hub").to_string(),
-                r["seq"].as_u64().unwrap_or(0),
-            )
-        });
-        let page: Vec<Value> = rows
-            .iter()
-            .take(args["limit"].as_u64().unwrap_or(50) as usize)
-            .cloned()
-            .collect();
+        let bindings = Value::String(Value::Object(bindings).to_string());
+        let channel = format!("{}:{}", self.host_id, string(&caller, "harness"));
+        let page = self.state.db.transaction(|db| {
+            self.read_and_ack_inbox(db, args, &bindings, &channel, limit as usize)
+        })?;
+        self.flush_acks();
+        Ok(page)
+    }
+
+    fn read_and_ack_inbox(
+        &self,
+        db: &crate::core::database::Connection,
+        args: &Value,
+        bindings: &Value,
+        channel: &str,
+        limit: usize,
+    ) -> Result<Value, String> {
         let ack_all = args["ack_all"]
             .as_bool()
             .unwrap_or(args["ack_ids"].is_null());
-        let mut selected: Vec<Value> = if ack_all { page.clone() } else { Vec::new() };
+        // Sort metadata only. Load payloads by primary key until the wire page is full.
+        let unread = "SELECT s.hub,s.listener_id,s.signal_id,s.hub_url,s.principal_id,l.hub_url AS target_hub_url,l.status AS target_status,l.principal_id AS target_principal_id FROM json_each(?1) b JOIN local_signals s ON s.hub=b.key AND s.listener_id=b.value JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.acknowledged_at_ms IS NULL";
+        let mut selected = std::collections::BTreeMap::<
+            (String, String),
+            std::collections::BTreeSet<String>,
+        >::new();
+        let mut select = |r: &Value| {
+            selected
+                .entry((string(r, "hub").into(), string(r, "listener_id").into()))
+                .or_default()
+                .insert(string(r, "signal_id").into());
+        };
+        // MCP embeds the JSON payload as a string. Count the escaped wire bytes;
+        // reserve 1 MiB for the request ID and headroom for framing and metadata.
+        let mut remaining = 7 * 1024 * 1024 - 1024;
+        let mut signals = Vec::new();
+        db.query_while(&format!("{unread} ORDER BY s.created_at,s.hub,s.seq,s.signal_id"), std::slice::from_ref(bindings), |key| {
+            if !super::super::state::joined_signal_is_current(&key) { return Ok(true); }
+            let row = db.query("SELECT * FROM local_signals WHERE hub=? AND signal_id=?", &[key["hub"].clone(),key["signal_id"].clone()])?.pop().ok_or("STATE_ERROR: Inbox row missing")?;
+            let hub = string(&row, "hub");
+            let signal = json!({"hub":hub,"signal_id":self.scoped(hub,string(&row,"signal_id")),"seq":row["seq"],"from":{"user":row["from_user"],"host_name":row["from_host_name"],"harness":row["from_harness"],"listener_id":row["from_listener_id"],"title":row["from_title"],"about":row["from_about"]},"message":row["message"],"in_reply_to":row["in_reply_to"].as_str().map(|id|self.scoped(hub,id)),"created_at":row["created_at"],"held_reason":row["held_reason"]});
+            let bytes = serde_json::to_vec(&signal.to_string())
+                .map_err(|e| e.to_string())?
+                .len();
+            if bytes > remaining {
+                if signals.is_empty() {
+                    return Err("INVALID_INPUT: Signal exceeds inbox transport limit".into());
+                }
+                return Ok(false);
+            }
+            remaining -= bytes;
+            if ack_all { select(&key); }
+            signals.push(signal);
+            Ok(signals.len() < limit)
+        })?;
         for raw in args["ack_ids"].as_array().into_iter().flatten() {
             let raw = raw
                 .as_str()
                 .ok_or("INVALID_INPUT: Ack ID must be a string")?;
             let (scoped_hub, id) = match raw.split_once(':') {
                 Some((h, id)) => {
-                    if args["hub"].is_string() && h != hub {
+                    if args["hub"].as_str().is_some_and(|hub| hub != h) {
                         return Err("INVALID_INPUT: Ack hub outside inbox".into());
                     }
                     (Some(h), id)
                 }
                 None => (None, raw),
             };
-            let mut matches = Vec::new();
-            for (name, node) in &bindings {
-                if scoped_hub.is_some_and(|hub| hub != name) {
-                    continue;
-                }
-                matches.extend(
-                    self.state
-                        .current_signal_metadata(name, node, 0, usize::MAX, Some(id))?
-                        .into_iter()
-                        .filter(|row| row["signal_id"] == *id || row["batch_id"] == *id),
-                );
-            }
-            if scoped_hub.is_none()
-                && matches
-                    .iter()
-                    .map(|r| string(r, "hub"))
-                    .collect::<std::collections::HashSet<_>>()
-                    .len()
-                    > 1
-            {
-                return Err("INVALID_INPUT: Ambiguous ack ID; use hub prefix".into());
-            }
-            for row in matches {
-                if !selected
-                    .iter()
-                    .any(|r| r["hub"] == row["hub"] && r["signal_id"] == row["signal_id"])
-                {
-                    selected.push(row);
-                }
-            }
-        }
-        for row in &selected {
-            self.state.acknowledge(
-                string(row, "hub"),
-                string(row, "listener_id"),
-                &[row["signal_id"].clone()],
-                &format!("{}:{}", self.host_id, string(&caller, "harness")),
+            let mut matched_hub = None;
+            let query = format!(
+                "{unread} AND (?2 IS NULL OR s.hub=?2) AND (s.signal_id=?3 OR s.batch_id=?3)"
+            );
+            db.query_while(
+                &query,
+                &[bindings.clone(), json!(scoped_hub), json!(id)],
+                |row| {
+                    if super::super::state::joined_signal_is_current(&row) {
+                        if matched_hub.get_or_insert_with(|| row["hub"].clone()) != &row["hub"] {
+                            return Err("INVALID_INPUT: Ambiguous ack ID; use hub prefix".into());
+                        }
+                        select(&row);
+                    }
+                    Ok(true)
+                },
             )?;
         }
-        let signals:Vec<Value>=page.iter().map(|row|json!({"hub":row["hub"],"signal_id":self.scoped(string(row,"hub"),string(row,"signal_id")),"seq":row["seq"],"from":{"user":row["from_user"],"host_name":row["from_host_name"],"harness":row["from_harness"],"listener_id":row["from_listener_id"],"title":row["from_title"],"about":row["from_about"]},"message":row["message"],"in_reply_to":row["in_reply_to"].as_str().map(|id|self.scoped(string(row,"hub"),id)),"created_at":row["created_at"],"held_reason":row["held_reason"]})).collect();
-        self.flush_acks();
+        let at = json!(now_ms());
+        let mut count = 0;
+        for ((hub, node), ids) in selected {
+            count += ids.len();
+            let keys = json!(json!(ids).to_string());
+            let args = [json!(hub), json!(node), keys, at.clone(), json!(channel)];
+            db.execute("UPDATE local_signals SET acknowledged_at_ms=?4,state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=?1 AND listener_id=?2 AND signal_id IN (SELECT value FROM json_each(?3))", &args[..4])?;
+            db.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?5,?4,hub_url,principal_id FROM local_signals WHERE hub=?1 AND listener_id=?2 AND signal_id IN (SELECT value FROM json_each(?3))", &args)?;
+            super::super::state::reconcile_wake_retry(db, &hub, &node)?;
+        }
         Ok(
-            json!({"ok":true,"signals":signals,"acknowledged_count":selected.len(),"replay_gap_detected":false,"replay_gap_range":null}),
+            json!({"ok":true,"signals":signals,"acknowledged_count":count,"replay_gap_detected":false,"replay_gap_range":null}),
         )
     }
     pub(super) fn flush_acks(&mut self) {

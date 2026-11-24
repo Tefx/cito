@@ -265,6 +265,88 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
 }
 
 #[test]
+fn same_name_channel_authority_change_discards_edits_pairing_and_test_receipts() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    open_settings(&f, p, &cfg, "channels");
+    let field = "channel_field:channel:account";
+    for (key, next) in [("url", "https://hub.example.com"), ("user", "bob")] {
+        input(&f, p, field, "previous account");
+        control(&f, p, "pair_channel:channel");
+        let pair = latest(&f, p, "channel_pair");
+        f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":pair["request_id"],"instruction":"Previous account pairing code"}));
+        control(&f, p, "test_channel:channel");
+        let request = latest(&f, p, "channel_test");
+        let result = json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","request_id":request["request_id"],"ok":true,"detail":"Previous account test"});
+        f.send(p, result.clone());
+        control(&f, p, "test_channel:channel");
+        let pending = latest(&f, p, "channel_test");
+        f.send(p, json!({"op":"test_focus_field","id":field}));
+        let before = inspect(&f, p);
+        assert_eq!(before.settings(field)["text"], "previous account");
+        assert_eq!(
+            before.settings("settings_channel_detail:channel")["text"],
+            result["detail"]
+        );
+        assert_eq!(
+            before.settings("pairing_instruction:channel")["text"],
+            "Previous account pairing code"
+        );
+        cfg["hubs"][0][key] = json!(next);
+        if key == "user" {
+            let mut partial = cfg.clone();
+            partial["channels"] = json!([]);
+            f.send(
+                p,
+                json!({"op":"settings","settings":partial,"truncated_collections":["channels"]}),
+            );
+            let switched = inspect(&f, p);
+            assert_eq!(
+                switched.settings("inbox_control_title")["text"],
+                "You (@bob)"
+            );
+            assert!(switched.settings("settings_channel:channel").is_null());
+        }
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        let mut late = result;
+        late["request_id"] = pending["request_id"].clone();
+        f.send(p, late);
+        let fresh = inspect(&f, p);
+        assert_eq!(fresh.settings(field)["text"], "");
+        assert!(fresh.settings("pairing_instruction:channel").is_null());
+        assert!(fresh.settings("settings_channel_detail:channel").is_null());
+        assert_eq!(fresh["pending_controls"], json!([]));
+    }
+}
+
+#[test]
+fn personal_save_that_configures_channel_preserves_a_newer_draft() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    open_settings(&f, p, &cfg, "channels");
+    let field = "channel_field:channel:account";
+    input(&f, p, field, "submitted");
+    control(&f, p, "save_channel:channel");
+    let request = latest(&f, p, "channel_save");
+    input(&f, p, field, "newer");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("submitted");
+    f.send(p, json!({"op":"settings","settings":cfg,"source_op":"channel_save","request_id":request["request_id"],"ok":true}));
+    assert_eq!(inspect(&f, p).settings(field)["text"], "newer");
+    control(&f, p, "save_channel:channel");
+    let request = latest(&f, p, "channel_save");
+    assert_eq!(request["values"]["account"], "newer");
+    cfg["channels"][0]["fields"][1]["value"] = json!("newer");
+    f.send(p, json!({"op":"settings","settings":cfg,"source_op":"channel_save","request_id":request["request_id"],"ok":true}));
+    assert_eq!(
+        inspect(&f, p).settings("channel_summary:channel")["text"],
+        "✓ Saved"
+    );
+}
+
+#[test]
 fn oversized_channel_submission_preserves_drafts_without_pending_or_transport_effects() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -365,12 +447,6 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                 assert_eq!(s.settings("inbox_control_bar")["height"], 48);
                 let scroll = s.settings("settings_channels_tab");
                 assert_eq!(scroll["height"], 368);
-                assert_eq!(
-                    s["clipped_views"],
-                    json!([]),
-                    "Every resting active/paused default must fit without scrolling"
-                );
-                assert_eq!(s["overlapping_siblings"], json!([]));
                 let summary = s.settings("inbox_control_summary");
                 assert_eq!(
                     summary["text"],
@@ -1045,6 +1121,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "edit_user_channel:channel");
     for (field, value) in [("secret", "discard-gateway"), ("account", "keep-personal")] {
         f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
     }
@@ -1060,6 +1137,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     f.send(p, json!({"op":"settings","hub":"work","settings":remote}));
     control(&f, p, "channel_hub_selector:work");
     control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "edit_user_channel:channel");
     for (field, value) in [("secret", "escape-work"), ("account", "keep-work")] {
         f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
     }

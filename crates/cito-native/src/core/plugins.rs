@@ -207,11 +207,6 @@ pub fn validate_oidc_url(raw: &str, issuer: bool) -> Result<url::Url, String> {
     Ok(url)
 }
 
-pub fn validate_https_issuer(raw: &str) -> Result<String, String> {
-    validate_oidc_url(raw, true)?;
-    Ok(raw.to_owned())
-}
-
 /// Apply a process-local endpoint override only to the selected Hub.
 pub fn apply_hub_url_override(name: &str, selected: &str, hub: &mut Value) -> Result<(), String> {
     if name == selected {
@@ -754,7 +749,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
     let issuer_env = env::var("CITO_OIDC_ISSUER").ok();
     let client_env = env::var("CITO_OIDC_CLIENT_ID").ok();
     if let Some(ref iss) = issuer_env {
-        validate_https_issuer(iss)?;
+        validate_oidc_url(iss, true)?;
     }
     if auth_mode == "oidc" && issuer_env.as_deref().unwrap_or("").trim().is_empty() {
         return Err("CITO_OIDC_ISSUER is required in oidc mode".to_string());
@@ -770,15 +765,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
         }
     }
 
-    let home_env = env::var("HOME").ok();
-    let home_dir = expand_home_dir("~", "HOME", home_env.as_deref())?;
-    let raw_state = env::var("CITO_STATE_DIR").unwrap_or_else(|_| "~/.cito".to_string());
-    let state_dir = expand_home_dir(&raw_state, "CITO_STATE_DIR", home_env.as_deref())?;
-    let explicit_config = env::var("CITO_CONFIG_PATH").ok();
-    let config_path = match explicit_config {
-        Some(ref p) => expand_home_dir(p, "CITO_CONFIG_PATH", home_env.as_deref())?,
-        None => state_dir.join("config.json"),
-    };
+    let (state_dir, config_path, home_dir) = super::setup::resolve_state_and_config_paths()?;
 
     if let Ok(id) = fs::read_to_string(state_dir.join("host-id")) {
         if !crate::is_valid_transcript_uuid(id.trim()) {
@@ -791,7 +778,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "local".to_string());
 
-    if explicit_config.is_some() || config_path.exists() {
+    if env::var("CITO_CONFIG_PATH").is_ok() || config_path.exists() {
         let raw = fs::read_to_string(&config_path)
             .map_err(|_| format!("Cannot load hub configuration: {}", config_path.display()))?;
         let Value::Object(mut map) = serde_json::from_str::<Value>(&raw)
@@ -898,15 +885,7 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
 }
 
 pub fn plugin_request(plugin: &PluginDescriptor, request: &Value) -> Result<Value, String> {
-    plugin_request_with_timeout(plugin, request, Duration::from_millis(10_000))
-}
-
-pub fn plugin_request_with_timeout(
-    plugin: &PluginDescriptor,
-    request: &Value,
-    timeout: Duration,
-) -> Result<Value, String> {
-    plugin_request_with_progress(plugin, request, timeout, |_| Ok(()))
+    plugin_request_with_progress(plugin, request, Duration::from_secs(10), |_| Ok(()))
 }
 
 /// Run caller-owned progress checks while polling the child. An error aborts and reaps
@@ -984,20 +963,22 @@ pub fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
     // SAFETY: siginfo is writable, pid belongs to an unreaped Child, and WNOWAIT
     // observes completion without releasing its PID or process-group ownership.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if result != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::Interrupted {
-            return Ok(None);
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            break;
         }
-        return Err(error.to_string());
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error.to_string());
+        }
     }
     if info.si_signo == 0 {
         return Ok(None);
@@ -1216,18 +1197,6 @@ fn daemon_health_from_json(config: &NativeConfig, val: &Value) -> Option<DaemonH
         pid: pid as i32,
         version,
     })
-}
-
-#[cfg(test)]
-#[test]
-fn pid_alive_rejects_non_process_ids() {
-    assert!(!pid_alive(0));
-    assert!(!pid_alive(u32::MAX as i32));
-    assert!(pid_alive(std::process::id() as i32));
-}
-
-pub fn pid_alive(pid: i32) -> bool {
-    crate::support::alive(pid as u32)
 }
 
 pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), String> {
@@ -1482,7 +1451,10 @@ mod tests {
             "https://id.example.com/tenant@team/",
             "http://127.0.0.1:8400",
         ] {
-            assert_eq!(validate_https_issuer(issuer).unwrap(), issuer);
+            assert!(validate_oidc_url(issuer, true).is_ok());
+            let raw = json!({"hubs":{"work":{"url":"https://hub.example.com","authMode":"oidc","issuer":issuer,"clientId":"example"}}}).to_string();
+            let (_, hubs, _) = try_normalize_existing_config(Some(&raw)).unwrap();
+            assert_eq!(hubs["work"]["issuer"], issuer);
         }
         for endpoint in [
             "https://id.example.com/authorize?tenant=work&prompt=login",
@@ -1737,19 +1709,20 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         let (root, plugin) = fixture("echo $$ > child.pid; exec /bin/sleep 10");
         let started = Instant::now();
-        let result = plugin_request_with_timeout(
+        let result = plugin_request_with_progress(
             &plugin,
             &json!({"op":"probe"}),
             Duration::from_millis(1000),
+            |_| Ok(()),
         );
         assert!(result.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(3));
-        let pid: i32 = fs::read_to_string(plugin.plugin_dir.join("child.pid"))
+        let pid = fs::read_to_string(plugin.plugin_dir.join("child.pid"))
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        assert!(!pid_alive(pid));
+        assert!(!crate::support::alive(pid));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1774,12 +1747,12 @@ mod tests {
             },
         );
         assert!(result.unwrap_err().contains("Wake lease renewal failed"));
-        let pid: i32 = fs::read_to_string(pid_path)
+        let pid = fs::read_to_string(pid_path)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        assert!(!pid_alive(pid));
+        assert!(!crate::support::alive(pid));
         fs::remove_dir_all(root).unwrap();
     }
 

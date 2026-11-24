@@ -33,8 +33,10 @@ pub fn normalize_slug(raw: &str) -> String {
         out.into()
     }
 }
-pub fn listener_id(principal: &str, harness: &str, session: &str) -> String {
-    let hash = Sha256::digest(format!("cito-v2|{principal}|{harness}|{session}").as_bytes());
+fn legacy_digest(principal: &str, harness: &str, session: &str) -> [u8; 32] {
+    Sha256::digest(format!("cito-v2|{principal}|{harness}|{session}")).into()
+}
+fn hex_id(hash: &[u8; 32]) -> String {
     format!(
         "c_{}",
         hash[..8]
@@ -42,6 +44,19 @@ pub fn listener_id(principal: &str, harness: &str, session: &str) -> String {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     )
+}
+pub fn listener_id(principal: &str, harness: &str, session: &str) -> String {
+    let parts = [principal, harness, session];
+    if !parts.iter().any(|part| part.contains('|')) {
+        return hex_id(&legacy_digest(principal, harness, session));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"cito-v3|");
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    hex_id(&digest.finalize().into())
 }
 /// Candidate keys preserve existing registrations when the wire's hash representation changes.
 pub fn listener_id_candidates(identity: &Value, harness: &str, session: &str) -> Vec<String> {
@@ -54,11 +69,12 @@ pub fn listener_id_candidates(identity: &Value, harness: &str, session: &str) ->
     }
     let mut ids = Vec::new();
     for principal in principals {
-        let id = listener_id(&principal, harness, session);
-        if !ids.contains(&id) {
-            ids.push(id);
+        let bytes = legacy_digest(&principal, harness, session);
+        for id in [listener_id(&principal, harness, session), hex_id(&bytes)] {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
         }
-        let bytes = Sha256::digest(format!("cito-v2|{principal}|{harness}|{session}").as_bytes());
         let mut legacy = String::from("c_");
         let mut bits: u32 = 0;
         let mut available = 0;
@@ -120,7 +136,9 @@ pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value
     } else {
         ""
     };
-    let address = if harness == "human" {
+    let address = if user == "self" {
+        public_listener_id(&user, id)
+    } else if harness == "human" {
         format!("@{}", string(row, "owner_user"))
     } else {
         let mut chosen = None;
@@ -274,11 +292,18 @@ mod tests {
     fn slugs_and_node_ids() {
         assert_eq!(normalize_slug("Alice._Smith"), "alice-smith");
         assert_eq!(normalize_slug("___"), "user");
-        assert_eq!(listener_id("p", "human", "default").len(), 18);
-        assert_eq!(
-            listener_id("p", "human", "default"),
-            listener_id("p", "human", "default")
-        );
+        assert_eq!(listener_id("p", "human", "default"), "c_5305ba8fab061fe4");
+        let ids: std::collections::HashSet<_> =
+            [("p|q", "r", "s"), ("p", "q|r", "s"), ("p", "q", "r|s")]
+                .into_iter()
+                .map(|(p, h, s)| {
+                    let candidates = listener_id_candidates(&json!({"principal_id":p}), h, s);
+                    assert!(candidates.iter().any(|id| id == "c_2f5266e8ba2c66be"));
+                    assert_eq!(candidates[0], listener_id(p, h, s));
+                    candidates[0].clone()
+                })
+                .collect();
+        assert_eq!(ids.len(), 3);
     }
     #[test]
     fn readable_addresses_preserve_hub_routing_and_disambiguate_live_collisions() {
@@ -342,6 +367,14 @@ mod tests {
             ),
             "local:@alice"
         );
+        for (owner, harness) in [("self", "human"), ("SELF.", "agent")] {
+            let row =
+                json!({"owner_user":owner,"harness":harness,"listener_id":"c_abcd123456789012"});
+            assert_eq!(
+                display_address("work", "local", &row, &[]),
+                "work:self-abcd123456789012"
+            );
+        }
         assert!(readable_alias("alice/agent#abcd").is_some());
         assert!(readable_alias("agent#abcd").is_some());
         assert!(readable_alias("alice/agent#").is_none());

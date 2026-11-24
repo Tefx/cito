@@ -10,7 +10,7 @@ fn test_engine(directory: &Path) -> TestEngine {
 fn detached_device_requires_a_new_generation() {
     let dir = temp();
     let e = test_engine(&dir);
-    let owner = local_principal("alice");
+    let owner = principal("alice");
     let mut req = json!({"host_id":"device","channel_id":"device:human","owner_token":"token","binding_generation":2});
     for op in [
         "human_device_attach",
@@ -72,6 +72,142 @@ fn raw_publish_and_kv_enforce_node_and_wire_limits() {
 }
 
 #[test]
+fn final_kv_values_fit_a_single_snapshot_entry_or_leave_the_prior_revision() {
+    let dir = temp();
+    let e = test_engine(&dir);
+    e.pause_worker();
+    let key = "\"".repeat(1024);
+    let empty =
+        json!({"key":key,"value_b64":"","revision":1,"created_ms":now_ms(),"operation":"PUT"});
+    let max_raw =
+        (2 * 1024 * 1024 - 128 - empty.to_string().len() - 1 - json!(key).to_string().len()) / 4
+            * 3;
+    let valid = "a".repeat(max_raw);
+    let invalid = format!("{valid}b");
+    for op in ["kv_create", "kv_update", "kv_put"] {
+        let current = e.rpc("kv_get", &json!({"key":key}), None).unwrap();
+        let error = e
+            .rpc(
+                op,
+                &json!({"key":key,"revision":current["revision"],"data":invalid}),
+                None,
+            )
+            .unwrap_err();
+        assert!(error.starts_with("INVALID_INPUT:"), "{op}: {error}");
+        let new = e
+            .rpc(
+                op,
+                &json!({"key":key,"revision":current["revision"],"data":valid}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            new["revision"].as_i64(),
+            Some(current["revision"].as_i64().unwrap_or(0) + 1)
+        );
+        let page = e.rpc("kv_snapshot", &json!({}), None).unwrap();
+        assert_eq!(page["entries"][0]["value_b64"], B64.encode(&valid));
+        assert!(page.to_string().len() <= 2 * 1024 * 1024);
+    }
+    // A compact input fits before lease stamping, then grows past the budget.
+    let mut reg = json!({"pad":"","channels":{"local":{"state":"ACTIVE"}}});
+    reg["pad"] = json!("a".repeat(max_raw - reg.to_string().len()));
+    assert!(e
+        .rpc("kv_put", &json!({"key":key,"data":reg}), None)
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    let owner = principal("alice");
+    let invalid = "x".repeat(2 * 1024 * 1024);
+    assert!(e.rpc("human_device_attach", &json!({"channel_id":"mac:human","host_id":"mac","host_name":invalid,"binding_generation":1,"owner_token":"token"}),Some(&owner)).unwrap_err().starts_with("INVALID_INPUT:"));
+    assert!(e.inner.db.transaction(|c| attach(c,&json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"sample","display_label":invalid}),true,"workspace",None)).unwrap_err().starts_with("INVALID_INPUT:"));
+    assert_eq!(
+        e.rpc("kv_keys", &json!({}), None).unwrap()["keys"],
+        json!([key])
+    );
+}
+
+#[test]
+fn bounded_receipts_and_key_pages_handle_legacy_rows_and_escaped_ids() {
+    let dir = temp();
+    let e = test_engine(&dir);
+    e.pause_worker();
+    let id = "\u{0001}".repeat(1024);
+    let publish = |subject, id: &str, text| {
+        e.rpc(
+            "js_publish",
+            &json!({"subject":subject,"msg_id":"one","data":{"signal_id":id,"message":text}}),
+            None,
+        )
+    };
+    assert_eq!(
+        publish("cito.signal.target", &id, "a").unwrap()["duplicate"],
+        false
+    );
+    assert_eq!(
+        publish("cito.signal.target", &id, "a").unwrap()["duplicate"],
+        true
+    );
+    let replay = e
+        .rpc(
+            "js_publish",
+            &json!({"subject":"cito.signal.target","data":{"signal_id":id,"message":"a"}}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(replay, json!({"stream":SIGNALS,"seq":1,"duplicate":true}));
+    for (subject, id, text) in [
+        ("cito.signal.target", format!("{id}x"), "a"),
+        ("cito.signal.target", id.clone(), "b"),
+        ("cito.signal.other", id.clone(), "a"),
+    ] {
+        assert!(publish(subject, &id, text)
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+    }
+    // These pre-admission-limit rows are individually readable. Their combined
+    // escaped strings cross the frame cap, even though raw UTF-8 sizes fit.
+    let legacy = "\u{0001}".repeat(750_000);
+    for prefix in ["a", "b"] {
+        let key = format!("{prefix}{legacy}");
+        e.inner.db.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES('cito.signal.target',?,?,X'00')",&[json!(key),json!(now_ms())]).unwrap();
+        e.inner
+            .db
+            .execute(
+                "INSERT INTO hub_kv(key,revision,created_ms,value) VALUES(?,1,1,X'00')",
+                &[json!(format!("{prefix}{}", "\u{0001}".repeat(475_000)))],
+            )
+            .unwrap();
+    }
+    let batch = |seqs: Value| {
+        e.rpc(
+            "stream_get_message",
+            &json!({"stream":SIGNALS,"seqs":seqs}),
+            None,
+        )
+    };
+    assert_eq!(batch(json!([1])).unwrap()["messages"][0]["signal_id"], id);
+    assert!(batch(json!([2, 3]))
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    for seq in [2, 3] {
+        let page = batch(json!([seq])).unwrap();
+        assert_eq!(page["messages"][0]["seq"], seq);
+        assert!(json!({"ok":true,"result":page}).to_string().len() <= 8 * 1024 * 1024);
+    }
+    let first = e.rpc("kv_keys", &json!({}), None).unwrap();
+    assert_eq!(first["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(first["next_cursor"], first["keys"][0]);
+    let last = e
+        .rpc("kv_keys", &json!({"after_key":first["next_cursor"]}), None)
+        .unwrap();
+    assert!(last["keys"][0].as_str().unwrap().starts_with('b'));
+    assert!(last["next_cursor"].is_null());
+    for page in [first, last] {
+        assert!(json!({"ok":true,"result":page}).to_string().len() <= 8 * 1024 * 1024);
+    }
+}
+
+#[test]
 fn terminal_delivery_and_opaque_reply_retention_have_independent_clocks() {
     let dir = temp();
     let e = test_engine(&dir);
@@ -124,7 +260,7 @@ fn human_mutations_fence_expired_devices_without_prior_reads() {
         let dir = temp();
         let e = test_engine(&dir);
         e.pause_worker();
-        let owner = local_principal("alice");
+        let owner = principal("alice");
         let request = json!({"channel_id":"device:human","host_id":"device","binding_generation":3,"owner_token":"old"});
         let mut row = e
             .rpc("human_device_attach", &request, Some(&owner))
@@ -158,7 +294,7 @@ fn current_reply_keys_reject_conflicting_payloads() {
     let dir = temp();
     let e = test_engine(&dir);
     e.pause_worker();
-    let owner = local_principal("alice");
+    let owner = principal("alice");
     put(&e, "target", "none#bob", "workspace");
     let req = json!({"to":"target","message":"Approved","in_reply_to":"source","msg_id":"once"});
     let first = e.rpc("send_reply_from_human", &req, Some(&owner)).unwrap();
@@ -240,17 +376,20 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
     let dir = temp();
     let e = test_engine(&dir);
     e.pause_worker();
-    let owner = local_principal("alice");
+    let owner = principal("alice");
     let human = e.rpc("human_device_attach", &json!({"channel_id":"host:human","host_id":"host","host_name":"Host","binding_generation":1,"owner_token":"owner"}), Some(&owner)).unwrap()["record"]["listener_id"].as_str().unwrap().to_owned();
     e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,enabled) VALUES('none#alice','fixture',1)", &[]).unwrap();
     put(&e, "target", "none#bob", "workspace");
     send(&e, &human, "ack-source");
     send(&e, &human, "reply-source");
-    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = e.inner.processes.lock().unwrap();
-        panic!("Inject notification process-lock failure");
-    }));
-    assert!(poisoned.is_err());
+    let root = fixture(&dir);
+    let mut plugin = hub_plugins::discover(&[(root, false)], None)
+        .unwrap()
+        .remove(0);
+    // Close the pipe after accepting configure; the cursor confirms stdin has no reader.
+    plugin.command = vec!["/bin/sh".into(), "-c".into(), "read -r line; exec 0<&-; printf '%s\\n' '{\"op\":\"cursor_save\",\"cursor\":1}'; exec sleep 30".into()];
+    e.ensure_process(&plugin).unwrap();
+    wait_for(|| e.inner.db.transaction(|c| service(c, "fixture")).unwrap().1["cursor"] == 1);
     let ack = json!({"node_id":human,"signal_ids":["ack-source"]});
     assert!(
         e.notify_ack(&ack).is_err(),
@@ -286,8 +425,8 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
             )],
         )
         .unwrap();
-    send(&e, &human, "plugin-source");
-    e.inner.db.execute("INSERT INTO hub_channel_delivery_msgs VALUES('fixture','none#alice','chunk','plugin-source','target')",&[]).unwrap();
+    send(&e, &human, "thread:source");
+    e.inner.db.execute("INSERT INTO hub_channel_delivery_msgs VALUES('fixture','none#alice','chunk','thread:source','target')",&[]).unwrap();
     let mut frame = json!({"op":"inbound_reply","external_chat_id":"room","external_user_id":"user","reply_to_external_msg_id":"chunk","update_id":"opaque","text":"Reply"});
     assert_eq!(e.plugin_frame("fixture", &frame).unwrap()["ok"], false);
     frame["external_chat_id"] = json!(" room ");
@@ -297,7 +436,62 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
         e.plugin_frame("fixture", &frame).unwrap()["duplicate"],
         true
     );
-    e.inner.processes.clear_poison();
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id='thread:source'",
+            &[]
+        )
+        .unwrap()[0]["acked_at_ms"]
+        .is_number());
+}
+
+#[test]
+fn silent_exit_keeps_its_health_warning_and_backs_off_relaunch() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    let root = fixture(&dir);
+    let plugin_dir = root.join("fixture");
+    let path = plugin_dir.join("plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["command"] = json!([
+        "/bin/sh",
+        "-c",
+        "echo started >> starts; while read -r line; do case $line in *finish*) exit;; esac; done"
+    ]);
+    std::fs::write(path, manifest.to_string()).unwrap();
+    hub.set_plugin_roots(&[root]).unwrap();
+    hub.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"armed"}}),
+        Some(&principal("alice")),
+    )
+    .unwrap();
+    let process = hub.ensure_process(&hub.plugin("fixture").unwrap()).unwrap();
+    process.send(&json!({"op":"finish"})).unwrap();
+    let health = || {
+        hub.inner
+            .db
+            .transaction(|c| service(c, "fixture"))
+            .unwrap()
+            .1
+    };
+    wait_for(|| health()["poll_error"] == "Plugin subprocess exited");
+    assert!(hub.configure_process("fixture", &process).is_err());
+    assert_eq!(health()["poll_error"], "Plugin subprocess exited");
+    assert!(hub
+        .tick_channels()
+        .unwrap_err()
+        .contains("waiting to restart"));
+    assert_eq!(
+        std::fs::read_to_string(plugin_dir.join("starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1340,8 +1534,7 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
                     &[],
                 )?
                 .ok_or("missing binding")?;
-                let id = find_human(c, &b)?.ok_or("missing node")?;
-                Ok(parse(&kv_row(c, &id)?.ok_or("missing row")?, "value"))
+                find_human(c, &b)?.1.ok_or_else(|| "missing node".into())
             })
             .unwrap()
     };
@@ -1350,7 +1543,7 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     configure(json!({"enabled":true,"user_config":{"address":"room"}}));
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
     e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,attempts,next_retry_ms,delivered_ms) VALUES('fixture','none#alice','failed',1,'failed_permanent',6,999999,1)",&[]).unwrap();
-    let bob = local_principal("bob");
+    let bob = principal("bob");
     let events = e.subscribe(None).unwrap();
     e.rpc(
         "human_channel_pair_start",
@@ -1602,6 +1795,112 @@ fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<()
         assert_eq!(parse(&row, "value"), value);
     }
     Ok(())
+}
+
+#[test]
+fn occupied_human_keys_require_the_owner_and_the_complete_human_tuple() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    let owner = principal("alice");
+    let key = listener_id("none#alice", "human", "default");
+    let device = json!({"channel_id":"mac:human","host_id":"mac","binding_generation":1,"owner_token":"token"});
+    for (pid, harness, session) in [
+        ("none#bob", "human", "default"),
+        ("none#alice", "sample", "default"),
+        ("none#alice", "human", "other"),
+    ] {
+        let stored = json!({"harness":harness,"session_id":session,"principal_id":pid});
+        hub.inner.db.execute("INSERT OR REPLACE INTO hub_kv(key,value,principal_id,revision,created_ms) VALUES(?,CAST(? AS BLOB),?,1,1)",&[json!(key),json!(stored.to_string()),json!(pid)]).unwrap();
+        for op in [
+            "human_device_attach",
+            "human_device_heartbeat",
+            "human_device_detach",
+            "human_inbox_update",
+        ] {
+            assert!(
+                hub.rpc(op, &device, Some(&owner))
+                    .unwrap_err()
+                    .starts_with("FORBIDDEN:"),
+                "{op}"
+            );
+        }
+        assert!(hub
+            .inner
+            .db
+            .transaction(|c| attach(c, &owner, true, "workspace", None))
+            .unwrap_err()
+            .starts_with("FORBIDDEN:"));
+        assert_eq!(
+            hub.inner
+                .db
+                .query(
+                    "SELECT revision,CAST(value AS TEXT) AS data FROM hub_kv",
+                    &[]
+                )
+                .unwrap(),
+            vec![json!({"revision":1,"data":stored.to_string()})]
+        );
+    }
+}
+
+#[test]
+fn consumer_operations_validate_requested_and_persisted_streams_and_limit_id_batches() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    let config = json!({"durable_name":"sample"});
+    let req = json!({"config":config,"name":"sample","stream":"unsupported","seq":1});
+    assert!(hub
+        .rpc("consumer_add", &req, None)
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    hub.rpc("consumer_add", &json!({"config":config}), None)
+        .unwrap();
+    for legacy in [false, true] {
+        let mut req = req.clone();
+        if legacy {
+            hub.inner
+                .db
+                .execute("UPDATE hub_consumers SET stream='unsupported'", &[])
+                .unwrap();
+            req["stream"] = json!(SIGNALS);
+        }
+        for op in [
+            "consumer_backlog",
+            "consumer_next",
+            "consumer_ack",
+            "consumer_delete",
+            "consumer_add",
+        ] {
+            assert!(
+                hub.rpc(op, &req, None)
+                    .unwrap_err()
+                    .starts_with("INVALID_INPUT:"),
+                "{op}"
+            );
+        }
+    }
+    let mut raw = vec!["z"; 1023];
+    raw.push("a");
+    for op in ["signal_claim_dispatch", "signal_ack"] {
+        let mut request = json!({"node_id":"target","channel_id":"local","signal_ids":raw});
+        let accepted = hub.rpc(op, &request, None).unwrap();
+        assert_eq!(
+            accepted[if op == "signal_ack" {
+                "signal_ids"
+            } else {
+                "acked_ids"
+            }],
+            json!(["z", "a"])
+        );
+        request["signal_ids"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("z"));
+        assert!(hub
+            .rpc(op, &request, None)
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+    }
 }
 
 #[test]
@@ -2079,12 +2378,7 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
         Some(&user),
     )
     .unwrap();
-    let human = e
-        .inner
-        .db
-        .transaction(|c| find_human(c, &user))
-        .unwrap()
-        .unwrap();
+    let human = e.inner.db.transaction(|c| find_human(c, &user)).unwrap().0;
     let node = e.rpc("kv_get", &json!({"key":human}), Some(&user)).unwrap();
     let reg: Value = serde_json::from_slice(&B64.decode(s(&node, "value_b64")).unwrap()).unwrap();
     assert_eq!(reg["scope"], "self");
@@ -2423,7 +2717,7 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
             None,
         )
         .unwrap();
-        let owner = local_principal("alice");
+        let owner = principal("alice");
         e.rpc(
             "human_channels_configure",
             &json!({"plugin_id":"fixture","enabled":true,"user_config":{"address":"reply-test"}}),
@@ -2488,7 +2782,7 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
 fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure() {
     let dir = temp();
     let e = test_engine(&dir);
-    let sender = local_principal("alice");
+    let sender = principal("alice");
     let human = listener_id("none#alice", "human", "default");
     put(&e, "target", "none#bob", "workspace");
     send(&e, &human, "original");
@@ -2609,7 +2903,12 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
     put(&e, "sender", "none#bob", "workspace");
     let pid = "none#alice";
     let node = listener_id(pid, "human", "default");
-    put(&e, &node, pid, "self");
+    e.rpc(
+        "human_inbox_update",
+        &json!({"expected_control_revision":1,"scope":"self"}),
+        Some(&principal("alice")),
+    )
+    .unwrap();
     send(&e, &node, "original");
     e.inner.db.transaction(|c|{c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,'fixture','alice',?)",&[json!(pid),json!(json!({"_external_chat_id":"room","_external_user_id":"user"}).to_string())])?;c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES('fixture',?,'chunk-1','original','work:sender')",&[json!(pid)])?;Ok(())}).unwrap();
     e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,delivered_ms) VALUES('fixture',?,'original',1,'delivered','work:sender',?)", &[json!(pid),json!(now_ms())]).unwrap();
@@ -2924,7 +3223,12 @@ fn http_wire_and_stoppable_shared_engine() {
             .unwrap();
         assert_eq!(response["result"]["config"]["name"], SIGNALS);
     }
+    assert!(server.wait_for_stop(&AtomicBool::new(true)).is_ok());
     server.shutdown();
+    assert_eq!(
+        server.wait_for_stop(&AtomicBool::new(false)).unwrap_err(),
+        "Hub listener stopped unexpectedly"
+    );
     assert!(e.rpc("account_info", &json!({}), None).is_ok());
 }
 #[test]
@@ -3061,13 +3365,13 @@ fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
         let e = test_engine(&dir);
         for index in 0..7 {
             let id = format!("human-{index}");
-            let reg = json!({"listener_id":id,"harness":"human","scope":"workspace",
+            let reg = json!({"listener_id":id,"harness":"human","principal_id":"none#alice","session_id":"default","scope":"workspace",
                 "state":"ACTIVE","about":"x".repeat(600_000),
                 "channels":{"device:human":{"host_id":"device","state":"ACTIVE",
                     "updated_at_ms":1,"binding_generation":3}}});
             // Seed expired, unreconciled storage directly so snapshot must write.
             e.inner.db.execute(
-                "INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,1,CAST(? AS BLOB),'','workspace')",
+                "INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,1,CAST(? AS BLOB),'none#alice','workspace')",
                 &[json!(id), json!(reg.to_string())],
             ).unwrap();
         }
@@ -3131,14 +3435,15 @@ fn snapshot_reserves_the_last_key_before_and_after_reconciliation() {
         let dir = temp();
         let e = test_engine(&dir);
         let keys = ["a".repeat(1024), "b".repeat(1024), "z".into()];
-        let mut first = json!({"harness":"human","about":"a".repeat(4096)});
+        let mut first = json!({"harness":"human","principal_id":"none#alice","session_id":"default","about":"a".repeat(4096)});
         if shrinks {
             first["channels"] = json!({"old:human":{"state":"ACTIVE","updated_at_ms":1,"display_name":"x".repeat(2048)}});
         }
-        let mut second = json!({"harness":"human","about":""});
+        let mut second =
+            json!({"harness":"human","principal_id":"none#bob","session_id":"default","about":""});
         e.inner.db.transaction(|c| {
             for (key, value) in keys.iter().zip([&first, &second, &json!({"about":"z".repeat(4096)})]) {
-                c.execute("INSERT INTO hub_kv(key,revision,created_ms,value) VALUES(?,1,1,CAST(? AS BLOB))", &[json!(key),json!(value.to_string())])?;
+                c.execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id) VALUES(?,1,1,CAST(? AS BLOB),?)", &[json!(key),json!(value.to_string()),value["principal_id"].clone()])?;
             }
             let mut used = 128;
             for key in &keys[..2] {
@@ -3430,7 +3735,8 @@ fn concurrent_claim_has_one_winner() {
 }
 #[test]
 fn pending_request_fails_on_child_exit() {
-    let dir = temp().join("fixture");
+    let root = temp();
+    let dir = root.join("fixture");
     std::fs::create_dir_all(&dir).unwrap();
     let plugin = ChannelPlugin {
         is_builtin: false,
@@ -3907,6 +4213,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
 fn retention_and_dedup_expire() {
     let dir = temp();
     let e = test_engine(&dir);
+    e.pause_worker();
     e.rpc(
         "stream_update",
         &json!({"stream":SIGNALS,"patch":{"max_age":50_000_000,"duplicate_window":50_000_000}}),
@@ -3936,4 +4243,31 @@ fn retention_and_dedup_expire() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["seq"], 2);
+
+    // Expire only the publication key, leaving the original logical signal readable.
+    e.rpc("stream_update", &json!({"stream":SIGNALS,"patch":{"max_age":60_000_000_000i64,"duplicate_window":50_000_000}}),None).unwrap();
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_signals SET created_ms=? WHERE seq=2",
+            &[json!(now_ms() - 1000)],
+        )
+        .unwrap();
+    let reused = e
+        .rpc(
+            "js_publish",
+            &json!({"subject":"cito.signal.target","msg_id":"s1","data":{"signal_id":"s2"}}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(reused["duplicate"], false);
+    assert_eq!(
+        e.rpc(
+            "stream_get_message",
+            &json!({"stream":SIGNALS,"seqs":[2,reused["seq"]]}),
+            None
+        )
+        .unwrap()["messages"],
+        json!([{"seq":2,"signal_id":"s1","acked_at_ms":null},{"seq":3,"signal_id":"s2","acked_at_ms":null}])
+    );
 }

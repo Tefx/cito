@@ -326,9 +326,16 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     let moved = f.dir.join("Relocated/Cito.app");
     fs::create_dir_all(moved.parent().unwrap()).unwrap();
     fs::rename(original, &moved).unwrap();
+    f.env.remove("CITO_BUILTIN_PLUGINS_DIR");
     let app = moved.as_path();
-    let obsolete = app.join("Contents/Resources/plugins/pi/obsolete");
-    fs::write(&obsolete, "retired staged file").unwrap();
+    // The relocated bundle owns the plugin source. A package-only resource
+    // must survive; retired destination files outside that source must not.
+    let bundled = app.join("Contents/Resources/plugins/pi/packaged-only");
+    fs::write(&bundled, "relocated source").unwrap();
+    let obsolete = app.join("Contents/Resources/obsolete");
+    fs::write(&obsolete, "retired bundle file").unwrap();
+    let obsolete_plugin = f.state.join("runtime/plugins/pi/obsolete");
+    fs::write(&obsolete_plugin, "retired staged file").unwrap();
     let (ok, out, err) = f.command(
         app.join("Contents/Helpers/cito-native").to_str().unwrap(),
         &["setup", "--build-app", app.to_str().unwrap(), "--json"],
@@ -336,6 +343,12 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     );
     assert!(ok, "In-place app rebuild failed: {out} {err}");
     assert!(!obsolete.exists());
+    assert!(!obsolete_plugin.exists());
+    assert_eq!(fs::read(&bundled).unwrap(), b"relocated source");
+    assert_eq!(
+        fs::read(f.state.join("runtime/plugins/pi/packaged-only")).unwrap(),
+        b"relocated source"
+    );
     assert!(!fs::read_dir(app.parent().unwrap())
         .unwrap()
         .any(|entry| entry

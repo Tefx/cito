@@ -86,6 +86,19 @@ pub fn wait_child_exit(child: &std::process::Child, timeout: Duration) -> Result
     )
 }
 
+/// Kill remaining members of an owned process_group(0) and reap its leader.
+/// Call before any reaping wait, while the child still reserves its PGID.
+pub fn teardown_child_group(
+    child: &mut std::process::Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    // SAFETY: callers own the dedicated group and have not reaped its leader.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    child.wait()
+}
+
 pub fn run_command_with_timeout(
     command: std::process::Command,
     timeout: Duration,
@@ -239,11 +252,7 @@ pub fn run_piped_command(
         }
         let _ = wait_child_exit(&child, Duration::from_millis(50));
     }
-    // Cleanup background grandchildren even after a successful parent exit.
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
-    let status = child.wait().map_err(|e| e.to_string());
+    let status = teardown_child_group(&mut child).map_err(|e| e.to_string());
     let Some([stdout, stderr]) = result? else {
         return Ok(None);
     };

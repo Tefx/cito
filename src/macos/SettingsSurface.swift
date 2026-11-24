@@ -61,11 +61,13 @@ final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
 extension Companion {
     func pendingLabel(_ control: MenuControl, _ pending: Bool, _ title: String) {
         guard pending else { return }
+        let pairedWidth = MenuControl.toggleWidth(control.identifier?.rawValue ?? "", title: control.label.stringValue,
+            font: control.label.font ?? .systemFont(ofSize: 11, weight: .medium), paddingX: control.paddingX)
         control.clearFeedback(title: title, accessibilityLabel: title)
         control.isEnabled = false; control.setLeadingSymbol(nil)
         control.toolTip = title
         let right = control.frame.maxX
-        control.pendingWidth = max(control.frame.width,MenuControl.intrinsicWidth(title))
+        control.pendingWidth = max(pairedWidth, control.frame.width, MenuControl.intrinsicWidth(title))
         control.frame.size.width = control.pendingWidth
         control.frame.origin.x = right - control.pendingWidth
     }
@@ -123,6 +125,14 @@ extension Companion {
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, channelSave: PendingControl? = nil, savedRequest: String? = nil, sourceOp: String? = nil, confirmHubSave: Bool = false, truncated: Bool = false) -> Bool {
         let previousUi = channelUiStates
         let target = settingsHub(value, hub: hub)
+        for old in settings?.hubs ?? [] where !old.sharesChannelAuthority(with: value.hubs.first { $0.name == old.name }) {
+            // A reused Hub name cannot carry local edits or in-flight receipts across accounts.
+            if settingsActiveTab == "channels", mountedChannelsSettings?.hub == old.name { settingsPanel?.makeFirstResponder(nil) }
+            channelUiStates = channelUiStates.filter { !$0.key.hasPrefix(old.name + "|") }
+            channelSettingsByHub.removeValue(forKey: old.name)
+            channelInventoryErrorsByHub.removeValue(forKey: old.name)
+            pendingControls = pendingControls.filter { $0.value.hub != old.name || !Self.channelControlOps.contains($0.value.op) }
+        }
         settings = value
         if !selectedChannelHub.isEmpty && !value.hubs.contains(where: { $0.name == selectedChannelHub && $0.enabled }) {
             selectedChannelHub = value.hubs.first(where: { $0.enabled })?.name ?? ""
@@ -179,14 +189,10 @@ extension Companion {
             if sourceOp != "channel_test" && (previous?.status != channel.status || previous?.detail != channel.detail || previous?.warning != channel.warning) {
                 ui.testResultIsLatest = false
             }
-            if !preservePairing && channel.configured && channel.status != "pairing_pending" &&
-                (previous?.configured == false || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) {
-                ui.resetPersonal(preservePendingPair: ui.waitingForPairCode)
-            }
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
             var acknowledged: (scope: String, values: [String: String], unchanged: Bool)?
-            if let pending = channelSave, pending.target == channel.id, pending.hub == target,
+            if previousChannels != nil, let pending = channelSave, pending.target == channel.id, pending.hub == target,
                let entry = pending.channelSave {
                 let unchanged = channel.fields.filter { $0.scope == entry.scope }.allSatisfy { field in
                     let draft = ui.drafts[field.key]
@@ -194,19 +200,28 @@ extension Companion {
                     return draft == nil || draft == (field.value ?? "")
                 }
                 acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
-                if unchanged {
-                    // Settings results retire save UI, not a newer pairing intent.
-                    if entry.scope == "user" && channel.configured && channel.status != "pairing_pending" { ui.resetPersonal(preservePendingPair: ui.waitingForPairCode) }
-                    ui.savedUntil[entry.scope] = Date().addingTimeInterval(1.5)
-                } else { ui.savedUntil.removeValue(forKey: entry.scope) }
-                rebuildFeedbackAfter(1.5)
             }
             for field in channel.fields {
                 if let sent = acknowledged?.values[field.key], ui.drafts[field.key] == sent {
                     ui.drafts.removeValue(forKey: field.key)
-                } else if field.type != "secret" && ui.drafts[field.key] == (field.value ?? "") {
+                } else if acknowledged?.values[field.key] == nil && field.type != "secret" && ui.drafts[field.key] == (field.value ?? "") {
                     ui.drafts.removeValue(forKey: field.key)
                 }
+            }
+            let personalSave = acknowledged?.scope == "user"
+            if channel.configured && channel.status != "pairing_pending" && (personalSave || (!preservePairing &&
+                (previous?.configured == false || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)))) {
+                if channel.fields.contains(where: { $0.scope == "user" && ui.drafts[$0.key] != nil }) || (personalSave && acknowledged?.unchanged == false) {
+                    ui.editingPersonal = true
+                } else {
+                    ui.resetPersonal(preservePendingPair: ui.waitingForPairCode)
+                }
+            }
+            if let acknowledged {
+                if acknowledged.unchanged {
+                    ui.savedUntil[acknowledged.scope] = Date().addingTimeInterval(1.5)
+                    rebuildFeedbackAfter(1.5)
+                } else { ui.savedUntil.removeValue(forKey: acknowledged.scope) }
             }
             if acknowledged?.scope == "hub" && acknowledged?.unchanged == true && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
                 ui.editingGateway = false
@@ -579,7 +594,7 @@ extension Companion {
         appsView.isHidden = settingsActiveTab != "apps"
 
         let resolvedApps: [AppSetupItem] = settings?.apps ?? harnesses.map { h in
-            AppSetupItem(id: h.id, display_name: h.display_name, tier: h.tier, installed: true,
+            AppSetupItem(id: h.id, display_name: h.display_name, tier: h.tier,
                 configured: false, status: "not_configured", detail: "Click Set Up to connect", paths: [])
         }
         appsView.addSubview(textLabel("AGENT APPS", NSRect(x:20,y:338,width:240,height:14),size:10,weight:.semibold,color:CitoPalette.secondaryText))
@@ -1013,8 +1028,9 @@ extension Companion {
             }
             if ch.configured {
                 let toggleTitle=(ch.enabled ? "Pause " : "Resume ") + ch.display_name
-                let toggleWidth=MenuControl.intrinsicWidth(toggleTitle,font:.systemFont(ofSize:10.5))
-                let toggle=MenuControl(toggleTitle,frame:NSRect(x:130,y:6,width:toggleWidth,height:24),radius:6)
+                let toggleFont: NSFont = personalCollapsed ? .systemFont(ofSize: 10.5) : .systemFont(ofSize: 11, weight: .medium)
+                let toggle=MenuControl(toggleTitle,frame:NSRect(x:130,y:6,width:MenuControl.intrinsicWidth(toggleTitle,font:toggleFont),height:24),radius:6)
+                toggle.label.font = toggleFont
                 toggle.identifier=NSUserInterfaceItemIdentifier("toggle_channel:\(ch.id)")
                 toggle.maximumWidth=170
                 toggle.style = ch.enabled ? .neutral : .prominent
@@ -1145,7 +1161,7 @@ extension Companion {
         hostCard.addSubview(hostStatus)
         let nextHostEnabled = !hostHub.enabled
         toggleHostBtn.pressed = { [weak self] in
-            guard let self=self else{return}
+            guard let self, !self.isPending("set_host_hub", target: "sharing") else { return }
             guard let port = self.validHostPort(fallback:hostHub.port, fallbackOnInvalid:!nextHostEnabled) else { return }
             self.emit(["op": "set_host_hub", "enabled": nextHostEnabled, "port": port])
         }
@@ -1201,7 +1217,7 @@ extension Companion {
         auth.identifier=NSUserInterfaceItemIdentifier("toggle_host_hub_auth")
         // Only Start/Stop owns `enabled`; Access and Apply can run before it settles.
         auth.pressed={ [weak self] in
-            guard let self=self else{return}
+            guard let self, !self.isPending("set_host_hub", target: "access") else { return }
             guard let port = self.validHostPort(fallback:hostHub.port) else { return }
             self.emit(["op":"set_host_hub","port":port,"auth_mode":authMode=="none" ? "token" : "none"])
         }
@@ -1403,7 +1419,7 @@ extension Companion {
         } else {
             let resolvedHubs: [HubConfigItem] = settings?.hubs ?? hubs.map { h in
                 HubConfigItem(name: h.name, url: "",
-                    auth_mode: h.auth_mode, enabled: h.enabled != false, auto_listen: h.auto_listen, is_default: false, status: h.status, user: h.user, error: h.error, issuer: nil, client_id: nil, capabilities:h.capabilities, is_builtin:h.is_builtin, supports_workspace_scope:h.supports_workspace_scope, can_login:h.can_login)
+                    auth_mode: h.auth_mode, enabled: h.enabled != false, is_default: false, status: h.status, user: h.user, error: h.error, issuer: nil, client_id: nil, is_builtin:h.is_builtin, supports_workspace_scope:h.supports_workspace_scope, can_login:h.can_login)
             }
             var rowTop = 180 + hubOffset
             for hub in resolvedHubs {

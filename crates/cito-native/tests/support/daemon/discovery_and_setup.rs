@@ -845,15 +845,16 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     ]);
     config["sessions"] = json!(sessions);
     fs::write(&options, config.to_string()).unwrap();
-    // Only background polling drives discovery/enrollment after restart.
+    // Observe enrollment without triggering discovery through a snapshot.
     f.daemon(&[]);
     wait(|| {
-        snapshot()["listeners"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v["harness"] == "fixture" && v["session_id"] == "live")
+        !f.rows("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id='live' AND status='ACTIVE'").is_empty()
     });
+    assert!(snapshot()["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["harness"] == "fixture" && v["session_id"] == "live"));
     let rows = f
         .rows("SELECT session_id FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'");
     assert_eq!(rows, vec![json!({"session_id":"live"})]);
@@ -1642,9 +1643,9 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert!(!f.exited(daemon));
     let ui_pid = fs::read_to_string(f.home.join("ui-pid"))
         .unwrap()
-        .parse::<i32>()
+        .parse::<u32>()
         .unwrap();
-    assert!(cito_native::plugins::pid_alive(ui_pid));
+    assert!(cito_native::support::alive(ui_pid));
     assert_eq!(http(f.port, "/health", None).0, 200);
     assert!(f.state.join("bin/cito-mcp").is_file());
     assert!(f.state.join("runtime/plugins/pi").is_dir());
@@ -1675,7 +1676,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         .rows("SELECT * FROM local_listeners WHERE harness='human'")
         .is_empty());
     assert!(!f.exited(daemon));
-    assert!(cito_native::plugins::pid_alive(ui_pid));
+    assert!(cito_native::support::alive(ui_pid));
 }
 #[test]
 fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {

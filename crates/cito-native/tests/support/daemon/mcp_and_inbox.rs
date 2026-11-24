@@ -1110,12 +1110,32 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
     );
     assert_eq!(union["acknowledged_count"], 4);
     assert_eq!(union["signals"].as_array().unwrap().len(), 4);
-    assert_eq!(f.tool("cito_inbox", json!({}), meta)["signals"], json!([]));
+    assert_eq!(
+        f.tool("cito_inbox", json!({}), meta.clone())["signals"],
+        json!([])
+    );
     assert_eq!(
         f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NOT NULL")
             .len(),
         55
     );
+    db.execute(
+        "UPDATE local_signals SET message=?,acknowledged_at_ms=NULL",
+        &[json!("\\".repeat(65_536))],
+    )
+    .unwrap();
+    let mut seqs = Vec::new();
+    while seqs.len() < 55 {
+        let result = f.tool_result("cito_inbox", json!({"limit":1000}), meta.clone());
+        assert!(result["isError"] == false && result.to_string().len() < 8 * 1024 * 1024);
+        let page: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let signals = page["signals"].as_array().unwrap();
+        assert!((1..55).contains(&signals.len()));
+        assert_eq!(page["acknowledged_count"], signals.len());
+        seqs.extend(signals.iter().map(|signal| signal["seq"].as_u64().unwrap()));
+    }
+    assert_eq!(seqs, (1..=55).collect::<Vec<_>>());
     let calls = fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl")).unwrap();
     assert!(!calls
         .lines()
@@ -2330,6 +2350,16 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             .any(|w| w.as_str().is_some_and(|w| w.starts_with("work:"))),
         "{directory}"
     );
+    let db = f.db("state.sqlite");
+    db.execute("CREATE TRIGGER fail_work_ack BEFORE INSERT ON pending_hub_acks WHEN NEW.hub='work' BEGIN SELECT RAISE(ABORT,'work ack unavailable'); END", &[]).unwrap();
+    let rejected = f.tool_result("cito_inbox", json!({}), meta.clone());
+    assert_eq!(rejected["isError"], true);
+    assert!(rejected.to_string().contains("work ack unavailable"));
+    assert!(f.rows("SELECT 1 FROM pending_hub_acks").is_empty());
+    assert!(f
+        .rows("SELECT 1 FROM local_signals WHERE acknowledged_at_ms IS NOT NULL")
+        .is_empty());
+    db.execute("DROP TRIGGER fail_work_ack", &[]).unwrap();
     let inbox = f.tool("cito_inbox", json!({}), meta.clone());
     assert_eq!(inbox["signals"].as_array().unwrap().len(), 2);
     assert_eq!(f.rows("SELECT * FROM pending_hub_acks").len(), 2);

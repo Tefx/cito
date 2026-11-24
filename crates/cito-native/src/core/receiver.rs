@@ -280,56 +280,65 @@ pub fn poll_listener(
     };
     for item in backlog["backlog"].as_array().into_iter().flatten() {
         use base64::{engine::general_purpose::STANDARD, Engine};
-        let bytes = STANDARD
-            .decode(string(item, "data_b64"))
-            .map_err(|e| e.to_string())?;
-        let mut signal: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if super::identity::canonical_node_id(string(&signal, "to"))
-            .ok()
-            .as_deref()
-            != Some(id)
-        {
+        // An unaddressable envelope cannot be acknowledged; still drain its peers.
+        let Some(seq) = item["seq"].as_u64().filter(|s| *s > 0) else {
             continue;
+        };
+        let signal = STANDARD
+            .decode(string(item, "data_b64"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        if let Some(mut signal) = signal.filter(|s| {
+            super::identity::canonical_node_id(string(s, "to")).as_deref() == Ok(id)
+                && !string(s, "signal_id").is_empty()
+                && s["message"].is_string()
+                && s["from"]["host_name"].is_string()
+                && s["from"]["user"].is_string()
+        }) {
+            signal["to"] = json!(id);
+            let admission_hub_now =
+                hub_now.saturating_add(observed.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            let created = item["created_ms"].as_u64().unwrap_or(admission_hub_now);
+            let acked = item
+                .get("acked_at_ms")
+                .filter(|v| v.is_number())
+                .or_else(|| signal.get("acked_at_ms"))
+                .unwrap_or(&Value::Null);
+            let admitted = client.with_current(|| {
+                local.admit(
+                    hub,
+                    row,
+                    &signal,
+                    seq,
+                    &iso(created),
+                    LocalState::signal_deadline(created, admission_hub_now, now_ms()),
+                    acked,
+                )
+            })?;
+            if admitted && !acked.is_number() {
+                on_admit(&signal);
+            }
         }
-        signal["to"] = json!(id);
-        let admission_hub_now =
-            hub_now.saturating_add(observed.elapsed().as_millis().min(u64::MAX as u128) as u64);
-        let created = item["created_ms"].as_u64().unwrap_or(admission_hub_now);
-        let acked = item
-            .get("acked_at_ms")
-            .filter(|v| v.is_number())
-            .or_else(|| signal.get("acked_at_ms"))
-            .unwrap_or(&Value::Null);
-        let admitted = client.with_current(|| {
-            local.admit(
-                hub,
-                row,
-                &signal,
-                item["seq"].as_u64().unwrap_or(0),
-                &iso(created),
-                LocalState::signal_deadline(created, admission_hub_now, now_ms()),
-                acked,
-            )
-        })?;
-        if admitted && !acked.is_number() {
-            on_admit(&signal);
-        }
+        // Transport settlement also consumes malformed or misaddressed payloads.
         client.rpc(
             "consumer_ack",
-            &json!({"stream":"CITO_SIGNALS","name":name,"seq":item["seq"]}),
+            &json!({"stream":"CITO_SIGNALS","name":name,"seq":seq}),
         )?;
     }
     drop(registration_guard);
     // Business acknowledgments can arrive after transport cursor advancement. Reconcile
     // unread rows from durable stream metadata even when no new backlog item is emitted.
-    let cursor = local
-        .listener(hub, id)?
-        .map(|r| r["ack_scan_seq"].as_u64().unwrap_or(0))
-        .unwrap_or(0);
-    let mut pending = local.current_signal_metadata(hub, id, cursor, 128, None)?;
-    if pending.is_empty() && cursor > 0 {
-        pending = local.current_signal_metadata(hub, id, 0, 128, None)?;
-    }
+    // Sweep downwards, wrapping at the oldest sequence. New arrivals cannot
+    // extend the current sweep indefinitely and starve earlier unread signals.
+    let pending = local.db.read(|db| {
+        let listener = current_listener(db, hub, id)?;
+        let mut page = Vec::new();
+        db.query_while("SELECT seq,signal_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY seq>=?,seq DESC", &[json!(hub),json!(id),listener["ack_scan_seq"].clone()], |s| {
+            if super::state::signal_matches_listener(&s, &listener) { page.push(s); }
+            Ok(page.len() < 128)
+        })?;
+        Ok(page)
+    })?;
     if !pending.is_empty() {
         if let Ok(remote) = client.rpc("stream_get_message",&json!({"stream":"CITO_SIGNALS","seqs":pending.iter().map(|r|r["seq"].clone()).collect::<Vec<_>>()})) {
             local.db.transaction(|db| {
@@ -385,7 +394,7 @@ pub fn probe_listener(
 ) -> Result<(), String> {
     let result = plugin_request(
         plugin,
-        &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"cwd":row["cwd"],"state_dir":state_dir}),
+        &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"process_identity":row["process_identity"],"cwd":row["cwd"],"state_dir":state_dir}),
         None,
         Some((local, row)),
     ).unwrap_or_else(|error| json!({"ok":false,"error":error}));
@@ -778,20 +787,24 @@ fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
             .ok()
         })
         .unwrap_or_else(|| state_dir.join("config.json"));
-    let config = std::fs::read_to_string(path).ok();
-    let Some((configured_default, hubs, _)) = config
-        .as_deref()
-        .and_then(|raw| super::config::try_normalize_existing_config(Some(raw)).ok())
+    qualify_on_hub(
+        hub,
+        std::fs::read_to_string(path).ok().as_deref(),
+        std::env::var("CITO_HUB").ok().as_deref(),
+    )
+}
+
+fn qualify_on_hub(hub: &str, config: Option<&str>, selected: Option<&str>) -> bool {
+    let Ok((configured_default, hubs, _)) = super::config::try_normalize_existing_config(config)
     else {
-        return !matches!(hub, "local" | "default");
+        return true;
     };
     let enabled = hubs.values().filter(|h| h["enabled"] != false).count();
     let count = if enabled == 0 { hubs.len() } else { enabled };
-    let default = std::env::var("CITO_HUB")
-        .ok()
+    let default = selected
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or(configured_default);
-    count != 1 || !matches!(default.as_str(), "local" | "default")
+        .unwrap_or(&configured_default);
+    count != 1 || hub != default || !matches!(hub, "local" | "default")
 }
 
 #[cfg(test)]

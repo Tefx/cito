@@ -109,7 +109,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var activityClearConfirm = false
     var directoryFacetBar: NSView?
     var directoryDynamicHarnessViews: [NSView] = []
-    var lastDirectoryFacetSignature = ""
+    var lastDirectoryFacetSignature: [(id: String, display_name: String)]?
     var directoryFacetControls: [String: MenuControl] = [:]
     var directoryComposerBar: NSView?
     var composerTargetPill: SurfaceView?
@@ -403,8 +403,6 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
 
     private func mergedSettings(_ observed: SettingsPayload, hub: String?, frame: Frame, preserveChannels: Bool) -> SettingsPayload {
         var merged = observed
-        if preserveChannels,
-           let cached = channelSettingsByHub[settingsHub(observed, hub: hub)] { merged.channels = cached }
         if frame.preservesCollection("apps") || frame.preservesCollection("settings.apps"), let current = settings { merged.apps = current.apps }
         if frame.preservesCollection("settings.hubs") || (frame.hubs == nil && frame.preservesCollection("hubs")), let current = settings {
             merged.hubs = current.hubs.map { old in
@@ -413,6 +411,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 return updated
             }
         }
+        let target = settingsHub(merged, hub: hub)
+        if preserveChannels, let old = settings?.hubs.first(where: { $0.name == target }),
+           old.sharesChannelAuthority(with: merged.hubs.first { $0.name == target }),
+           let cached = channelSettingsByHub[target] { merged.channels = cached }
         return merged
     }
 
@@ -453,6 +455,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                   (frame.op == "settings" && frame.source_op == nil && pending.op == "set_host_hub" && request == hostPort.requestId) else { return false }
         }
         pendingControls.removeValue(forKey: request)
+        if pending.appCheck, pending.op == "setup_apply", ["state", "settings"].contains(frame.op),
+           frame.ok == true, frame.authority_changed != true {
+            appCheckedUntil[pending.target] = Date().addingTimeInterval(1.5)
+            rebuildFeedbackAfter(1.5)
+        }
         guard isChannel else { return true }
         let hub = pending.hub
         let key = "\(hub)|\(pending.target)"
@@ -557,7 +564,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
            (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
             let settled = settleReceiptOnly(frame)
             if settled {
-                rebuild()
+                rebuild(preservingEditor: true)
                 refreshDirectoryViews()
                 if settingsVisible { rebuildSettingsPanel() }
             }
@@ -572,7 +579,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let hasAny = frame.activity_has_any ?? activityHasAny
             if (unread, online, hasAny) != (unreadCount, directoryOnlineCount, activityHasAny) {
                 (unreadCount, directoryOnlineCount, activityHasAny) = (unread, online, hasAny)
-                rebuild()
+                rebuild(preservingEditor: true)
                 refreshDirectoryViews()
             }
             if preserveDirectoryRows {
@@ -640,12 +647,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         if frame.op == "error" || (frame.ok == false && frame.op != "channel_test_result") {
             let sourceOp = frame.source_op ?? frame.action ?? (settledControl ? pendingReceipt?.op : nil) ?? ""
+            let clipboardJoin = hubInvitePending && frame.request_id == hubInviteRequest
             if sourceOp == "paste_hub_invite", let request = frame.request_id {
-                guard (!hubForm.parseRequest.isEmpty && request == hubForm.parseRequest) ||
-                      (!hubInviteRequest.isEmpty && request == hubInviteRequest) ||
+                guard clipboardJoin || (!hubForm.parseRequest.isEmpty && request == hubForm.parseRequest) ||
                       (hubForm.pendingSave != nil && request == hubForm.pendingSave?.requestId) else { return }
                 if !hubForm.parseRequest.isEmpty && request == hubForm.parseRequest { hubForm.parseRequest=""; return }
-                if hubInvitePending && request == hubInviteRequest { hubInviteRequest = "" }
             }
             // A command may emit both its result and a trailing generic error.
             // Neither can settle a retry or overwrite its feedback.
@@ -655,14 +661,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                requestId != hostPort.requestId && !settledControl { return }
             let isAddHubOp = ["setup_save_hub", "paste_hub_invite"].contains(sourceOp) || (hubForm.pendingSave != nil && frame.request_id == hubForm.pendingSave?.requestId)
             if sourceOp == "setup_save_hub", let requestId = frame.request_id,
-               requestId != hubForm.pendingSave?.requestId { return }
+               requestId != hubForm.pendingSave?.requestId && !clipboardJoin { return }
             // Only the matching save result owns an active form submission.
             // Untagged invite/transport failures remain visible in the settings banner.
             let isAddHubError: Bool
             if let pending = hubForm.pendingSave {
                 isAddHubError = isAddHubOp && frame.request_id == pending.requestId
             } else {
-                isAddHubError = hubForm.isOpen && isAddHubOp && sourceOp != "paste_hub_invite"
+                isAddHubError = hubForm.isOpen && isAddHubOp && !clipboardJoin && sourceOp != "paste_hub_invite"
             }
             let error = frame.error ?? frame.warning ?? ""
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
@@ -671,7 +677,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 hostPort.pending = false
                 hostPort.requestId = ""
             }
-            if (["paste_hub_invite", "setup_save_hub"].contains(sourceOp) && frame.request_id == nil) || (sourceOp.isEmpty && (frame.request_id == nil || (!hubInviteRequest.isEmpty && frame.request_id == hubInviteRequest))) {
+            if (sourceOp.isEmpty || ["paste_hub_invite", "setup_save_hub"].contains(sourceOp)) && (frame.request_id == nil || clipboardJoin) {
                 hubInviteRequest=""; hubInvitePastedUntil = .distantPast
             }
             if isAddHubError { hubForm.pendingSave = nil }
@@ -688,10 +694,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 directoryActionError = error; directoryActionErrorSourceOp = sourceOp; updateDirectoryWarnings()
             }
             else if sourceOp == "channel_test" || (sourceOp == "set_host_hub" && presentationError(settings?.host_hub.error ?? "") == presentationError(error)) { }
-            else if settingsVisible || hubForm.pendingSave != nil || sourceOp == "paste_hub_invite" { settingsBannerError = error }
+            else if settingsVisible || hubForm.pendingSave != nil || clipboardJoin || sourceOp == "paste_hub_invite" { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")
-            rebuild()
+            rebuild(preservingEditor: true)
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
@@ -700,10 +706,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if frame.op == "state", frame.ok == true, frame.committed == true,
            frame.request_id != nil, frame.hubs == nil || frame.listeners == nil {
             settleReceiptOnly(frame)
-            if settledControl, let warning = frame.warning, !warning.isEmpty {
-                if settingsVisible { settingsBannerError = warning } else { menuBannerError = warning }
-            }
-            rebuild()
+            rebuild(preservingEditor: true)
             refreshDirectoryViews()
             if settingsVisible { rebuildSettingsPanel() }
             return
@@ -712,11 +715,6 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if frame.op == "settings", let value = nextSettings {
             let changed = settingsProjectionChanged(value, hub: settingsHubHint)
             let receipt = settledControl || frame.request_id != nil || frame.source_op != nil
-            if settledControl, let pending = pendingReceipt, pending.appCheck,
-               frame.ok == true && frame.source_op == "setup_apply" {
-                appCheckedUntil[pending.target] = Date().addingTimeInterval(1.5)
-                rebuildFeedbackAfter(1.5)
-            }
             let hubSaveSucceeded = frame.ok == true && ["setup_save_hub", "paste_hub_invite"].contains(frame.source_op ?? "")
             if hubInvitePending && frame.request_id == hubInviteRequest && hubSaveSucceeded {
                 hubInviteRequest=""; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
@@ -753,7 +751,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if frame.op == "state", let observedHubs = frame.hubs, let observedListeners = frame.listeners {
             let h = hasRenderedState && frame.preservesCollection("hubs") ? hubs.map { old in
                 guard var updated = observedHubs.first(where: { $0.name == old.name }) else { return old }
-                updated.attachments = old.attachments
+                updated.attachments = old.attachments ?? updated.attachments
                 return updated
             } : observedHubs
             let l = hasRenderedState && frame.preservesCollection("listeners") ? listeners : observedListeners
@@ -785,7 +783,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
                 seedDirectoryPeersIfEmpty()
                 hasRenderedState = true; pendingMutation = false
-                rebuild()
+                rebuild(preservingEditor: true)
                 refreshDirectoryViews()
                 if directoryVisible && (directoryMembershipChanged || directoryRemoteChanged) { queryDirectory() }
                 if settingsChanged || settingsReceipt || settingsBannerChanged || settledControl || directoryMembershipChanged {
@@ -832,10 +830,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             directoryOnlineCount = frame.online_count ?? peers.count
             if let u = frame.unread_count { unreadCount = u }
             if rowsChanged { refreshDirectoryViews() }
-            if hasRenderedState && (menuChanged || settledControl) { rebuild() }
+            if hasRenderedState && (menuChanged || settledControl) { rebuild(preservingEditor: true) }
             if headless { diagnostic("directory peers=\(peers.count) matched=\(directoryMatchedCount) online=\(directoryOnlineCount)") }
         } else if frame.op == "state" {
-            if menuBannerChanged { rebuild() }
+            if menuBannerChanged { rebuild(preservingEditor: true) }
             if settingsBannerChanged { rebuildSettingsPanel(preservingEditor: frame.request_id == nil) }
         }
     }
@@ -843,7 +841,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     func emit(_ action: [String: Any], userInitiated: Bool = true, appCheck: Bool = false) {
         let operation = action["op"] as? String ?? ""
         let passive = ["query_directory", "refresh_available"].contains(operation)
-        if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild() }
+        if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild(preservingEditor: true) }
         var outgoing = action
         let tracked = Self.channelControlOps + ["set_host_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "setup_remove_hub", "set_scope", "set_auto_listen", "unlisten_session", "set_listen_mode", "rename_session", "hub_action", "setup_toggle_hub", "set_launch_at_login", "setup_disconnect_all", "listen_session"]
         if tracked.contains(operation) || directoryActionOps.contains(operation) {
@@ -856,7 +854,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             else if operation == "paste_hub_invite" { hubInviteRequest = ""; hubForm.parseRequest = ""; settingsBannerError = message }
             else if operation == "send_signal" { pendingComposer = nil; setComposerStatus(message) }
             else { settingsBannerError = message; menuBannerError = message }
-            rebuild(); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            rebuild(preservingEditor: true); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
         if tracked.contains(operation), let request = outgoing["request_id"] as? String {
@@ -909,7 +907,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             } else if settingsPanel != nil { rebuildSettingsPanel() }
         }
         if ["set_host_hub", "hub_action", "setup_toggle_hub", "setup_remove_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "listen_session"].contains(operation) {
-            rebuild(); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            rebuild(preservingEditor: true); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
         }
         FileHandle.standardOutput.write(data + Data([10]))
     }
@@ -918,7 +916,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             if self.settingsRebuildDeferred { self.rebuildSettingsPanel(preservingEditor: true) }
-            if self.menuRebuildDeferred { self.rebuild() }
+            if self.menuRebuildDeferred { self.rebuild(preservingEditor: true) }
         }
     }
 
@@ -930,7 +928,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if directoryMode == "activity" {
                 applyActivityFilter()
             } else {
-                applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                applyDirectoryFilter()
             }
             queryDirectory()
             return
@@ -974,7 +972,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                     renameField?.textColor = CitoPalette.dangerText
                     renameField?.toolTip = menuBannerError
                     renameField?.setAccessibilityHelp(menuBannerError)
-                    rebuild(); return true
+                    rebuild(preservingEditor: true); return true
                 }
                 emit(["op":"rename_session", "harness":listener.harness, "session_id":listener.session_id, "title":newTitle])
                 renamingSessionKey = nil; rebuild(); return true

@@ -3,6 +3,7 @@ use super::identity::{principal, string};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -17,6 +18,64 @@ fn hub_error(code: &str, message: &str) -> String {
         message.into()
     } else {
         format!("{code}: {message}")
+    }
+}
+
+fn connect_http(url: &url::Url, deadline: Instant) -> io::Result<TcpStream> {
+    let mut error = io::Error::new(io::ErrorKind::NotConnected, "Hub address unavailable");
+    for address in url.socket_addrs(|| None)? {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(&address, remaining.min(Duration::from_millis(500))) {
+            Ok(socket) => return Ok(socket),
+            Err(e) => error = e,
+        }
+    }
+    Err(error)
+}
+
+// Preserve partial chunk headers and terminators across idle socket timeouts.
+struct ChunkedEvents<R> {
+    reader: R,
+    remaining: u64,
+    terminator: bool,
+    line: Vec<u8>,
+}
+impl<R: BufRead> Read for ChunkedEvents<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        while self.remaining == 0 {
+            let budget = 8192 - self.line.len();
+            self.reader
+                .by_ref()
+                .take(budget as u64)
+                .read_until(b'\n', &mut self.line)?;
+            let line = self
+                .line
+                .strip_suffix(b"\r\n")
+                .ok_or(io::ErrorKind::InvalidData)?;
+            if self.terminator {
+                if !line.is_empty() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.terminator = false;
+            } else {
+                let digits = line.split(|b| *b == b';').next().unwrap_or_default();
+                self.remaining = std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|s| u64::from_str_radix(s, 16).ok())
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                if self.remaining == 0 {
+                    return Ok(0);
+                }
+            }
+            self.line.clear();
+        }
+        let n = self.reader.by_ref().take(self.remaining).read(out)?;
+        self.remaining -= n as u64;
+        self.terminator = self.remaining == 0;
+        Ok(n)
     }
 }
 
@@ -108,6 +167,7 @@ pub struct HubClient {
     event_revision: Arc<AtomicU64>,
     event_wait: Arc<(Mutex<()>, std::sync::Condvar)>,
     local_event_wake: Arc<Mutex<Option<Arc<crate::support::WakePipe>>>>,
+    event_socket: Arc<Mutex<Option<TcpStream>>>,
     directory_observed_at: Arc<Mutex<Option<Instant>>>,
     human_observed_at: Arc<Mutex<Option<Instant>>>,
     event_credentials: Arc<Mutex<Option<String>>>,
@@ -117,7 +177,10 @@ pub struct HubClient {
 }
 impl HubClient {
     pub fn new(name: String, config: Value, user: &str, local: Option<Arc<HubEngine>>) -> Self {
-        let bearer = config["token"].as_str().map(str::to_string);
+        let bearer = config["token"]
+            .as_str()
+            .filter(|token| config["authMode"] != "none" && super::config::valid_hub_token(token))
+            .map(str::to_owned);
         let status = if local.is_some() {
             "connected"
         } else {
@@ -142,6 +205,7 @@ impl HubClient {
             event_revision: Arc::new(AtomicU64::new(1)),
             event_wait: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
             local_event_wake: Arc::new(Mutex::new(None)),
+            event_socket: Arc::default(),
             directory_observed_at: Arc::new(Mutex::new(None)),
             human_observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -181,12 +245,7 @@ impl HubClient {
         let result = match request.send_json(json!({"op":op,"params":params})) {
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
-            Err(error) => {
-                if let Ok(mut status) = self.status.lock() {
-                    *status = "reconnecting".into();
-                }
-                return Err(format!("NATS_UNAVAILABLE: {error}"));
-            }
+            Err(error) => return Err(self.disconnected(error)),
         };
         let status = result.status();
         let mut bytes = Vec::new();
@@ -194,11 +253,17 @@ impl HubClient {
             .into_reader()
             .take(8 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| self.disconnected(e))?;
         if bytes.len() > 8 * 1024 * 1024 {
-            return Err("Hub response exceeds frame limit".into());
+            return Err(self.disconnected("Hub response exceeds frame limit"));
         }
         self.parse_rpc_response(status, &bytes, &bearer)
+    }
+    fn disconnected(&self, error: impl std::fmt::Display) -> String {
+        if let Ok(mut status) = self.status.lock() {
+            *status = "disconnected".into();
+        }
+        format!("NATS_UNAVAILABLE: {error}")
     }
     fn parse_rpc_response(
         &self,
@@ -249,32 +314,13 @@ impl HubClient {
         let host = url.host_str().ok_or("Invalid Hub URL")?;
         let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
         let deadline = Instant::now() + Duration::from_secs(10);
-        let addresses = url.socket_addrs(|| None).map_err(|e| e.to_string())?;
         let credential = self
             .event_credentials
             .lock()
             .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
             .clone();
         let result = (|| {
-            let mut connected = None;
-            let mut last_error = "Hub address unavailable".to_owned();
-            for address in addresses {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match std::net::TcpStream::connect_timeout(
-                    &address,
-                    remaining.min(Duration::from_millis(500)),
-                ) {
-                    Ok(socket) => {
-                        connected = Some(socket);
-                        break;
-                    }
-                    Err(error) => last_error = error.to_string(),
-                }
-            }
-            let socket = connected.ok_or_else(|| format!("NATS_UNAVAILABLE: {last_error}"))?;
+            let socket = connect_http(&url, deadline).map_err(|e| e.to_string())?;
             socket
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .map_err(|e| e.to_string())?;
@@ -292,19 +338,10 @@ impl HubClient {
                 .filter(|v| !v.is_empty())
                 .map(|v| format!("Authorization: Bearer {v}\r\n"))
                 .unwrap_or_default();
-            write!(stream,"POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nX-Cito-User: {}\r\n{bearer}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",url.path(),string(&self.identity,"owner_user"),body.len()).map_err(|e|format!("NATS_UNAVAILABLE: {e}"))?;
+            write!(stream,"POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nX-Cito-User: {}\r\n{bearer}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",url.path(),string(&self.identity,"owner_user"),body.len()).map_err(|e| e.to_string())?;
             crate::plugins::read_http_response(&mut stream)
-                .map_err(|e| format!("NATS_UNAVAILABLE: {e}"))
         })();
-        if result
-            .as_ref()
-            .is_err_and(|e| e.starts_with("NATS_UNAVAILABLE"))
-        {
-            if let Ok(mut status) = self.status.lock() {
-                *status = "disconnected".into();
-            }
-        }
-        let reply = result?;
+        let reply = result.map_err(|e| self.disconnected(e))?;
         self.parse_rpc_response(reply.status, reply.body.as_bytes(), &credential)
     }
     fn reject_token(&self, bearer: &Option<String>) {
@@ -327,6 +364,7 @@ impl HubClient {
         self.event_revision = old.event_revision.clone();
         self.event_wait = old.event_wait.clone();
         self.local_event_wake = old.local_event_wake.clone();
+        self.event_socket = old.event_socket.clone();
         self.rejected_bearer = old.rejected_bearer.clone();
         self.directory_observed_at = old.directory_observed_at.clone();
         self.human_observed_at = old.human_observed_at.clone();
@@ -344,15 +382,11 @@ impl HubClient {
         let _guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
         self.event_wait.1.notify_all();
     }
-    fn observation_recent(&self) -> bool {
+    fn observation_recent(&self, now: Instant) -> bool {
         self.local.is_some()
-            || self
-                .directory_observed_at
-                .lock()
-                .is_ok_and(|at| at.is_some_and(|at| at.elapsed() < Duration::from_secs(60)))
-    }
-    pub fn observation_current(&self) -> bool {
-        self.auth_valid() && self.observation_recent()
+            || self.directory_observed_at.lock().is_ok_and(|at| {
+                at.is_some_and(|at| now.duration_since(at) < Duration::from_secs(60))
+            })
     }
     pub(super) fn human_observation_current(&self) -> bool {
         self.auth_valid()
@@ -371,6 +405,9 @@ impl HubClient {
                 .is_ok_and(|rejected| rejected.is_none())
     }
     pub fn capabilities(&self) -> Value {
+        self.capabilities_at(Instant::now())
+    }
+    fn capabilities_at(&self, now: Instant) -> Value {
         let authenticated = self.auth_valid();
         let rpc = self
             .status
@@ -378,7 +415,7 @@ impl HubClient {
             .map(|status| status.clone())
             .unwrap_or_else(|_| "disconnected".into());
         let stream = self.stream_live.load(Ordering::SeqCst);
-        let current = authenticated && self.observation_recent();
+        let current = authenticated && self.observation_recent(now);
         let status = if !authenticated {
             "auth_required"
         } else if self.local.is_some() || rpc == "connected" || stream {
@@ -465,6 +502,14 @@ impl HubClient {
     pub fn close(&self) {
         if let Ok(_guard) = self.event_wait.0.lock() {
             self.closed.store(true, Ordering::SeqCst);
+            if let Some(socket) = self
+                .event_socket
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
             self.event_wait.1.notify_all();
             if let Ok(wake) = self.local_event_wake.lock() {
                 if let Some(wake) = &*wake {
@@ -473,12 +518,110 @@ impl HubClient {
             }
         }
     }
-    pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
-        self.start_events_with_idle_timeout(Duration::from_secs(90))
+    fn open_events(
+        &self,
+        url: &url::Url,
+        bearer: Option<&str>,
+    ) -> io::Result<(u16, Box<dyn Read>)> {
+        let user = string(&self.identity, "owner_user");
+        if url.scheme() == "https" {
+            use ureq::OrAnyStatus;
+            let mut request = self
+                .agent
+                .get(url.as_str())
+                .set("Accept-Encoding", "identity")
+                .set("X-Cito-User", user);
+            if let Some(token) = bearer {
+                request = request.set("Authorization", &format!("Bearer {token}"));
+            }
+            let response = request.call().or_any_status().map_err(io::Error::other)?;
+            return Ok((response.status(), response.into_reader()));
+        }
+        if url.scheme() != "http"
+            || user.chars().any(char::is_control)
+            || bearer.is_some_and(|t| t.chars().any(char::is_control))
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut socket = connect_http(url, Instant::now() + Duration::from_secs(5))?;
+        {
+            // Publish before any request I/O. A concurrent close either takes
+            // this socket or wins first and prevents its publication.
+            let mut active = self.event_socket.lock().unwrap_or_else(|e| e.into_inner());
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(io::ErrorKind::ConnectionAborted.into());
+            }
+            *active = Some(socket.try_clone()?);
+        }
+        socket.set_read_timeout(Some(Duration::from_secs(1)))?;
+        socket.set_write_timeout(Some(Duration::from_secs(1)))?;
+        let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
+        write!(socket, "GET {} HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\nAccept-Encoding: identity\r\nX-Cito-User: {user}\r\nConnection: close\r\n", url.path())?;
+        if let Some(token) = bearer {
+            write!(socket, "Authorization: Bearer {token}\r\n")?;
+        }
+        socket.write_all(b"\r\n")?;
+
+        let mut reader = BufReader::new(socket);
+        let mut headers = reader.by_ref().take(65_536);
+        let mut line = String::new();
+        headers.read_line(&mut line)?;
+        let (version, rest) = line.split_once(' ').ok_or(io::ErrorKind::InvalidData)?;
+        if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let status: u16 = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or(io::ErrorKind::InvalidData)?;
+        let mut length = None;
+        let mut chunked = false;
+        loop {
+            line.clear();
+            headers.read_line(&mut line)?;
+            if line == "\r\n" {
+                break;
+            }
+            let (name, value) = line
+                .strip_suffix("\r\n")
+                .and_then(|s| s.split_once(':'))
+                .ok_or(io::ErrorKind::InvalidData)?;
+            if name.eq_ignore_ascii_case("content-length") {
+                let n = value
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| io::ErrorKind::InvalidData)?;
+                if length.replace(n).is_some() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                chunked = true;
+            }
+        }
+        let body: Box<dyn Read> = match (chunked, length) {
+            (true, None) => Box::new(ChunkedEvents {
+                reader,
+                remaining: 0,
+                terminator: false,
+                line: Vec::new(),
+            }),
+            (false, Some(n)) => Box::new(reader.take(n)),
+            (false, None) => Box::new(reader),
+            (true, Some(_)) => return Err(io::ErrorKind::InvalidData.into()),
+        };
+        Ok((status, body))
     }
-    fn start_events_with_idle_timeout(
+    pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
+        self.start_events_with(Duration::from_secs(90), ureq::AgentBuilder::new())
+    }
+    fn start_events_with(
         &self,
         idle_timeout: Duration,
+        https: ureq::AgentBuilder,
     ) -> Option<thread::JoinHandle<()>> {
         if let Some(local) = &self.local {
             let mut subscription = local.subscribe(Some(self.identity.clone())).ok()?;
@@ -527,36 +670,85 @@ impl HubClient {
         if let Ok(mut token) = self.event_credentials.lock() {
             *token = self.bearer.clone();
         }
+        let url = url::Url::parse(&format!(
+            "{}/v1/events",
+            string(&self.config, "url").trim_end_matches('/')
+        ))
+        .ok()?;
         let mut client = self.clone();
-        client.agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout_connect(Duration::from_secs(5))
-            .timeout_read(idle_timeout.min(Duration::from_secs(1)))
-            .build();
+        if url.scheme() == "https" {
+            client.agent = https
+                .redirects(0)
+                .timeout_connect(Duration::from_secs(5))
+                .timeout_read(Duration::from_millis(150))
+                .build();
+        }
         Some(thread::spawn(move || {
             let mut backoff = crate::support::RetryBackoff::default();
             while !client.closed.load(Ordering::SeqCst) {
-                let url = format!(
-                    "{}/v1/events",
-                    string(&client.config, "url").trim_end_matches('/')
-                );
-                let mut request = client
-                    .agent
-                    .get(&url)
-                    .set("X-Cito-User", string(&client.identity, "owner_user"));
                 let bearer = client
                     .event_credentials
                     .lock()
                     .ok()
                     .and_then(|token| token.clone());
-                if let Some(token) = bearer.as_deref().filter(|s| !s.is_empty()) {
-                    request = request.set("Authorization", &format!("Bearer {token}"));
+                let response =
+                    client.open_events(&url, bearer.as_deref().filter(|s| !s.is_empty()));
+                let status = response.as_ref().ok().map(|(status, _)| *status);
+                if let Some(body) = response
+                    .ok()
+                    .and_then(|(status, body)| (status == 200).then_some(body))
+                {
+                    client.stream_live.store(true, Ordering::SeqCst);
+                    let mut reader = BufReader::new(body);
+                    let connected = Instant::now();
+                    let mut last_input = connected;
+                    // Only the SSE field name matters. Consume each fragment before
+                    // checking cancellation, even for an unterminated data line.
+                    let mut prefix = Vec::with_capacity(5);
+                    while !client.closed.load(Ordering::SeqCst)
+                        && last_input.elapsed() < idle_timeout
+                    {
+                        let bytes = match reader.fill_buf() {
+                            Ok([]) => break,
+                            Ok(bytes) => bytes,
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    io::ErrorKind::TimedOut
+                                        | io::ErrorKind::WouldBlock
+                                        | io::ErrorKind::Interrupted
+                                ) =>
+                            {
+                                continue
+                            }
+                            Err(_) => break,
+                        };
+                        last_input = Instant::now();
+                        let newline = bytes.iter().position(|b| *b == b'\n');
+                        let n = newline.map_or(bytes.len(), |i| i + 1);
+                        prefix.extend_from_slice(&bytes[..n.min(5 - prefix.len())]);
+                        reader.consume(n);
+                        if newline.is_some() {
+                            if prefix == b"data:" {
+                                backoff.reset();
+                                client.mutation();
+                            } else if connected.elapsed() >= Duration::from_secs(30) {
+                                backoff.reset();
+                            }
+                            prefix.clear();
+                        }
+                    }
                 }
-                let response = request.call();
-                if bearer.is_some() && matches!(&response, Err(ureq::Error::Status(401, _))) {
+                client
+                    .event_socket
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                client.stream_live.store(false, Ordering::SeqCst);
+                if bearer.is_some() && status == Some(401) {
                     client.reject_token(&bearer);
                 }
-                if matches!(&response, Err(ureq::Error::Status(401 | 403 | 409, _))) {
+                if matches!(status, Some(401 | 403 | 409)) {
                     let guard = client
                         .event_wait
                         .0
@@ -575,96 +767,6 @@ impl HubClient {
                         .unwrap_or_else(|e| e.into_inner());
                     continue;
                 }
-                if let Ok(response) = response {
-                    client.stream_live.store(true, Ordering::SeqCst);
-                    let mut reader = BufReader::new(response.into_reader());
-                    let connected = Instant::now();
-                    let mut last_input = connected;
-                    let mut line = Vec::new();
-                    loop {
-                        if last_input.elapsed() >= idle_timeout {
-                            break;
-                        }
-                        let remaining = 65_536usize.saturating_sub(line.len());
-                        if remaining == 0 {
-                            // The stream carries invalidation hints, not authoritative payloads.
-                            // Drain an oversized hint without growing memory or reconnecting.
-                            let mut chunk = [0u8; 8192];
-                            let drained = loop {
-                                if client.closed.load(Ordering::SeqCst)
-                                    || last_input.elapsed() >= idle_timeout
-                                {
-                                    break false;
-                                }
-                                match reader.fill_buf() {
-                                    Ok([]) => break false,
-                                    Ok(bytes) => {
-                                        last_input = Instant::now();
-                                        let count = bytes.len().min(chunk.len());
-                                        chunk[..count].copy_from_slice(&bytes[..count]);
-                                        let newline =
-                                            chunk[..count].iter().position(|b| *b == b'\n');
-                                        reader.consume(newline.map_or(count, |n| n + 1));
-                                        if newline.is_some() {
-                                            break true;
-                                        }
-                                    }
-                                    Err(error)
-                                        if matches!(
-                                            error.kind(),
-                                            io::ErrorKind::TimedOut
-                                                | io::ErrorKind::WouldBlock
-                                                | io::ErrorKind::Interrupted
-                                        ) =>
-                                    {
-                                        continue
-                                    }
-                                    Err(_) => break false,
-                                }
-                            };
-                            if !drained {
-                                break;
-                            }
-                            if line.starts_with(b"data:") {
-                                client.mutation();
-                                backoff.reset();
-                            }
-                            line.clear();
-                            continue;
-                        }
-                        let before = line.len();
-                        let result = reader
-                            .by_ref()
-                            .take(remaining as u64)
-                            .read_until(b'\n', &mut line);
-                        if line.len() > before {
-                            last_input = Instant::now();
-                        }
-                        if client.closed.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        if matches!(&result, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
-                        {
-                            continue;
-                        }
-                        if matches!(result, Ok(n) if n > 0 && !line.ends_with(b"\n")) {
-                            continue;
-                        }
-                        if !matches!(result, Ok(n) if n > 0) {
-                            break;
-                        }
-                        if connected.elapsed() >= Duration::from_secs(30) {
-                            backoff.reset();
-                        }
-                        if line.starts_with(b"data:") {
-                            backoff.reset();
-                            // Hints invalidate observations; only the durable consumer advances cursors.
-                            client.mutation();
-                        }
-                        line.clear();
-                    }
-                }
-                client.stream_live.store(false, Ordering::SeqCst);
                 if client.closed.load(Ordering::SeqCst) {
                     break;
                 }
@@ -767,8 +869,13 @@ impl HubClient {
                 .or_else(|| raw["entries"].as_array())
                 .ok_or("NATS_UNAVAILABLE: Missing directory entries")?;
             for item in items {
-                if item["listener_id"].is_string() {
-                    rows.push(item.clone());
+                if let Some(id) = item["listener_id"].as_str() {
+                    if !id.is_empty() {
+                        rows.push(item.clone());
+                    }
+                    continue;
+                }
+                if raw.is_array() && item.get("value_b64").is_none() {
                     continue;
                 }
                 let data = STANDARD
@@ -778,12 +885,12 @@ impl HubClient {
                             .ok_or("NATS_UNAVAILABLE: Missing directory record")?,
                     )
                     .map_err(|e| e.to_string())?;
-                let mut row: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-                if !row.is_object() {
-                    return Err("NATS_UNAVAILABLE: Invalid directory record".into());
+                // KV also carries arbitrary bytes and non-registration JSON.
+                if let Ok(row) = serde_json::from_slice::<Value>(&data) {
+                    if row["listener_id"].as_str().is_some_and(|id| !id.is_empty()) {
+                        rows.push(row);
+                    }
                 }
-                row["server_now_ms"] = raw["server_now_ms"].clone();
-                rows.push(row);
             }
             let next = raw["next_cursor"].as_str().map(str::to_owned);
             if next.is_some() && next <= cursor {
@@ -791,6 +898,11 @@ impl HubClient {
             }
             cursor = next;
             if cursor.is_none() {
+                if let Some(now) = raw["server_now_ms"].as_u64() {
+                    for row in &mut rows {
+                        row["server_now_ms"] = json!(now);
+                    }
+                }
                 self.observe_server_clock(&raw);
                 break;
             }

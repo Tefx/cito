@@ -489,26 +489,23 @@ pub fn try_inspect_plugin_setup(
     plugin: &PluginDescriptor,
 ) -> Result<(bool, bool, Vec<String>), String> {
     match setup_request(plugin, "setup_inspect", false, true) {
-        Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => Ok((
-            response
-                .get("installed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            response
-                .get("configured")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            response
-                .get("paths")
-                .and_then(Value::as_array)
-                .map(|paths| {
-                    paths
-                        .iter()
-                        .filter_map(Value::as_str)
+        Ok(response) if response["ok"] == true => Ok((
+            response["installed"]
+                .as_bool()
+                .ok_or("Plugin inspection requires boolean installed")?,
+            response["configured"]
+                .as_bool()
+                .ok_or("Plugin inspection requires boolean configured")?,
+            response["paths"]
+                .as_array()
+                .ok_or("Plugin inspection requires paths array")?
+                .iter()
+                .map(|p| {
+                    p.as_str()
                         .map(str::to_owned)
-                        .collect()
+                        .ok_or("Plugin inspection requires string paths")
                 })
-                .unwrap_or_default(),
+                .collect::<Result<_, _>>()?,
         )),
         Ok(response) => Err(crate::support::response_diagnostic(
             &response,
@@ -545,10 +542,24 @@ fn plugin_setup_actions(
                     .map(str::to_owned)
                     .ok_or_else(|| format!("Plugin action missing {key}"))
             };
+            let status = text("status")?;
+            if !matches!(
+                status.as_str(),
+                "created" | "updated" | "unchanged" | "removed" | "missing" | "conflict"
+            ) {
+                return Err("Unknown plugin setup action status".into());
+            }
+            if op == "setup_remove" && status == "conflict" && !dry_run {
+                return Err(format!(
+                    "Plugin removal conflict in {}: {}",
+                    text("path")?,
+                    text("detail")?
+                ));
+            }
             Ok(SetupAction {
                 target: text("target")?,
                 path: text("path")?,
-                status: text("status")?,
+                status,
                 backup_path: action
                     .get("backupPath")
                     .and_then(Value::as_str)
@@ -568,14 +579,27 @@ pub fn apply_plugin_setup(
 }
 
 pub fn remove_plugin_setup(plugin: &PluginDescriptor) -> Result<Vec<SetupAction>, String> {
-    remove_plugin_setup_dry_run(plugin, false)
+    plugin_setup_actions(plugin, "setup_remove", false, false)
 }
 
-pub fn remove_plugin_setup_dry_run(
-    plugin: &PluginDescriptor,
-    dry_run: bool,
-) -> Result<Vec<SetupAction>, String> {
-    plugin_setup_actions(plugin, "setup_remove", false, dry_run)
+// Discover conflicts across all integrations before any driver cleans its runtime.
+fn remove_integrations(plugins: &LoadedPlugins) -> Result<Vec<SetupAction>, String> {
+    let agents = plugins.agent_plugins();
+    for plugin in &agents {
+        for action in plugin_setup_actions(plugin, "setup_remove", false, true)? {
+            if action.status == "conflict" {
+                return Err(format!(
+                    "Plugin removal conflict in {}: {}",
+                    action.path, action.detail
+                ));
+            }
+        }
+    }
+    let mut actions = Vec::new();
+    for plugin in agents {
+        actions.extend(remove_plugin_setup(plugin)?);
+    }
+    Ok(actions)
 }
 
 pub fn inspect_setup_json(
@@ -774,9 +798,7 @@ fn disconnect_offline(
             .then(|| super::state::LocalState::open(dir))
             .transpose()?;
         let plugins = crate::plugins::load_plugins_readonly(dir);
-        for plugin in plugins.agent_plugins() {
-            remove_plugin_setup(plugin)?;
-        }
+        remove_integrations(&plugins)?;
         let mut receipt = json!({"ok":true,"committed":true});
         if purge {
             set_launch_at_login(false, dir, &config.home_dir, &plugins)?;
@@ -884,10 +906,11 @@ pub(crate) fn uninstall_setup_with_owner(
     }
     let remove = || {
         let _staging = crate::support::FileLock::acquire(&staging)?;
-        let mut actions = Vec::new();
-        for plugin in plugins.agent_plugins() {
-            actions.extend(remove_plugin_setup(plugin)?);
+        let mut keep = keep;
+        if !purge_data {
+            keep.extend(crate::support::profile_keep(config_path, &state)?);
         }
+        let mut actions = remove_integrations(plugins)?;
 
         let plist_path = launch_agent_plist_path(home_dir);
         if plist_path.exists() {
@@ -907,7 +930,7 @@ pub(crate) fn uninstall_setup_with_owner(
             ("sockets", "Removed local sockets directory"),
         ] {
             let dir = state.join(sub);
-            if dir.exists() && remove_except_locks(&dir, &keep).map_err(|e| e.to_string())? {
+            if dir.exists() && remove_except(&dir, &keep).map_err(|e| e.to_string())? {
                 actions.push(SetupAction {
                     target: "cito".to_string(),
                     path: dir.to_string_lossy().to_string(),
@@ -922,7 +945,7 @@ pub(crate) fn uninstall_setup_with_owner(
                 continue;
             }
             let dir = state.join(&p.id);
-            if dir.exists() && remove_except_locks(&dir, &keep).map_err(|e| e.to_string())? {
+            if dir.exists() && remove_except(&dir, &keep).map_err(|e| e.to_string())? {
                 actions.push(SetupAction {
                     target: p.id.clone(),
                     path: dir.to_string_lossy().into_owned(),
@@ -958,7 +981,7 @@ pub(crate) fn uninstall_setup_with_owner(
                 let path = fs::canonicalize(parent)
                     .map_err(|e| e.to_string())?
                     .join(app_target.file_name().ok_or("Missing application name")?);
-                if !remove_except_locks(&path, &keep).map_err(|e| e.to_string())? {
+                if !remove_except(&path, &keep).map_err(|e| e.to_string())? {
                     continue;
                 }
                 actions.push(SetupAction {
@@ -992,7 +1015,7 @@ pub(crate) fn uninstall_setup_with_owner(
                 fs::remove_file(config_path).map_err(|e| e.to_string())?;
             }
             if state_dir.exists() {
-                remove_except_locks(&state, &keep).map_err(|e| e.to_string())?;
+                remove_except(&state, &keep).map_err(|e| e.to_string())?;
                 actions.push(SetupAction {
                     target: "cito".to_string(),
                     path: state_dir.to_string_lossy().to_string(),
@@ -1014,25 +1037,7 @@ pub(crate) fn uninstall_setup_with_owner(
     })
 }
 
-// Keep stable inodes for both queued and newly arriving writers. Descend only
-// into ancestors of a lock, and never follow a symlink during tree removal.
-fn remove_except_locks(path: &Path, keep: &[PathBuf]) -> std::io::Result<bool> {
-    if keep.iter().any(|p| p == path) {
-        return Ok(false);
-    }
-    if !fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_file(path)?;
-    } else if !keep.iter().any(|p| p.starts_with(path)) {
-        fs::remove_dir_all(path)?;
-    } else {
-        let mut removed = false;
-        for entry in fs::read_dir(path)? {
-            removed |= remove_except_locks(&entry?.path(), keep)?;
-        }
-        return Ok(removed);
-    }
-    Ok(true)
-}
+use crate::support::remove_except;
 
 fn removal_action(target: &str, path: &Path, result: &Value, fallback: &str) -> SetupAction {
     let mut details = vec![result["notice"].as_str().unwrap_or(fallback).to_owned()];
@@ -1068,7 +1073,7 @@ fn removal_action(target: &str, path: &Path, result: &Value, fallback: &str) -> 
 
 fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<SetupAction>, String> {
     if dry_run {
-        return remove_plugin_setup_dry_run(plugin, true);
+        return plugin_setup_actions(plugin, "setup_remove", false, true);
     }
     let (config, _) = crate::plugins::load_native_config()?;
     crate::plugins::ensure_daemon(&config)?;
@@ -1084,7 +1089,7 @@ fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<Set
     )])
 }
 pub fn run_setup_cli(args: &[String]) {
-    let run = || -> Result<Option<PathBuf>, String> {
+    let run = || -> Result<bool, String> {
         let (state_dir, config_path, home_dir) = resolve_state_and_config_paths()?;
 
         let mut status_only = false;
@@ -1249,8 +1254,21 @@ pub fn run_setup_cli(args: &[String]) {
             i += 1;
         }
 
-        if hub_user.is_some() && hub_name.is_none() {
-            return Err("--user requires --hub and --url".into());
+        if purge_data && !(uninstall || disconnect_all) {
+            return Err("--purge-data requires --uninstall or --disconnect-all".into());
+        }
+        for (present, flag) in [
+            (hub_user.is_some(), "--user"),
+            (set_default, "--default"),
+            (hub_auth.is_some(), "--auth"),
+            (hub_token.is_some(), "--token"),
+            (hub_issuer.is_some(), "--issuer"),
+            (hub_client_id.is_some(), "--client-id"),
+            (hub_redirect_port.is_some(), "--redirect-port"),
+        ] {
+            if present && hub_name.is_none() {
+                return Err(format!("{flag} requires --hub and --url"));
+            }
         }
         if hub_name.is_some() != hub_url.is_some() {
             return Err("--hub and --url must be specified together".to_string());
@@ -1287,7 +1305,7 @@ pub fn run_setup_cli(args: &[String]) {
             };
             if dry_run {
                 println!("{}", json!({"ok":true,"dry_run":true,"op":action["op"]}));
-                return Ok(None);
+                return Ok(false);
             }
             let config = match crate::plugins::load_native_config() {
                 Ok((config, _)) => {
@@ -1296,7 +1314,7 @@ pub fn run_setup_cli(args: &[String]) {
                 }
                 Err(error) if disconnect_all => {
                     let before = ConfigSnapshot::read(&config_path)?;
-                    if before.normalized().is_ok() {
+                    if !purge_data && before.normalized().is_ok() {
                         return Err(error);
                     }
                     let config =
@@ -1305,7 +1323,7 @@ pub fn run_setup_cli(args: &[String]) {
                     // running owner and its registrations, even across versions.
                     if crate::plugins::probe_daemon_health(&config).is_none() {
                         println!("{}", disconnect_offline(&config, &before, purge_data)?);
-                        return Ok(None);
+                        return Ok(false);
                     }
                     config
                 }
@@ -1327,9 +1345,19 @@ pub fn run_setup_cli(args: &[String]) {
             } else {
                 println!("{result}");
             }
-            return Ok(None);
+            return Ok(false);
         }
         let plugins = crate::plugins::load_plugins_readonly(&state_dir);
+        for h in enable_harnesses.iter().chain(&disable_harnesses) {
+            if plugins.rejected_ids.contains(h) {
+                return Err(format!(
+                    "PLUGIN_LOAD_ERROR: Invalid plugin manifest for {h}"
+                ));
+            }
+            if !validate_harness_id(h) || !plugins.agent_plugins().iter().any(|p| &p.id == h) {
+                return Err(format!("Unknown harness: {h}"));
+            }
+        }
         if dry_run && (build_app || uninstall) {
             let before = uninstall
                 .then(|| ConfigSnapshot::read(&config_path))
@@ -1358,7 +1386,7 @@ pub fn run_setup_cli(args: &[String]) {
                 },
             };
             emit_setup_result(&config_path, &current_default, true, &[action], json_output);
-            return Ok(None);
+            return Ok(false);
         }
 
         if status_only {
@@ -1419,14 +1447,22 @@ pub fn run_setup_cli(args: &[String]) {
             if inspection["ok"] == false {
                 std::process::exit(1);
             }
-            return Ok(None);
+            return Ok(false);
         }
 
         if uninstall && !build_app {
             let (default_hub, actions) =
-                uninstall_setup_native(&state_dir, &config_path, &home_dir, &plugins, purge_data)?;
+                uninstall_setup_native(&state_dir, &config_path, &home_dir, &plugins, purge_data)
+                    .inspect_err(|e| {
+                    if json_output {
+                        println!(
+                            "{}",
+                            json!({"ok":false,"error":super::cli::presentation_error(e)})
+                        );
+                    }
+                })?;
             emit_setup_result(&config_path, &default_hub, false, &actions, json_output);
-            return Ok(None);
+            return Ok(false);
         }
         let raw_config = crate::plugins::read_config_text(&config_path)?;
         let (default_hub, existing_hubs, rest) =
@@ -1472,18 +1508,7 @@ pub fn run_setup_cli(args: &[String]) {
             } else {
                 println!("Built {} ({} bytes)", app_path.display(), bytes);
             }
-            return Ok(Some(state_dir));
-        }
-
-        for h in enable_harnesses.iter().chain(disable_harnesses.iter()) {
-            if plugins.rejected_ids.contains(h) {
-                return Err(format!(
-                    "PLUGIN_LOAD_ERROR: Invalid plugin manifest for {h}"
-                ));
-            }
-            if !validate_harness_id(h) || plugins.find_by_id(h).is_none() {
-                return Err(format!("Unknown harness: {h}"));
-            }
+            return Ok(true);
         }
 
         let only_disable = !disable_harnesses.is_empty()
@@ -1507,7 +1532,7 @@ pub fn run_setup_cli(args: &[String]) {
                 reconcile()?;
             }
             emit_setup_result(&config_path, &default_hub, dry_run, &actions, json_output);
-            return Ok((!dry_run).then_some(state_dir));
+            return Ok(!dry_run);
         }
 
         for n in enable_hubs
@@ -1816,15 +1841,15 @@ pub fn run_setup_cli(args: &[String]) {
             &actions,
             json_output,
         );
-        Ok((!dry_run).then_some(state_dir))
+        Ok(!dry_run)
     };
 
     match run() {
-        Ok(Some(_state_dir)) => {
+        Ok(true) => {
             // Cleanup also requires the resulting native configuration to be valid.
             let _ = crate::plugins::load_native_config();
         }
-        Ok(None) => {}
+        Ok(false) => {}
         Err(err) => crate::plugins::exit_cli_error("cito setup", &err),
     }
 }
@@ -1920,6 +1945,21 @@ mod tests {
             "{output}"
         );
         assert!(!output.contains("os error"), "{output}");
+        let plugin = &plugins.plugins[0];
+        let driver = plugin.plugin_dir.join("bin/sample");
+        for (key, value) in [
+            ("installed", json!(0)),
+            ("configured", json!("no")),
+            ("paths", json!(null)),
+            ("paths", json!(["settings", 2])),
+        ] {
+            let mut response = json!({"ok":true,"installed":true,"configured":false,"paths":[]});
+            response[key] = value;
+            fs::write(&driver, format!("#!/bin/sh\necho '{response}'\n")).unwrap();
+            assert!(try_inspect_plugin_setup(plugin).unwrap_err().contains(key));
+        }
+        fs::write(&driver,"#!/bin/sh\necho '{\"ok\":true,\"actions\":[{\"target\":\"sample\",\"status\":\"warning\",\"path\":\"settings\",\"detail\":\"fixture\"}]}'\n").unwrap();
+        assert!(remove_plugin_setup(plugin).unwrap_err().contains("status"));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -2815,7 +2855,7 @@ mod tests {
             child.try_wait().unwrap().and_then(|s| s.signal()),
             Some(libc::SIGTERM)
         );
-        assert!(!crate::plugins::pid_alive(pid as i32));
+        assert!(!crate::support::alive(pid));
         assert!(state.join("runtime/staging.lock").exists());
         for sub in ["bin", "runtime/plugins", "sockets", "sample"] {
             assert!(

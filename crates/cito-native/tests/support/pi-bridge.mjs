@@ -94,18 +94,35 @@ try {
  process.env.CITO_DAEMON_PORT='0';process.env.CITO_CONFIG_PATH='~/bridge-config.json';writeFileSync(join(process.env.HOME,'bridge-config.json'),JSON.stringify({daemonPort:port}));await command.handler('on',context);assert.equal(calls.length,4);
  await command.handler('on --hub INVALID!',context);assert.equal(calls.length,4);assert.equal(notices.at(-1).t,'warning');
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
- // Same-session commands settle in intent order even when HTTP completes backwards.
+ // The daemon sees each mutation only after the prior same-session request settles.
  holdHttp=true;
  const begin=async arg=>{const arrived=new Promise(resolve=>{heldArrival=resolve});const done=command.handler(arg,context);await arrived;return {done,response:held.at(-1)}};
  for(const staleError of [false,true]) {
-  const older=await begin('on Older');const newer=await begin('off');
+  const older=await begin('private Older');const count=calls.length;
+  const newer=begin('off');
+  // A bridge round trip gives a mistakenly concurrent 'off' time to arrive.
+  await request({op:'ping'});
+  assert.equal(calls.length,count,'The unlisten must not reach the daemon before listen settles');
   const reply=JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'older-session',scope:'self'})}]}});
-  newer.response.end(reply);await newer.done;
-  const badgeCount=badges.length, noticeCount=notices.length;
-  assert.equal(badges.at(-1),undefined);
   older.response.statusCode=staleError?500:200;older.response.end(staleError?'Unavailable':reply);await older.done;
-  assert.equal(badges.length,badgeCount,'Stale command must not restore a badge');
-  assert.equal(notices.length,noticeCount,'Stale command must not overwrite current feedback');
+  const off=await newer;assert.equal(calls.at(-1).params.name,'cito_unlisten');off.response.end(reply);await off.done;
+  assert.equal(badges.at(-1),undefined);
+  assert.equal(notices.at(-1).s,'Cito stopped listening');
+ }
+ // A blocked session does not block another session or resurrect its queued
+ // intent when the user switches away and returns to the original ID.
+ {
+  const start=calls.length;
+  const older=await begin('team Pending');const queued=command.handler('off',context);
+  session='session-b';await handlers.get('session_tree')({},context);
+  const other=await begin('on Independent');
+  assert.deepEqual(calls.slice(start).map(v=>[v.params.name,v.params._meta.expected_session_id]),[['cito_listen','session-a'],['cito_listen','session-b']]);
+  const reply=JSON.stringify({result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'active',scope:'self'})}]}});
+  other.response.end(reply);await other.done;
+  session='session-a';await handlers.get('session_tree')({},context);
+  const badgeCount=badges.length, noticeCount=notices.length;
+  older.response.end(reply);await older.done;await queued;
+  assert.equal(calls.length,start+2);assert.equal(badges.length,badgeCount);assert.equal(notices.length,noticeCount);
  }
  // Both transitions retain the previous badge when the daemon sends no usable receipt.
  for(const [op,badge] of [['on',undefined],['off','active']]) {

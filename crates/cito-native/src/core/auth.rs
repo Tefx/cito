@@ -8,14 +8,12 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub fn env_value(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-}
-
-pub fn local_principal(user: &str) -> Value {
-    super::identity::principal(user)
+    let value = std::env::var(key).ok()?;
+    if matches!(key, "CITO_HUB_TOKEN" | "CITO_OIDC_CLIENT_ID") {
+        return Some(value);
+    }
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 pub fn principal_ids_equal(a: &str, b: &str) -> bool {
@@ -105,26 +103,47 @@ fn validate_token_times(claims: &Value, now: u64) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn valid_client_id(id: &str) -> bool {
+    !id.is_empty() && id.trim() == id && !id.chars().any(char::is_control)
+}
+
 pub struct OidcVerifier {
     issuer: String,
     client_id: String,
     cache: Mutex<KeyCache>,
     refreshed: Condvar,
+    key_lifetime: Duration,
+    refresh_cooldown: Duration,
     agent: ureq::Agent,
 }
 
 impl OidcVerifier {
     pub fn new(issuer: &str, client_id: &str) -> Result<Self, String> {
+        let cooldown = env_value("CITO_JWKS_COOLDOWN_MS")
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_secs(60));
+        Self::with_cache_policy(issuer, client_id, Duration::from_secs(300), cooldown)
+    }
+
+    fn with_cache_policy(
+        issuer: &str,
+        client_id: &str,
+        key_lifetime: Duration,
+        refresh_cooldown: Duration,
+    ) -> Result<Self, String> {
         validate_oidc_endpoint(issuer, "CITO_OIDC_ISSUER", true)
             .map_err(|e| format!("INVALID_INPUT: {e}"))?;
-        if client_id.trim().is_empty() {
-            return Err("INVALID_INPUT: CITO_OIDC_CLIENT_ID must not be empty".into());
+        if !valid_client_id(client_id) {
+            return Err("INVALID_INPUT: Invalid CITO_OIDC_CLIENT_ID".into());
         }
         Ok(Self {
             issuer: issuer.into(),
             client_id: client_id.into(),
             cache: Mutex::new(KeyCache::default()),
             refreshed: Condvar::new(),
+            key_lifetime,
+            refresh_cooldown,
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(5))
                 .timeout_connect(Duration::from_secs(5))
@@ -166,10 +185,7 @@ impl OidcVerifier {
         let discovery: Value =
             serde_json::from_reader(discovery_response.into_reader().take(1_048_576))
                 .map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC discovery JSON")?;
-        if discovery
-            .get("issuer")
-            .is_some_and(|issuer| issuer.as_str() != Some(self.issuer.as_str()))
-        {
+        if discovery["issuer"] != self.issuer {
             return Err("AUTH_UNAVAILABLE: discovery issuer mismatch".into());
         }
         let uri = discovery["jwks_uri"]
@@ -199,10 +215,7 @@ impl OidcVerifier {
         deadline: Option<Instant>,
         mut refresh_after: Option<Instant>,
     ) -> Result<(jsonwebtoken::jwk::Jwk, Instant), String> {
-        let cooldown = env_value("CITO_JWKS_COOLDOWN_MS")
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(60));
+        let mut attempted = false;
         let mut cache = self
             .cache
             .lock()
@@ -211,7 +224,7 @@ impl OidcVerifier {
             Self::request_timeout(deadline)?;
             if let Some(at) = cache
                 .loaded_at
-                .filter(|at| Some(*at) > refresh_after && at.elapsed() < Duration::from_secs(300))
+                .filter(|at| Some(*at) > refresh_after && at.elapsed() < self.key_lifetime)
             {
                 if let Some(keys) = &cache.keys {
                     let mut selected = None;
@@ -260,7 +273,11 @@ impl OidcVerifier {
                 };
                 continue;
             }
-            if cache.refresh_at.is_some_and(|at| at.elapsed() < cooldown) {
+            if attempted
+                || cache
+                    .refresh_at
+                    .is_some_and(|at| at.elapsed() < self.refresh_cooldown)
+            {
                 return Err(if cache.unavailable {
                     "AUTH_UNAVAILABLE: OIDC keys unavailable; refresh cooldown active"
                 } else {
@@ -268,6 +285,7 @@ impl OidcVerifier {
                 }
                 .into());
             }
+            attempted = true;
             cache.refreshing = true;
             cache.refresh_at = Some(Instant::now());
             drop(cache);
@@ -456,8 +474,12 @@ impl HubAuth {
         if !matches!(mode, "none" | "token" | "oidc") {
             return Err("INVALID_INPUT: CITO_AUTH_MODE must be none, token, or oidc".into());
         }
-        if mode == "token" && token.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        let credential = token.as_deref().filter(|s| !s.is_empty());
+        if mode == "token" && credential.is_none() {
             return Err("INVALID_INPUT: CITO_HUB_TOKEN is required in token mode".into());
+        }
+        if credential.is_some_and(|s| !super::config::valid_hub_token(s)) {
+            return Err("INVALID_INPUT: Invalid CITO_HUB_TOKEN".into());
         }
         let verifier = if mode == "oidc" {
             Some(OidcVerifier::new(
@@ -496,13 +518,13 @@ impl HubAuth {
             .unwrap_or("local")
             .to_lowercase();
         if self.mode == "none" {
-            return Ok(local_principal(&user));
+            return Ok(super::identity::principal(&user));
         }
         let bearer = headers
             .get("authorization")
             .and_then(|s| s.split_once(' '))
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-            .map(|(_, s)| s.trim())
+            .map(|(_, s)| s)
             .or_else(|| headers.get("x-cito-token").map(String::as_str))
             .ok_or("AUTHORIZATION_VIOLATION: bearer token required")?;
         if let Some(verifier) = &self.verifier {
@@ -514,7 +536,7 @@ impl HubAuth {
         if diff != 0 {
             return Err("AUTHORIZATION_VIOLATION: invalid token".into());
         }
-        let mut principal = local_principal(&user);
+        let mut principal = super::identity::principal(&user);
         principal["auth_mode"] = json!("token");
         Ok(principal)
     }

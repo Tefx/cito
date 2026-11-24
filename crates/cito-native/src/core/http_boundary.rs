@@ -114,16 +114,6 @@ fn authority(value: &str) -> Option<Url> {
     .then_some(url)
 }
 
-pub(super) fn validate(
-    bound: SocketAddr,
-    method: &str,
-    host: Option<&str>,
-    origin: Option<&str>,
-    content_type: Option<&str>,
-) -> Result<(), (u16, &'static str)> {
-    validate_hub(bound, method, host, origin, content_type, false)
-}
-
 pub(super) fn validate_hub(
     bound: SocketAddr,
     method: &str,
@@ -274,7 +264,8 @@ mod tests {
     #[test]
     fn browser_boundary_checks_authority_origin_and_media_type() {
         let bound = "127.0.0.1:4291".parse().unwrap();
-        let check = |host, origin, media| validate(bound, "POST", Some(host), origin, media);
+        let check =
+            |host, origin, media| validate_hub(bound, "POST", Some(host), origin, media, false);
         assert!(check(
             "127.0.0.1:4291",
             None,
@@ -325,7 +316,10 @@ mod tests {
                 "[::1]:4291",
                 "hub.example:4291",
             ] {
-                assert!(validate(bind.parse().unwrap(), "GET", Some(host), None, None).is_ok());
+                assert!(
+                    validate_hub(bind.parse().unwrap(), "GET", Some(host), None, None, false)
+                        .is_ok()
+                );
             }
         }
     }

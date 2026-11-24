@@ -73,7 +73,11 @@ fn health_exposes_only_oidc_discovery_metadata() {
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, EncodingKey, Header};
-fn verifier(alg: Algorithm) -> (OidcVerifier, EncodingKey) {
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
+fn key_material(alg: Algorithm) -> (Value, EncodingKey) {
     let mut jwk = json!({"kid":"test-key","alg":format!("{alg:?}"),"use":"sig"});
     let key = if matches!(
         alg,
@@ -122,71 +126,49 @@ fn verifier(alg: Algorithm) -> (OidcVerifier, EncodingKey) {
         jwk["x"] = json!(URL_SAFE_NO_PAD.encode(&der[der.len() - 32..]));
         EncodingKey::from_ed_pem(include_bytes!("fixtures/ed25519-private.pem")).unwrap()
     };
-    let verifier = OidcVerifier::new("https://id.example.com", "client").unwrap();
-    {
-        let mut cache = verifier.cache.lock().unwrap();
-        cache.keys = Some(serde_json::from_value(json!({"keys":[jwk]})).unwrap());
-        cache.loaded_at = Some(Instant::now());
-        cache.refresh_at = Some(Instant::now());
-    }
-    (verifier, key)
+    (jwk, key)
+}
+fn verifier(alg: Algorithm) -> (KeyServer, OidcVerifier, EncodingKey) {
+    let (jwk, key) = key_material(alg);
+    let server = key_server(json!({"keys":[jwk]}));
+    let verifier = OidcVerifier::new(&server.issuer, "client").unwrap();
+    (server, verifier, key)
 }
 #[test]
 fn missing_kid_selects_only_an_unambiguous_eligible_signing_key() {
-    let (v, key) = verifier(Algorithm::RS256);
-    let header = Header::new(Algorithm::RS256);
-    let claims = json!({"iss":"https://id.example.com","aud":"client","sub":"alice","exp":crate::plugins::now_ms()/1000+60});
-    let jwt = encode(&header, &claims, &key).unwrap();
-    let (_, original_epoch) = v.verification_key(&header, None, None).unwrap();
-    {
-        let mut cache = v.cache.lock().unwrap();
-        let keys = &mut cache.keys.as_mut().unwrap().keys;
-        let mut enc = keys[0].clone();
-        enc.common.public_key_use = Some(jsonwebtoken::jwk::PublicKeyUse::Encryption);
-        keys.push(enc);
-        cache.loaded_at = Some(Instant::now());
-    }
-    assert!(v
-        .verification_key(&header, None, Some(original_epoch))
-        .is_ok());
-    assert!(v.verify(&jwt).is_ok());
-    {
-        let mut cache = v.cache.lock().unwrap();
-        let keys = &mut cache.keys.as_mut().unwrap().keys;
-        keys.push(keys[0].clone());
-    }
-    assert!(v.verify(&jwt).is_err());
+    check_key_selection(false);
 }
 
 #[test]
 fn shared_kid_selects_only_one_compatible_verification_key() {
-    use jsonwebtoken::jwk::{KeyAlgorithm, PublicKeyUse};
-    let (v, key) = verifier(Algorithm::RS256);
+    check_key_selection(true);
+}
+fn check_key_selection(with_kid: bool) {
+    let (signing, key) = key_material(Algorithm::RS256);
+    let mut encryption = signing.clone();
+    encryption["use"] = json!("enc");
+    let mut other_alg = signing.clone();
+    other_alg["alg"] = json!("RS512");
+    let mut keys = vec![encryption, other_alg, signing.clone()];
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("test-key".into());
-    let jwt = encode(&header, &json!({"iss":"https://id.example.com","aud":"client","sub":"alice","exp":crate::plugins::now_ms()/1000+600}), &key).unwrap();
-    {
-        let mut cache = v.cache.lock().unwrap();
-        let keys = &mut cache.keys.as_mut().unwrap().keys;
-        let signing = keys[0].clone();
-        let mut encryption = signing.clone();
-        encryption.common.public_key_use = Some(PublicKeyUse::Encryption);
-        let mut different_alg = signing.clone();
-        different_alg.common.key_algorithm = Some(KeyAlgorithm::RS512);
-        let mut unrelated = signing.clone();
-        unrelated.common.key_id = Some("other-key".into());
-        *keys = vec![encryption, different_alg, unrelated, signing];
+    if with_kid {
+        header.kid = Some("test-key".into());
+        let mut other = signing.clone();
+        other["kid"] = json!("other-key");
+        keys.push(other);
     }
-    assert_eq!(v.verify(&jwt).unwrap()["sub"], "alice");
-    {
-        let mut cache = v.cache.lock().unwrap();
-        let keys = &mut cache.keys.as_mut().unwrap().keys;
-        keys.insert(0, keys.last().unwrap().clone());
-    }
-    assert!(v
-        .verify(&jwt)
-        .unwrap_err()
-        .starts_with("AUTHORIZATION_VIOLATION:"));
+    let server = key_server(json!({"keys":keys}));
+    let claims = json!({"iss":server.issuer,"aud":"client","sub":"alice","exp":crate::plugins::now_ms()/1000+60});
+    let jwt = encode(&header, &claims, &key).unwrap();
+    let check = || {
+        OidcVerifier::new(&server.issuer, "client")
+            .unwrap()
+            .verify(&jwt)
+    };
+    assert_eq!(check().unwrap()["sub"], "alice");
+    keys.push(signing);
+    *server.keys.lock().unwrap() = json!({"keys":keys});
+    assert!(check().unwrap_err().starts_with("AUTHORIZATION_VIOLATION:"));
 }
 
 #[test]
@@ -200,12 +182,12 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
         Algorithm::ES384,
         Algorithm::EdDSA,
     ] {
-        let (v, key) = verifier(alg);
+        let (server, v, key) = verifier(alg);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let claims = json!({"iss":"https://id.example.com","sub":"subject","aud":["other","client"],"azp":"client","exp":now+300,"nbf":now-1,"preferred_username":"alice.smith"});
+        let claims = json!({"iss":server.issuer,"sub":"subject","aud":["other","client"],"azp":"client","exp":now+300,"nbf":now-1,"preferred_username":"alice.smith"});
         let mut header = Header::new(alg);
         header.kid = Some("test-key".into());
         let signed = |claims: &Value| encode(&header, claims, &key).unwrap();
@@ -213,7 +195,7 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
         let principal = v.verify(&token).unwrap();
         assert_eq!(
             principal["principal_id"],
-            "oidc:https://id.example.com|subject"
+            format!("oidc:{}|subject", server.issuer)
         );
         assert_eq!(principal["owner_user"], "alice.smith");
         let mut fallback = claims.clone();
@@ -264,10 +246,8 @@ fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
     );
     listener.set_nonblocking(true).unwrap();
     let discovery = json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys.json")}).to_string();
-    let (seed, key) = verifier(Algorithm::RS256);
-    let keys = Arc::new(Mutex::new(
-        serde_json::to_value(seed.cache.lock().unwrap().keys.as_ref().unwrap()).unwrap(),
-    ));
+    let (jwk, key) = key_material(Algorithm::RS256);
+    let keys = Arc::new(Mutex::new(json!({"keys":[jwk]})));
     let cert = rustls::pki_types::CertificateDer::from(
         include_bytes!("fixtures/localhost-cert.der").to_vec(),
     );
@@ -356,7 +336,10 @@ fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let mut verifier = OidcVerifier::new(&issuer, "client").unwrap();
+    let cooldown = Duration::from_millis(150);
+    let mut verifier =
+        OidcVerifier::with_cache_policy(&issuer, "client", Duration::from_secs(300), cooldown)
+            .unwrap();
     verifier.agent = ureq::AgentBuilder::new()
         .tls_config(std::sync::Arc::new(tls))
         .timeout(Duration::from_secs(3))
@@ -377,13 +360,13 @@ fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
         .verify(&token)
         .unwrap_err()
         .starts_with("AUTHORIZATION_VIOLATION"));
-    verifier.cache.lock().unwrap().refresh_at = Some(Instant::now() - Duration::from_secs(61));
+    std::thread::sleep(cooldown);
     verifier.verify(&token).unwrap();
 }
 #[test]
 fn blank_environment_is_unset_and_explicit_auth_is_validated() {
     assert_eq!(
-        local_principal("Alice.Example")["principal_id"],
+        crate::core::identity::principal("Alice.Example")["principal_id"],
         "none#alice.example"
     );
     assert!(HubAuth::new("token", Some("".into()), None, None)
@@ -402,6 +385,14 @@ fn blank_environment_is_unset_and_explicit_auth_is_validated() {
         .err()
         .unwrap()
         .contains("CITO_OIDC_CLIENT_ID"));
+    for invalid in [" leading", "trailing ", "embedded\x01control"] {
+        assert!(HubAuth::new("token", Some(invalid.into()), None, None).is_err());
+        assert!(OidcVerifier::new("https://id.example.com", invalid).is_err());
+        assert!(crate::core::config::discover_hub_config(
+            json!({"url":"local://","authMode":"token","token":invalid})
+        )
+        .is_err());
+    }
     for url in [
         "http://id.example.com",
         "http://localhost:9000",
@@ -417,8 +408,21 @@ fn blank_environment_is_unset_and_explicit_auth_is_validated() {
     assert!(OidcVerifier::new("http://127.0.0.1:9000", "client").is_ok());
 }
 
-#[test]
-fn http_loopback_discovery_and_jwks_verify_real_signatures() {
+struct KeyServer {
+    issuer: String,
+    keys: Arc<Mutex<Value>>,
+    requests: Arc<AtomicUsize>,
+    discovery: Arc<Mutex<Value>>,
+    stopped: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for KeyServer {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+fn key_server(keys: Value) -> KeyServer {
     use std::io::{BufRead, BufReader, Write};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -427,10 +431,7 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let issuer = format!("http://{}/", listener.local_addr().unwrap());
-    let (seed, key) = verifier(Algorithm::RS256);
-    let keys = Arc::new(Mutex::new(
-        serde_json::to_value(seed.cache.lock().unwrap().keys.as_ref().unwrap()).unwrap(),
-    ));
+    let keys = Arc::new(Mutex::new(keys));
     let served_keys = keys.clone();
     let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let requested = requests.clone();
@@ -477,23 +478,30 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
             }
         }
     });
-    struct Cleanup {
-        stopped: Arc<AtomicBool>,
-        worker: Option<std::thread::JoinHandle<()>>,
-    }
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            self.stopped.store(true, Ordering::SeqCst);
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
-        }
-    }
-    let _cleanup = Cleanup {
+    KeyServer {
+        issuer,
+        keys,
+        requests,
+        discovery,
         stopped,
         worker: Some(worker),
-    };
-    let verifier = OidcVerifier::new(&issuer, "client").unwrap();
+    }
+}
+#[test]
+fn http_loopback_discovery_and_jwks_verify_real_signatures() {
+    let (jwk, key) = key_material(Algorithm::RS256);
+    let mut previous = jwk.clone();
+    let mut modulus = URL_SAFE_NO_PAD.decode(jwk["n"].as_str().unwrap()).unwrap();
+    modulus[30] ^= 1;
+    previous["n"] = json!(URL_SAFE_NO_PAD.encode(modulus));
+    let server = key_server(json!({"keys":[previous]}));
+    let issuer = &server.issuer;
+    let keys = &server.keys;
+    let discovery = &server.discovery;
+    let requests = &server.requests;
+    let cooldown = Duration::from_millis(50);
+    let lifetime = Duration::from_millis(400);
+    let verifier = OidcVerifier::with_cache_policy(issuer, "client", lifetime, cooldown).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -502,21 +510,13 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();
-    assert_eq!(
-        verifier.verify(&token).unwrap()["principal_id"],
-        format!("oidc:{issuer}|subject")
-    );
+    assert!(verifier
+        .verify(&token)
+        .unwrap_err()
+        .starts_with("AUTHORIZATION_VIOLATION"));
     assert_eq!(requests.load(Ordering::SeqCst), 1);
-    {
-        let mut cache = verifier.cache.lock().unwrap();
-        let mut keys = serde_json::to_value(cache.keys.as_ref().unwrap()).unwrap();
-        let modulus = keys["keys"][0]["n"].as_str().unwrap();
-        let mut bytes = URL_SAFE_NO_PAD.decode(modulus).unwrap();
-        bytes[30] ^= 1;
-        keys["keys"][0]["n"] = json!(URL_SAFE_NO_PAD.encode(bytes));
-        cache.keys = Some(serde_json::from_value(keys).unwrap());
-        cache.refresh_at = Some(Instant::now() - Duration::from_secs(61));
-    }
+    *keys.lock().unwrap() = json!({"keys":[jwk]});
+    std::thread::sleep(cooldown);
     // Concurrent callers recover the rotated key with a single JWKS request.
     let before = requests.load(Ordering::SeqCst);
     let start = std::sync::Barrier::new(4);
@@ -538,11 +538,7 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         }
     });
     assert_eq!(requests.load(Ordering::SeqCst), before + 1);
-    {
-        let mut cache = verifier.cache.lock().unwrap();
-        cache.loaded_at = Some(Instant::now() - Duration::from_secs(301));
-        cache.refresh_at = Some(Instant::now() - Duration::from_secs(301));
-    }
+    std::thread::sleep(lifetime);
     verifier.verify(&token).unwrap();
     assert_eq!(
         requests.load(Ordering::SeqCst),
@@ -550,42 +546,28 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         "Known keys have a bounded cache lifetime"
     );
     keys.lock().unwrap()["keys"][0]["use"] = json!("enc");
-    {
-        let mut cache = verifier.cache.lock().unwrap();
-        let mut wrong = serde_json::to_value(cache.keys.as_ref().unwrap()).unwrap();
-        let mut modulus = URL_SAFE_NO_PAD
-            .decode(wrong["keys"][0]["n"].as_str().unwrap())
-            .unwrap();
-        modulus[30] ^= 1;
-        wrong["keys"][0]["n"] = json!(URL_SAFE_NO_PAD.encode(modulus));
-        cache.keys = Some(serde_json::from_value(wrong).unwrap());
-        cache.refresh_at = Some(Instant::now() - Duration::from_secs(61));
-    }
+    std::thread::sleep(cooldown);
+    let mut parts: Vec<String> = token.split('.').map(String::from).collect();
+    let mut signature = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();
+    signature[0] ^= 1;
+    parts[2] = URL_SAFE_NO_PAD.encode(signature);
     assert!(
         verifier
-            .verify(&token)
+            .verify(&parts.join("."))
             .unwrap_err()
             .contains("not a verification key"),
         "Refreshed keys retain all algorithm and use checks"
     );
     keys.lock().unwrap()["keys"][0]["use"] = json!("sig");
-    {
-        let mut cache = verifier.cache.lock().unwrap();
-        cache.loaded_at = Some(Instant::now() - Duration::from_secs(301));
-        cache.refresh_at = Some(Instant::now() - Duration::from_secs(301));
-    }
+    std::thread::sleep(lifetime);
     verifier.verify(&token).unwrap();
-    let mut parts: Vec<String> = token.split('.').map(String::from).collect();
-    let mut signature = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();
-    signature[0] ^= 1;
-    parts[2] = URL_SAFE_NO_PAD.encode(signature);
     assert!(verifier
         .verify(&parts.join("."))
         .unwrap_err()
         .starts_with("AUTHORIZATION_VIOLATION"));
     discovery.lock().unwrap()["jwks_uri"] = json!("http://id.example.com/keys.json");
     header.kid = Some("unknown-key".into());
-    verifier.cache.lock().unwrap().refresh_at = Some(Instant::now() - Duration::from_secs(61));
+    std::thread::sleep(cooldown);
     let error = verifier
         .verify(&encode(&header, &claims, &key).unwrap())
         .unwrap_err();
@@ -601,16 +583,40 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
 }
 
 #[test]
+fn discovery_requires_the_configured_issuer_before_fetching_keys() {
+    let (server, _, key) = verifier(Algorithm::RS256);
+    let jwt = encode(&Header::new(Algorithm::RS256), &json!({"iss":server.issuer,"sub":"alice","aud":"client","exp":crate::plugins::now_ms()/1000+60}), &key).unwrap();
+    for issuer in [None, Some(json!("https://other.example.com"))] {
+        let mut doc = server.discovery.lock().unwrap();
+        doc.as_object_mut().unwrap().remove("issuer");
+        if let Some(issuer) = issuer {
+            doc["issuer"] = issuer;
+        }
+        drop(doc);
+        assert!(OidcVerifier::new(&server.issuer, "client")
+            .unwrap()
+            .verify(&jwt)
+            .unwrap_err()
+            .contains("discovery issuer mismatch"));
+        assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+    }
+}
+#[test]
 fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
     use std::io::{Read, Write};
-    let (verifier, key) = verifier(Algorithm::RS256);
+    let (issuer, verifier, key) = verifier(Algorithm::RS256);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test-key".into());
-    let token = encode(&header,&json!({"iss":"https://id.example.com","aud":"client","sub":"subject","exp":now as f64-0.5}),&key).unwrap();
+    let token = encode(
+        &header,
+        &json!({"iss":issuer.issuer,"aud":"client","sub":"subject","exp":now as f64-0.5}),
+        &key,
+    )
+    .unwrap();
     assert!(
         verifier.verify(&token).is_ok(),
         "Clock leeway admits authentication, but must not extend SSE lifetime"
@@ -651,7 +657,7 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
 #[test]
 fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
     use std::io::{BufRead, BufReader, Read, Write};
-    let (verifier, key) = verifier(Algorithm::RS256);
+    let (issuer, verifier, key) = verifier(Algorithm::RS256);
     let expires = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -661,7 +667,7 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
     header.kid = Some("test-key".into());
     let token = encode(
         &header,
-        &json!({"iss":"https://id.example.com","aud":"client","sub":"subject","exp":expires}),
+        &json!({"iss":issuer.issuer,"aud":"client","sub":"subject","exp":expires}),
         &key,
     )
     .unwrap();
@@ -737,13 +743,12 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
 }
 #[test]
 fn caller_deadline_bounds_cache_wait_and_cached_verification() {
-    let (v, key) = verifier(Algorithm::RS256);
+    let (server, v, key) = verifier(Algorithm::RS256);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let claims =
-        json!({"iss":"https://id.example.com","aud":"client","sub":"subject","exp":now+300});
+    let claims = json!({"iss":server.issuer,"aud":"client","sub":"subject","exp":now+300});
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();
@@ -754,17 +759,22 @@ fn caller_deadline_bounds_cache_wait_and_cached_verification() {
         .verify_with_deadline(&token, Instant::now() - Duration::from_millis(1))
         .unwrap_err()
         .starts_with("OIDC_LOGIN_TIMEOUT"));
-    header.kid = Some("pending-key".into());
-    let token = encode(&header, &claims, &key).unwrap();
-    v.cache.lock().unwrap().refreshing = true;
-    let start = Instant::now();
-    assert!(v
-        .verify_with_deadline(&token, start + Duration::from_millis(50))
-        .unwrap_err()
-        .starts_with("OIDC_LOGIN_TIMEOUT"));
-    assert!(start.elapsed() < Duration::from_secs(1));
-    v.cache.lock().unwrap().refreshing = false;
-    v.refreshed.notify_all();
+    let v = OidcVerifier::new(&server.issuer, "client").unwrap();
+    let keys = server.keys.lock().unwrap();
+    let requests = server.requests.load(Ordering::SeqCst);
+    std::thread::scope(|scope| {
+        let refresh = scope.spawn(|| v.verify(&token));
+        let start = Instant::now();
+        while server.requests.load(Ordering::SeqCst) == requests {
+            assert!(start.elapsed() < Duration::from_secs(1));
+            std::thread::yield_now();
+        }
+        let result = v.verify_with_deadline(&token, Instant::now() + Duration::from_millis(50));
+        drop(keys);
+        assert!(result.unwrap_err().starts_with("OIDC_LOGIN_TIMEOUT"));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(refresh.join().unwrap().is_ok());
+    });
 }
 #[test]
 fn token_time_boundaries_match_jose_clock_tolerance() {

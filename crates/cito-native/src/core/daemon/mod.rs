@@ -682,7 +682,7 @@ impl DaemonService {
             crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
         let host = rest.get("host_hub").unwrap_or(&Value::Null);
         let _ = self.sync_host_hub(host);
-        let live_port = self.host_server.as_ref().map(|server| server.port());
+        let address = self.host_server.as_ref().map(|server| server.address);
         self.config.default_hub = std::env::var("CITO_HUB")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -719,9 +719,7 @@ impl DaemonService {
             if hub["enabled"] == false {
                 continue;
             }
-            if name != "local"
-                && host_hub::is_own_host_hub_url(string(&hub, "url"), host, live_port)
-            {
+            if name != "local" && host_hub::is_own_host_hub_url(string(&hub, "url"), address) {
                 self.reject_slot_authority(&name, host_hub::OWN_HUB_ERROR.into())?;
                 continue;
             }
@@ -1204,7 +1202,9 @@ impl HubAccess {
     }
 
     fn scoped(&self, hub: &str, id: &str) -> String {
-        if self.slots.len() == 1 && matches!(self.config.default_hub.as_str(), "local" | "default")
+        if self.slots.len() == 1
+            && hub == self.config.default_hub
+            && matches!(hub, "local" | "default")
         {
             id.into()
         } else {
@@ -1485,6 +1485,7 @@ impl DaemonService {
                 row["harness"],
                 row["session_id"],
                 row["endpoint_pid"],
+                row["process_identity"],
                 row["cwd"],
                 start
             ])
@@ -1569,7 +1570,7 @@ impl DaemonService {
                 let row = &targets[0].0;
                 let result = super::receiver::plugin_request(
                     &plugin,
-                    &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"cwd":row["cwd"],"state_dir":dir}),
+                    &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"process_identity":row["process_identity"],"cwd":row["cwd"],"state_dir":dir}),
                     None,
                     None,
                 );

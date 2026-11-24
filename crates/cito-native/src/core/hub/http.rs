@@ -8,19 +8,36 @@ pub struct HubServer {
     pub address: SocketAddr,
     pub(in crate::core) auth: Arc<HubAuth>,
     running: Arc<AtomicBool>,
-    wake: Arc<crate::support::WakePipe>,
+    pub(super) wake: Arc<crate::support::WakePipe>,
     sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
-struct ListenerLifetime(Arc<AtomicBool>);
+struct ListenerLifetime(Arc<AtomicBool>, Arc<crate::support::WakePipe>);
 impl Drop for ListenerLifetime {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+        self.1.notify();
     }
 }
 impl HubServer {
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
+    }
+    pub(super) fn wait_for_stop(&self, requested: &AtomicBool) -> Result<(), String> {
+        while !requested.load(Ordering::SeqCst) {
+            if !self.is_running() {
+                return Err("Hub listener stopped unexpectedly".into());
+            }
+            crate::support::poll_until(
+                &mut [libc::pollfd {
+                    fd: self.wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                None,
+            )?;
+        }
+        Ok(())
     }
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::Release);
@@ -57,12 +74,11 @@ impl HubEngine {
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let running = Arc::new(AtomicBool::new(true));
         let wake = Arc::new(crate::support::WakePipe::new()?);
-        let worker_wake = wake.clone();
         let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
         let auth = auth.into();
         let (engine, lifetime, ss, worker_auth) = (
             self.clone(),
-            ListenerLifetime(running.clone()),
+            ListenerLifetime(running.clone(), wake.clone()),
             sockets.clone(),
             auth.clone(),
         );
@@ -78,7 +94,7 @@ impl HubEngine {
                         revents: 0,
                     },
                     libc::pollfd {
-                        fd: worker_wake.read_fd(),
+                        fd: lifetime.1.read_fd(),
                         events: libc::POLLIN,
                         revents: 0,
                     },
@@ -121,7 +137,7 @@ impl HubEngine {
                             lifetime.0.clone(),
                             ss.clone(),
                         );
-                        let shutdown_wake = worker_wake.clone();
+                        let shutdown_wake = lifetime.1.clone();
                         workers.push(thread::spawn(move || {
                             handle_http(stream, e, a, s, address, shutdown_wake);
                             if let Ok(mut list) = connections.lock() {
@@ -137,7 +153,6 @@ impl HubEngine {
                 }
             }
             drop(lifetime);
-            worker_wake.notify();
             if let Ok(sockets) = ss.lock() {
                 for socket in sockets.values() {
                     let _ = socket.shutdown(Shutdown::Both);
@@ -313,7 +328,7 @@ fn handle_http(
         if path != "/v1/rpc" || method != "POST" {
             return Err("NOT_FOUND: Not found".into());
         }
-        if length > 8 * 1024 * 1024 {
+        if length > MAX_RPC_BYTES {
             return invalid(&mut stream, 413, "RPC body exceeds 8 MiB");
         }
         let mut body = vec![0u8; length];

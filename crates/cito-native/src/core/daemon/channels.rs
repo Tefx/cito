@@ -68,11 +68,7 @@ impl ChannelInventory {
         // The same owner spans schema lookup, mutation, and the post-mutation read.
         // No pre-mutation inventory can satisfy or overwrite this acknowledgement.
         if let (Err(error), Ok(value)) = (self.fetch_locked(slot), &mut result) {
-            if value.is_object() {
-                super::mcp::add_warning(value, "maintenance_warning", &error);
-            } else {
-                eprintln!("Channel inventory refresh: {error}");
-            }
+            super::mcp::add_warning(value, "maintenance_warning", &error);
         }
         result
     }
@@ -81,7 +77,7 @@ impl ChannelInventory {
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
             return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
         }
-        let result = slot.rpc("human_channels_list", &json!({}));
+        let result = channel_list(slot);
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
             return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
         }
@@ -158,6 +154,17 @@ pub(super) fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
     }
 }
 
+fn channel_list(slot: &HubClient) -> Result<Value, String> {
+    let inventory = slot.rpc("human_channels_list", &json!({}))?;
+    if !inventory["channels"]
+        .as_array()
+        .is_some_and(|items| items.iter().all(Value::is_object))
+    {
+        return Err("INVALID_INPUT: Channel inventory must contain an array of objects".into());
+    }
+    Ok(inventory)
+}
+
 fn channel_id(action: &Value) -> Result<&str, String> {
     action["channel_id"]
         .as_str()
@@ -199,7 +206,7 @@ fn run_channel_action(
     if let Some(values) = action["values"].as_object() {
         // The selected Hub owns the schema, including remote-only plugins
         // and remote schemas that differ from a locally installed plugin.
-        let schema = slot.rpc("human_channels_list", &json!({}))?;
+        let schema = channel_list(slot)?;
         let fields = schema["channels"]
             .as_array()
             .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
@@ -241,7 +248,7 @@ fn run_channel_action(
         params = json!({"plugin_id":id,"hub_config":hub_config});
     }
     let result = slot.rpc(rpc, &params)?;
-    if matches!(rpc, "human_channel_pair_start" | "human_channels_test") && !result.is_object() {
+    if !result.is_object() {
         Err("INVALID_INPUT: Channel result must be an object".into())
     } else {
         Ok(result)
@@ -400,14 +407,10 @@ fn after_channel_action(
         return Err(error);
     }
     result.map(|mut value| {
-        if let Some(fields) = value.as_object_mut() {
-            if fields.get("ok") == Some(&json!(true)) && kind == ChannelActionKind::Mutation {
-                fields.insert("committed".into(), json!(true));
-            }
-            super::mcp::add_warning(&mut value, "maintenance_warning", &error);
-        } else {
-            eprintln!("Channel maintenance: {error}");
+        if value["ok"] == true {
+            value["committed"] = json!(true);
         }
+        super::mcp::add_warning(&mut value, "maintenance_warning", &error);
         value
     })
 }

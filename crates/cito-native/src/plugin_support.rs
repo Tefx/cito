@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -114,11 +114,61 @@ pub fn expand(req: &Value, value: &str) -> PathBuf {
     }
 }
 pub fn state(req: &Value) -> PathBuf {
-    str_at(req, "state_dir")
+    raw_str_at(req, "state_dir")
         .map(|s| expand(req, s))
         .or_else(|| env_value(req, "CITO_STATE_DIR").map(|s| expand(req, &s)))
         .unwrap_or_else(|| home(req).join(".cito"))
 }
+/// Paths that keep a profile addressable when removing its containing runtime tree.
+pub fn profile_keep(config: &Path, root: &Path) -> Result<Vec<PathBuf>> {
+    let target = publication_target(config)?;
+    let mut keep = Vec::new();
+    for part in config.ancestors().filter(|p| p.is_symlink()) {
+        if let (Some(parent), Some(name)) = (part.parent(), part.file_name()) {
+            keep.push(publication_target(parent)?.join(name));
+        }
+    }
+    if target.starts_with(root) {
+        let name = target
+            .file_name()
+            .ok_or("Missing config filename")?
+            .to_string_lossy();
+        let prefix = format!("{name}.bak.");
+        let parent = target.parent().ok_or("Missing config directory")?;
+        if parent.try_exists().map_err(|e| e.to_string())? {
+            for entry in fs::read_dir(parent).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    keep.push(entry.path());
+                }
+            }
+        }
+        keep.push(target.with_file_name(format!("{name}.cito.lock")));
+        keep.push(target.with_file_name(format!("{name}.lock")));
+        keep.push(target);
+    }
+    Ok(keep)
+}
+
+// Descend only into ancestors of a protected path; never follow symlinks.
+pub fn remove_except(path: &Path, keep: &[PathBuf]) -> std::io::Result<bool> {
+    if keep.iter().any(|p| p == path) {
+        return Ok(false);
+    }
+    if !fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_file(path)?;
+    } else if !keep.iter().any(|p| p.starts_with(path)) {
+        fs::remove_dir_all(path)?;
+    } else {
+        let mut removed = false;
+        for entry in fs::read_dir(path)? {
+            removed |= remove_except(&entry?.path(), keep)?;
+        }
+        return Ok(removed);
+    }
+    Ok(true)
+}
+
 pub fn remove_setup_runtime(
     req: &Value,
     directory: &str,
@@ -127,9 +177,13 @@ pub fn remove_setup_runtime(
     if req["op"] != "setup_remove" || req["dry_run"] == true {
         return Ok(());
     }
-    let root = state(req);
-    match fs::remove_dir_all(root.join(directory)) {
-        Ok(()) => {}
+    let root = publication_target(&state(req))?;
+    let config = env_value(req, "CITO_CONFIG_PATH")
+        .map(|s| expand(req, &s))
+        .unwrap_or_else(|| root.join("config.json"));
+    let keep = profile_keep(&config, &root)?;
+    match remove_except(&root.join(directory), &keep) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.to_string()),
     }
@@ -141,7 +195,9 @@ pub fn remove_setup_runtime(
         };
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
-            if entry.file_name().to_string_lossy().starts_with(prefix) {
+            if entry.file_name().to_string_lossy().starts_with(prefix)
+                && !keep.contains(&entry.path())
+            {
                 match fs::remove_file(entry.path()) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -499,40 +555,116 @@ pub fn update_badge(
     }
 }
 
-/// Parse the executable once; concrete entrypoint policies remain plugin-owned.
-pub fn matches_process(command: &str, policy: impl FnOnce(&str, &str, bool) -> bool) -> bool {
-    let Some((program, script)) = process_entrypoint(command) else {
-        return false;
-    };
-    let entry = script.unwrap_or(program);
-    let name = Path::new(entry)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    policy(entry, name, script.is_some())
-}
-
 pub fn live_bridge(req: &Value, harness: &str, pid: u32) -> bool {
     let path = state(req).join(format!("sockets/{harness}-pid-{pid}.sock"));
     path.exists()
         && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true)
 }
 pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
-    let mut s = UnixStream::connect(path).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(Duration::from_millis(750)))
-        .map_err(|e| e.to_string())?;
-    s.set_write_timeout(Some(Duration::from_millis(750)))
-        .map_err(|e| e.to_string())?;
-    writeln!(s, "{req}").map_err(socket_io_error)?;
-    let mut line = String::new();
-    BufReader::new(s)
-        .take(4 * 1024 * 1024)
-        .read_line(&mut line)
-        .map_err(socket_io_error)?;
-    if !line.ends_with('\n') {
-        return Err("Socket closed before newline".into());
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::time::Instant;
+    let deadline = Instant::now() + Duration::from_millis(750);
+    // SAFETY: sockaddr_un contains only integer fields. Reserve the trailing NUL.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= addr.sun_path.len() {
+        return Err("Invalid Unix socket path".into());
     }
-    serde_json::from_str(&line).map_err(|e| e.to_string())
+    addr.sun_family = libc::AF_UNIX as _;
+    for (dst, &src) in addr.sun_path.iter_mut().zip(bytes) {
+        *dst = src as _;
+    }
+    let len =
+        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    {
+        addr.sun_len = len as _;
+    }
+    // SAFETY: a successful socket call returns a new owned descriptor. Transfer
+    // it immediately to UnixStream so every early return closes it.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut s = unsafe { UnixStream::from_raw_fd(fd) };
+    // SAFETY: fd is live until s drops. No inherited bridge connection is needed.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    s.set_nonblocking(true).map_err(socket_io_error)?;
+    let ready = |events| {
+        if Instant::now() < deadline
+            && poll_until(
+                &mut [libc::pollfd {
+                    fd,
+                    events,
+                    revents: 0,
+                }],
+                Some(deadline),
+            )?
+        {
+            Ok(())
+        } else {
+            Err("Socket request timed out".to_string())
+        }
+    };
+    // SAFETY: addr holds len initialized bytes and a terminated pathname.
+    if unsafe { libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(socket_io_error(error));
+        }
+        ready(libc::POLLOUT)?;
+        if let Some(error) = s.take_error().map_err(socket_io_error)? {
+            return Err(socket_io_error(error));
+        }
+    }
+    let mut frame = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+    frame.push(b'\n');
+    let mut rest = frame.as_slice();
+    while !rest.is_empty() {
+        ready(libc::POLLOUT)?;
+        match s.write(rest) {
+            Ok(0) => return Err("Socket closed before write".into()),
+            Ok(n) => rest = &rest[n..],
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(socket_io_error(e)),
+        }
+    }
+    frame.clear();
+    let mut chunk = [0; 8192];
+    while frame.len() < 4 * 1024 * 1024 {
+        ready(libc::POLLIN)?;
+        let cap = chunk.len().min(4 * 1024 * 1024 - frame.len());
+        match s.read(&mut chunk[..cap]) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Some(end) = chunk[..n].iter().position(|&b| b == b'\n') {
+                    frame.extend_from_slice(&chunk[..end]);
+                    return serde_json::from_slice(&frame).map_err(|e| e.to_string());
+                }
+                frame.extend_from_slice(&chunk[..n]);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(socket_io_error(e)),
+        }
+    }
+    Err("Socket closed before newline".into())
 }
 // Inspect sibling bridges with at most eight workers sharing a dynamic queue.
 // Return completed results in PID order within the provider's discovery budget;
@@ -610,6 +742,7 @@ pub fn endpoint_pid_walk(
 ) -> Vec<u32> {
     let mut found = Vec::new();
     let mut visited = std::collections::HashSet::new();
+    let boundary = discovery_root();
     for mut pid in roots {
         for _ in 0..=depth {
             if pid <= 1 || !visited.insert(pid) {
@@ -623,7 +756,7 @@ pub fn endpoint_pid_walk(
                 break;
             }
             found.push(pid);
-            if command.as_deref().is_some_and(&matches) {
+            if Some(pid) == boundary || command.as_deref().is_some_and(&matches) {
                 break;
             }
             let Some(parent) = process_parent(pid) else {
@@ -891,11 +1024,23 @@ fn same_user_process(pid: u32) -> bool {
     }
 }
 
+// A launcher may scope discovery to its own descendants. Use the same boundary
+// for process enumeration and ancestor walks so an enclosing harness cannot leak in.
+fn discovery_root() -> Option<u32> {
+    std::env::var("CITO_PROCESS_DISCOVERY_ROOT_PID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
 /// Same-user ancestry is bounded and stops when process inspection is unavailable.
 pub fn has_harness_ancestor(pid: u32, matches: impl Fn(u32, &str) -> bool) -> bool {
+    let root = discovery_root();
     let mut current = pid;
     for _ in 0..16 {
-        let Some(parent) = process_parent(current).filter(|p| *p > 1) else {
+        if Some(current) == root {
+            break;
+        }
+        let Some(parent) = process_parent(current).filter(|p| *p > 1 && Some(*p) != root) else {
             break;
         };
         if !same_user_process(parent) {
@@ -923,29 +1068,22 @@ pub fn endpoint_identity_changed(
         || (req["process_identity"].is_object() && req["process_identity"] != *current)
 }
 
-pub fn is_agent_harness(command: &str) -> bool {
-    let Some((program, script)) = process_entrypoint(command) else {
-        return false;
-    };
+pub fn agent_harness(command: &str) -> Option<&'static str> {
+    let (program, script) = process_entrypoint(command)?;
     let entry = script.unwrap_or(program);
-    let name = Path::new(entry)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    matches!(
-        name,
-        "pi" | "pi-coding-agent"
-            | "pi.js"
-            | "pi.mjs"
-            | "claude"
-            | "claude.js"
-            | "claude.mjs"
-            | "codex"
-            | "codex.js"
-            | "codex.mjs"
-    ) || (script.is_none() && desktop_command(entry))
-        || (entry.contains("/pi-coding-agent/") || entry.contains("/claude-code/"))
-            && matches!(name, "cli.js" | "cli.mjs")
+    let name = Path::new(entry).file_name()?.to_str()?;
+    match (script.is_some(), name) {
+        (_, "pi") | (false, "pi-coding-agent") | (true, "pi.js" | "pi.mjs") => Some("pi"),
+        (_, "claude") | (true, "claude.js" | "claude.mjs") => Some("claude"),
+        (_, "codex") | (true, "codex.js" | "codex.mjs") => Some("codex"),
+        (true, "cli.js" | "cli.mjs") if entry.contains("/pi-coding-agent/") => Some("pi"),
+        (true, "cli.js" | "cli.mjs") if entry.contains("/claude-code/") => Some("claude"),
+        (false, _) if desktop_command(entry) => Some("codex"),
+        _ => None,
+    }
+}
+pub fn is_agent_harness(command: &str) -> bool {
+    agent_harness(command).is_some()
 }
 
 /// Ignore inherited endpoint hints that cross a nearer harness boundary.
@@ -960,13 +1098,14 @@ pub fn enclosing_endpoint_pid_with(
     parent: u32,
     is_endpoint: impl Fn(u32) -> bool,
 ) -> u32 {
+    let root = discovery_root();
     let hint = hint.filter(|p| alive(*p) && same_user_process(*p));
     let mut current = parent;
     for _ in 0..16 {
         if Some(current) == hint {
             return current;
         }
-        if !same_user_process(current) {
+        if Some(current) == root || !same_user_process(current) {
             break;
         }
         if is_endpoint(current) {
@@ -1062,7 +1201,7 @@ pub fn process_command(pid: u32) -> Result<String> {
 /// Enumerate same-user processes without launching one subprocess per endpoint.
 pub fn user_processes() -> Result<Vec<u32>> {
     #[cfg(target_os = "macos")]
-    {
+    let mut pids = {
         // SAFETY: proc_listpids first reports capacity, then fills our bounded PID array.
         // libproc's PROC_ALL_PIDS is defined by sys/proc_info.h, absent from libc.
         const PROC_ALL_PIDS: u32 = 1;
@@ -1085,19 +1224,37 @@ pub fn user_processes() -> Result<Vec<u32>> {
         pids.truncate(count as usize / 4);
         let uid = unsafe { libc::geteuid() };
         pids.retain(|pid| *pid > 0 && process_info(*pid).is_ok_and(|info| info.pbi_uid == uid));
-        Ok(pids)
-    }
+        pids
+    };
     #[cfg(not(target_os = "macos"))]
-    {
+    let mut pids: Vec<u32> = {
         use std::os::unix::fs::MetadataExt;
         let uid = unsafe { libc::geteuid() };
-        Ok(std::fs::read_dir("/proc")
+        std::fs::read_dir("/proc")
             .map_err(|_| "Cannot enumerate endpoint processes")?
             .flatten()
             .filter(|entry| entry.metadata().is_ok_and(|m| m.uid() == uid))
             .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-            .collect())
+            .collect()
+    };
+    if let Some(root) = discovery_root() {
+        let parents: std::collections::HashMap<_, _> = pids
+            .iter()
+            .filter_map(|&p| Some((p, process_parent(p)?)))
+            .collect();
+        pids.retain(|p| {
+            let mut next = parents.get(p);
+            for _ in 0..16 {
+                let Some(parent) = next else { break };
+                if *parent == root {
+                    return true;
+                }
+                next = parents.get(parent);
+            }
+            false
+        });
     }
+    Ok(pids)
 }
 pub fn process_identity(pid: u32) -> Result<Value> {
     // The command detects a PID reused by another application; start time also binds
@@ -1108,6 +1265,16 @@ pub fn process_identity(pid: u32) -> Result<Value> {
         return Err("Endpoint process changed during inspection".into());
     }
     Ok(json!({"command":command,"started_at":started_at}))
+}
+/// A successful bridge exchange alone cannot establish that its PID still owns
+/// the endpoint. Preserve the distinction between a closed PID and a live one
+/// whose identity could not be sampled.
+pub fn probe_process_identity(p: u32) -> std::result::Result<Value, Value> {
+    process_identity(p).map_err(|_| if alive(p) {
+        json!({"ok":true,"status":"transient_error","reason":"Endpoint process identity is unavailable"})
+    } else {
+        json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process is closed"})
+    })
 }
 pub fn remember_process(mut caller: Value) -> Value {
     if let Some(pid) = caller["endpoint_pid"]
@@ -1466,7 +1633,9 @@ pub fn caller(
     };
     let cwd = fallback_cwd.as_deref().unwrap_or(cwd);
     let (repo, branch) = git_metadata(req, cwd);
-    json!({"harness":id,"session_id":sid,"cwd":cwd,"repo":repo,"branch":branch,"title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session")),"endpoint_pid":pid})
+    remember_process(
+        json!({"harness":id,"session_id":sid,"cwd":cwd,"repo":repo,"branch":branch,"title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session")),"endpoint_pid":pid}),
+    )
 }
 pub fn alive(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {

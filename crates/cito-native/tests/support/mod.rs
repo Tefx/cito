@@ -238,6 +238,10 @@ impl Fixture {
             ("USER", "alice".into()),
             ("CITO_USER", "alice".into()),
             ("CITO_HOST_NAME", "mac-studio".into()),
+            (
+                "CITO_PROCESS_DISCOVERY_ROOT_PID",
+                std::process::id().to_string(),
+            ),
             ("CITO_PI_PROCESS_DISCOVERY", "0".into()),
             ("CITO_PI_ALLOW_HEADLESS_DISCOVERY", "1".into()),
             ("CITO_DISABLE_UI", "1".into()),

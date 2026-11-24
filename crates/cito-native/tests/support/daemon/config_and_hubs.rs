@@ -544,15 +544,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     assert_eq!(status, 400);
     assert!(error["error"].as_str().unwrap().contains("own shared Hub"));
     assert_eq!(fs::read(&f.config).unwrap(), committed);
-    let hostname = f.env["CITO_HOST_NAME"].clone();
-    for host in [
-        "127.0.0.1",
-        "127.0.0.2",
-        "localhost",
-        "[::1]",
-        &hostname,
-        &format!("{}.local", hostname.trim_end_matches(".local")),
-    ] {
+    for host in ["127.0.0.1", "localhost"] {
         let invite =
             json!({"name":"self-invite","url":format!("http://{host}:{port}"),"auth_mode":"none"});
         let (status, error) =
@@ -583,6 +575,10 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     let landing = root.into_string().unwrap();
     assert!(landing.contains("On another Mac"));
     assert!(landing.contains("Join from Clipboard"));
+    // Other addresses on the same port do not reach the IPv4 loopback listener.
+    for (name, host) in [("ipv6", "[::1]"), ("other-interface", "127.0.0.2")] {
+        f.action_ok(json!({"op":"setup_save_hub","name":name,"url":format!("http://{host}:{port}"),"auth_mode":"none"}));
+    }
     // The same host on another port remains a valid remote Hub.
     let different = if port == 65535 { port - 1 } else { port + 1 };
     let invite = json!({"name":"different-port","url":format!("http://127.0.0.1:{different}"),"auth_mode":"none"});

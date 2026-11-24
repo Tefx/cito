@@ -1,7 +1,7 @@
 use super::{
     auth::principal_ids_equal,
     database::{Connection, Database},
-    identity::{hash, normalize_slug, string},
+    identity::{canonical_node_id, hash, normalize_slug, public_listener_id, string},
 };
 use crate::plugins::now_ms;
 use serde_json::{json, Value};
@@ -55,10 +55,14 @@ impl LocalState {
             .first()
             .and_then(|v| v["user_version"].as_i64())
             .unwrap_or(0);
-        if current != 7 {
+        let has_process_identity =
+            |columns: &[Value]| columns.iter().any(|r| r["name"] == "process_identity");
+        if current != 7
+            || !has_process_identity(&db.query("PRAGMA table_info(local_listeners)", &[])?)
+        {
             db.transaction(|c| {
             let version=c.query("PRAGMA user_version",&[])?.first().and_then(|v|v["user_version"].as_i64()).unwrap_or(0);
-            if version == 7 { return Ok(()); }
+            if version == 7 && has_process_identity(&c.query("PRAGMA table_info(local_listeners)", &[])?) { return Ok(()); }
             if version>7 { return Err(format!("Unsupported state schema version {version}")); }
             if version < 4 {
                 c.execute("DROP TABLE IF EXISTS local_pairwise_wakes; DROP TABLE IF EXISTS local_signals; DROP TABLE IF EXISTS local_listeners; DROP TABLE IF EXISTS local_sent_idempotency; DROP TABLE IF EXISTS pending_hub_acks; DROP TABLE IF EXISTS pending_hub_detaches; DROP TABLE IF EXISTS wake_retries; DROP TABLE IF EXISTS daemon_owner;", &[])?;
@@ -129,6 +133,7 @@ impl LocalState {
             for (name, definition) in [
                 ("listen_mode", "TEXT NOT NULL DEFAULT 'manual' CHECK(listen_mode IN ('manual','auto'))"),
                 ("user_stopped", "INTEGER NOT NULL DEFAULT 0"),
+                ("process_identity", "TEXT"),
                 ("retirement_reason", "TEXT"),
                 // TEXT preserves all u64 revisions, including values above SQLite's signed range.
                 ("retired_activity_revision", "TEXT"),
@@ -194,15 +199,20 @@ impl LocalState {
         Ok(())
     }
     pub fn custom_title(&self, harness: &str, session: &str) -> Result<Option<String>, String> {
-        Ok(self
-            .db
-            .query(
-                "SELECT title FROM session_custom_titles WHERE harness=? AND session_id=?",
-                &[json!(harness), json!(session)],
-            )?
-            .first()
-            .and_then(|row| row["title"].as_str())
-            .map(str::to_owned))
+        self.db.read(|c| Self::custom_title_on(c, harness, session))
+    }
+    pub(super) fn custom_title_on(
+        c: &Connection,
+        harness: &str,
+        session: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(c.query(
+            "SELECT title FROM session_custom_titles WHERE harness=? AND session_id=?",
+            &[json!(harness), json!(session)],
+        )?
+        .first()
+        .and_then(|row| row["title"].as_str())
+        .map(str::to_owned))
     }
     pub fn set_custom_title(
         &self,
@@ -211,25 +221,46 @@ impl LocalState {
         title: &str,
     ) -> Result<(), String> {
         super::registration::validate_title(title)?;
-        self.db.transaction(|c| {
-            c.execute("INSERT INTO session_custom_titles(harness,session_id,title) VALUES(?,?,?) ON CONFLICT(harness,session_id) DO UPDATE SET title=excluded.title", &[json!(harness),json!(session),json!(title)])?;
-            c.execute("UPDATE local_listeners SET title=? WHERE harness=? AND session_id=?", &[json!(title),json!(harness),json!(session)])?;
-            Ok(())
-        })
+        self.db
+            .transaction(|c| Self::write_custom_title(c, harness, session, title))
+    }
+    pub(super) fn write_custom_title(
+        c: &Connection,
+        harness: &str,
+        session: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        c.execute("INSERT INTO session_custom_titles(harness,session_id,title) VALUES(?,?,?) ON CONFLICT(harness,session_id) DO UPDATE SET title=excluded.title", &[json!(harness),json!(session),json!(title)])?;
+        c.execute(
+            "UPDATE local_listeners SET title=? WHERE harness=? AND session_id=?",
+            &[json!(title), json!(harness), json!(session)],
+        )?;
+        Ok(())
+    }
+    fn decode_listener(mut row: Value) -> Result<Value, String> {
+        if let Some(encoded) = row["process_identity"].as_str() {
+            row["process_identity"] = serde_json::from_str(encoded)
+                .map_err(|e| format!("Invalid persisted process identity: {e}"))?;
+        }
+        Ok(row)
     }
     pub fn listener(&self, hub: &str, id: &str) -> Result<Option<Value>, String> {
-        Ok(self
-            .db
+        self.db
             .query(
                 "SELECT * FROM local_listeners WHERE hub=? AND listener_id=?",
                 &[json!(hub), json!(id)],
             )?
             .into_iter()
-            .next())
+            .next()
+            .map(Self::decode_listener)
+            .transpose()
     }
     pub fn active(&self) -> Result<Vec<Value>, String> {
         self.db
-            .query("SELECT * FROM local_listeners WHERE status='ACTIVE'", &[])
+            .query("SELECT * FROM local_listeners WHERE status='ACTIVE'", &[])?
+            .into_iter()
+            .map(Self::decode_listener)
+            .collect()
     }
     /// Convert the Hub's remaining lifetime once; all local queues and badge
     /// expiry queries then use this local deadline without client clock skew.
@@ -254,7 +285,6 @@ impl LocalState {
         self.db.transaction(|c| {
             let current = current_listener(c, hub, string(listener, "listener_id"))?;
             check_listener(&current, listener)?;
-            c.execute("UPDATE local_listeners SET persisted_seq=MAX(persisted_seq,?) WHERE hub=? AND listener_id=?", &[json!(seq), json!(hub), listener["listener_id"].clone()])?;
             let previous = c.query("SELECT * FROM local_signals WHERE hub=? AND signal_id=?", &[json!(hub), signal["signal_id"].clone()])?;
             if previous.is_empty() && current["scope"] != "workspace"
                 && !principal_ids_equal(string(&signal["from"], "principal_id"), string(&current, "principal_id")) {
@@ -577,10 +607,6 @@ impl LocalState {
         }))?;
         Ok(rows)
     }
-    pub fn activity(&self) -> Result<(Vec<Value>, u64), String> {
-        let (rows, _, unread) = self.query_activity("all", "")?;
-        Ok((rows, unread))
-    }
     /// Count visible current history without loading message payloads.
     pub fn activity_counts(&self) -> Result<(u64, u64), String> {
         let rows = self.db.query("SELECT s.principal_id AS source,l.principal_id AS target,count(*) AS total,sum(s.acknowledged_at_ms IS NULL) AS unread FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND l.status!='FENCED_INACTIVE' AND l.hub_url!='' AND s.hub_url=l.hub_url GROUP BY s.principal_id,l.principal_id", &[])?;
@@ -791,26 +817,10 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
     };
     let title = string(signal, "from_title").trim();
     // Match the baseline public-ID title suppression, including legacy base32 IDs.
-    let slug = raw_id
-        .rsplit_once(':')
-        .map(|(_, id)| id)
-        .unwrap_or(raw_id)
-        .rsplit_once('-')
-        .filter(|(slug, suffix)| {
-            !slug.is_empty()
-                && slug.split('-').all(|p| {
-                    !p.is_empty()
-                        && p.bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-                })
-                && (suffix.len() == 16 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
-                    || suffix.len() == 12
-                        && suffix
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)))
-        })
-        .map(|(slug, _)| slug);
-    let title_part = if !title.is_empty() && slug != Some(normalize_slug(title).as_str()) {
+    let id = raw_id.rsplit(':').next().unwrap_or(raw_id);
+    let redundant =
+        canonical_node_id(id).is_ok_and(|canonical| public_listener_id(title, &canonical) == id);
+    let title_part = if !title.is_empty() && !redundant {
         format!(" · {}", escape_card(title))
     } else {
         String::new()

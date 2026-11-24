@@ -1,8 +1,8 @@
 //! One persisted HubEngine for embedded and standalone HTTP deployments.
-use super::auth::{env_value, local_principal, principal_ids_equal, principal_matches, HubAuth};
+use super::auth::{env_value, principal_ids_equal, principal_matches, HubAuth};
 use super::database::{Connection, Database};
-use super::hub_plugins::{self, ChannelPlugin, ChannelProcess};
-use super::identity::{alternate_oidc_principal, hash, listener_id};
+use super::hub_plugins::{self, ChannelPlugin, ChannelProcess, CHANNEL_RETRY_DELAY};
+use super::identity::{alternate_oidc_principal, hash, listener_id, principal};
 use super::lease::evaluate_node_lease;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
@@ -21,6 +21,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SIGNALS: &str = "CITO_SIGNALS";
+const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RPC_BYTES: usize = 8 * 1024 * 1024;
+// Includes the RPC envelope and fixed snapshot fields; the cursor is counted separately.
+const PAGE_OVERHEAD: usize = 128;
 const KV_STREAM: &str = "KV_cito_listeners";
 const KV_SELECT: &str =
     "SELECT key,revision,created_ms,CAST(value AS TEXT) AS value,hex(value) AS value_hex,principal_id,scope FROM hub_kv";
@@ -28,15 +32,15 @@ const SIGNAL_SELECT: &str = "SELECT seq,subject,signal_id,created_ms,CAST(data A
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS hub_meta(key TEXT PRIMARY KEY,int_val INTEGER NOT NULL DEFAULT 0,json_val TEXT);
 CREATE TABLE IF NOT EXISTS hub_kv(key TEXT PRIMARY KEY,revision INTEGER NOT NULL,created_ms INTEGER NOT NULL,value BLOB NOT NULL,principal_id TEXT,scope TEXT);
-CREATE TABLE IF NOT EXISTS hub_signals(seq INTEGER PRIMARY KEY AUTOINCREMENT,subject TEXT NOT NULL,msg_id TEXT UNIQUE,signal_id TEXT,created_ms INTEGER NOT NULL,data BLOB NOT NULL,acked INTEGER NOT NULL DEFAULT 0,claimed_by_channel TEXT,claim_until_ms INTEGER,acked_at_ms INTEGER);
+CREATE TABLE IF NOT EXISTS hub_signals(seq INTEGER PRIMARY KEY AUTOINCREMENT,subject TEXT NOT NULL,msg_id TEXT UNIQUE,signal_id TEXT,created_ms INTEGER NOT NULL,data BLOB NOT NULL,claimed_by_channel TEXT,claim_until_ms INTEGER,acked_at_ms INTEGER);
 CREATE TABLE IF NOT EXISTS hub_plugin_services(plugin_id TEXT PRIMARY KEY,config_json TEXT NOT NULL DEFAULT '{}',service_state_json TEXT NOT NULL DEFAULT '{}',updated_ms INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS hub_human_channels(principal_id TEXT NOT NULL,plugin_id TEXT NOT NULL,owner_user TEXT NOT NULL DEFAULT 'local',enabled INTEGER NOT NULL DEFAULT 1,user_config_json TEXT NOT NULL DEFAULT '{}',display_label TEXT,last_delivered_seq INTEGER NOT NULL DEFAULT 0,updated_ms INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(principal_id,plugin_id));
-CREATE TABLE IF NOT EXISTS hub_channel_deliveries(plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,signal_id TEXT NOT NULL,seq INTEGER NOT NULL,status TEXT NOT NULL,external_msg_id TEXT,from_listener_id TEXT,from_user TEXT,from_title TEXT,delivered_ms INTEGER NOT NULL,PRIMARY KEY(plugin_id,principal_id,signal_id));
+CREATE TABLE IF NOT EXISTS hub_channel_deliveries(plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,signal_id TEXT NOT NULL,seq INTEGER NOT NULL,status TEXT NOT NULL,external_msg_id TEXT,from_listener_id TEXT,delivered_ms INTEGER NOT NULL,PRIMARY KEY(plugin_id,principal_id,signal_id));
 CREATE TABLE IF NOT EXISTS hub_pairing_codes(code TEXT PRIMARY KEY,plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,owner_user TEXT NOT NULL,instruction TEXT,created_ms INTEGER NOT NULL,expires_ms INTEGER NOT NULL,consumed_ms INTEGER);
 CREATE TABLE IF NOT EXISTS hub_audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT,ts_ms INTEGER NOT NULL,principal_id TEXT NOT NULL,action TEXT NOT NULL,target_id TEXT NOT NULL,detail_json TEXT);
 CREATE TABLE IF NOT EXISTS hub_channel_delivery_msgs(plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,external_msg_id TEXT NOT NULL,signal_id TEXT NOT NULL,from_listener_id TEXT NOT NULL,PRIMARY KEY(plugin_id,principal_id,external_msg_id));
 CREATE TABLE IF NOT EXISTS hub_processed_replies(plugin_id TEXT NOT NULL,update_id TEXT NOT NULL,processed_at_ms INTEGER NOT NULL,PRIMARY KEY(plugin_id,update_id));
-CREATE TABLE IF NOT EXISTS hub_consumers(name TEXT PRIMARY KEY,stream TEXT NOT NULL,filter_subject TEXT,start_seq INTEGER NOT NULL,cursor_seq INTEGER NOT NULL,last_acked_seq INTEGER NOT NULL DEFAULT 0,principal_id TEXT);
+CREATE TABLE IF NOT EXISTS hub_consumers(name TEXT PRIMARY KEY,stream TEXT NOT NULL,filter_subject TEXT,start_seq INTEGER NOT NULL,cursor_seq INTEGER NOT NULL,principal_id TEXT);
 CREATE TABLE IF NOT EXISTS hub_consumer_acks(name TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(name,seq));
 ";
 
@@ -137,12 +141,7 @@ fn encoded(v: &Value) -> String {
     B64.encode(v.to_string())
 }
 fn random_id(prefix: &str) -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|e| format!("CSPRNG unavailable: {e}"))?;
-    Ok(format!(
-        "{prefix}{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ))
+    Ok(format!("{prefix}{}", crate::support::try_random_hex(16)?))
 }
 fn encode_pair_token(bytes: [u8; 6]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -193,9 +192,36 @@ fn check_subject(subject: &str, wildcard: bool) -> Result<(), String> {
     Ok(())
 }
 fn kv_wire(row: &Value) -> Result<Value, String> {
-    Ok(
-        json!({"key":row["key"],"revision":row["revision"],"created_ms":row["created_ms"],"value_b64":B64.encode(stored_bytes(row,"value")?),"operation":"PUT"}),
-    )
+    Ok(kv_entry(
+        s(row, "key"),
+        n(row, "revision"),
+        n(row, "created_ms"),
+        &stored_bytes(row, "value")?,
+    ))
+}
+fn kv_entry(key: &str, revision: i64, now: i64, raw: &[u8]) -> Value {
+    json!({"key":key,"revision":revision,"created_ms":now,"value_b64":B64.encode(raw),"operation":"PUT"})
+}
+fn write_kv(
+    c: &Connection,
+    key: &str,
+    now: i64,
+    raw: &[u8],
+    owner: &Value,
+    scope: &Value,
+) -> Result<Value, String> {
+    let revision = next_revision(c)?;
+    let mut entry = kv_entry(key, revision, now, raw);
+    if PAGE_OVERHEAD + entry.to_string().len() + 1 + entry["key"].to_string().len()
+        > MAX_SNAPSHOT_BYTES
+    {
+        return Err("INVALID_INPUT: Registration exceeds snapshot page budget".into());
+    }
+    c.execute(&format!("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,?,?,{},?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,created_ms=excluded.created_ms,value=excluded.value,principal_id=excluded.principal_id,scope=excluded.scope",blob_literal(raw)),&[json!(key),json!(revision),json!(now),owner.clone(),json!(scope.as_str())])?;
+    entry["type"] = json!("kv");
+    entry["principal_id"] = owner.clone();
+    entry["scope"] = scope.clone();
+    Ok(entry)
 }
 fn signal_wire(row: &Value) -> Result<Value, String> {
     Ok(
@@ -473,7 +499,7 @@ impl HubEngine {
                 .tick()
                 .map_err(|err| eprintln!("cito hub: {err}"))
                 .is_err();
-            let delay = e.worker_delay().unwrap_or(Duration::from_secs(5));
+            let delay = e.worker_delay().unwrap_or(CHANNEL_RETRY_DELAY);
             #[cfg(test)]
             if failed {
                 if let Some(hook) = e.inner.before_worker_wait.lock().unwrap().take() {
@@ -488,11 +514,7 @@ impl HubEngine {
             // do not advance this generation, so persistent failures still back off.
             let _ = changed.1.wait_timeout_while(
                 version,
-                if failed {
-                    Duration::from_secs(5)
-                } else {
-                    delay
-                },
+                if failed { CHANNEL_RETRY_DELAY } else { delay },
                 |v| *v == observed && !e.inner.closed.load(Ordering::SeqCst),
             );
         });
@@ -656,6 +678,17 @@ impl HubEngine {
         events: &mut Vec<Value>,
     ) -> Result<(Value, Option<Value>), String> {
         maintain(c)?;
+        if matches!(
+            op,
+            "consumer_add"
+                | "consumer_next"
+                | "consumer_backlog"
+                | "consumer_ack"
+                | "consumer_delete"
+        ) && p.get("stream").is_some_and(|stream| stream != SIGNALS)
+        {
+            return Err("INVALID_INPUT: Unsupported consumer stream".into());
+        }
         let result = match op {
             "human_device_attach"
             | "human_device_heartbeat"
@@ -709,15 +742,21 @@ impl HubEngine {
                         .ok_or("INVALID_INPUT: seqs must contain 1..128 sequence numbers")?;
                     let placeholders = vec!["?"; seqs.len()].join(",");
                     let mut messages = Vec::new();
-                    for row in c.query(
-                        &format!("{SIGNAL_SELECT} WHERE seq IN ({placeholders})"),
-                        seqs,
-                    )? {
+                    let mut bytes = PAGE_OVERHEAD;
+                    c.query_while(
+                        &format!("SELECT seq,subject,signal_id,acked_at_ms,CAST(data AS TEXT) AS data FROM hub_signals WHERE seq IN ({placeholders}) ORDER BY seq"),
+                        seqs, |row| {
                         if !signal_readable(c, &row, caller)? {
                             return Err("FORBIDDEN: signal is private".into());
                         }
-                        messages.push(json!({"seq":row["seq"],"signal_id":row["signal_id"],"acked_at_ms":row["acked_at_ms"]}));
-                    }
+                        let receipt = json!({"seq":row["seq"],"signal_id":row["signal_id"],"acked_at_ms":row["acked_at_ms"]});
+                        bytes += receipt.to_string().len() + 1;
+                        if bytes > MAX_RPC_BYTES {
+                            return Err("INVALID_INPUT: Receipt batch exceeds response budget; request fewer sequences".into());
+                        }
+                        messages.push(receipt);
+                        Ok(true)
+                    })?;
                     return Ok((json!({"messages":messages}), None));
                 }
                 let row = one(
@@ -736,6 +775,9 @@ impl HubEngine {
                     &[p["seq"].clone()]
                 )?
                 .is_some());
+                if PAGE_OVERHEAD + result.to_string().len() > MAX_RPC_BYTES {
+                    return Err("INVALID_INPUT: Signal exceeds response frame budget".into());
+                }
                 Ok(result)
             }
             "kv_get" => {
@@ -751,22 +793,41 @@ impl HubEngine {
                 Ok(wire)
             }
             "kv_keys" | "kv_snapshot" => {
-                let sql = format!("{KV_SELECT} WHERE key>? ORDER BY key");
+                let limit = p["limit"]
+                    .as_u64()
+                    .unwrap_or(if op == "kv_keys" { 1024 } else { 256 })
+                    .clamp(1, 1024) as usize;
                 let params = [json!(s(p, "after_key"))];
                 if op == "kv_keys" {
                     let mut keys = Vec::new();
-                    c.query_while(&sql, &params, |row| {
-                        if visible(&row, caller) && matches(s(&row, "key"), s(p, "key")) {
-                            keys.push(row["key"].clone());
-                        }
-                        Ok(true)
-                    })?;
-                    Ok(json!({"keys":keys}))
+                    let mut bytes = PAGE_OVERHEAD;
+                    let mut cursor = None;
+                    c.query_while(
+                        "SELECT key,principal_id,scope FROM hub_kv WHERE key>? ORDER BY key",
+                        &params,
+                        |row| {
+                            if visible(&row, caller) && matches(s(&row, "key"), s(p, "key")) {
+                                let key = &row["key"];
+                                let size = key.to_string().len();
+                                if keys.len() == limit || bytes + size * 2 + 1 > MAX_RPC_BYTES {
+                                    cursor = Some(
+                                        keys.last()
+                                            .cloned()
+                                            .ok_or("INVALID_INPUT: Key exceeds response budget")?,
+                                    );
+                                    return Ok(false);
+                                }
+                                bytes += size + 1;
+                                keys.push(key.clone());
+                            }
+                            Ok(true)
+                        },
+                    )?;
+                    Ok(json!({"keys":keys,"next_cursor":cursor}))
                 } else {
-                    const PAGE_BYTES: usize = 2 * 1024 * 1024;
-                    let limit = p["limit"].as_u64().unwrap_or(256).clamp(1, 1024) as usize;
+                    let sql = format!("{KV_SELECT} WHERE key>? ORDER BY key");
                     let mut rows = Vec::new();
-                    let mut bytes = 128;
+                    let mut bytes = PAGE_OVERHEAD;
                     let mut more = false;
                     c.query_while(&sql, &params, |row| {
                         if !visible(&row, caller) || !matches(s(&row, "key"), s(p, "key")) {
@@ -777,7 +838,7 @@ impl HubEngine {
                             .len()
                             + 1;
                         if rows.len() >= limit
-                            || bytes + size + row["key"].to_string().len() > PAGE_BYTES
+                            || bytes + size + row["key"].to_string().len() > MAX_SNAPSHOT_BYTES
                         {
                             more = true;
                             return Ok(false);
@@ -789,11 +850,11 @@ impl HubEngine {
                     // Reconciliation may write hub_kv. The SELECT cursor must be
                     // dropped before any connection re-entry or mutation.
                     let mut entries = Vec::new();
-                    bytes = 128;
+                    bytes = PAGE_OVERHEAD;
                     for row in rows {
                         let wire = kv_wire(&reconcile_human_row(c, row, events)?)?;
                         let size = serde_json::to_vec(&wire).map_err(|e| e.to_string())?.len() + 1;
-                        if bytes + size + wire["key"].to_string().len() > PAGE_BYTES {
+                        if bytes + size + wire["key"].to_string().len() > MAX_SNAPSHOT_BYTES {
                             more = true;
                             break;
                         }
@@ -877,7 +938,6 @@ impl HubEngine {
                         return Err("PERMISSIONS_VIOLATION: registration principal mismatch".into());
                     }
                 }
-                let revision = next_revision(c)?;
                 let now = now_ms();
                 // Only changed attachments renew. Unmodified siblings retain their leases.
                 let previous = existing
@@ -911,11 +971,13 @@ impl HubEngine {
                         .or_else(|| caller.and_then(|p| p["principal_id"].as_str()))
                         .map(str::to_owned)
                 };
-                if op == "kv_delete" {
+                let event = if op == "kv_delete" {
+                    let revision = next_revision(c)?;
                     c.execute("DELETE FROM hub_kv WHERE key=?", &[json!(key)])?;
+                    json!({"type":"kv","key":key,"revision":revision,"created_ms":now,"value_b64":"","operation":"DEL","principal_id":owner,"scope":existing.as_ref().map(|r| &r["scope"])})
                 } else {
-                    c.execute(&format!("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,?,?,{},?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,created_ms=excluded.created_ms,value=excluded.value,principal_id=excluded.principal_id,scope=excluded.scope",blob_literal(&raw)),&[json!(key),json!(revision),json!(now),json!(owner),json!(data["scope"].as_str())])?;
-                }
+                    write_kv(c, key, now, &raw, &json!(owner), &data["scope"])?
+                };
                 audit(
                     c,
                     principal_id(caller),
@@ -927,7 +989,8 @@ impl HubEngine {
                     key,
                     &data,
                 )?;
-                events.push(json!({"type":"kv","key":key,"revision":revision,"created_ms":now,"value_b64":B64.encode(&raw),"operation":if op=="kv_delete"{"DEL"}else{"PUT"},"principal_id":owner,"scope":if op=="kv_delete"{existing.as_ref().map(|r|r["scope"].clone()).unwrap_or(Value::Null)}else{data["scope"].clone()}}));
+                let revision = event["revision"].clone();
+                events.push(event);
                 if previous["scope"] == "workspace" && data["scope"] == "self" {
                     events.push(json!({"type":"kv"}));
                 }
@@ -996,7 +1059,7 @@ impl HubEngine {
                 }
                 if let Some(row) = one(
                     c,
-                    "SELECT principal_id FROM hub_consumers WHERE name=?",
+                    "SELECT principal_id,stream FROM hub_consumers WHERE name=?",
                     &[json!(name)],
                 )? {
                     consumer_owner(&row, caller)?;
@@ -1006,7 +1069,7 @@ impl HubEngine {
                 } else {
                     1
                 };
-                let stream = p["stream"].as_str().unwrap_or(SIGNALS);
+                let stream = SIGNALS;
                 c.execute("INSERT INTO hub_consumers(name,stream,filter_subject,start_seq,cursor_seq,principal_id) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET stream=excluded.stream,filter_subject=excluded.filter_subject,start_seq=excluded.start_seq,cursor_seq=excluded.cursor_seq",&[json!(name),json!(stream),json!(filter),json!(start),json!(start),caller.map(|p|p["principal_id"].clone()).unwrap_or(Value::Null)])?;
                 let row = consumer(c, &name, caller)?;
                 let backlog = backlog_from(c, &row, caller, n(&row, "start_seq"))?;
@@ -1070,13 +1133,18 @@ impl HubEngine {
                     if inserted > 0 {
                         events.push(json!({"type":"receipt","seq":p["seq"]}));
                     }
-                    c.execute("UPDATE hub_consumers SET last_acked_seq=MAX(last_acked_seq,?) WHERE name=?",&[p["seq"].clone(),json!(name)])?;
                     Ok(json!({"acked":true}))
                 }
             }
             "send_reply_from_human" => {
                 let sender = caller.ok_or("FORBIDDEN: Human identity required")?;
-                return publish_human_reply(c, sender, "human", p, events);
+                let mut request = p.clone();
+                for key in ["in_reply_to", "signal_id"] {
+                    if let Some((_, raw)) = s(p, key).split_once(':') {
+                        request[key] = json!(raw);
+                    }
+                }
+                return publish_human_reply(c, sender, "human", &request, events);
             }
             "signal_claim_dispatch" => claim(c, p, caller),
             "signal_ack" => ack(c, p, caller, events),
@@ -1237,29 +1305,40 @@ impl HubEngine {
         }
     }
     fn set_poll_error(&self, id: &str, error: Option<&str>) -> Result<(), String> {
-        self.inner.db.diagnostic_transaction(|c| {
-            let (cfg, mut state) = service(c, id)?;
-            save_service(c, id, &cfg)?;
-            let previous = state.to_string();
-            if let Some(error) = error {
-                state["poll_error"] = json!(error);
-            } else if let Some(state) = state.as_object_mut() {
-                state.remove("poll_error");
-            }
-            let serialized = state.to_string();
-            if serialized != previous {
-                c.execute(
-                    "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
-                    &[json!(serialized), json!(id)],
-                )?;
-            }
-            Ok(())
-        })
+        self.inner
+            .db
+            .diagnostic_transaction(|c| Self::persist_poll_error(c, id, error))
+    }
+    fn persist_poll_error(c: &Connection, id: &str, error: Option<&str>) -> Result<(), String> {
+        let (cfg, mut state) = service(c, id)?;
+        save_service(c, id, &cfg)?;
+        let previous = state.to_string();
+        if let Some(error) = error {
+            state["poll_error"] = json!(error);
+        } else if let Some(state) = state.as_object_mut() {
+            state.remove("poll_error");
+            state.remove("process_retry_at_ms");
+        }
+        let serialized = state.to_string();
+        if serialized != previous {
+            c.execute(
+                "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
+                &[json!(serialized), json!(id)],
+            )?;
+        }
+        Ok(())
     }
     fn configure_process(&self, id: &str, process: &ChannelProcess) -> Result<(), String> {
         let frame=self.inner.db.transaction(|c|{let(cfg,state)=service(c,id)?;let bindings=c.query("SELECT principal_id,owner_user,user_config_json FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?.iter().map(|b|json!({"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(b,"user_config_json")})).collect::<Vec<_>>();Ok(json!({"op":"configure","hub_config":cfg,"bindings":bindings,"cursor":state["cursor"]}))})?;
         process.send(&frame)?;
-        self.set_poll_error(id, None)
+        self.inner.db.diagnostic_transaction(|c| {
+            // Serialize with the reader's terminal health update. An exit after this
+            // check is recorded after this transaction releases the database.
+            if !process.alive() {
+                return Err("PLUGIN_EXEC_FAILED: Plugin subprocess exited".into());
+            }
+            Self::persist_poll_error(c, id, None)
+        })
     }
     fn human_rpc(&self, op: &str, p: &Value, caller: Option<&Value>) -> Result<Value, String> {
         if !p.is_object() {
@@ -1270,7 +1349,7 @@ impl HubEngine {
             patch["cancel_pair"] = json!(true);
             return self.human_rpc("human_channels_configure", &patch, caller);
         }
-        let local = local_principal(
+        let local = principal(
             &env_value("CITO_USER")
                 .or_else(|| env_value("USER"))
                 .unwrap_or_else(|| "local".into()),
@@ -1512,10 +1591,10 @@ impl HubEngine {
         }
         self.inner.db.transaction(|c| {
             let (_, mut state) = service(c, id)?;
-            if state
-                .as_object_mut()
-                .is_some_and(|fields| fields.remove("poll_error").is_some())
-            {
+            if state.as_object_mut().is_some_and(|fields| {
+                fields.remove("process_retry_at_ms");
+                fields.remove("poll_error").is_some()
+            }) {
                 c.execute(
                     "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
                     &[json!(state.to_string()), json!(id)],
@@ -1533,7 +1612,7 @@ impl HubEngine {
             .clone();
         let is_admin = admin(Some(caller)).is_ok();
         self.inner.db.transaction(|c| {
-            let inbox_paused = find_human(c,caller)?.and_then(|id| kv_row(c,&id).ok().flatten()).is_some_and(|row| parse(&row,"value")["human_paused"] == true);
+            let inbox_paused = find_human(c,caller)?.1.is_some_and(|reg| reg["human_paused"] == true);
             let mut channels=Vec::new();
             let pid = s(caller,"principal_id");
             for plugin in plugins {
@@ -1622,9 +1701,16 @@ impl HubEngine {
             .clone();
         let mut first_error = None;
         for plugin in plugins {
-            let should_run=self.inner.db.transaction(|c|{let(cfg,_)=service(c,&plugin.id)?;let bound=one(c,"SELECT 1 AS n FROM hub_human_channels WHERE plugin_id=? AND enabled=1 LIMIT 1",&[json!(plugin.id)])?.is_some();let pairing=one(c,"SELECT 1 AS n FROM hub_pairing_codes WHERE plugin_id=? AND consumed_ms IS NULL AND expires_ms>? LIMIT 1",&[json!(plugin.id),json!(now_ms())])?.is_some();Ok(ready(&plugin,&cfg,"hub")&&(cfg.as_object().is_some_and(|m|m.values().any(configured))||bound||pairing))})?;
+            let (should_run,retry_at)=self.inner.db.transaction(|c|{let(cfg,state)=service(c,&plugin.id)?;let bound=one(c,"SELECT 1 AS n FROM hub_human_channels WHERE plugin_id=? AND enabled=1 LIMIT 1",&[json!(plugin.id)])?.is_some();let pairing=one(c,"SELECT 1 AS n FROM hub_pairing_codes WHERE plugin_id=? AND consumed_ms IS NULL AND expires_ms>? LIMIT 1",&[json!(plugin.id),json!(now_ms())])?.is_some();Ok((ready(&plugin,&cfg,"hub")&&(cfg.as_object().is_some_and(|m|m.values().any(configured))||bound||pairing),n(&state,"process_retry_at_ms")))})?;
             if !should_run {
                 self.stop_process(&plugin.id)?;
+                continue;
+            }
+            if (1..=CHANNEL_RETRY_DELAY.as_millis() as i64)
+                .contains(&retry_at.saturating_sub(now_ms()))
+            {
+                first_error
+                    .get_or_insert_with(|| "Plugin subprocess exited; waiting to restart".into());
                 continue;
             }
             if let Err(error) = self
@@ -1655,7 +1741,7 @@ impl HubEngine {
         Ok(())
     }
     fn reserve_deliveries(&self, plugin: &ChannelPlugin) -> Result<Vec<Value>, String> {
-        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();let in_flight=one(c,"SELECT COUNT(*) AS count FROM hub_channel_deliveries WHERE plugin_id=? AND status='in_flight' AND delivered_ms>?",&[json!(plugin.id),json!(now_ms()-60_000)])?.map(|row|n(&row,"count")).unwrap_or(0);let capacity=32usize.saturating_sub(in_flight.max(0) as usize);for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND signal_id<>'' AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{if sends.len() >= capacity { break; }let id=s(&row,"signal_id");let data=parse(&row,"data");let token=random_id("delivery_")?;let reserved_ms=now_ms();c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(reserved_ms),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","claim_until_ms":reserved_ms+60_000,"already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
+        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();let in_flight=one(c,"SELECT COUNT(*) AS count FROM hub_channel_deliveries WHERE plugin_id=? AND status='in_flight' AND delivered_ms>?",&[json!(plugin.id),json!(now_ms()-60_000)])?.map(|row|n(&row,"count")).unwrap_or(0);let capacity=32usize.saturating_sub(in_flight.max(0) as usize);for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let (node,reg)=find_human(c,&b)?;if let Some(reg) = reg { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND signal_id<>'' AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{if sends.len() >= capacity { break; }let id=s(&row,"signal_id");let data=parse(&row,"data");let token=random_id("delivery_")?;let reserved_ms=now_ms();c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),json!(reserved_ms),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","claim_until_ms":reserved_ms+60_000,"already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
@@ -1668,7 +1754,17 @@ impl HubEngine {
                 c.execute("DELETE FROM hub_processed_replies WHERE plugin_id=? AND update_id!='' AND update_id NOT GLOB '*[^0-9]*' AND CAST(update_id AS INTEGER)<?",&[json!(id),json!(floor)])?;
             } else { state["cursor"]=frame["cursor"].clone(); }
             c.execute("UPDATE hub_plugin_services SET service_state_json=?,updated_ms=? WHERE plugin_id=?",&[json!(state.to_string()),json!(now_ms()),json!(id)])?;Ok(Value::Null)}),
-        "health"=>self.inner.db.transaction(|c|{let(_,mut state)=service(c,id)?;state["poll_error"]=frame["error"].clone();c.execute("UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",&[json!(state.to_string()),json!(id)])?;Ok(Value::Null)}),
+        "health" | "process_exit" => self.inner.db.diagnostic_transaction(|c| {
+            let (cfg,mut state)=service(c,id)?;
+            save_service(c,id,&cfg)?;
+            if frame["op"] == "process_exit" {
+                let retry = n(frame,"retry_ms").clamp(0,CHANNEL_RETRY_DELAY.as_millis() as i64);
+                state["process_retry_at_ms"] = json!(now_ms()+retry);
+            }
+            state["poll_error"] = frame["error"].clone();
+            c.execute("UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?", &[json!(state.to_string()),json!(id)])?;
+            Ok(Value::Null)
+        }),
         "delivered"=>self.delivery_result(id,frame),
         "pair_redeem"=>self.redeem(id,frame),
         "inbound_reply"=>self.inbound_reply(id,frame),
@@ -1800,6 +1896,7 @@ impl HubEngine {
         self.send_ack_frames(frames)
     }
     fn send_ack_frames(&self, frames: Vec<(String, Value)>) -> Result<(), String> {
+        let mut first_error = None;
         for (id, frame) in frames {
             let proc = self
                 .inner
@@ -1809,10 +1906,12 @@ impl HubEngine {
                 .get(&id)
                 .cloned();
             if let Some(proc) = proc {
-                let _ = proc.send(&frame);
+                if let Err(error) = proc.send(&frame) {
+                    first_error.get_or_insert(error);
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
     fn inbound_reply(&self, id: &str, f: &Value) -> Result<Value, String> {
         let mut events = Vec::new();
@@ -1885,9 +1984,10 @@ fn publish_human_reply(
         .transpose()?;
     let pid = required(sender, "principal_id")?;
     let owner = required(sender, "owner_user")?;
-    let raw = target.rsplit_once(':').map(|(_, s)| s).unwrap_or(target);
+    // Sender addresses in delivery mappings can also be hub-qualified.
+    let raw_target = target.rsplit_once(':').map_or(target, |(_, id)| id);
     let target_row =
-        resolve_registration(c, raw)?.ok_or("LISTENER_NOT_FOUND: reply target not found")?;
+        resolve_registration(c, raw_target)?.ok_or("LISTENER_NOT_FOUND: reply target not found")?;
     let registration = parse(&target_row, "value");
     if !matches!(
         evaluate_node_lease(&registration, now_ms() as u64),
@@ -1901,12 +2001,11 @@ fn publish_human_reply(
         return Err("FORBIDDEN_TARGET_SCOPE: reply target is private".into());
     }
     let text = super::identity::sanitize_message(text)?;
-    let human = find_human(c, sender)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
+    let (human, _) = find_human(c, sender)?;
     let target_id = s(&target_row, "key");
     if human == target_id {
         return Err("SELF_SEND_FORBIDDEN: cannot reply to the same node".into());
     }
-    let in_reply_to = in_reply_to.map(|raw| raw.rsplit_once(':').map(|(_, id)| id).unwrap_or(raw));
     // The daemon reserves the reply ID durably before its first publication attempt.
     let sig = match p.get("reply_signal_id").filter(|v| !v.is_null()) {
         Some(id) => id
@@ -2154,6 +2253,25 @@ fn publish_payload(
             return Err("FORBIDDEN_TARGET_SCOPE: target is private".into());
         }
     }
+    let bytes = raw
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| std::borrow::Cow::Owned(data.to_string().into_bytes()));
+    if bytes.len().div_ceil(3) * 4 + subject.len() * 2 + 4096 > MAX_RPC_BYTES {
+        return Err("INVALID_INPUT: Signal exceeds response frame budget".into());
+    }
+    let signal_id = data["signal_id"].as_str();
+    if let Some(id) = signal_id {
+        if id.len() > 1024 {
+            return Err("INVALID_INPUT: signal_id exceeds 1024 bytes".into());
+        }
+        // BEGIN IMMEDIATE serializes admission across all writers, including upgraded databases.
+        if let Some(row) = one(c,"SELECT seq,subject,hex(data) AS data_hex FROM hub_signals WHERE signal_id=? ORDER BY seq LIMIT 1", &[json!(id)])? {
+            if row["subject"] != subject || stored_bytes(&row,"data")? != bytes.as_ref() {
+                return Err("INVALID_INPUT: signal_id already belongs to a different publication".into());
+            }
+            return Ok(json!({"stream":SIGNALS,"seq":row["seq"],"duplicate":true}));
+        }
+    }
     if let Some(mid) = msg_id {
         let config = stream_info(c, SIGNALS)?["config"].clone();
         let window = config["duplicate_window"]
@@ -2174,24 +2292,12 @@ fn publish_payload(
         }
     }
     let now = now_ms();
-    let bytes = raw
-        .map(Vec::from)
-        .unwrap_or_else(|| data.to_string().into_bytes());
-    // Reserve room for both the subject and the response envelope after base64 encoding.
-    if bytes.len().div_ceil(3) * 4 + subject.len() * 2 + 4096 > 8 * 1024 * 1024 {
-        return Err("INVALID_INPUT: Signal exceeds response frame budget".into());
-    }
     c.execute(
         &format!(
             "INSERT INTO hub_signals(subject,msg_id,signal_id,created_ms,data) VALUES(?,?,?,?,{})",
             blob_literal(&bytes)
         ),
-        &[
-            json!(subject),
-            json!(msg_id),
-            json!(data["signal_id"].as_str()),
-            json!(now),
-        ],
+        &[json!(subject), json!(msg_id), json!(signal_id), json!(now)],
     )?;
     let seq =
         one(c, "SELECT last_insert_rowid() AS seq", &[])?.unwrap_or(Value::Null)["seq"].clone();
@@ -2200,6 +2306,9 @@ fn publish_payload(
     Ok(json!({"stream":SIGNALS,"seq":seq,"duplicate":false}))
 }
 fn consumer_owner(row: &Value, p: Option<&Value>) -> Result<(), String> {
+    if row["stream"] != SIGNALS {
+        return Err("INVALID_INPUT: Unsupported consumer stream".into());
+    }
     if oidc(p) && !owns_principal(s(row, "principal_id"), p) {
         Err("FORBIDDEN: consumer belongs to another principal".into())
     } else {
@@ -2250,15 +2359,18 @@ fn ids(p: &Value) -> Result<Vec<String>, String> {
         .as_array()
         .filter(|a| !a.is_empty())
         .ok_or("INVALID_INPUT: signal_ids must contain at least one ID")?;
+    if array.len() > 1024 {
+        return Err("INVALID_INPUT: signal_ids exceeds 1024 IDs".into());
+    }
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for id in array {
         let id = id
             .as_str()
             .filter(|s| !s.is_empty())
-            .ok_or("INVALID_INPUT: signal ID must be a string")?
-            .to_owned();
-        if !out.contains(&id) {
-            out.push(id)
+            .ok_or("INVALID_INPUT: signal ID must be a string")?;
+        if seen.insert(id) {
+            out.push(id.to_owned())
         }
     }
     Ok(out)
@@ -2321,7 +2433,7 @@ fn ack(
     let now = now_ms();
     let mut count = 0;
     for id in &ids {
-        count+=c.execute("UPDATE hub_signals SET acked=1,acked_at_ms=COALESCE(acked_at_ms,?),claimed_by_channel=NULL,claim_until_ms=NULL WHERE subject=? AND signal_id=?",&[json!(now),json!(format!("cito.signal.{node}")),json!(id)])?;
+        count+=c.execute("UPDATE hub_signals SET acked_at_ms=COALESCE(acked_at_ms,?),claimed_by_channel=NULL,claim_until_ms=NULL WHERE subject=? AND signal_id=?",&[json!(now),json!(format!("cito.signal.{node}")),json!(id)])?;
     }
     audit(c, principal_id(caller), "ack", node, p)?;
     let data = json!({"type":"node_ack","node_id":node,"signal_ids":ids,"acked_at_ms":now,"channel_id":p["channel_id"]});
@@ -3122,10 +3234,13 @@ mod resilience_tests {
 fn save_human(c: &Connection, id: &str, reg: &mut Value) -> Result<Value, String> {
     let now = now_ms();
     super::lease::reconcile_registration_state(reg, now.max(0) as u64);
-    let revision = next_revision(c)?;
-    c.execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,?,?,CAST(? AS BLOB),?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,created_ms=excluded.created_ms,value=excluded.value,principal_id=excluded.principal_id,scope=excluded.scope", &[json!(id),json!(revision),json!(now),json!(reg.to_string()),reg["principal_id"].clone(),reg["scope"].clone()])?;
-    Ok(
-        json!({"type":"kv","key":id,"revision":revision,"created_ms":now,"value_b64":encoded(reg),"operation":"PUT","principal_id":reg["principal_id"],"scope":reg["scope"]}),
+    write_kv(
+        c,
+        id,
+        now,
+        reg.to_string().as_bytes(),
+        &reg["principal_id"],
+        &reg["scope"],
     )
 }
 
@@ -3135,7 +3250,8 @@ fn reconcile_human_row(
     events: &mut Vec<Value>,
 ) -> Result<Value, String> {
     let mut reg = parse(&row, "value");
-    if reg["harness"] != "human" {
+    // Opaque or malformed legacy records remain readable, without a Human write-back.
+    if reg["harness"] != "human" || validate_human(&row, &reg, &row).is_err() {
         return Ok(row);
     }
     let before = reg.clone();
@@ -3170,25 +3286,18 @@ fn human_operation(
 ) -> Result<Value, String> {
     let caller = caller.ok_or("FORBIDDEN: Authenticated principal required")?;
     let pid = required(caller, "principal_id")?;
-    let id = find_human(c, caller)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
+    let (id, existing) = find_human(c, caller)?;
     if p.get("node_id").is_some_and(|node| node != &id) {
         return Err("FORBIDDEN: Human operation belongs to another principal".into());
     }
-    let old = kv_row(c, &id)?;
-    let mut reg = if let Some(old) = old {
-        if !owns_principal(s(&old, "principal_id"), Some(caller)) {
-            return Err("FORBIDDEN: Human principal mismatch".into());
-        }
-        parse(&old, "value")
+    let mut reg = if let Some(old) = existing {
+        old
     } else {
         if !matches!(op, "human_device_attach" | "human_inbox_update") {
             return Err("LISTENER_NOT_FOUND: Human inbox not found".into());
         }
         json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(caller,"owner_user"),&id),"principal_id":pid,"owner_user":caller["owner_user"],"harness":"human","session_id":"default","title":"Human","about":"Human","scope":initial_human_scope(caller, default_scope),"human_paused":false,"human_control_revision":1,"binding_generation":1,"channels":{}})
     };
-    if !reg.is_object() {
-        return Err("STATE_ERROR: Human record must be an object".into());
-    }
     if reg["human_control_revision"].is_null() {
         reg["human_control_revision"] = json!(1);
     }
@@ -3285,7 +3394,21 @@ fn human_operation(
     Ok(json!({"record":reg,"server_now_ms":now}))
 }
 
-fn find_human(c: &Connection, principal: &Value) -> Result<Option<String>, String> {
+fn validate_human(row: &Value, reg: &Value, principal: &Value) -> Result<(), String> {
+    if !reg.is_object() {
+        return Err("INVALID_INPUT: Listener must be an object".into());
+    }
+    if reg["harness"] != "human"
+        || reg["session_id"] != "default"
+        || !principal_matches(s(row, "principal_id"), principal)
+        || !principal_matches(s(reg, "principal_id"), principal)
+    {
+        return Err("FORBIDDEN: Human registration identity mismatch".into());
+    }
+    Ok(())
+}
+fn find_human(c: &Connection, principal: &Value) -> Result<(String, Option<Value>), String> {
+    let id = listener_id(required(principal, "principal_id")?, "human", "default");
     let mut principals = Vec::new();
     for key in ["principal_id", "legacy_principal_id"] {
         let value = s(principal, key);
@@ -3297,23 +3420,27 @@ fn find_human(c: &Connection, principal: &Value) -> Result<Option<String>, Strin
             principals.push(json!(alias));
         }
     }
-    if principals.is_empty() {
-        return Ok(None);
-    }
     let placeholders = vec!["?"; principals.len()].join(",");
-    for row in c.query(
-        &format!("{KV_SELECT} WHERE principal_id IN ({placeholders}) ORDER BY revision DESC"),
-        &principals,
-    )? {
-        if !principal_matches(s(&row, "principal_id"), principal) {
-            continue;
-        }
-        let v = parse(&row, "value");
-        if v["harness"] == "human" && v["session_id"] == "default" {
-            return Ok(Some(s(&row, "key").into()));
-        }
+    let mut found = None;
+    c.query_while(
+        &format!("SELECT key,principal_id,CAST(value AS TEXT) AS value FROM hub_kv WHERE principal_id IN ({placeholders}) ORDER BY revision DESC"),
+        &principals, |row| {
+            let reg = parse(&row,"value");
+            if reg["harness"] == "human" && validate_human(&row,&reg,principal).is_ok() {
+                found = Some((s(&row,"key").into(),Some(reg)));
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+    if let Some(found) = found {
+        return Ok(found);
     }
-    Ok(None)
+    if let Some(row) = kv_row(c, &id)? {
+        let reg = parse(&row, "value");
+        validate_human(&row, &reg, principal)?;
+        return Ok((id, Some(reg)));
+    }
+    Ok((id, None))
 }
 fn resolve_registration(c: &Connection, id: &str) -> Result<Option<Value>, String> {
     if let Some(row) = kv_row(c, id)? {
@@ -3335,12 +3462,8 @@ fn attach(
     plugin: Option<&ChannelPlugin>,
 ) -> Result<(), String> {
     let pid = required(b, "principal_id")?;
-    let id = find_human(c, b)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
-    let old = kv_row(c, &id)?;
-    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(b,"owner_user"), &id),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":"Human","about":"Human","human_paused":false,"human_control_revision":1,"scope":default_scope,"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
-    if !reg.is_object() {
-        return Err("INVALID_INPUT: Listener must be an object".into());
-    }
+    let (id, existing) = find_human(c, b)?;
+    let mut reg=existing.unwrap_or_else(||json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(b,"owner_user"), &id),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":"Human","about":"Human","human_paused":false,"human_control_revision":1,"scope":default_scope,"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
     if !reg["channels"].is_object() {
         reg["channels"] = json!({})
     }
@@ -3349,10 +3472,8 @@ fn attach(
     }
     let channel = format!("hub:{}", s(b, "plugin_id"));
     reg["channels"][&channel] = json!({"channel_id":channel,"kind":"human","host_id":"hub","host_name":"Hub","display_name":plugin.map(|p|p.manifest["displayName"].clone()).unwrap_or_else(||b["plugin_id"].clone()),"display_label":b["display_label"],"delivery_mode":"notify_fanout","priority":100,"state":if enabled{"ACTIVE"}else{"UNLISTENED"},"updated_at_ms":now_ms()});
-    super::lease::reconcile_registration_state(&mut reg, now_ms().max(0) as u64);
     reg["updated_at_ms"] = json!(now_ms());
-    let rev = next_revision(c)?;
-    c.execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,?,?,CAST(? AS BLOB),?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,created_ms=excluded.created_ms,value=excluded.value,principal_id=excluded.principal_id,scope=excluded.scope",&[json!(id),json!(rev),json!(now_ms()),json!(reg.to_string()),json!(pid),reg["scope"].clone()])?;
+    save_human(c, &id, &mut reg)?;
     Ok(())
 }
 
@@ -3505,7 +3626,9 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
     let home = env_value("HOME").unwrap_or_else(|| ".".into());
     let data_dir = super::plugins::expand_home_dir(&raw, "CITO_HUB_DATA_DIR", Some(&home))?;
     let engine = HubEngine::open_with_auth_mode(&data_dir, &mode)?;
-    let server = engine.start_server(&bind, port, auth)?;
+    let server = engine
+        .start_server(&bind, port, auth)
+        .inspect_err(|_| engine.shutdown())?;
     eprintln!("cito hub: ready on http://{} (auth={mode})", server.address);
     let host = if bind == "0.0.0.0" || bind == "::" {
         "<host>"
@@ -3523,42 +3646,20 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
         _ => format!("cito setup --hub personal --url {url}"),
     };
     eprintln!("cito hub: join with: {join}");
-    let mut fds = [-1; 2];
-    // SAFETY: pipe and sigaction receive valid initialized out-pointers. The handler only
-    // stores atomics and writes a byte; all cleanup runs below in ordinary thread context.
+    // The listener and signal handler share the same level-triggered shutdown wake.
+    SIGNAL_WRITE.store(server.wake.write_fd(), Ordering::SeqCst);
+    // SAFETY: sigaction receives initialized pointers; the handler only stores
+    // an atomic and writes to the server's nonblocking wake descriptor.
     unsafe {
-        if libc::pipe(fds.as_mut_ptr()) != 0 {
-            server.shutdown();
-            engine.shutdown();
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        for fd in fds {
-            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        }
-        SIGNAL_WRITE.store(fds[1], Ordering::SeqCst);
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = hub_signal as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
     }
-    while !HUB_STOP.load(Ordering::SeqCst) {
-        let mut pfd = libc::pollfd {
-            fd: fds[0],
-            events: libc::POLLIN,
-            revents: 0,
-        }; // SAFETY: pfd is live for the bounded poll.
-        unsafe {
-            libc::poll(&mut pfd, 1, -1);
-        }
-    }
+    let result = server.wait_for_stop(&HUB_STOP);
+    SIGNAL_WRITE.store(-1, Ordering::SeqCst);
     server.shutdown();
     engine.shutdown();
-    SIGNAL_WRITE.store(-1, Ordering::SeqCst); // SAFETY: the handler can no longer access the descriptors.
-    unsafe {
-        libc::close(fds[0]);
-        libc::close(fds[1]);
-    }
-    Ok(())
+    result
 }

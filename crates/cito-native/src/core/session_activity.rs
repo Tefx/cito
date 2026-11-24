@@ -93,6 +93,7 @@ struct Badge {
 /// per class may run concurrently; each provider has a 1500 ms discovery deadline.
 pub struct SessionActivity {
     state_dir: std::path::PathBuf,
+    refresh_interval: Duration,
     env: Value,
     discovery: Vec<Discovery>,
     badges: BTreeMap<Target, Badge>,
@@ -122,7 +123,15 @@ impl Drop for CompletionNotice {
 }
 impl SessionActivity {
     pub fn new(config: &NativeConfig, plugins: &LoadedPlugins) -> Self {
+        Self::with_refresh_interval(config, plugins, REFRESH_INTERVAL)
+    }
+    fn with_refresh_interval(
+        config: &NativeConfig,
+        plugins: &LoadedPlugins,
+        refresh_interval: Duration,
+    ) -> Self {
         Self {
+            refresh_interval,
             state_dir: config.state_dir.clone(),
             env: json!({"HOME":config.home_dir,"CITO_STATE_DIR":config.state_dir,
                 "CITO_CONFIG_PATH":config.config_path}),
@@ -414,7 +423,9 @@ impl SessionActivity {
                 .badge_inputs
                 .as_ref()
                 .is_none_or(|(previous, live, at)| {
-                    *previous != revision || live != live_active || at.elapsed() >= REFRESH_INTERVAL
+                    *previous != revision
+                        || live != live_active
+                        || at.elapsed() >= self.refresh_interval
                 });
         if reconcile {
             for provider in &mut self.discovery {
@@ -572,7 +583,11 @@ impl SessionActivity {
                                 row["title"] = json!(row["title"]
                                     .as_str()
                                     .filter(|s| !s.trim().is_empty())
-                                    .unwrap_or(&plugin.display_name));
+                                    .unwrap_or(&plugin.display_name)
+                                    .trim()
+                                    .chars()
+                                    .take(500)
+                                    .collect::<String>());
                                 row
                             })
                             .collect())
@@ -644,7 +659,7 @@ impl SessionActivity {
                     + if invalidated {
                         Duration::ZERO
                     } else {
-                        REFRESH_INTERVAL
+                        self.refresh_interval
                     };
             }
         }
@@ -1169,17 +1184,23 @@ print(json.dumps(response), flush=True)
                 .is_err(),
             "Liveness changes must request reconciliation"
         );
-        activity.badge_inputs.as_mut().unwrap().2 = Instant::now() - REFRESH_INTERVAL;
-        assert!(
-            activity.tick(&f.state, &[]).is_err(),
-            "Expiry requires slow fallback reconciliation"
-        );
+
         f.state.db.execute(
             "ALTER TABLE hidden_listeners RENAME TO local_listeners",
             &[],
         )?;
-        activity.tick(&f.state, &[])?;
-        activity.shutdown()?;
+        let mut expiring =
+            SessionActivity::with_refresh_interval(&f.config, &f.plugins, Duration::ZERO);
+        expiring.discovery_demand(false, HashSet::new());
+        expiring.tick(&f.state, &[])?;
+        f.state.db.execute(
+            "ALTER TABLE local_listeners RENAME TO hidden_listeners",
+            &[],
+        )?;
+        assert!(
+            expiring.tick(&f.state, &[]).is_err(),
+            "Expiry requires fallback reconciliation without mutation or liveness changes"
+        );
         Ok(())
     }
 
@@ -1274,7 +1295,11 @@ print(json.dumps(response), flush=True)
             "agent",
             json!({"response":{"ok":false,"message":"Provider unavailable"}}),
         )?;
-        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        let mut activity = SessionActivity::with_refresh_interval(
+            &f.config,
+            &f.plugins,
+            Duration::from_millis(100),
+        );
         activity.tick(&f.state, &[])?;
         assert_eq!(activity.discovery[0].refreshed_at, 0);
         assert!(activity.discovery[0].flight.worker.is_some());
@@ -1303,15 +1328,12 @@ print(json.dumps(response), flush=True)
         assert!(activity.discovery_status()[0]["error"].is_null());
         assert_eq!(activity.available(&[], 1), sessions);
 
-        // Exercise both explicit refresh and the periodic deadline without a 5s sleep.
+        // Both explicit refresh and periodic discovery retain the visible inventory.
         for explicit in [true, false] {
             if explicit {
                 activity.refresh_discovery();
-            } else {
-                activity.discovery[0].due = Instant::now();
             }
-            activity.tick(&f.state, &[])?;
-            assert!(activity.discovery[0].flight.worker.is_some());
+            pump(&mut activity, &f, &[], |a| a.discovery_pending())?;
             assert_eq!(activity.discovery_status()[0]["status"], "ready");
             assert_eq!(activity.discovery[0].cached, sessions);
             assert_eq!(activity.available(&[], 1), sessions);
@@ -1442,96 +1464,56 @@ print(json.dumps(response), flush=True)
         Ok(())
     }
     #[test]
-    fn discovery_errors_and_panics_clear_stale_candidates() -> Result<(), String> {
+    fn discovery_failure_revocation_and_recovery_use_provider_results() -> Result<(), String> {
         let mut f = Fixture::new()?;
-        f.provider("agent", json!({}))?;
+        let candidate = json!({"harness":"agent","session_id":"kept","cwd":"/repo","title":"Work"});
+        f.provider("agent", json!({"sessions":[candidate]}))?;
         let mut activity = SessionActivity::new(&f.config, &f.plugins);
-        let confirmed = vec![json!({"harness":"agent","session_id":"kept","title":"Work"})];
-        activity.discovery[0].cached = confirmed.clone();
-        assert_eq!(activity.candidates().count(), 1);
-        for panic in [false, true] {
-            activity.discovery[0].flight.worker = Some(std::thread::spawn(move || {
-                if panic {
-                    panic!("discovery fixture panic");
-                }
-                Err("PLUGIN_TIMEOUT: fixture deadline".into())
-            }));
-            assert_eq!(
-                activity.candidates().count(),
-                0,
-                "Do not enroll an identity while its refresh is unconfirmed"
-            );
-            pump(&mut activity, &f, &[], |a| {
-                a.discovery[0].flight.worker.is_none()
-            })?;
-            assert!(activity.discovery[0].cached.is_empty());
-            assert!(activity.available(&[], 1).is_empty());
+        activity.discovery_demand(false, HashSet::from(["agent".into()]));
+        let refresh = |a: &mut SessionActivity, options: Value| -> Result<(), String> {
+            fs::write(f.dir.join("agent/options.json"), options.to_string())
+                .map_err(|e| e.to_string())?;
+            a.refresh_discovery();
+            a.tick(&f.state, &[])?;
+            assert!(a.discovery_pending());
+            assert_eq!(a.candidates().count(), 0);
+            Ok(())
+        };
+        for failure in [json!({"malformed":true}), json!({"response":{"ok":false}})] {
+            let started = now_ms();
+            refresh(&mut activity, json!({"sessions":[candidate]}))?;
+            let launched = now_ms();
+            pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+            let fresh = activity
+                .candidates()
+                .next()
+                .ok_or("Missing confirmed candidate")?;
+            assert!((started..=launched).contains(&fresh["discovered_at"].as_u64().unwrap()));
+            assert_eq!(activity.available(&[], 1), vec![candidate.clone()]);
+            refresh(&mut activity, failure)?;
+            pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
             assert_eq!(activity.discovery_status()[0]["status"], "error");
-            assert_eq!(
-                activity.candidates().count(),
-                0,
-                "Retained identities cannot auto-enroll after discovery failure"
-            );
+            assert!(activity.available(&[], 1).is_empty());
+            assert_eq!(activity.candidates().count(), 0);
         }
-        let switched =
-            vec![json!({"harness":"agent","session_id":"replacement","title":"New work"})];
-        let fresh = switched.clone();
-        activity.discovery[0].flight.started_at = 10;
-        activity.discovery[0].flight.worker = Some(std::thread::spawn(move || Ok(fresh)));
-        pump(&mut activity, &f, &[], |a| {
-            a.discovery[0].flight.worker.is_none()
-        })?;
-        let candidates = activity.candidates().collect::<Vec<_>>();
-        assert_eq!(candidates[0]["session_id"], switched[0]["session_id"]);
-        assert_eq!(candidates[0]["discovered_at"], 10);
-        assert_eq!(
-            activity.available(&[], 1),
-            switched,
-            "Private freshness metadata must not leak into presentation"
-        );
-        // State clones invalidate a confirmed inventory synchronously, without
-        // borrowing worker ownership or waiting for the daemon's next tick.
+        let long = "é".repeat(501);
+        let mut replacement = candidate.clone();
+        replacement["title"] = json!(format!("  {long}  "));
+        refresh(&mut activity, json!({"sessions":[replacement]}))?;
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        replacement["title"] = json!("é".repeat(500));
+        assert_eq!(activity.available(&[], 1), vec![replacement.clone()]);
         f.state.clone().invalidate_discovery("agent")?;
         assert_eq!(activity.candidates().count(), 0);
-        assert_eq!(activity.available(&[], 1), switched);
-        for invalidated in [true, false] {
-            let revision = f.state.discovery_revision("agent")?;
-            activity.discovery[0].flight.started_revision = revision.load(Ordering::SeqCst);
-            let (release, wait) = std::sync::mpsc::channel();
-            let rows = switched.clone();
-            activity.discovery[0].flight.worker = Some(std::thread::spawn(move || {
-                wait.recv_timeout(Duration::from_secs(3))
-                    .map_err(|e| e.to_string())?;
-                Ok(rows)
-            }));
-            if invalidated {
-                f.state.clone().invalidate_discovery("agent")?;
-            }
-            release.send(()).map_err(|e| e.to_string())?;
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !activity.discovery[0]
-                .flight
-                .worker
-                .as_ref()
-                .is_some_and(|worker| worker.is_finished())
-            {
-                if Instant::now() >= deadline {
-                    return Err("Controlled discovery did not finish".into());
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-            activity.reap_discovery();
-            assert_eq!(activity.candidates().count(), usize::from(!invalidated));
-            assert_eq!(activity.available(&[], 1), switched);
-        }
-        activity.discovery[0].flight.worker = Some(std::thread::spawn(|| Ok(vec![])));
-        pump(&mut activity, &f, &[], |a| {
-            a.discovery[0].flight.worker.is_none()
-        })?;
-        assert!(
-            activity.discovery[0].cached.is_empty(),
-            "A confirmed empty inventory replaces old candidates"
-        );
+        refresh(&mut activity, json!({"sessions":[candidate]}))?;
+        f.state.invalidate_discovery("agent")?;
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert_eq!(activity.candidates().count(), 0);
+        assert_eq!(activity.available(&[], 1), vec![replacement]);
+        refresh(&mut activity, json!({"sessions":[]}))?;
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        assert!(activity.available(&[], 1).is_empty());
         Ok(())
     }
 
@@ -1992,23 +1974,21 @@ print(json.dumps(response), flush=True)
                 .values()
                 .all(|b| b.sent.as_ref() == Some(&b.desired))
         })?;
-        // Controlled worker completions exercise the real reap/tick policy without
-        // sleeping through the capped 15-second retry interval.
+        fs::write(
+            f.dir.join("agent/options.json"),
+            json!({"response":{"ok":false}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        let mut observation = row.clone();
+        observation["badge"] = json!("outdated badge");
         for failures in 1..=3 {
-            let badge = activity
-                .badges
-                .get_mut(&Target::of(&row))
-                .ok_or("Missing badge")?;
-            badge.attempted = Some(badge.desired.clone());
-            badge.worker = Some(thread::spawn(|| Err("unavailable".into())));
-            while !badge.worker.as_ref().is_some_and(|w| w.is_finished()) {
-                thread::yield_now();
-            }
-            activity.reap_badges();
-            let badge = &activity.badges[&Target::of(&row)];
-            assert_eq!(badge.failures, failures);
+            activity.observe_badge(&observation);
+            pump(&mut activity, &f, std::slice::from_ref(&row), |a| {
+                a.badges[&Target::of(&row)].failures == failures
+            })?;
             assert!(
-                badge.retry_at > Instant::now() + badge_retry(failures) - Duration::from_millis(50)
+                activity.badges[&Target::of(&row)].retry_at
+                    > Instant::now() + badge_retry(failures) - Duration::from_millis(50)
             );
         }
         f.seed(
@@ -2024,18 +2004,25 @@ print(json.dumps(response), flush=True)
             0,
             "New intent resets retry history"
         );
-        pump(&mut activity, &f, std::slice::from_ref(&row), |a| {
-            a.badges.values().all(|b| b.worker.is_none())
+        pump(&mut activity, &f, &[], |a| {
+            a.badges[&Target::of(&row)].failures == 1
         })?;
-        let badge = activity
-            .badges
-            .get_mut(&Target::of(&row))
-            .ok_or("Missing badge")?;
-        badge.desired.badge = None;
-        badge.sent = None;
-        badge.failures = INACTIVE_FAILURE_LIMIT;
-        activity.tick(&f.state, &[])?;
-        assert!(activity.badges.is_empty());
+        for failures in 2..=INACTIVE_FAILURE_LIMIT {
+            activity.observe_badge(&observation);
+            pump(&mut activity, &f, &[], |a| {
+                match a.badges.get(&Target::of(&row)) {
+                    Some(b) => failures < INACTIVE_FAILURE_LIMIT && b.failures == failures,
+                    None => failures == INACTIVE_FAILURE_LIMIT,
+                }
+            })?;
+        }
+        assert_eq!(
+            f.calls("agent", "update_badge")
+                .iter()
+                .filter(|call| call["req"]["badge"].is_null())
+                .count(),
+            INACTIVE_FAILURE_LIMIT as usize
+        );
         let count = f.calls("agent", "update_badge").len();
         for _ in 0..3 {
             activity.tick(&f.state, &[])?;

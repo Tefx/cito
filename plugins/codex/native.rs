@@ -7,15 +7,11 @@ use std::thread;
 use std::time::Duration;
 use toml_edit::{value, DocumentMut, Item, Table};
 fn matches_process(command: &str) -> bool {
-    crate::support::matches_process(command, |entry, name, script| {
-        if script {
-            return matches!(name, "codex" | "codex.js" | "codex.mjs");
-        }
-        name == "codex" || desktop_command(entry)
-    })
+    agent_harness(command) == Some("codex")
 }
 fn interactive_process(p: u32, command: &str) -> bool {
-    if has_harness_ancestor(p, |_, command| is_agent_harness(command)) {
+    if !matches_process(command) || has_harness_ancestor(p, |_, command| is_agent_harness(command))
+    {
         return false;
     }
     if process_entrypoint(command)
@@ -23,8 +19,7 @@ fn interactive_process(p: u32, command: &str) -> bool {
     {
         return true;
     }
-    matches_process(command)
-        && process_has_tty(p)
+    process_has_tty(p)
         && !process_arguments(command).any(|arg| {
             matches!(
                 arg,
@@ -170,6 +165,17 @@ fn effect_path(req: &Value, sid: &str) -> PathBuf {
         .join("activity/codex")
         .join(format!("{:x}.json", Sha256::digest(sid.as_bytes())))
 }
+fn settle_effects(ledger: &mut Value, revision: u64, at: u64) {
+    // An observed DB revision covers all serialized insertions up to this point.
+    if let Some(effects) = ledger["effects"].as_array_mut() {
+        for effect in effects {
+            if let Some(hash) = effect.get_mut("pending").map(Value::take) {
+                *effect = hash;
+            }
+        }
+    }
+    ledger["fallback"] = json!({"revision":revision,"at_ms":at});
+}
 fn record_effect(
     req: &Value,
     sid: &str,
@@ -185,11 +191,13 @@ fn record_effect(
     if let Some(text) = text {
         let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
         let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
-        effects.push(hash);
+        effects.push(json!({"pending":hash}));
+        // Only recent unmatched queue messages can be correlated with a later rollout.
+        effects.drain(..effects.len().saturating_sub(256));
         ledger["effects"] = json!(effects);
     }
     if let Some((revision, at)) = activity {
-        ledger["fallback"] = json!({"revision":revision,"at_ms":at});
+        settle_effects(&mut ledger, revision, at);
     }
     atomic_write(&path, ledger.to_string().as_bytes())
 }
@@ -200,7 +208,7 @@ fn abandon_effect(req: &Value, sid: &str, text: &str) -> Result<()> {
     let mut ledger = read_json(&path)?;
     let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
     if let Some(effects) = ledger["effects"].as_array_mut() {
-        if let Some(index) = effects.iter().rposition(|value| value == &hash) {
+        if let Some(index) = effects.iter().rposition(|value| value["pending"] == hash) {
             effects.remove(index);
         }
     }
@@ -256,8 +264,16 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     let Some(_idle) = idle_wake_guard(&path.with_extension("wake.lock"))? else {
         return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
     };
+    if ledger["effects"].as_array().is_some_and(|effects| {
+        effects.iter().any(|e| e.get("pending").is_some())
+            || (!effects.is_empty() && ledger["fallback"].is_null())
+    }) {
+        // The writer exited without publishing its receipt. Fence the observed revision
+        // once; a later DB advance can qualify genuine work even without a transcript.
+        settle_effects(&mut ledger, source_revision, recency);
+    }
     let mut scanned_activity = None;
-    if let Some(rollout) = str_at(row, "rollout_path") {
+    if let Some(rollout) = raw_str_at(row, "rollout_path") {
         match std::fs::File::open(rollout) {
             Ok(mut file) => {
                 let metadata = file
@@ -277,6 +293,16 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                     cached["user_at_ms"].as_u64()
                 } else {
                     None
+                };
+                // Replay consumed *records*, not just message text. A subsequent real
+                // turn with the same text must still qualify. Drop records absent from
+                // the replacement after the rescan.
+                let mut consumed: std::collections::BTreeMap<String, usize> =
+                    serde_json::from_value(cached["consumed"].take()).unwrap_or_default();
+                let mut replay = if same_source {
+                    Default::default()
+                } else {
+                    std::mem::take(&mut consumed)
                 };
                 let mut saw_effect = same_source && cached["saw_effect"] == true;
                 let mut carrier = if same_source {
@@ -335,15 +361,28 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                     }
                     carrier =
                         json!({"hash":hash,"kind":payload["type"],"turn_id":payload["turn_id"]});
-                    let effect = ledger["effects"]
-                        .as_array_mut()
-                        .and_then(|effects| {
-                            let index = effects.iter().position(|value| value == &hash)?;
-                            effects.remove(index);
-                            Some(())
-                        })
-                        .is_some();
+                    let fingerprint =
+                        || format!("{:x}", Sha256::digest(event.to_string().as_bytes()));
+                    let replayed = !replay.is_empty()
+                        && replay.get_mut(&fingerprint()).is_some_and(|n| {
+                            if *n == 0 {
+                                false
+                            } else {
+                                *n -= 1;
+                                true
+                            }
+                        });
+                    let effect = replayed
+                        || ledger["effects"]
+                            .as_array_mut()
+                            .and_then(|effects| {
+                                let index = effects.iter().position(|value| value == &hash)?;
+                                effects.remove(index);
+                                Some(())
+                            })
+                            .is_some();
                     if effect {
+                        *consumed.entry(fingerprint()).or_default() += 1;
                         saw_effect = true;
                     } else if let Some(at) =
                         event["timestamp"].as_str().and_then(activity_timestamp)
@@ -353,7 +392,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                 }
                 // The cursor bounds repeat work, not the activity revision. Revision
                 // remains the durable DB source integer across scans and restarts.
-                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision,"carrier":carrier});
+                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision,"carrier":carrier,"consumed":consumed});
                 if let Some(at) = latest {
                     scanned_activity =
                         Some(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
@@ -515,7 +554,7 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         )?
         .into_iter()
         // Preserve caller validation for whitespace-only IDs and working directories.
-        .filter(|row| raw_str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
+        .filter(|row| raw_str_at(row, "id").is_some() && raw_str_at(row, "cwd").is_some())
         .collect())
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
@@ -576,18 +615,18 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
     Ok(ids.pop())
 }
 fn row_caller(req: &Value, r: &Value) -> Value {
-    let cwd = str_at(r, "cwd")
-        .or_else(|| str_at(req, "cwd"))
+    let cwd = raw_str_at(r, "cwd")
+        .or_else(|| raw_str_at(req, "cwd"))
         .unwrap_or("");
     let sid = raw_str_at(r, "id").unwrap_or("");
     let title = str_at(r, "name").or_else(|| str_at(r, "title"));
     if r.get("git_branch").is_some() || r.get("git_origin_url").is_some() {
         // SQLite metadata is authoritative, including absent values. Do not
         // launch git once per historical thread during discovery.
-        return json!({"harness":"codex","session_id":sid,"cwd":cwd,
+        return remember_process(json!({"harness":"codex","session_id":sid,"cwd":cwd,
             "endpoint_pid":pid(req),"branch":r["git_branch"],
             "repo":str_at(r,"git_origin_url").and_then(normalize_repo),
-            "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
+            "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))}));
     }
     caller(req, "codex", sid, cwd, pid(req), title)
 }
@@ -733,7 +772,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             if let Err(e) = verify(&c, req, None) {
                 return Ok(error("INVALID_INPUT", e));
             }
-            Ok(json!({"ok":true,"caller":remember_process(c)}))
+            Ok(json!({"ok":true,"caller":c}))
         }
         "probe" => {
             let inspection = setup(

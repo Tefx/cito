@@ -75,20 +75,27 @@ fn reservations_are_globally_bounded_and_local_backpressure_does_not_spend_attem
     let f = Fixture::new();
     let plugin = f.plugin();
     f.hub.inner.db.transaction(|c| {
-        let binding = json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"sample"});
-        attach(c,&binding,true,"workspace",Some(&plugin))?;
-        let node = find_human(c,&binding)?.unwrap();
-        c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES('none#alice','sample','alice')", &[])?;
-        for _ in 0..200 {
-            c.execute("INSERT INTO hub_signals(subject,created_ms,data) VALUES(?,?,X'00')", &[json!(format!("cito.signal.{node}")),json!(now_ms())])?;
-        }
-        for index in 0..65 {
-            c.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES(?,?,?,CAST(? AS BLOB))", &[json!(format!("cito.signal.{node}")),json!(format!("signal-{index}")),json!(now_ms()),json!(json!({"signal_id":format!("signal-{index}"),"from":{"listener_id":"sender"},"message":"Message"}).to_string())])?;
+        for user in ["alice", "bob"] {
+            let binding = json!({"principal_id":format!("none#{user}"),"owner_user":user,"plugin_id":"sample"});
+            attach(c, &binding, true, "workspace", Some(&plugin))?;
+            let (node, _) = find_human(c, &binding)?;
+            let subject = json!(format!("cito.signal.{node}"));
+            c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES(?,'sample',?)", &[binding["principal_id"].clone(),json!(user)])?;
+            for _ in 0..200 {
+                c.execute("INSERT INTO hub_signals(subject,created_ms,data) VALUES(?,?,X'00')", &[subject.clone(),json!(now_ms())])?;
+            }
+            for index in 0..24 {
+                let id = format!("{user}-{index}");
+                let signal = json!({"signal_id":id,"from":{"listener_id":"sender"},"message":"Message"});
+                c.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES(?,?,?,CAST(? AS BLOB))", &[subject.clone(),json!(id),json!(now_ms()),json!(signal.to_string())])?;
+            }
         }
         Ok(())
     }).unwrap();
     let reservations = f.hub.reserve_deliveries(&plugin).unwrap();
     assert_eq!(reservations.len(), 32);
+    assert!(reservations.iter().any(|r| r["user"] == "alice"));
+    assert!(reservations.iter().any(|r| r["user"] == "bob"));
     assert!(f.hub.reserve_deliveries(&plugin).unwrap().is_empty());
     for (reservation, error) in reservations.iter().zip([
         "Outbound queue is full",
@@ -116,12 +123,13 @@ fn reservations_are_globally_bounded_and_local_backpressure_does_not_spend_attem
     assert_eq!(deferred.len(), 2);
     assert!(deferred.iter().all(|row| row["attempts"] == 5));
     let fresh = f.hub.reserve_deliveries(&plugin).unwrap();
+    let second_user = s(&reservations[31], "user");
     assert_eq!(
         fresh
             .iter()
             .map(|r| s(&r["signal"], "signal_id"))
             .collect::<Vec<_>>(),
-        ["signal-32", "signal-33"]
+        [format!("{second_user}-8"), format!("{second_user}-9")]
     );
     f.hub
         .inner
@@ -145,7 +153,10 @@ fn reservations_are_globally_bounded_and_local_backpressure_does_not_spend_attem
             .iter()
             .map(|r| s(&r["signal"], "signal_id"))
             .collect::<Vec<_>>(),
-        ["signal-0", "signal-1"]
+        reservations[..2]
+            .iter()
+            .map(|r| s(&r["signal"], "signal_id"))
+            .collect::<Vec<_>>()
     );
 }
 

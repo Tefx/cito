@@ -5,7 +5,7 @@ use crate::core::{
     identity::{local_host_name, normalize_slug, string},
 };
 use serde_json::{json, Value};
-use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -253,17 +253,11 @@ pub(super) fn lan_advertised_host(bind: &str) -> String {
 
 pub(super) const OWN_HUB_ERROR: &str = "INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.";
 
-pub(crate) fn is_own_host_hub_url(url_str: &str, host_cfg: &Value, live_port: Option<u16>) -> bool {
-    if url_str == "local://" || (host_cfg["enabled"] != true && live_port.is_none()) {
+pub(super) fn is_own_host_hub_url(url_str: &str, address: Option<SocketAddr>) -> bool {
+    let Some(address) = address else {
         return false;
-    }
-    let port = live_port
-        .or_else(|| {
-            u16::try_from(host_cfg["port"].as_u64()?)
-                .ok()
-                .filter(|&p| p != 0)
-        })
-        .unwrap_or(4291);
+    };
+    let port = address.port();
     let Ok(url) = url::Url::parse(url_str) else {
         return false;
     };
@@ -274,18 +268,33 @@ pub(crate) fn is_own_host_hub_url(url_str: &str, host_cfg: &Value, live_port: Op
         return false;
     };
     let host = host.trim_matches(['[', ']']).trim_end_matches('.');
-    if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
-        || host.eq_ignore_ascii_case("localhost")
-    {
-        return true;
+    let bind = address.ip();
+    let reaches = |ip: IpAddr| {
+        let ip = ip.to_canonical();
+        bind.to_canonical() == ip
+            || (bind.is_unspecified()
+                && (bind.is_ipv4() == ip.is_ipv4()
+                    || (bind.is_ipv6()
+                        && UdpSocket::bind("[::]:0")
+                            .and_then(|s| s.connect("[::ffff:127.0.0.1]:9"))
+                            .is_ok()))
+                && (ip.is_loopback() || UdpSocket::bind((ip, 0)).is_ok()))
+    };
+    if let Ok(ip) = host.parse() {
+        return reaches(ip);
     }
     let hostname = local_host_name();
-    let bind = string(host_cfg, "bind");
     let matches = |s: &str| host.eq_ignore_ascii_case(s.trim_end_matches('.'));
-    matches(&hostname)
+    if !(matches("localhost")
+        || matches(&hostname)
         || matches(&format!("{}.local", hostname.trim_end_matches(".local")))
-        || matches(&lan_advertised_host(bind))
-        || tailscale_advertised_host().as_deref().is_some_and(matches)
+        || tailscale_advertised_host().as_deref().is_some_and(matches))
+    {
+        return false;
+    }
+    (host, port)
+        .to_socket_addrs()
+        .is_ok_and(|mut addrs| addrs.any(|a| reaches(a.ip())))
 }
 
 pub(super) fn remote_endpoint(hub: &Value) -> Option<url::Url> {
@@ -301,16 +310,51 @@ pub(super) fn duplicate_hub_error(existing: &str) -> String {
     format!("{DUPLICATE_HUB_ERROR} '{existing}'")
 }
 
-pub(crate) fn validate_hub_endpoints(raw: &Value, live_port: Option<u16>) -> Result<(), String> {
-    validate_hub_edit(raw, live_port, None)
-}
-
 pub(crate) fn validate_hub_edit(
     raw: &Value,
     live_port: Option<u16>,
     edited: Option<&str>,
 ) -> Result<(), String> {
     let (_, hubs, rest) = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+    let host = rest.get("host_hub").unwrap_or(&Value::Null);
+    let address = if live_port.is_some() || host["enabled"] == true {
+        host["bind"]
+            .as_str()
+            .unwrap_or("0.0.0.0")
+            .parse()
+            .ok()
+            .map(|ip| {
+                SocketAddr::new(
+                    ip,
+                    live_port.unwrap_or_else(|| {
+                        host["port"]
+                            .as_u64()
+                            .and_then(|n| u16::try_from(n).ok())
+                            .unwrap_or(4291)
+                    }),
+                )
+            })
+    } else {
+        None
+    };
+    validate_endpoints(raw, hubs, address, edited)
+}
+
+pub(super) fn validate_hub_endpoints(
+    raw: &Value,
+    address: Option<SocketAddr>,
+    edited: Option<&str>,
+) -> Result<(), String> {
+    let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+    validate_endpoints(raw, hubs, address, edited)
+}
+
+fn validate_endpoints(
+    raw: &Value,
+    hubs: serde_json::Map<String, Value>,
+    address: Option<SocketAddr>,
+    edited: Option<&str>,
+) -> Result<(), String> {
     let global_user = std::env::var("CITO_USER")
         .ok()
         .filter(|u| !u.trim().is_empty())
@@ -325,13 +369,7 @@ pub(crate) fn validate_hub_edit(
         let Some(url) = remote_endpoint(hub) else {
             continue;
         };
-        if name != "local"
-            && is_own_host_hub_url(
-                url.as_str(),
-                rest.get("host_hub").unwrap_or(&Value::Null),
-                live_port,
-            )
-        {
+        if name != "local" && is_own_host_hub_url(url.as_str(), address) {
             return Err(OWN_HUB_ERROR.into());
         }
         let user = hub["user"]

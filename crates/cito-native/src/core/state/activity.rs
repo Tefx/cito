@@ -73,15 +73,20 @@ impl LocalState {
             let selected = action["hub"].as_str().unwrap_or("");
             let signal_id = action["signal_id"].as_str().unwrap_or("");
             let filter=action["filter"].as_str().unwrap_or(default_filter);
-            c.query_while("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
-                if !crate::core::state::joined_signal_is_current(&row) || !crate::core::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { return Ok(true); }
-                if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { acknowledge_current(c,string(&row,"hub"),string(&row,"listener_id"),&row["signal_id"],&format!("{host_id}:human"))?; }
-                c.execute("UPDATE local_signals SET activity_hidden=1 WHERE hub=? AND signal_id=?", &[row["hub"].clone(),row["signal_id"].clone()])?;
-                crate::core::state::reconcile_wake_retry(c, string(&row, "hub"), string(&row, "listener_id"))?;
-                Ok(true)
+            let mut groups = HashMap::<_,Vec<_>>::new();
+            c.query_each("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
+                if joined_signal_is_current(&row) && matches_activity(&row,string(action,"query")) {
+                    groups.entry((string(&row,"hub").to_owned(), string(&row,"listener_id").to_owned())).or_default().push((row["signal_id"].clone(), row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null()));
+                }
             })?;
+            for ((hub,node), rows) in groups {
+                for (id, ack) in rows {
+                    if ack { acknowledge_current(c,&hub,&node,&id,&format!("{host_id}:human"))?; }
+                    c.execute("UPDATE local_signals SET activity_hidden=1 WHERE hub=? AND signal_id=?", &[json!(hub),id])?;
+                }
+                reconcile_wake_retry(c, &hub, &node)?;
+            }
             Ok(())
-        })?;
-        Ok(())
+        })
     }
 }

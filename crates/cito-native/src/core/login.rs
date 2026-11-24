@@ -177,15 +177,15 @@ impl Settings {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: issuer required")?;
-        crate::plugins::validate_https_issuer(issuer)
+        crate::plugins::validate_oidc_url(issuer, true)
             .map_err(|error| format!("INVALID_INPUT: {error}"))?;
         let client = config
             .get("clientId")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: clientId required")?;
-        if client.trim() != client {
-            return Err("INVALID_INPUT: clientId must not have surrounding whitespace".into());
+        if !super::auth::valid_client_id(client) {
+            return Err("INVALID_INPUT: Invalid clientId".into());
         }
         let port = match super::config::redirect_port(&config)? {
             Some(port) => port,
@@ -264,26 +264,17 @@ fn cache_path(dir: &Path, hub: &str) -> Result<PathBuf, String> {
     }
     Ok(dir.join(format!("oidc-token-{hub}.json")))
 }
-fn read_cache(path: &Path, settings: &Settings) -> Result<Option<Value>, String> {
+fn read_cache(path: &Path, settings: &Settings) -> std::io::Result<Option<Value>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("AUTH_UNAVAILABLE: Cannot read OIDC cache: {error}")),
+        Err(error) => return Err(error),
     };
-    if file
-        .metadata()
-        .map_err(|e| e.to_string())?
-        .permissions()
-        .mode()
-        & 0o777
-        != 0o600
-    {
+    if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
         return Ok(None);
     }
     let mut raw = Vec::new();
-    file.take(MAX_JSON + 1)
-        .read_to_end(&mut raw)
-        .map_err(|e| e.to_string())?;
+    file.take(MAX_JSON + 1).read_to_end(&mut raw)?;
     if raw.len() as u64 > MAX_JSON {
         return Ok(None);
     }
@@ -379,30 +370,17 @@ fn response_json(response: ureq::Response, deadline: &Deadline<'_>) -> Result<Va
 }
 fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), String> {
     deadline.remaining()?;
-    crate::support::atomic_write_checked(path, cache.to_string().as_bytes(), Some(0o600), || {
+    let data = cache.to_string();
+    if data.len() as u64 > MAX_JSON {
+        return Err("AUTH_UNAVAILABLE: OIDC token cache exceeds 1 MiB".into());
+    }
+    crate::support::atomic_write_checked(path, data.as_bytes(), Some(0o600), || {
         deadline.remaining().map(|_| ())
     })
 }
 
 /// Recover a rejected bearer generation even if its JWT has not expired. Callers must pass
 /// the hash of the bearer that actually received 401, never the subsequently reloaded cache.
-pub fn recover(
-    dir: &Path,
-    hub: &str,
-    config: &Value,
-    rejected_hash: Option<&str>,
-    interactive: bool,
-) -> Result<LoginResult, String> {
-    recover_cancellable(
-        dir,
-        hub,
-        config,
-        rejected_hash,
-        interactive,
-        false,
-        (&super::daemon::shutdown_requested, None),
-    )
-}
 pub fn recover_cancellable(
     dir: &Path,
     hub: &str,
@@ -440,7 +418,11 @@ fn recover_inner(
     let path = cache_path(dir, hub)?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let _cache_lock = FileLock::acquire(&path.with_extension("json.lock"), deadline)?;
-    let old = read_cache(&path, settings)?;
+    let old = match read_cache(&path, settings) {
+        Ok(cache) => cache,
+        Err(e) if interactive && e.kind() == std::io::ErrorKind::PermissionDenied => None,
+        Err(e) => return Err(format!("AUTH_UNAVAILABLE: Cannot read OIDC cache: {e}")),
+    };
     let old_refresh = old
         .as_ref()
         .filter(|_| !force_account_select)

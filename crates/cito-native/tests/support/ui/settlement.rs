@@ -56,7 +56,7 @@ fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banne
 
     cfg["channels"] = json!([]);
     cfg["apps"] = json!([]);
-    cfg["hubs"][0]["user"] = json!("bob");
+    cfg["hubs"][0]["human_paused"] = json!(true);
     cfg["hubs"][0]["status"] = json!("disconnected");
     cfg["channel_inventory_error"] = json!("Service unavailable.");
     cfg["launch_at_login"] = json!(true);
@@ -66,12 +66,12 @@ fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banne
         stale.settings("channel_inventory_error")["text"],
         "Service unavailable."
     );
-    assert_eq!(stale.settings("inbox_control_title")["text"], "You (@bob)");
+    assert_eq!(stale.settings("toggle_inbox")["text"], "Resume Inbox");
     assert!(!stale.settings("settings_channel:channel").is_null());
     assert_eq!(stale["settings_launch_at_login"], true);
 
     cfg["channel_inventory_error"] = Value::Null;
-    cfg["hubs"][0]["user"] = json!("alice");
+    cfg["hubs"][0]["human_paused"] = json!(false);
     base["settings"] = cfg;
     base["truncated"] = json!(true);
     base["truncated_collections"] = json!(["channels", "apps"]);
@@ -79,10 +79,7 @@ fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banne
     f.send(p, base);
     let fresh = inspect(&f, p);
     assert!(fresh.settings("channel_inventory_error").is_null());
-    assert_eq!(
-        fresh.settings("inbox_control_title")["text"],
-        "You (@alice)"
-    );
+    assert_eq!(fresh.settings("toggle_inbox")["text"], "Pause Inbox");
     assert!(!fresh.settings("settings_channel:channel").is_null());
 }
 
@@ -107,13 +104,17 @@ fn settings_shedding_respects_flat_and_dotted_keys_without_freezing_other_collec
         for collection in ["apps", "channels", "hubs"] {
             update[collection] = json!([]);
         }
+        // A cached channel inventory belongs to a Hub that still exists.
+        if preserved == "channels" {
+            update["hubs"] = json!([original["hubs"][0]]);
+        }
         f.send(p, json!({"op":"settings","hub":"personal","settings":update,"truncated":true,"truncated_collections":[key]}));
         let projection = render_state(&f, p);
         for collection in ["apps", "channels", "hubs"] {
             let count = if collection == preserved {
                 original[collection].as_array().unwrap().len()
             } else {
-                0
+                update[collection].as_array().unwrap().len()
             };
             assert_eq!(
                 projection["collection_counts"][format!("settings.{collection}")],
@@ -449,9 +450,14 @@ fn host_port_matching_receipt_settles_normalized_values_and_keeps_new_drafts() {
         p,
         json!({"op":"test_settings_input","id":"host_hub_port","value":" \t4700 "}),
     );
+    f.send(p, json!({"op":"test_focus_field","id":"host_hub_port"}));
     for id in ["toggle_host_hub_auth", "toggle_host_hub"] {
+        let before = f.frames_for(p, "set_host_hub").count();
         control(&f, p, id);
-        inspect(&f, p);
+        control(&f, p, id);
+        let focused = inspect(&f, p);
+        assert_eq!(focused["settings_rebuild_deferred"], true);
+        assert_eq!(f.frames_for(p, "set_host_hub").count(), before + 1);
         assert_eq!(
             f.frames_for(p, "set_host_hub").next_back().unwrap()["port"],
             4700
@@ -649,4 +655,9 @@ fn app_check_pending_uses_checking_label_and_accessibility() {
     assert_eq!(button["text"], "Checking…");
     assert_eq!(button["accessibility_label"], "Checking…");
     assert_eq!(button["enabled"], false);
+    let request = latest(&f, p, "setup_apply");
+    f.send(p, json!({"op":"state","source_op":"setup_apply","request_id":request["request_id"],"committed":true,"ok":true}));
+    let checked = inspect(&f, p).settings("setup_app:fixture");
+    assert_eq!(checked["text"], "✓ Checked");
+    assert_eq!(checked["enabled"], true);
 }

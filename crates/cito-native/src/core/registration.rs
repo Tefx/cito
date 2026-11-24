@@ -26,14 +26,24 @@ pub fn sync_custom_title(
     let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-    let Some(title) = state.custom_title(string(row, "harness"), string(row, "session_id"))? else {
+    sync_custom_title_locked(state, client, host_id, row)
+}
+
+fn sync_custom_title_locked(
+    state: &LocalState,
+    client: &HubClient,
+    host_id: &str,
+    row: &Value,
+) -> Result<(), String> {
+    let title = state.db.transaction(|db| {
+        client.check_current()?;
+        let Some(title) = LocalState::custom_title_on(db, string(row, "harness"), string(row, "session_id"))? else { return Ok(None); };
+        let changed = db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+        Ok((changed > 0).then_some(title))
+    })?;
+    let Some(title) = title else {
         return Ok(());
     };
-    state.db.transaction(|db| {
-        client.check_current()?;
-        db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
-        Ok(())
-    })?;
     let channel = format!("{host_id}:{}", string(row, "harness"));
     for _ in 0..3 {
         let Some((mut remote, revision)) = client.kv_get(string(row, "listener_id"))? else {
@@ -42,7 +52,10 @@ pub fn sync_custom_title(
         if remote["title"] == title && remote["custom_title"] == true {
             return Ok(());
         }
-        if !remote_matches_listener(&remote, row, &channel) {
+        if remote["state"] != "ACTIVE"
+            || remote["channels"][&channel]["state"] != "ACTIVE"
+            || !remote_matches_listener(&remote, row, &channel)
+        {
             return Ok(());
         }
         remote["title"] = json!(title);
@@ -326,7 +339,7 @@ pub(super) const DISCOVERY_CUTOFF_SQL: &str =
     "SELECT COALESCE(MAX(updated_at),0) AS revoked_at FROM local_listeners WHERE harness=?1 AND session_id=?2 AND (status='UNLISTENED' OR (status='ACTIVE' AND endpoint_pid>0 AND ?3>0 AND endpoint_pid!=?3))";
 
 enum RegistrationCommit {
-    Committed,
+    Committed { concurrent_title: Option<String> },
     Retry,
     StaleDiscovery,
 }
@@ -374,12 +387,12 @@ fn register_locked(
             Ok::<_, String>(title)
         })
         .transpose()?;
-    let custom_title = requested_title
-        .map(str::to_owned)
-        .or(state.custom_title(harness, session)?);
-    let title = custom_title
-        .as_deref()
-        .unwrap_or_else(|| string(caller, "title"));
+    let initial_title = state.custom_title(harness, session)?;
+    let custom_title = requested_title.or(initial_title.as_deref());
+    let title = custom_title.unwrap_or_else(|| string(caller, "title"));
+    let process_identity = caller["process_identity"]
+        .as_object()
+        .map(|identity| json!(identity).to_string());
     let initial_local = local_node(state, client, harness, session)?;
     let automatic = args["_auto"] == true;
     let revision = state.discovery_revision(harness)?;
@@ -495,6 +508,7 @@ fn register_locked(
                 && previous["channels"][&channel]["owner_token"] == row["owner_token"]
                 && remote_matches_listener(&previous, row, &channel)
                 && row["endpoint_pid"] == caller["endpoint_pid"]
+                && row["process_identity"].as_str() == process_identity.as_deref()
         });
         let retain = (sibling || same_binding.is_some())
             && previous["binding_generation"]
@@ -568,13 +582,22 @@ fn register_locked(
                 "SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?",
                 &[json!(hub), json!(id), json!(generation), json!(owner)],
             )?.is_empty() { return Ok(RegistrationCommit::Retry); }
+            let current_title = LocalState::custom_title_on(connection, harness, session)?;
+            let concurrent_title = current_title.filter(|s| Some(s) != initial_title.as_ref());
+            let committed_title = concurrent_title.as_deref().unwrap_or(title);
             let changed = connection.execute(
-                "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET consecutive_probe_failures=CASE WHEN status!='ACTIVE' OR owner_token!=excluded.owner_token OR COALESCE(endpoint_pid,-1)!=COALESCE(excluded.endpoint_pid,-1) THEN 0 ELSE consecutive_probe_failures END,public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status=excluded.status,binding_generation=excluded.binding_generation,owner_token=excluded.owner_token,updated_at=MAX(local_listeners.updated_at,excluded.updated_at) WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
-                &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(if stale { "UNLISTENED" } else { "ACTIVE" }),json!(generation),json!(owner),json!(now_ms().max(cutoff))],
+                "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,process_identity,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET consecutive_probe_failures=CASE WHEN status!='ACTIVE' OR owner_token!=excluded.owner_token OR endpoint_pid IS NOT excluded.endpoint_pid OR process_identity IS NOT excluded.process_identity THEN 0 ELSE consecutive_probe_failures END,public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,process_identity=excluded.process_identity,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status=excluded.status,binding_generation=excluded.binding_generation,owner_token=excluded.owner_token,updated_at=MAX(local_listeners.updated_at,excluded.updated_at) WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
+                &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(process_identity),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(committed_title),json!(about),json!(scope),json!(if stale { "UNLISTENED" } else { "ACTIVE" }),json!(generation),json!(owner),json!(now_ms().max(cutoff))],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
+            connection.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=?", &[client.config["url"].clone(),json!(hub),json!(id)])?;
+            if stale {
+                // Preserve local stop/recovery intent while retaining the published owner for cleanup.
+                connection.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
+                return Ok(RegistrationCommit::StaleDiscovery);
+            }
             if let Some(previous) = local.as_ref().filter(|row| {
-                !stale && row["status"] == "UNLISTENED" && row["user_stopped"] == 0
+                row["status"] == "UNLISTENED" && row["user_stopped"] == 0
                     && row["retirement_reason"] == "hard_exit"
                     && row["hub_url"] == client.config["url"]
                     && principal_ids_equal(string(row, "principal_id"), string(&client.identity, "principal_id"))
@@ -594,24 +617,17 @@ fn register_locked(
             if let Some((revision, _)) = advancing {
                 connection.execute("UPDATE local_listeners SET last_activity_revision=? WHERE hub=? AND listener_id=?", &[json!(revision.to_string()),json!(hub),json!(id)])?;
             }
-            connection.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=?", &[client.config["url"].clone(),json!(hub),json!(id)])?;
-            if stale {
-                // Retain both the published owner and retry intent before any cleanup IO.
-                connection.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
-                Ok(RegistrationCommit::StaleDiscovery)
-            } else {
-                connection.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
-                if super::state::reconcile_wake_retry(connection, hub, &id)? {
-                    connection.execute("INSERT OR IGNORE INTO wake_retries(hub,listener_id,retry_at_ms) VALUES(?,?,?)", &[json!(hub),json!(id),json!(now_ms())])?;
-                }
-                Ok(RegistrationCommit::Committed)
+            connection.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+            if super::state::reconcile_wake_retry(connection, hub, &id)? {
+                connection.execute("INSERT OR IGNORE INTO wake_retries(hub,listener_id,retry_at_ms) VALUES(?,?,?)", &[json!(hub),json!(id),json!(now_ms())])?;
             }
+            Ok(RegistrationCommit::Committed { concurrent_title })
         }).inspect_err(|_| {
             if same_binding.is_none() {
                 let _ = super::receiver::detach_channel_expected(client, &id, &channel, &json!({"binding_generation":generation,"owner_token":owner}));
             }
         })?;
-        match committed {
+        let concurrent_title = match committed {
             RegistrationCommit::Retry => continue,
             RegistrationCommit::StaleDiscovery => {
                 // Drop the database lock before IO; fence cleanup to this channel's token.
@@ -628,7 +644,7 @@ fn register_locked(
                 }
                 return Err("STALE_DISCOVERY: Candidate was revoked during registration".into());
             }
-            RegistrationCommit::Committed => {
+            RegistrationCommit::Committed { concurrent_title } => {
                 if discovered_at == 0
                     || local
                         .as_ref()
@@ -636,15 +652,32 @@ fn register_locked(
                 {
                     state.invalidate_discovery(harness)?;
                 }
+                concurrent_title
             }
-        }
-        let mut result = json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60});
-        if let Some(title) = requested_title {
-            if state.set_custom_title(harness, session, title).is_err() {
-                result["committed"] = json!(true);
-                result["warning"] =
-                    json!("Listening committed; session title maintenance is incomplete");
-            }
+        };
+        let committed_title = concurrent_title.as_deref().unwrap_or(title);
+        let mut result = json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":committed_title,"scope":scope,"lease_ttl_seconds":60});
+        let maintenance = if concurrent_title.is_some() {
+            sync_custom_title_locked(
+                state,
+                client,
+                host_id,
+                &json!({"harness":harness,"session_id":session,"hub":hub,"listener_id":id,"binding_generation":generation,"owner_token":owner}),
+            )
+        } else if let Some(requested) = requested_title {
+            state.db.transaction(|db| {
+                if LocalState::custom_title_on(db, harness, session)? == initial_title {
+                    LocalState::write_custom_title(db, harness, session, requested)?;
+                }
+                Ok(())
+            })
+        } else {
+            Ok(())
+        };
+        if maintenance.is_err() {
+            result["committed"] = json!(true);
+            result["warning"] =
+                json!("Listening committed; session title maintenance is incomplete");
         }
         return Ok(result);
     }

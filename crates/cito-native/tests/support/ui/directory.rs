@@ -577,6 +577,7 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
         s.directory("act_time:personal:sig_unread")["text"],
         "Just now"
     );
+    assert_eq!(s.directory("act_time:personal:sig_unread")["tooltip"], "");
     assert_eq!(s.directory("act_msg:personal:sig_unread")["width"], 492);
     let delete = s.directory("delete_activity:personal:sig_unread");
     assert_eq!(delete["symbol"], "xmark");
@@ -1020,6 +1021,31 @@ fn in_flight_directory_query_filters_cached_rows_until_correlated_reply() {
 }
 
 #[test]
+fn directory_facets_distinguish_display_names_containing_separators() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    let mut first = frame["harnesses"][0].clone();
+    first["display_name"] = json!("First|other:Second");
+    frame["harnesses"] = json!([first]);
+    f.send(p, frame.clone());
+    control(&f, p, "open_directory");
+    assert_eq!(
+        inspect(&f, p).directory("dir_harness:fixture")["text"],
+        "First|other:Second"
+    );
+    first["display_name"] = json!("First");
+    let mut other = first.clone();
+    other["id"] = json!("other");
+    other["display_name"] = json!("Second");
+    frame["harnesses"] = json!([first, other]);
+    f.send(p, frame);
+    let two = inspect(&f, p);
+    assert_eq!(two.directory("dir_harness:fixture")["text"], "First");
+    assert_eq!(two.directory("dir_harness:other")["text"], "Second");
+}
+
+#[test]
 fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -1035,6 +1061,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(s["directory_selected_id"], "personal:one");
     assert_eq!(s.directory("dir_scope:mine")["border_width"], 0);
     assert_eq!(s.directory("dir_harness:fixture")["border_width"], 0);
+    assert_eq!(s.directory("dir_user:personal:one")["tooltip"], "@bob");
     assert_eq!(s.directory("dir_scope:all")["border_width"], 1);
     assert_eq!(s.directory("directory_panel")["width"], 560);
     for id in [

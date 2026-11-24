@@ -387,7 +387,7 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
                 f.service.slot(hub)?,
                 &f.service.host_id,
                 &json!({"about":"Work"}),
-                &json!({"harness":"agent","session_id":sid,"endpoint_pid":std::process::id(),"cwd":"/workspace","title":"Work"}),
+                &json!({"harness":"agent","session_id":sid,"endpoint_pid":std::process::id(),"process_identity":{"command":"agent","started_at":"original"},"cwd":"/workspace","title":"Work"}),
             )?;
         }
     }
@@ -432,6 +432,10 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
         thread::sleep(Duration::from_millis(1));
     }
     let calls = f.calls("probe");
+    assert!(calls
+        .iter()
+        .all(|r| r["request"]["process_identity"]
+            == json!({"command":"agent","started_at":"original"})));
     assert_eq!(
         calls.len(),
         2,

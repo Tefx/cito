@@ -9,12 +9,7 @@ enum CitoMetrics {
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
     static let cardRadius: CGFloat = 10
-    static let sessionTextX: CGFloat = 48
-    static let sessionPathWidth = menuRailWidth - sessionTextX - cardInset - 52
-    static let directoryWidth: CGFloat = 560
-    static let directoryTextX: CGFloat = 52
-    static let directoryInset: CGFloat = 16
-    static let activityTextWidth = directoryWidth - directoryTextX - directoryInset
+    static let activityTextWidth: CGFloat = 492
 }
 
 func compactHomePath(_ path: String, home: String = NSHomeDirectory()) -> String {
@@ -146,7 +141,7 @@ func compactAddressLabel(_ address: String, maxWidth: CGFloat, font: NSFont, pad
     return "…"
 }
 
-func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = CitoMetrics.sessionPathWidth,
+func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat,
                         font: NSFont = .systemFont(ofSize: 10.5)) -> String {
     let full = shortCwd + branchSuffix
     guard measureTextWidth(full, font: font) > maxWidth else { return full }

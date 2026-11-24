@@ -130,12 +130,12 @@ extension Companion: NSMenuDelegate {
         return copy
     }
 
-    func rebuild() {
+    func rebuild(preservingEditor: Bool = false) {
         updateStatusItem()
         menuDirty = true
         guard menuOpen || renderingForInspection else { return }
         let count = uniqueSessionCount
-        if renamingSessionKey != nil, renameField?.currentEditor() != nil {
+        if preservingEditor, renamingSessionKey != nil, renameField?.currentEditor() != nil {
             updateMenuErrorRow()
             menuRebuildDeferred = true
             return
@@ -273,11 +273,8 @@ extension Companion: NSMenuDelegate {
         for hub in hubs where showHubControls {
             let color = hub.name == effectiveTargetHub && hub.status == "connected" && hub.error == nil ? NSColor.white : statusColor(hub.status)
             let isSingleDefault = hubs.count == 1 && hub.is_builtin == true
-            let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
             let title: String
-            if isCompactIcon {
-                title = ""
-            } else if isSingleDefault {
+            if isSingleDefault {
                 switch hub.status {
                 case "connected": title = hub.user ?? "Connected"
                 case "connecting": title = "Connecting…"
@@ -290,29 +287,17 @@ extension Companion: NSMenuDelegate {
             let compactChips = totalHubPillsWidth + 4 > stripWidth
             let fullCap = stripWidth - 4
             let chipCap = hubs.count > 1 && stripWidth >= 92 ? floor((stripWidth-8)/2) : fullCap
-            let width: CGFloat = isCompactIcon ? 44 : min(compactChips ? chipCap : fullCap, 180, measureTextWidth(title, font: btnFont) + 26)
+            let width: CGFloat = min(compactChips ? chipCap : fullCap, 180, measureTextWidth(title, font: btnFont) + 26)
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
             pill.style = hub.name == effectiveTargetHub
                 ? (hub.status == "connected" && hub.error == nil ? .prominent : .neutral)
                 : .subtleHeader
-            if isCompactIcon {
-                pill.label.isHidden = true
-                pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
-                let net = NSImageView(frame: NSRect(x: 16, y: 5, width: 12, height: 12))
-                net.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Connected")
-                net.contentTintColor = .labelColor; pill.addSubview(net); pill.centerSymbolView = net
-                let chev = NSImageView(frame: NSRect(x: 31, y: 7, width: 8, height: 8))
-                chev.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)
-                chev.contentTintColor = CitoPalette.secondaryText; pill.addSubview(chev); pill.accessorySymbolView = chev
-                pill.toolTip = "Connected · \(hub.user ?? "local")"
-            } else {
-                pill.label.font = btnFont
-                pill.label.lineBreakMode = .byTruncatingMiddle; pill.toolTip = title
-                pill.label.frame.origin.x = 16; pill.label.frame.size.width = width - 20
-                pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
-                pill.toolTip = isSingleDefault ? (hub.status == "connected" ? "Connected · \(hub.user ?? "local")" : title) : "\(hub.name) · \(["connected":"Connected", "auth_required":"Sign-in required", "disconnected":"Offline", "connecting":"Connecting…"][hub.status] ?? "Unavailable")"
-            }
+            pill.label.font = btnFont
+            pill.label.lineBreakMode = .byTruncatingMiddle
+            pill.label.frame.origin.x = 16; pill.label.frame.size.width = width - 20
+            pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
+            pill.toolTip = isSingleDefault ? (hub.status == "connected" ? "Connected · \(hub.user ?? "local")" : title) : "\(hub.name) · \(["connected":"Connected", "auth_required":"Sign-in required", "disconnected":"Offline", "connecting":"Connecting…"][hub.status] ?? "Unavailable")"
             pill.setAccessibilityLabel(pill.toolTip ?? hub.name)
             pill.pressed = { [weak self, weak menu] in
                 guard let self = self, let drawer = drawerItems[hub.name] else { return }
@@ -322,7 +307,7 @@ extension Companion: NSMenuDelegate {
                     if alreadySelected || hub.status != "connected" || hub.error != nil {
                         self.hubDrawerVisibility[hub.name] = drawer.isHidden
                     }
-                    self.rebuild()
+                    self.rebuild(preservingEditor: false)
                     return
                 }
                 drawer.isHidden = !drawer.isHidden
@@ -365,13 +350,12 @@ extension Companion: NSMenuDelegate {
         let orderedListeners = listeners.filter { $0.harness != "human" }
         for listener in orderedListeners {
             let sessionKey = "\(listener.harness):\(listener.session_id)"
-            let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
                 .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
             let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user, about: listener.about, harnessName: map[listener.harness]?.display_name, customTitle: listener.custom_title == true)
-            let hasDistinctAbout = distinctAbout(listener.about, title:listener.title, user:user, otherTitle:displayTitle) != nil
-            let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
-            let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
+            let aboutText = distinctAbout(listener.about, title:listener.title, user:user, otherTitle:displayTitle)
+            let rowHeight: CGFloat = aboutText != nil ? 78 : 64
+            let cardHeight: CGFloat = aboutText != nil ? 72 : 58
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
             row.identifier = NSUserInterfaceItemIdentifier("session:\(listener.scoped_id)")
             let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
@@ -387,7 +371,7 @@ extension Companion: NSMenuDelegate {
                 NSRect(x: titleX, y: cardHeight - 26, width: 40, height: 18), size: 13, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle
             title.toolTip = displayTitle; card.addSubview(title)
-            if hasDistinctAbout {
+            if let aboutText {
                 let aboutLabel = textLabel(aboutText, NSRect(x: titleX, y: 28, width: card.bounds.width - CitoMetrics.cardInset - titleX, height: 16), size: 11.5, color: CitoPalette.secondaryText)
                 aboutLabel.lineBreakMode = .byTruncatingMiddle
                 aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
@@ -519,7 +503,7 @@ extension Companion: NSMenuDelegate {
             toggleRemote.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.myRemoteCollapsed.toggle()
-                self.rebuild()
+                self.rebuild(preservingEditor: false)
             }
             remoteHeader.addSubview(toggleRemote)
             _ = host(remoteHeader, id: "my_remote_header")
@@ -663,7 +647,7 @@ extension Companion: NSMenuDelegate {
                     guard let self = self else { return }
                     if self.collapsedGroups.contains(groupKey) { self.collapsedGroups.remove(groupKey) }
                     else { self.collapsedGroups.insert(groupKey) }
-                    self.rebuild()
+                    self.rebuild(preservingEditor: false)
                 }
                 groupRow.addSubview(groupControl)
                 _ = host(groupRow, id: "group:\(harness)")

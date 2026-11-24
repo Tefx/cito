@@ -1,6 +1,4 @@
-use cito_native::core;
-use cito_native::extract_jsonrpc_from_http_body;
-pub use core::{daemon, hub, plugins, setup};
+use cito_native::{daemon, extract_jsonrpc_from_http_body, hub, plugins, setup};
 
 use plugins::{ensure_daemon, http_post_mcp, load_native_config, CITO_VERSION};
 use serde_json::{json, Value};
@@ -37,14 +35,7 @@ impl Drop for Sidecar {
     fn drop(&mut self) {
         self.input.take();
         let _ = cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100));
-        if cito_native::core::plugins::peek_plugin_exit(self.child.id()).is_ok() {
-            // SAFETY: an unreaped owned process still reserves its process group.
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-            }
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        let _ = cito_native::support::teardown_child_group(&mut self.child);
     }
 }
 static STDIO_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -180,7 +171,7 @@ mod rpc_tests {
 fn run_mcp_stdio() -> Result<(), String> {
     let pipe = cito_native::support::WakePipe::new()?;
     let wake = STDIO_WAKE.get_or_init(|| pipe);
-    let output_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (failures, failure) = mpsc::channel();
     // SAFETY: handlers store a lock-free atomic and write to the live self-pipe.
     unsafe {
         libc::signal(
@@ -281,7 +272,7 @@ fn run_mcp_stdio() -> Result<(), String> {
             let ready_wake = Arc::new(cito_native::support::WakePipe::new()?);
             let ready_notice = ready_wake.clone();
             let out = lock.clone();
-            let failed = output_failed.clone();
+            let failures = failures.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stdout);
                 let ready = read_sidecar_line(&mut reader)
@@ -290,20 +281,29 @@ fn run_mcp_stdio() -> Result<(), String> {
                     .and_then(|line| {
                         serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())
                     });
-                let _ = tx.send(ready);
+                let active = ready.as_ref().is_ok_and(|v| v["op"] == "ready");
+                let sent = tx.send(ready);
                 ready_notice.notify();
-                while let Ok(Some(line)) = read_sidecar_line(&mut reader) {
-                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if v["jsonrpc"] == "2.0"
-                            && v.get("method").is_some()
-                            && output(&out, &v).is_err()
-                        {
-                            failed.store(true, std::sync::atomic::Ordering::Release);
-                            STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-                            wake.notify();
-                            break;
+                if !active || sent.is_err() {
+                    return;
+                }
+                let result = (|| -> Result<(), String> {
+                    while let Some(line) = read_sidecar_line(&mut reader)
+                        .map_err(|e| format!("Sidecar framing: {e}"))?
+                    {
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            if v["jsonrpc"] == "2.0" && v.get("method").is_some() {
+                                output(&out, &v)
+                                    .map_err(|e| format!("MCP stdout write failed: {e}"))?;
+                            }
                         }
                     }
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    let _ = failures.send(e);
+                    STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+                    wake.notify();
                 }
             });
             let mut fds = [
@@ -401,11 +401,7 @@ fn run_mcp_stdio() -> Result<(), String> {
         }
     }
     drop(sidecars);
-    if output_failed.load(std::sync::atomic::Ordering::Acquire) {
-        Err("MCP stdout write failed".into())
-    } else {
-        Ok(())
-    }
+    failure.try_recv().map_or(Ok(()), Err)
 }
 fn main() {
     let args: Vec<String> = env::args().collect();

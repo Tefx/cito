@@ -268,7 +268,11 @@ fn v45_settings_dedup_scroll_editor_and_inventory_diagnostics() {
     );
     f.send(p, json!({"op":"test_focus_field","id":"settings_hub_name"}));
     f.send(p, json!({"op":"test_clipboard","text":"Draft"}));
-    f.send(p, json!({"op":"test_settings_key","key":"cmd-v"}));
+    f.send(p, json!({"op":"test_settings_key","key":"command-v"}));
+    assert_eq!(
+        inspect(&f, p).settings("settings_hub_name")["text"],
+        "Draft"
+    );
     f.send(p, json!({"op":"test_editor_marked","value":"compose"}));
     let editing = inspect(&f, p);
     let editor = editing["field_editors"][0].clone();
@@ -566,6 +570,7 @@ fn v45_menu_candidate_timestamp_empty_drawer_and_active_rename_stability() {
     let reconnect = inspect(&f, p);
     assert_eq!(reconnect.menu("empty")["height"], height);
     assert_eq!(reconnect.menu("drawer:personal")["hidden"], true);
+    f.send(p, json!({"op":"test_menu_open"}));
     frame["hubs"][0]["status"] = json!("connected");
     frame["listeners"] = json!([listener()]);
     f.send(p, frame.clone());
@@ -602,6 +607,9 @@ fn v45_menu_candidate_timestamp_empty_drawer_and_active_rename_stability() {
         refreshed["rename_field_identity"],
         editing["rename_field_identity"]
     );
+    assert!(refreshed.menu("remote:personal:other-host").is_object());
+    control(&f, p, "toggle_my_remote");
+    assert!(inspect(&f, p).menu("remote:personal:other-host").is_null());
     f.send(p, json!({"op":"test_end_editing"}));
     f.send(p, json!({"op":"test_menu_key","key":"escape"}));
     assert!(inspect(&f, p)

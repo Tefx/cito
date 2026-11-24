@@ -793,6 +793,7 @@ server.serve_forever()
     gate("bob-current", "bob", "rotated-credential", false);
     gate("bob-periodic", "bob", "rotated-credential", false);
     let mut config: Value = read_json(&f.config);
+    config["hubs"]["shared"]["authMode"] = json!("token");
     config["hubs"]["shared"]["token"] = json!("rotated-credential");
     fs::write(&f.config, config.to_string()).unwrap();
     wait(|| seen("alice-old"));

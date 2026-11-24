@@ -8,7 +8,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             if directorySummaryLabel?.toolTip == oldCopyError { directorySummaryLabel?.toolTip = nil }
             if directorySummaryLabel?.stringValue == oldCopyError {
                 if directoryMode == "activity" { applyActivityFilter() }
-                else { applyDirectoryFilter(fromDaemonFrame:false,daemonMatchedCount:nil) }
+                else { applyDirectoryFilter() }
             }
         }
         updateDirectoryWarnings()
@@ -176,7 +176,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self = self else { return }
                 self.directoryScopeFilter = scopeVal
                 self.updateDirectoryFacetStyles()
-                self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                self.applyDirectoryFilter()
                 self.queryDirectory()
             }
             pill.frame.origin=NSPoint(x:x-14,y:2)
@@ -190,7 +190,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             guard let self = self else { return }
             self.directoryHarnessFilter = "all"
             self.rebuildDirectoryFacetBar()
-            self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+            self.applyDirectoryFilter()
             self.queryDirectory()
         }
         directoryFacetControls["dir_harness:all"] = allHarnessesPill
@@ -395,7 +395,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         if mode == "activity" {
             applyActivityFilter(revealSelection:true)
         } else {
-            applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+            applyDirectoryFilter()
         }
     }
 
@@ -477,15 +477,10 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func rebuildDirectoryFacetBar() {
         guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
         guard let facetBar = directoryFacetBar else { return }
-        let map = harnessMap
-        let unionHarnesses = Set<String>(harnesses.filter { $0.id != "human" && ($0.kind == nil || $0.kind == "agent" || $0.kind == "agent-harness") }.map { $0.id })
-        let ordered = unionHarnesses.sorted { a, b in
-            let va = resolveHarnessVisual(a, harnesses: map)
-            let vb = resolveHarnessVisual(b, harnesses: map)
-            return va.order != vb.order ? va.order < vb.order : a < b
-        }
-        let signature = ordered.map { h in "\(h):\(resolveHarnessVisual(h, harnesses: map).name)" }.joined(separator: "|")
-        if signature == lastDirectoryFacetSignature {
+        let signature = harnesses.filter { $0.id != "human" && ($0.kind == nil || $0.kind == "agent" || $0.kind == "agent-harness") }
+            .sorted { ($0.order, $0.id) < ($1.order, $1.id) }
+            .map { (id: $0.id, display_name: $0.display_name) }
+        if let lastDirectoryFacetSignature, signature.elementsEqual(lastDirectoryFacetSignature, by: ==) {
             updateDirectoryFacetStyles()
             return
         }
@@ -498,9 +493,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
         let pillFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         var harnessPills: [NSView] = directoryFacetControls["dir_harness:all"].map { [$0] } ?? []
-        for harness in ordered {
-            let visual = resolveHarnessVisual(harness, harnesses: map)
-            let title = ordered.count <= 3 ? visual.name.replacingOccurrences(of:" (Experimental)",with:"") : harness
+        for (harness, name) in signature {
+            let title = signature.count <= 3 ? name.replacingOccurrences(of:" (Experimental)",with:"") : harness
             let width = max(42, ceil(measureTextWidth(title, font: pillFont)) + 20)
             let id = "dir_harness:\(harness)"
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
@@ -509,7 +503,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self = self else { return }
                 self.directoryHarnessFilter = harness
                 self.rebuildDirectoryFacetBar()
-                self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                self.applyDirectoryFilter()
                 self.queryDirectory()
             }
             harnessPills.append(pill); directoryFacetControls[id] = pill
@@ -591,7 +585,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                     guard let self=self else{return}
                     self.directoryQuery=""; self.directoryScopeFilter="all"; self.directoryHarnessFilter="all"
                     self.directorySearchField?.stringValue=""; self.rebuildDirectoryFacetBar()
-                    self.applyDirectoryFilter(fromDaemonFrame:false,daemonMatchedCount:nil)
+                    self.applyDirectoryFilter()
                     self.queryDirectory()
                 }
             } else {
@@ -691,14 +685,13 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             let host = (listener.host_name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return RemotePeer(hub: listener.hub, listener_id: listener.listener_id,
                 public_id: listener.public_id, scoped_id: listener.scoped_id,
-                user: user, host_id: listener.host_id ?? "", host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
+                user: user, host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
                 display_address: listener.display_address, title: listener.title, about: listener.about ?? "",
-                scope: listener.scope, last_seen_at: "", session_id: listener.session_id, custom_title: listener.custom_title, cwd: listener.cwd, repo: listener.repo,
+                scope: listener.scope, custom_title: listener.custom_title, cwd: listener.cwd, repo: listener.repo,
                 branch: listener.branch, is_self_principal: listener.is_self_principal, channels: listener.channels,
-                attachments:listener.attachments ?? (listener.harness == "human" ? hubs.first(where:{$0.name == listener.hub})?.attachments : nil),
-                can_set_scope:listener.can_set_scope, can_pin:listener.can_pin, can_rename:listener.can_rename, can_stop:listener.can_stop)
+                attachments:listener.attachments ?? (listener.harness == "human" ? hubs.first(where:{$0.name == listener.hub})?.attachments : nil))
         } + myRemote
-        applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+        applyDirectoryFilter()
     }
 
     func refreshDirectoryViews(revealSelection: Bool = false) {
@@ -706,7 +699,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         updateDirectoryModePills()
         rebuildDirectoryFacetBar()
         if directoryMode == "activity" { applyActivityFilter(revealSelection: revealSelection) }
-        else { applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil) }
+        else { applyDirectoryFilter() }
     }
 
     func openDirectoryPanel(mode: String = "directory") {
@@ -746,7 +739,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         if emitAction { emit(["op": "close_directory"]) }
     }
 
-    func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
+    func applyDirectoryFilter() {
         directoryDirty = true
         let (offset, top, deltaY) = captureScrollAnchor()
         let anchorId = directoryFilteredPeers.indices.contains(top) ? directoryFilteredPeers[top].scoped_id : nil
@@ -766,7 +759,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 return searchable.joined(separator: " ").localizedCaseInsensitiveContains(directoryQuery)
             }
         } else { directoryFilteredPeers = directoryAllPeers }
-        directoryMatchedCount = daemonMatchedCount ?? (sameServerQuery ? serverDirectoryMatchedCount : directoryFilteredPeers.count)
+        directoryMatchedCount = sameServerQuery ? serverDirectoryMatchedCount : directoryFilteredPeers.count
         if directoryFilteredPeers.isEmpty {
             directorySelectedIndex = 0
         } else if let prev = previousSelectedId, let idx = directoryFilteredPeers.firstIndex(where: { $0.scoped_id == prev }) {

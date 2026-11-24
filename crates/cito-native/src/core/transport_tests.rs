@@ -13,7 +13,7 @@ fn silent_established_sse_reconnects_without_peer_eof() {
         None,
     );
     let worker = client
-        .start_events_with_idle_timeout(Duration::from_millis(150))
+        .start_events_with(Duration::from_millis(150), ureq::AgentBuilder::new())
         .unwrap();
     let accept = || {
         let mut fds = [libc::pollfd {
@@ -28,15 +28,22 @@ fn silent_established_sse_reconnects_without_peer_eof() {
     };
     let mut first = accept();
     let initial = client.event_revision();
+    // A slow handshake may outlast the established-stream cancellation budget.
+    thread::sleep(Duration::from_millis(120));
     first.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: first\n\n").unwrap();
     client.wait_for_event(initial, Instant::now() + Duration::from_secs(1));
     assert!(client.event_revision() > initial);
     let mut second = accept();
+    crate::core::http_boundary::read_head(&mut BufReader::new(&second), 16_384).unwrap();
     assert!(!client.stream_live.load(Ordering::SeqCst));
-    client.close();
+    // Close through the renewed authority while the original reader awaits headers.
+    let mut renewed = HubClient::new("work".into(), client.config.clone(), "alice", None);
+    renewed.inherit_authority(&client);
     second
-        .write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n")
+        .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
+    renewed.close();
+    assert_eq!(second.read(&mut [0; 1]).unwrap(), 0);
     worker.join().unwrap();
 }
 
@@ -44,7 +51,7 @@ fn silent_established_sse_reconnects_without_peer_eof() {
 fn oversized_sse_hints_drain_without_reconnect_and_keep_following_events() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let (release, released) = std::sync::mpsc::channel();
+    let (closed, eof) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(socket.try_clone().unwrap());
@@ -55,15 +62,20 @@ fn oversized_sse_hints_drain_without_reconnect_and_keep_following_events() {
                 break;
             }
         }
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: ").unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nda\r\n4;ext=1\r\nta: \r\n").unwrap();
         // A maximum-codepoint signal expands beyond the bounded line buffer on the wire.
         let chunk = "x".repeat(8191);
         for _ in 0..40 {
-            socket.write_all(chunk.as_bytes()).unwrap();
+            write!(socket, "{:x}\r\n{chunk}\r\n", chunk.len()).unwrap();
         }
-        socket.write_all(b"\n\ndata: following\n\n").unwrap();
+        let tail = "\n\ndata: following\n\n";
+        write!(socket, "{:x}\r\n{tail}\r\n", tail.len()).unwrap();
         socket.flush().unwrap();
-        let _ = released.recv_timeout(Duration::from_secs(3));
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(socket.read(&mut [0; 1]).unwrap(), 0);
+        closed.send(()).unwrap();
     });
     let client = HubClient::new(
         "work".into(),
@@ -83,7 +95,8 @@ fn oversized_sse_hints_drain_without_reconnect_and_keep_following_events() {
     }
     assert!(client.stream_live.load(Ordering::SeqCst));
     client.close();
-    let _ = release.send(());
+    eof.recv_timeout(Duration::from_millis(200))
+        .expect("close must release the active SSE socket");
     worker.join().unwrap();
     server.join().unwrap();
 }
@@ -253,23 +266,18 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
         "A delayed rejection cannot reject new credentials"
     );
     let server = thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = crate::core::http_boundary::accept_test_client(&listener).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let mut reader = BufReader::new(socket.try_clone().unwrap());
-        let mut headers = String::new();
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            headers.push_str(&line);
-        }
-        assert!(
-            headers.contains("Authorization: Bearer verified-new"),
-            "{headers}"
+        let mut reader = BufReader::new(&mut socket);
+        let head = crate::core::http_boundary::read_head(&mut reader, 16_384).unwrap();
+        assert_eq!(head.headers["authorization"], "Bearer verified-new");
+        let mut request = vec![0; head.length];
+        reader.read_exact(&mut request).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request).unwrap(),
+            json!({"op":"fixture","params":{}})
         );
         let body = r#"{"ok":true,"result":{}}"#;
         write!(
@@ -287,42 +295,65 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
 
 #[test]
 fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client = HubClient::new(
         "work".into(),
-        json!({"url":"http://127.0.0.1:1"}),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap()),"authMode":"none","token":"unused-token"}),
         "alice",
         None,
     );
-    client.cache_human(&json!({"record":{"listener_id":"human"}}));
-    assert!(
-        !client.observation_current(),
-        "Single-node observations cannot establish directory freshness"
-    );
-    *client.directory_observed_at.lock().unwrap() = Some(Instant::now());
-    client
-        .parse_rpc_response(200, br#"{"ok":true,"result":null}"#, &None)
-        .unwrap();
-    // A disconnected SSE stream cannot downgrade a successful RPC or observation.
-    client.stream_live.store(false, Ordering::SeqCst);
+    let server = thread::spawn(move || {
+        serve_rpc(
+            &listener,
+            "human_get",
+            &json!({}),
+            200,
+            &json!({"ok":true,"result":{"record":{"listener_id":"human"}}}),
+        );
+        serve_rpc(
+            &listener,
+            "kv_snapshot",
+            &json!({"after_key":null}),
+            200,
+            &json!({"ok":true,"result":{"entries":[]}}),
+        );
+        let (mut stream, _) = listener.accept().unwrap();
+        drop(listener);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let head =
+            crate::core::http_boundary::read_head(&mut BufReader::new(&stream), 16_384).unwrap();
+        assert!(!head.headers.contains_key("authorization"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\ndata: ready\n\n")
+            .unwrap();
+        assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+    });
+    client.human_request("human_get", &json!({})).unwrap();
+    assert!(client.human_observation_current());
+    assert_eq!(client.capabilities()["observation_current"], false);
+    client.directory().unwrap();
     assert_eq!(client.connection_status(), "connected");
-    assert!(client.observation_current());
-    client.stream_live.store(true, Ordering::SeqCst);
+    assert_eq!(client.capabilities()["observation_current"], true);
+    let revision = client.event_revision();
+    let worker = client.start_events().unwrap();
+    client.wait_for_event(revision, Instant::now() + Duration::from_secs(2));
     assert!(client.rpc("fixture", &json!({})).is_err());
     let state = client.capabilities();
     assert_eq!(state["status"], "connected");
     assert_eq!(state["rpc_status"], "disconnected");
     assert_eq!(state["sse_live"], true);
     assert_eq!(state["observation_current"], true);
-    client.stream_live.store(false, Ordering::SeqCst);
-    assert!(client.observation_current());
-    assert_eq!(client.capabilities()["rpc_status"], "disconnected");
-    assert_ne!(client.connection_status(), "connected");
-    client.stream_live.store(true, Ordering::SeqCst);
-    *client.directory_observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
-    client.cache_human(&json!({"record":{"listener_id":"human","title":"Updated"}}));
-    assert!(client.human_observed_at.lock().unwrap().unwrap().elapsed() < Duration::from_secs(1));
-    assert!(!client.observation_current());
-    assert_eq!(client.connection_status(), "connected");
+    assert_eq!(
+        client.capabilities_at(Instant::now() + Duration::from_secs(60))["observation_current"],
+        false
+    );
+    client.close();
+    worker.join().unwrap();
+    server.join().unwrap();
+    assert_eq!(client.connection_status(), "disconnected");
+    assert_eq!(client.capabilities()["observation_current"], true);
 }
 
 #[test]
@@ -372,6 +403,65 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.dir).unwrap();
     }
 }
+fn loopback_tls() -> (Arc<rustls::ServerConfig>, ureq::AgentBuilder) {
+    let cert = rustls::pki_types::CertificateDer::from(
+        include_bytes!("../../tests/hub/fixtures/localhost-cert.der").to_vec(),
+    );
+    let key = include_str!("../../tests/hub/fixtures/localhost-key.pem")
+        .lines()
+        .filter(|line| !line.starts_with("---"))
+        .collect::<String>();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(STANDARD.decode(key).unwrap());
+    let server = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key.into())
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    (
+        Arc::new(server),
+        ureq::AgentBuilder::new().tls_config(Arc::new(tls)),
+    )
+}
+#[test]
+fn close_releases_quiet_https_subscription_within_budget() {
+    let (config, builder) = loopback_tls();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "https://localhost:{}",
+        listener.local_addr().unwrap().port()
+    );
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut tls =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), socket);
+        let head =
+            crate::core::http_boundary::read_head(&mut BufReader::new(&mut tls), 16_384).unwrap();
+        assert_eq!(head.target, "/v1/events");
+        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: ready\n\n").unwrap();
+        tls.flush().unwrap();
+        // Read TCP directly: a dropped ureq body need not send TLS close_notify.
+        assert_eq!(tls.sock.read(&mut [0; 1]).unwrap(), 0);
+    });
+    let client = HubClient::new("work".into(), json!({"url":url}), "alice", None);
+    let revision = client.event_revision();
+    let worker = client
+        .start_events_with(Duration::from_secs(90), builder)
+        .unwrap();
+    client.wait_for_event(revision, Instant::now() + Duration::from_secs(2));
+    assert!(client.event_revision() > revision);
+    let start = Instant::now();
+    client.close();
+    worker.join().unwrap();
+    server.join().unwrap();
+    assert!(start.elapsed() < Duration::from_millis(200));
+}
 fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
     let dir =
         std::env::temp_dir().join(format!("cito-backlog-{}", crate::plugins::random_uuid_v4()));
@@ -392,29 +482,8 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
     let mut url = format!("http://{}", f.server.address);
     let mut agent = ureq::agent();
     if https {
-        let cert = rustls::pki_types::CertificateDer::from(
-            include_bytes!("../../tests/hub/fixtures/localhost-cert.der").to_vec(),
-        );
-        let key = include_str!("../../tests/hub/fixtures/localhost-key.pem")
-            .lines()
-            .filter(|line| !line.starts_with("---"))
-            .collect::<String>();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(STANDARD.decode(key).unwrap());
-        let config = Arc::new(
-            rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(vec![cert.clone()], key.into())
-                .unwrap(),
-        );
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert).unwrap();
-        agent = ureq::AgentBuilder::new()
-            .tls_config(Arc::new(
-                rustls::ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-            ))
-            .build();
+        let (config, builder) = loopback_tls();
+        agent = builder.build();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         url = format!(
             "https://localhost:{}",
@@ -468,6 +537,26 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
                 reader.read_exact(&mut body).unwrap();
                 drop(reader);
                 let input: Value = serde_json::from_slice(&body).unwrap();
+                if matches!(
+                    input["op"].as_str(),
+                    Some("fixture_short" | "fixture_oversized")
+                ) {
+                    let body = if input["op"] == "fixture_short" {
+                        vec![b'x'; 1]
+                    } else {
+                        vec![b'x'; 8 * 1024 * 1024 + 1]
+                    };
+                    write!(
+                        tls,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len().max(2)
+                    )
+                    .unwrap();
+                    tls.write_all(&body).unwrap();
+                    tls.conn.send_close_notify();
+                    tls.flush().unwrap();
+                    continue;
+                }
                 if matches!(input["op"].as_str(), Some("fixture_error" | "fixture_null")) {
                     let response = if input["op"] == "fixture_error" {
                         json!({"ok":false,"error":{"code":"FORBIDDEN","message":"Request denied"}})
@@ -518,6 +607,24 @@ fn https_rpc_extracts_error_envelopes_and_accepts_null_error() {
         "accepted"
     );
 }
+#[test]
+fn https_transport_failures_mark_rpc_disconnected() {
+    let (fixture, client) = fixture("127.0.0.1", true);
+    for op in ["fixture_short", "fixture_oversized"] {
+        client.rpc("fixture_null", &json!({})).unwrap();
+        assert_eq!(client.capabilities()["rpc_status"], "connected");
+        let error = client.rpc(op, &json!({})).unwrap_err();
+        assert!(error.starts_with("NATS_UNAVAILABLE: "), "{error}");
+        assert_eq!(client.capabilities()["rpc_status"], "disconnected");
+    }
+    client.rpc("fixture_null", &json!({})).unwrap();
+    drop(fixture);
+    assert!(client
+        .rpc("fixture_null", &json!({}))
+        .unwrap_err()
+        .starts_with("NATS_UNAVAILABLE: "));
+    assert_eq!(client.capabilities()["rpc_status"], "disconnected");
+}
 // Check the outgoing RPC as well as its response, including the cursor used for later pages.
 fn serve_rpc(listener: &TcpListener, op: &str, params: &Value, status: u16, response: &Value) {
     use std::os::fd::AsRawFd;
@@ -534,6 +641,7 @@ fn serve_rpc(listener: &TcpListener, op: &str, params: &Value, status: u16, resp
         .unwrap();
     let mut reader = BufReader::new(&mut socket);
     let head = crate::core::http_boundary::read_head(&mut reader, 16_384).unwrap();
+    assert!(!head.headers.contains_key("authorization"));
     let mut body = vec![0; head.length];
     reader.read_exact(&mut body).unwrap();
     assert_eq!(
@@ -684,8 +792,8 @@ fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
                 encoding_error.as_str(),
             ),
             (
-                json!({"entries":[{"value_b64":STANDARD.encode(b"[]") }]}),
-                "NATS_UNAVAILABLE: Invalid directory record",
+                json!({"entries":[{"value_b64":null}]}),
+                "NATS_UNAVAILABLE: Missing directory record",
             ),
         ];
         if later {
@@ -708,9 +816,26 @@ fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
             assert_eq!(observe(), before);
         }
     }
-    let recovered = fetch(vec![(Value::Null, page("recovered", 100_000, Value::Null))]).unwrap();
+    let mut first = page("first", 10_000, json!("middle"));
+    first["entries"].as_array_mut().unwrap().extend(
+        [json!([1]), json!({"title":"metadata"}), json!(null)]
+            .into_iter()
+            .map(|v| json!({"value_b64":STANDARD.encode(v.to_string())})),
+    );
+    first["entries"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"value_b64":STANDARD.encode([0xff, 0x00])}));
+    let recovered = fetch(vec![
+        (Value::Null, first),
+        (json!("middle"), page("recovered", 100_000, Value::Null)),
+    ])
+    .unwrap();
+    assert_eq!(recovered.len(), 2);
+    assert!(recovered.iter().all(|row| row["server_now_ms"] == 100_000));
     let after = observe();
-    assert_eq!(recovered[0]["listener_id"], "recovered");
+    assert_eq!(recovered[0]["listener_id"], "first");
+    assert_eq!(recovered[1]["listener_id"], "recovered");
     assert_eq!(after.0, recovered);
     assert_eq!(after.1, before.1 + 1);
     assert_eq!(after.2.unwrap().0, 100_000);

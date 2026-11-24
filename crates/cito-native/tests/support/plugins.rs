@@ -588,8 +588,18 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
     let resumed = hook("resumed-session", "direct");
     assert_eq!(resumed["err"], "");
     assert_eq!(session(), "resumed-session");
+    assert_eq!(hook("real-session", "direct")["err"], "");
+    assert_eq!(
+        socket(&path, json!({"op":"identify"}))["session_id"],
+        "real-session"
+    );
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
+    let resumed = f.plugin(
+        CLAUDE,
+        json!({"op":"probe","endpoint_pid":pid,"session_id":"real-session","cwd":"/repo"}),
+    );
+    assert_eq!(resumed["status"], "alive", "{resumed}");
 }
 
 #[test]
@@ -698,8 +708,26 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
         parent,
         json!({"hook_event_name":"SessionStart","session_id":"adopted-session","cwd":"/repo-b"}),
     );
+    let stamp = std::time::SystemTime::now() + Duration::from_secs(3600);
+    let entry = fs::File::create(dir.join("adopted-session.jsonl")).unwrap();
+    entry.set_modified(stamp).unwrap();
+    fs::File::create(dir.join("12345678-1234-1234-1234-123456789abc.jsonl"))
+        .unwrap()
+        .set_modified(stamp + Duration::from_secs(3600))
+        .unwrap();
     let adopted = socket(&socket_path, json!({"op":"identify"}));
     assert_eq!(adopted["session_id"], "adopted-session");
+    assert_eq!(
+        adopted["updated_at_ms"],
+        entry
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    );
     // Passive identification and discovery must not renew activity.
     std::thread::sleep(Duration::from_millis(5));
     let identified = socket(&socket_path, json!({"op":"identify"}));
@@ -740,7 +768,14 @@ c,_=s.accept();c.settimeout(2);c.recv(4096);c.sendall((sys.argv[2]+'\n').encode(
     drop(lock);
     wait(|| f.exited(discovery));
     wait(|| !f.frames(discovery).is_empty());
-    assert_eq!(f.frames(discovery)[0]["ok"], true);
+    let fresh = &f.frames(discovery)[0]["sessions"][0];
+    assert_eq!(fresh["session_id"], "canonical-session");
+    assert_eq!(fresh["cwd"], "/repo-b");
+    assert_eq!(fresh["title"], "Canonical title");
+    assert_eq!(
+        fresh["process_identity"],
+        canonical_value["process_identity"]
+    );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
 
     // With no competing hook, the same refresh still updates metadata normally.
@@ -806,7 +841,7 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         parent_hook(
             &f,
             parent,
-            json!({"hook_event_name":"SessionStart","session_id":replacement,"cwd":"/repo-b"}),
+            json!({"hook_event_name":"SessionStart","session_id":replacement,"cwd":if replacement == "old-session" {"/repo"} else {"/repo-b"}}),
         );
         let canonical = fs::read(&binding).unwrap();
         release_tx.send(()).unwrap();
@@ -825,7 +860,14 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         assert_eq!(fs::read(&binding).unwrap(), canonical, "{op}");
         let canonical: Value = serde_json::from_slice(&canonical).unwrap();
         assert_eq!(canonical["session_id"], replacement);
-        assert_eq!(canonical["cwd"], "/repo-b");
+        assert_eq!(
+            canonical["cwd"],
+            if replacement == "old-session" {
+                "/repo"
+            } else {
+                "/repo-b"
+            }
+        );
         assert_eq!(canonical["source"], "hook");
     }
 }
@@ -1243,6 +1285,11 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
             }
             let warm = f.plugin(bin, json!({"op":"discover_sessions"}));
             assert_eq!(warm["sessions"].as_array().unwrap().len(), 9, "{warm}");
+            assert!(warm["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["process_identity"]["started_at"].is_string()));
             let mut activity = SessionActivity::new(&config, &plugins);
             let started = Instant::now();
             activity.tick(&state, &[]).unwrap();
@@ -1320,6 +1367,26 @@ fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
 }
 
 #[test]
+fn bridge_deadline_bounds_a_trickling_response() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let path = f.dir.join("bridge.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = bridge_request(&listener);
+        for _ in 0..5 {
+            if stream.write_all(b" ").is_err() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let _ = stream.write_all(b"{\"ok\":true}\n");
+    });
+    let result = cito_native::support::socket_call(&path, &json!({"op":"identify"}));
+    server.join().unwrap();
+    assert_eq!(result.unwrap_err(), "Socket request timed out");
+}
+#[test]
 fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1334,6 +1401,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         };
         wait(|| f.output(process, false).contains("ready"));
         let pid = f.pid(process);
+        let fallback = format!("claude-{pid}");
         let published = if id == "claude" {
             parent_hook(
                 &f,
@@ -1342,14 +1410,15 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
             );
             let aliases = f.state.join("claude/aliases");
             fs::create_dir_all(&aliases).unwrap();
-            fs::write(aliases.join("live-session"), "claude-retained\n").unwrap();
-            "claude-retained"
+            fs::write(aliases.join("live-session"), format!("{fallback}\n")).unwrap();
+            fallback.as_str()
         } else {
             "live-session"
         };
         let path = f.state.join(format!("sockets/{id}-pid-{pid}.sock"));
         let listener = UnixListener::bind(&path).unwrap();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let session = published.to_owned();
         let server = std::thread::spawn(move || {
             let responses = if id == "pi" {
                 &['Y', 'T', 'T', 'N', 'T'][..]
@@ -1359,7 +1428,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
             for response in responses {
                 let (mut stream, _) = bridge_request(&listener);
                 match response {
-                    'Y' => writeln!(stream,"{}",json!({"ok":true,"session_id":published,"cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
+                    'Y' => writeln!(stream,"{}",json!({"ok":true,"session_id":session,"cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
                     'T' => { let _ = release_rx.recv_timeout(std::time::Duration::from_secs(4)); },
                     _ => writeln!(stream,"{}",json!({"ok":false,"message":"Session closed"})).unwrap(),
                 }
@@ -1448,6 +1517,11 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         })
         .collect();
     assert_eq!(own.len(), 2, "{found}");
+    assert_eq!(
+        found["sessions"].as_array().unwrap().len(),
+        own.len(),
+        "Discovery must stay within the fixture launcher's process tree"
+    );
     assert_ne!(own[0]["session_id"], own[1]["session_id"]);
     assert!(
         own.iter().all(|v| v["session_id"] != "live-session"),
@@ -2075,6 +2149,19 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
         .join(format!("pi/endpoints/{}.json", f.pid(process)));
     let mut cached: Value = read_json(&cache_path);
     assert_eq!(cached["identity"], enrolled["caller"]["process_identity"]);
+    use std::os::unix::fs::MetadataExt;
+    let inode = fs::File::open(&cache_path).unwrap();
+    let same = f.plugin(
+        PI,
+        json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir}),
+    );
+    assert_eq!(same, enrolled);
+    assert_eq!(
+        fs::metadata(&cache_path).unwrap().ino(),
+        inode.metadata().unwrap().ino()
+    );
+    let stale = f.plugin(PI,json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"],"process_identity":{"started_at":"old"}}));
+    assert_eq!(stale["status"], "closed_definitive");
     let mismatch=f.plugin(PI,json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir,"meta":{"expected_session_id":"different"}}));
     assert_eq!(mismatch["error_code"], "BINDING_REQUIRED", "{mismatch}");
     assert_eq!(f.plugin(PI,json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"]}))["status"],"alive");
@@ -2252,7 +2339,7 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    let rollout = f.dir.join("rollout.jsonl");
+    let rollout = f.dir.join("rollout.jsonl ");
     fs::write(&rollout,"{\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"User work\"}}\n").unwrap();
     for i in 0..12 {
         db.execute(
@@ -2336,6 +2423,16 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         before,
         "Cito effects cannot renew qualifying user activity"
     );
+    drop(file);
+    let replacement = rollout.with_extension("replacement");
+    fs::copy(&rollout, &replacement).unwrap();
+    fs::rename(&replacement, &rollout).unwrap();
+    assert_eq!(
+        activity(&discover(&f)),
+        before,
+        "Rotated rollout must preserve consumed wake attribution"
+    );
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout).unwrap();
     writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":wake}})).unwrap();
     // Tool output after a user turn can exceed a fixed tail slice. It must not
     // hide the qualifying turn or become new activity on subsequent refreshes.
@@ -2496,6 +2593,7 @@ fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
         (false, false, false, false),
         (true, false, false, false),
         (true, false, true, true),
+        (false, true, true, true),
     ] {
         let mut f = Fixture::new(json!({}));
         let source =
@@ -2626,11 +2724,16 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
             wait(|| f.dir.join("finished").exists());
             assert!(f.frames(wake).is_empty());
             let recovered = discover(&f);
-            assert_eq!(recovered["kind"], "user_turn");
-            assert_eq!(
-                recovered["at_ms"], before["at_ms"],
-                "An insertion with no receipt remains attributable to Cito across both carriers"
-            );
+            if with_rollout {
+                assert_eq!(recovered["kind"], "user_turn");
+                assert_eq!(recovered["at_ms"], before["at_ms"], "An insertion with no receipt remains attributable to Cito across both carriers");
+            } else {
+                assert_eq!(recovered["kind"], "cito_effect");
+                source
+                    .execute("UPDATE threads SET recency_at_ms=?", &[json!(now + 3)])
+                    .unwrap();
+                assert_eq!(discover(&f)["kind"], "user_turn");
+            }
             continue;
         }
         fs::write(&release, "").unwrap();
@@ -3056,11 +3159,18 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
     fs::create_dir_all(&wakes).unwrap();
     fs::create_dir_all(f.state.join("claude/aliases")).unwrap();
     fs::write(f.state.join("claude/aliases").join(sid), b"claude-123").unwrap();
-    let aliased = f.plugin(CLAUDE, json!({"op":"probe","session_id":"claude-123","cwd":"/repo","endpoint_pid":f.pid(endpoint)}));
+    let stale = f.plugin(CLAUDE, json!({"op":"probe","session_id":"claude-123","cwd":"/repo","endpoint_pid":f.pid(endpoint)}));
+    assert_eq!(stale["current_session_id"], sid, "{stale}");
+    let fallback = format!("claude-{}", f.pid(endpoint));
+    fs::write(f.state.join("claude/aliases").join(sid), &fallback).unwrap();
+    let aliased = f.plugin(
+        CLAUDE,
+        json!({"op":"probe","session_id":fallback,"cwd":"/repo","endpoint_pid":f.pid(endpoint)}),
+    );
     assert_eq!(aliased["status"], "alive", "{aliased}");
-    let mut request = json!({"op":"resolve_caller","require_open":false,"endpoint_pid":f.pid(endpoint),"cwd":"/repo","explicit_session_id":sid,"meta":{"expected_harness":"claude","expected_session_id":"claude-123"}});
+    let mut request = json!({"op":"resolve_caller","require_open":false,"endpoint_pid":f.pid(endpoint),"cwd":"/repo","explicit_session_id":sid,"meta":{"expected_harness":"claude","expected_session_id":fallback}});
     let resolved = f.plugin(CLAUDE, request.clone());
-    assert_eq!(resolved["caller"]["session_id"], "claude-123", "{resolved}");
+    assert_eq!(resolved["caller"]["session_id"], fallback, "{resolved}");
     assert_eq!(resolved["caller"]["title"], "Hook transcript title");
     request["cached_caller"] = resolved["caller"].clone();
     // A fresh resolution would now observe a different title.
@@ -3072,7 +3182,7 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
     );
     request["meta"]["expected_session_id"] = json!("different-session");
     assert_eq!(f.plugin(CLAUDE, request)["error_code"], "INVALID_INPUT");
-    let alias = wakes.join("claude-123.jsonl");
+    let alias = wakes.join(format!("{fallback}.jsonl"));
     fs::write(
         &alias,
         "{\"batch_id\":\"alias\",\"content\":\"keep alias\"}\n",
@@ -3501,6 +3611,16 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
 }
 #[test]
 fn desktop_entrypoints_are_harness_boundaries_only_for_the_executable() {
+    for (cmd, expected) in [
+        ("/tmp/pi.js", None),
+        ("node /tmp/pi.js", Some("pi")),
+        ("node /tmp/pi-coding-agent", None),
+        ("node /tmp/claude-code/cli.mjs", Some("claude")),
+        ("/tmp/codex.js", None),
+        ("node /tmp/codex.js", Some("codex")),
+    ] {
+        assert_eq!(cito_native::support::agent_harness(cmd), expected, "{cmd}");
+    }
     for app in ["Codex", "ChatGPT"] {
         let entry = format!("/Applications/{app}.app/Contents/MacOS/{app}");
         assert!(cito_native::support::is_agent_harness(&entry));
@@ -3533,7 +3653,7 @@ fn mcp_stdio_reports_invalid_frames_and_reaps_its_daemon_while_idle() {
     );
     // SAFETY: the sandbox health and process parent identify the daemon started by this client.
     assert_eq!(unsafe { libc::kill(daemon as i32, libc::SIGTERM) }, 0);
-    wait(|| !cito_native::plugins::pid_alive(daemon as i32));
+    wait(|| !cito_native::support::alive(daemon));
     assert!(!f.exited(mcp));
     f.eof(mcp);
     wait(|| f.exited(mcp));
@@ -3617,6 +3737,25 @@ fn setup_rejects_padded_inline_issuer_and_exits_on_remove_conflicts() {
         "",
     );
     assert!(!ok && err.contains("OIDC"), "{err}");
+    for args in [
+        vec!["--purge-data"],
+        vec!["--default"],
+        vec!["--auth", "none"],
+        vec!["--token", "value"],
+        vec!["--issuer", "https://id.example.com"],
+        vec!["--client-id", "acme"],
+        vec!["--redirect-port", "8400"],
+        vec!["--enable", "telegram"],
+        vec!["--disable", "telegram"],
+    ] {
+        let mut command = vec!["setup", "--dry-run"];
+        command.extend(args);
+        let (ok, _, err) = f.command(NATIVE, &command, "");
+        assert!(
+            !ok && (err.contains("requires") || err.contains("Unknown harness")),
+            "{command:?}: {err}"
+        );
+    }
     let plugin = f.state.join("plugins/sample");
     script(&plugin.join("driver"), "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"actions\":[{\"target\":\"sample\",\"path\":\"settings\",\"status\":\"conflict\",\"detail\":\"Settings changed\"}]}'\n");
     fs::write(
@@ -3624,12 +3763,15 @@ fn setup_rejects_padded_inline_issuer_and_exits_on_remove_conflicts() {
         json!({"id":"sample","displayName":"Sample","command":["./driver"]}).to_string(),
     )
     .unwrap();
+    fs::create_dir_all(f.state.join("pi")).unwrap();
+    fs::write(f.state.join("pi/sentinel"), "retained").unwrap();
     for args in [
         vec!["setup", "--disable", "sample", "--dry-run", "--json"],
         vec!["setup", "--uninstall", "--json"],
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(!ok && err.contains("Settings changed"), "{out} {err}");
+        assert!(f.state.join("pi/sentinel").exists());
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["ok"], false);
     }
     let (ok, _, err) = f.command(NATIVE, &["SQLITE_ERROR: no such table: private_name"], "");
@@ -3802,6 +3944,45 @@ s=http.server.HTTPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handl
     );
 }
 
+#[test]
+fn uninstall_preserves_nested_profile_and_backups_including_plugin_runtime() {
+    let _lock = serial();
+    for sub in ["runtime/private", "pi/private"] {
+        let mut f = Fixture::new(json!({}));
+        install_provider_command(&f, "pi", json!([PI]));
+        let dir = f.state.join(sub);
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("custom.json");
+        fs::write(&config, "{\"user\":\"alice\"}").unwrap();
+        fs::write(dir.join("custom.json.bak.older"), "backup").unwrap();
+        fs::write(dir.join("scratch"), "disposable").unwrap();
+        f.env
+            .insert("CITO_CONFIG_PATH".into(), config.display().to_string());
+        let (ok, out, err) = f.command(NATIVE, &["setup", "--uninstall", "--json"], "");
+        assert!(ok, "{out} {err}");
+        assert_eq!(read_json(config)["user"], "alice");
+        assert_eq!(
+            fs::read(dir.join("custom.json.bak.older")).unwrap(),
+            b"backup"
+        );
+        assert!(!dir.join("scratch").exists());
+    }
+}
+#[test]
+fn disconnect_purge_recovers_a_structurally_valid_invalid_default() {
+    let _lock = serial();
+    let f = Fixture::new(
+        json!({"default_hub":"missing","hubs":{"local":{"url":"local://"}},"user":"alice"}),
+    );
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &["setup", "--disconnect-all", "--purge-data", "--json"],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    assert_eq!(read_json(&f.config)["default_hub"], "local");
+    assert_eq!(read_json(&f.config)["user"], "alice");
+}
 #[test]
 fn malformed_config_does_not_prevent_uninstall_or_purge() {
     let _lock = serial();

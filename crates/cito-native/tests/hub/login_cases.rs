@@ -204,6 +204,17 @@ impl Drop for Provider {
         self.thread.take().unwrap().join().unwrap();
     }
 }
+fn refresh(dir: &Path, config: &Value, rejected: Option<&str>) -> Result<LoginResult, String> {
+    recover_cancellable(
+        dir,
+        "work",
+        config,
+        rejected,
+        false,
+        false,
+        (&|| false, None),
+    )
+}
 fn read(dir: &Path) -> Value {
     serde_json::from_slice(&fs::read(cache_path(dir, "work").unwrap()).unwrap()).unwrap()
 }
@@ -298,7 +309,9 @@ fn login_worker() {
         cancelled: &cancelled,
     };
     let rejected = std::env::var("CITO_LOGIN_TEST_REJECTED").ok();
-    let current = read_cache(&cache_path(&dir, "work").unwrap(), &settings).unwrap();
+    let current = read_cache(&cache_path(&dir, "work").unwrap(), &settings)
+        .ok()
+        .flatten();
     let hash = if config["reuse_fresh"] == true {
         None
     } else {
@@ -385,6 +398,47 @@ fn real_pkce_scopes_signature_nonce_and_private_publication() {
     }
 }
 #[test]
+fn interactive_login_replaces_unreadable_cache() {
+    let dir = Temp::new();
+    let provider = Provider::new();
+    let config = provider.config();
+    let path = cache_path(&dir.0, "work").unwrap();
+    fs::write(&path, b"unreadable").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    if File::open(&path).is_err_and(|err| err.kind() == std::io::ErrorKind::PermissionDenied) {
+        assert!(refresh(&dir.0, &config, None)
+            .unwrap_err()
+            .contains("Cannot read OIDC cache"));
+    }
+    let value = result(&dir.0, worker(&dir.0, &config, None, 3000));
+    assert_eq!(value["identity"]["owner_user"], "alice", "{value}");
+    assert_eq!(
+        offline_identity(&dir.0, "work", &config).unwrap()["owner_user"],
+        "alice"
+    );
+}
+#[test]
+fn cache_publication_obeys_the_readers_byte_limit() {
+    let dir = Temp::new();
+    let provider = Provider::new();
+    provider.seed(&dir.0, 0);
+    let path = cache_path(&dir.0, "work").unwrap();
+    let mut cache = read(&dir.0);
+    cache["refresh_token"] = json!("");
+    let length = MAX_JSON as usize - cache.to_string().len();
+    let deadline = Deadline {
+        cancellation_fd: None,
+        at: Instant::now() + LOGIN_TIMEOUT,
+        cancelled: &|| false,
+    };
+    cache["refresh_token"] = json!("x".repeat(length));
+    publish(&path, &cache, &deadline).unwrap();
+    cache["refresh_token"] = json!("x".repeat(length + 1));
+    assert!(publish(&path, &cache, &deadline).is_err());
+    assert_eq!(fs::metadata(&path).unwrap().len(), MAX_JSON);
+    assert!(offline_identity(&dir.0, "work", &provider.config()).is_some());
+}
+#[test]
 fn refresh_identity_and_rejected_bearer_generation() {
     for changed in [false, true] {
         let dir = Temp::new();
@@ -398,7 +452,7 @@ fn refresh_identity_and_rejected_bearer_generation() {
             }
         }
         let rejected = hash(&token);
-        let value = recover(&dir.0, "work", &provider.config(), Some(&rejected), false).unwrap();
+        let value = refresh(&dir.0, &provider.config(), Some(&rejected)).unwrap();
         assert_ne!(value.0, token);
         assert_eq!(
             read(&dir.0)["refresh_token"],
@@ -410,7 +464,7 @@ fn refresh_identity_and_rejected_bearer_generation() {
         );
         assert_eq!(provider.state.lock().unwrap().refresh_requests, 1);
         assert_eq!(
-            recover(&dir.0, "work", &provider.config(), Some(&rejected), false)
+            refresh(&dir.0, &provider.config(), Some(&rejected))
                 .unwrap()
                 .0,
             value.0
@@ -429,7 +483,7 @@ fn fresh_cache_refreshes_only_after_definitive_token_rejection() {
     cache["id_token"] = json!(invalid);
     cache["token_sha256"] = json!(hash(&invalid));
     fs::write(&path, cache.to_string()).unwrap();
-    let recover = || recover(&dir.0, "work", &provider.config(), None, false);
+    let recover = || refresh(&dir.0, &provider.config(), None);
 
     provider.state.lock().unwrap().jwks_unavailable = true;
     assert!(recover().unwrap_err().starts_with("AUTH_UNAVAILABLE:"));
@@ -462,7 +516,7 @@ fn concurrent_expired_cache_waiters_refresh_once() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                recover(&path, "work", &config, None, false).unwrap().0
+                refresh(&path, &config, None).unwrap().0
             })
         })
         .collect();
@@ -489,7 +543,7 @@ fn concurrent_unexpired_rejection_waiters_reuse_one_verified_winner() {
             let rejected = rejected.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                recover(&path, "work", &config, Some(&rejected), false).unwrap()
+                refresh(&path, &config, Some(&rejected)).unwrap()
             })
         })
         .collect();
@@ -531,7 +585,7 @@ fn refresh_unavailable_preserves_previous_verified_cache() {
     provider.seed(&dir.0, 0);
     let before = fs::read(cache_path(&dir.0, "work").unwrap()).unwrap();
     provider.state.lock().unwrap().refresh_status = 503;
-    assert!(recover(&dir.0, "work", &provider.config(), None, false)
+    assert!(refresh(&dir.0, &provider.config(), None)
         .unwrap_err()
         .contains("AUTH_UNAVAILABLE"));
     assert_eq!(

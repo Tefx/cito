@@ -14,12 +14,11 @@ impl Drop for Descendant {
 
 #[test]
 fn child_exit_is_not_masked_by_a_descendants_inherited_stdout() {
-    let dir = std::env::temp_dir()
-        .join(format!(
-            "cito-child-exit-{}",
-            crate::plugins::random_uuid_v4()
-        ))
-        .join("sample");
+    let root = crate::core::hub::TestDirectory(std::env::temp_dir().join(format!(
+        "cito-child-exit-{}",
+        crate::plugins::random_uuid_v4()
+    )));
+    let dir = root.join("sample");
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("driver.py");
     fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
@@ -30,12 +29,18 @@ fn child_exit_is_not_masked_by_a_descendants_inherited_stdout() {
         manifest: json!({}),
         command: vec!["python3".into(), script.to_string_lossy().into_owned()],
     };
-    let process = ChannelProcess::spawn(&plugin, Arc::new(|_| None)).unwrap();
-    assert!(crate::support::wait_child_exit(
-        &process.child.lock().unwrap(),
-        Duration::from_secs(2)
+    let (tx, rx) = mpsc::channel();
+    let process = ChannelProcess::spawn(
+        &plugin,
+        Arc::new(move |frame| {
+            tx.send(frame).unwrap();
+            None
+        }),
     )
-    .unwrap());
+    .unwrap();
+    let exit = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(exit["op"], "process_exit");
+    assert_eq!(exit["error"], "Plugin subprocess exited");
     let pid = fs::read_to_string(dir.join("descendant"))
         .unwrap()
         .parse::<i32>()
@@ -59,15 +64,14 @@ fn child_exit_is_not_masked_by_a_descendants_inherited_stdout() {
     .unwrap());
     cleanup.0 = 0;
     drop(cleanup);
-    drop(process);
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader() {
-    let dir = std::env::temp_dir()
-        .join(format!("cito-reaped-{}", crate::plugins::random_uuid_v4()))
-        .join("sample");
+    let root = crate::core::hub::TestDirectory(
+        std::env::temp_dir().join(format!("cito-reaped-{}", crate::plugins::random_uuid_v4())),
+    );
+    let dir = root.join("sample");
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("driver.py");
     fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
@@ -96,8 +100,6 @@ fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader(
     // A post-reap group SIGKILL would kill this still-live descendant.
     assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
     drop(cleanup);
-    drop(process);
-    fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {

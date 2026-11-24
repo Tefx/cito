@@ -94,7 +94,22 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
         return;
     };
     fs::create_dir_all(&dir).unwrap();
-    let path = std::path::Path::new(&dir).join(name);
+    capture_png(
+        f,
+        p,
+        surface,
+        &std::path::Path::new(&dir).join(name),
+        appearance,
+    );
+    inspect_as(f, p, appearance);
+}
+fn capture_png(
+    f: &Fixture,
+    p: usize,
+    surface: &str,
+    path: &std::path::Path,
+    appearance: Option<&str>,
+) {
     f.send(
         p,
         json!({"op":"test_render_png","surface":surface,"path":path,"appearance":appearance}),
@@ -103,7 +118,7 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
         f.output(p, true)
             .contains(&format!("rendered {}", path.display()))
     });
-    let data = fs::read(&path).unwrap();
+    let data = fs::read(path).unwrap();
     assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n");
     assert!(data.len() > 1000);
     let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
@@ -122,7 +137,6 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
         assert_eq!(height, 920);
     }
     assert!(height > 100);
-    inspect_as(f, p, appearance);
 }
 
 fn hubs() -> Value {

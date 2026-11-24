@@ -14,7 +14,7 @@ extension Companion {
         guard headless else { return }
         renderingForInspection = true
         defer { renderingForInspection = false }
-        if menuDirty && hasRenderedState { rebuild() }
+        if menuDirty && hasRenderedState { rebuild(preservingEditor: true) }
         if settingsDirty, settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
         if directoryDirty, directoryPanel != nil { refreshDirectoryViews() }
     }
@@ -155,14 +155,6 @@ extension Companion {
                     controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:field))
                 }
                 return true
-            }
-            if ["test_focus_field", "test_settings_input"].contains(op), let id = object["id"] as? String, id.hasPrefix("channel_field:") {
-                let parts = id.split(separator: ":")
-                if parts.count > 1 {
-                    let hub = mountedChannelsSettings?.hub ?? effectiveChannelHub
-                    channelUiStates["\(hub)|\(parts[1])", default: ChannelUiState()].editingPersonal = true
-                    if settingsFieldControls[id] == nil { rebuildSettingsPanel() }
-                }
             }
             if op == "test_editor_marked", let value = object["value"] as? String {
                 let window = object["surface"] as? String == "menu" ? headlessMenuPanel : settingsPanel

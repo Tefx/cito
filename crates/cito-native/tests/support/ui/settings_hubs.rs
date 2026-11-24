@@ -216,16 +216,22 @@ fn clipboard_join_errors_stay_outside_an_idle_add_hub_form() {
         json!({"op":"test_clipboard","text":"https://hub.example.com"}),
     );
     control(&f, p, "paste_hub_invite");
-    let request = latest(&f, p, "paste_hub_invite");
+    latest(&f, p, "paste_hub_invite");
     f.send(
         p,
-        json!({"op":"error","request_id":"unrelated","error":"Other request failed"}),
+        json!({"op":"error","source_op":"setup_save_hub","request_id":"unrelated","error":"Other request failed"}),
     );
     assert_eq!(inspect(&f, p)["hub_invite_pending"], true);
-    for correlated in [true, false] {
-        let mut error = json!({"op":"error","source_op":"paste_hub_invite","error":"Join failed"});
+    for (source, correlated) in [
+        ("setup_save_hub", true),
+        ("paste_hub_invite", true),
+        ("paste_hub_invite", false),
+    ] {
+        control(&f, p, "paste_hub_invite");
+        let current = latest(&f, p, "paste_hub_invite");
+        let mut error = json!({"op":"error","source_op":source,"error":"Join failed"});
         if correlated {
-            error["request_id"] = request["request_id"].clone();
+            error["request_id"] = current["request_id"].clone();
         }
         f.send(p, error);
         let s = inspect(&f, p);

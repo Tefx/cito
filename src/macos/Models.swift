@@ -12,7 +12,6 @@ struct HarnessMeta: Decodable, Equatable {
     let idle_timeout_ms: UInt64?
 }
 struct HarnessVisual {
-    let id: String
     let name: String
     let symbol: String
     let tint: NSColor
@@ -22,7 +21,6 @@ struct HarnessVisual {
 func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -> HarnessVisual {
     if let meta = harnesses[harness] {
         return HarnessVisual(
-            id: meta.id,
             name: meta.display_name,
             symbol: meta.sf_symbol,
             tint: CitoPalette.badgeFill(meta.tint),
@@ -32,7 +30,6 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
     }
     if harness == "human" {
         return HarnessVisual(
-            id: "human",
             name: "Human",
             symbol: "person.crop.circle.fill",
             tint: CitoPalette.badgeFill("human"),
@@ -41,7 +38,6 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
         )
     }
     return HarnessVisual(
-        id: harness,
         name: harness.capitalized,
         symbol: "bolt.horizontal.fill",
         tint: CitoPalette.badgeFill("blue"),
@@ -51,23 +47,19 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
 }
 
 struct ChannelAttachment: Decodable, Equatable {
-    let channel_id: String, location: String, display_name: String, availability: String
+    let location: String, display_name: String, availability: String
     let is_local: Bool
-    let host_id: String?, plugin_id: String?
 }
 
 struct DiscoveryState: Decodable, Equatable {
     let harness: String, status: String
     let error: String?
 }
-struct HubCapabilities: Decodable, Equatable {
-    let status: String?, auth_valid: Bool?, rpc_status: String?, sse_live: Bool?, observation_current: Bool?
-}
 struct Hub: Decodable, Equatable {
     let name: String, status: String, auth_mode: String
     let user: String?, error: String?
     let enabled: Bool?, auto_listen: Bool?
-    let human_paused: Bool?, human_about: String?
+    let human_paused: Bool?
     var human_listener_id: String? = nil
     var human_can_set_scope: Bool? = nil
     var human_control_revision: Int? = nil
@@ -75,7 +67,6 @@ struct Hub: Decodable, Equatable {
     var human_scope: String? = nil
     var human_state_status: String? = nil
     var attachments: [ChannelAttachment]? = nil
-    var capabilities: HubCapabilities? = nil
     var is_builtin: Bool? = nil
     var supports_workspace_scope: Bool? = nil
     var can_login: Bool? = nil
@@ -89,7 +80,6 @@ struct Listener: Decodable, Equatable {
     let display_address: String
     let user: String?, owner_user: String?
     let host_name: String?
-    let host_id: String?
     let channels: [String]?
     let attachments: [ChannelAttachment]?
     var is_self_principal: Bool? = nil
@@ -100,46 +90,23 @@ struct Listener: Decodable, Equatable {
 }
 struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
-    let branch: String?, endpoint_pid: Int?, updated_at_ms: Double?
+    let branch: String?, endpoint_pid: Int?
     let listening_hubs: [String]?
     let custom_title: Bool?
     let needs_reload: Bool?
     let reload_hint: String?
-
-    // Discovery timestamps do not affect any rendered candidate field.
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.harness == rhs.harness && lhs.session_id == rhs.session_id && lhs.title == rhs.title && lhs.cwd == rhs.cwd &&
-        lhs.branch == rhs.branch && lhs.endpoint_pid == rhs.endpoint_pid && lhs.listening_hubs == rhs.listening_hubs &&
-        lhs.custom_title == rhs.custom_title && lhs.needs_reload == rhs.needs_reload && lhs.reload_hint == rhs.reload_hint
-    }
 }
 struct RemotePeer: Decodable, Equatable {
     let hub: String?
     let listener_id: String, public_id: String, scoped_id: String
-    let user: String, host_id: String, host_name: String, harness: String
+    let user: String, host_name: String, harness: String
     let display_address: String
     let title: String, about: String, scope: String
-    let last_seen_at: String?
-    var session_id: String? = nil
     var custom_title: Bool? = nil
     let cwd: String?, repo: String?, branch: String?
     let is_self_principal: Bool?
     let channels: [String]?
     var attachments: [ChannelAttachment]? = nil
-    var can_set_scope: Bool? = nil
-    var can_pin: Bool? = nil
-    var can_rename: Bool? = nil
-    var can_stop: Bool? = nil
-
-    // Hub lease refreshes leave the displayed peer unchanged.
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.hub == rhs.hub && lhs.listener_id == rhs.listener_id && lhs.public_id == rhs.public_id && lhs.scoped_id == rhs.scoped_id &&
-        lhs.user == rhs.user && lhs.host_id == rhs.host_id && lhs.host_name == rhs.host_name && lhs.harness == rhs.harness &&
-        lhs.display_address == rhs.display_address && lhs.title == rhs.title && lhs.about == rhs.about && lhs.scope == rhs.scope &&
-        lhs.session_id == rhs.session_id && lhs.custom_title == rhs.custom_title && lhs.cwd == rhs.cwd && lhs.repo == rhs.repo &&
-        lhs.branch == rhs.branch && lhs.is_self_principal == rhs.is_self_principal && lhs.channels == rhs.channels && lhs.attachments == rhs.attachments &&
-        lhs.can_set_scope == rhs.can_set_scope && lhs.can_pin == rhs.can_pin && lhs.can_rename == rhs.can_rename && lhs.can_stop == rhs.can_stop
-    }
 }
 struct ActivityItem: Decodable, Equatable {
     let hub: String
@@ -155,13 +122,10 @@ struct ActivityItem: Decodable, Equatable {
     let message_truncated: Bool?
     let target_harness: String
     let target_title: String
-    let target_scoped_id: String
     let message: String
     let held_reason: String?
-    let in_reply_to: String?
     let created_at: String
     var unread: Bool
-    let for_me: Bool
     var from_listener_id: String? = nil
     var can_reply: Bool? = nil
 }
@@ -175,7 +139,6 @@ struct ChannelFieldItem: Decodable, Equatable {
     let value: String?
     let configured: Bool
     let hidden: Bool?
-    let redacted: Bool?
     let configured_placeholder: String?
     let help_text: String?
 }
@@ -200,7 +163,6 @@ struct ChannelSetupItem: Decodable, Equatable {
     var pairing_manual_disclosure: Bool? = nil
     var warning: Bool? = nil
     var inbox_paused: Bool? = nil
-    var delivery_enabled: Bool? = nil
     let fields: [ChannelFieldItem]
     let setup_guide: [String]?
     let pairing_help_text: String?
@@ -229,7 +191,6 @@ struct AppSetupItem: Decodable, Equatable {
     let id: String
     let display_name: String
     let tier: String
-    let installed: Bool
     let configured: Bool?
     var isConfigured: Bool { configured == true }
     let status: String
@@ -259,7 +220,6 @@ struct HubConfigItem: Decodable, Equatable {
     let url: String
     let auth_mode: String
     let enabled: Bool
-    let auto_listen: Bool?
     let is_default: Bool
     let status: String
     let user: String?
@@ -267,7 +227,6 @@ struct HubConfigItem: Decodable, Equatable {
     let issuer: String?
     let client_id: String?
     var human_paused: Bool? = nil
-    var human_about: String? = nil
     var human_listener_id: String? = nil
     var human_can_set_scope: Bool? = nil
     var human_control_revision: Int? = nil
@@ -275,11 +234,14 @@ struct HubConfigItem: Decodable, Equatable {
     var human_availability: String? = nil
     var human_state_status: String? = nil
     var attachments: [ChannelAttachment]? = nil
-    var capabilities: HubCapabilities? = nil
     var is_builtin: Bool? = nil
     var supports_workspace_scope: Bool? = nil
     var can_login: Bool? = nil
     var redirect_port: Int? = nil
+    func sharesChannelAuthority(with other: HubConfigItem?) -> Bool {
+        guard let other else { return false }
+        return url == other.url && user == other.user
+    }
     var formProfile: HubFormProfile {
         HubFormProfile(name: name, url: normalizedHubURL(url), issuer: issuer ?? "", clientId: client_id ?? "", redirectPort: redirect_port.map(String.init) ?? "")
     }

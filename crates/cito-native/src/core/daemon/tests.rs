@@ -11,6 +11,12 @@ use std::net::TcpStream;
 
 use crate::core::hub::{TestDirectory, TestEngine};
 
+impl DaemonService {
+    pub(super) fn retire_id(&self, hub: &str, id: &str, reason: &str) -> Result<bool, String> {
+        self.access.retire_binding(hub, id, reason, None, None)
+    }
+}
+
 fn test_config(dir: &TestDirectory) -> NativeConfig {
     NativeConfig {
         state_dir: dir.join("state"),
@@ -815,11 +821,21 @@ fn mcp_http_releases_service_for_directory_enrollment_publication_and_retirement
             };
             if matches!(tool, "cito_listen" | "cli_human_device") {
                 assert_eq!(result["committed"], true, "{result}");
-                assert!(string(&result, "warning").contains("STALE_GENERATION"));
+                assert_eq!(
+                    string(&result, "warning")
+                        .matches("STALE_GENERATION")
+                        .count(),
+                    1
+                );
             } else if matches!(tool, "cito_send" | "send_signal") {
                 assert_eq!(result["committed"], true, "{result}");
                 assert!(string(&result, "signal_id").starts_with("work:sig_"));
-                assert!(string(&result, "maintenance_warning").contains("STALE_GENERATION"));
+                assert_eq!(
+                    string(&result, "maintenance_warning")
+                        .matches("STALE_GENERATION")
+                        .count(),
+                    1
+                );
             } else if tool == "cito_unlisten" {
                 assert!(
                     result["committed"] == true || result["error"]["code"] == "DETACH_PENDING",
@@ -1972,16 +1988,33 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
 
 #[test]
 fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let slot = HubClient::new(
         "work".into(),
-        json!({"url":"http://127.0.0.1:0"}),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap())}),
         "alice",
         None,
     );
     let inventory = ChannelInventory::new(remote_channels_identity(&slot));
     let channels = json!([{"id":"fixture","status":"ready","fields":[]}]);
-    inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"channels":channels});
-    for generation in 0..2 {
+    let responses = [
+        json!({"channels":channels}),
+        json!({"channels":["invalid"]}),
+    ];
+    let server = thread::spawn(move || -> Result<(), String> {
+        for result in responses {
+            let mut stream = crate::core::http_boundary::accept_test_client(&listener)?;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let head =
+                crate::core::http_boundary::read_head(&mut reader, 16384).map_err(|(_, e)| e)?;
+            let mut body = vec![0; head.length];
+            reader.read_exact(&mut body).map_err(|e| e.to_string())?;
+            respond(&mut stream, 200, &json!({"ok":true,"result":result}));
+        }
+        Ok(())
+    });
+    inventory.refresh(&slot, 0)?;
+    for generation in 1..3 {
         assert!(inventory.refresh(&slot, generation).is_err());
         let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
         assert_eq!(cached.value["channels"], channels);
@@ -1991,6 +2024,7 @@ fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), Str
             .is_some_and(|s| !s.is_empty()));
         assert_eq!(cached.completed_gen, generation + 1);
     }
+    server.join().unwrap()?;
     let fresh = ChannelInventory::new(remote_channels_identity(&slot));
     assert!(fresh.refresh(&slot, 0).is_err());
     let cached = fresh.cached.lock().map_err(|e| e.to_string())?;
@@ -2020,6 +2054,9 @@ fn bulk_disconnect_uses_live_registrations_when_the_profile_is_damaged() -> Resu
             "ACTIVE"
         );
         fs::write(&config.config_path, broken).map_err(|e| e.to_string())?;
+        for op in ["close_directory", "close_menu", "close_settings"] {
+            assert_eq!(service.action(&json!({"op":op}))?["ok"], true);
+        }
         assert!(service
             .action(&json!({"op":"set_user","user":"bob"}))
             .is_err());
@@ -2055,7 +2092,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             "human",
             "default",
         );
-        service.unlisten_id("local", &human_id)?;
+        service.retire_id("local", &human_id, "user")?;
         assert_eq!(
             service
                 .state
@@ -2207,10 +2244,10 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         let client = service.slot("local")?.clone();
         client.closed.store(true, Ordering::SeqCst);
         assert!(service
-            .unlisten_id("local", string(&personal, "listener_id"))
+            .retire_id("local", string(&personal, "listener_id"), "user")
             .is_err());
         assert!(service
-            .unlisten_id("local", string(&target, "listener_id"))
+            .retire_id("local", string(&target, "listener_id"), "user")
             .is_err());
         assert_eq!(
             LocalState::open(&config.state_dir)?
@@ -2255,7 +2292,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         );
         client.closed.store(true, Ordering::SeqCst);
         assert!(service
-            .unlisten_id("local", string(&personal, "listener_id"))
+            .retire_id("local", string(&personal, "listener_id"), "user")
             .is_err());
         client.closed.store(false, Ordering::SeqCst);
         assert!(service
@@ -2289,7 +2326,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         service.reload_slots()?;
         assert!(!service.slots.contains_key("local"));
         assert!(service
-            .unlisten_id("local", string(&personal, "listener_id"))
+            .retire_id("local", string(&personal, "listener_id"), "user")
             .unwrap_err()
             .starts_with("DETACH_PENDING:"));
         assert_eq!(
@@ -2324,7 +2361,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         raw["hubs"]["local"]["url"] = json!("local://");
         fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
         assert!(service
-            .unlisten_id("local", string(&personal, "listener_id"))
+            .retire_id("local", string(&personal, "listener_id"), "user")
             .unwrap_err()
             .starts_with("DETACH_PENDING:"));
         assert_eq!(
@@ -2430,7 +2467,7 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
             remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
             old.kv_save(id, &remote, Some(revision))?;
             let remote = old.kv_get(id)?.ok_or("Missing Hub-stamped sibling")?.0;
-            assert!(service.unlisten_id("local", id)?);
+            assert!(service.retire_id("local", id, "user")?);
             let authority = service.state.registration_lock("local")?;
             assert!(Arc::ptr_eq(
                 &service.state.clone().registration_lock("local")?,
@@ -2442,6 +2479,28 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
             ));
             let config_before = service.raw_config()?;
             for (action, expected) in [
+                (json!({"op":"hub_action","hub":"local"}), "INVALID_INPUT:"),
+                (
+                    json!({"op":"hub_action","hub":"local","action":true}),
+                    "INVALID_INPUT:",
+                ),
+                (
+                    json!({"op":"hub_action","hub":"local","action":"other"}),
+                    "INVALID_INPUT:",
+                ),
+                (
+                    json!({"op":"cli_human_device","hub":"local"}),
+                    "INVALID_INPUT:",
+                ),
+                (
+                    json!({"op":"cli_human_device","attach":"false"}),
+                    "INVALID_INPUT:",
+                ),
+                (json!({"op":"set_launch_at_login"}), "INVALID_INPUT:"),
+                (
+                    json!({"op":"set_launch_at_login","enabled":1}),
+                    "INVALID_INPUT:",
+                ),
                 (
                     json!({"op":"hub_action","hub":"missing","action":"reconnect"}),
                     "NOT_FOUND:",
@@ -2504,7 +2563,7 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
             let backend =
                 super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
             backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
-            let revoked = service.unlisten_id("local", id);
+            let revoked = service.retire_id("local", id, "user");
             backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
             assert!(
                 revoked.is_err(),
@@ -2675,10 +2734,7 @@ elif request['op'] == 'setup_inspect':
     if marker.exists():
         revoke = json.loads(marker.read_text())
         with sqlite3.connect(root / 'state' / 'state.sqlite') as db:
-            if 'endpoint_pid' in revoke:
-                db.execute("UPDATE local_listeners SET endpoint_pid=?,updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (revoke['endpoint_pid'], time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
-            else:
-                db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
+            db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
     result.update(installed=True, configured=True, paths=[])
 print(json.dumps(result), flush=True)
 "#).map_err(|e|e.to_string())?;
@@ -2777,7 +2833,7 @@ fn sender_addresses_use_readable_metadata_before_directory_arrival() {
 fn endpoint_admission_uses_normalized_urls_users_and_oidc_clients() {
     let base = json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"one","url":"https://hub.example.com/team","user":"alice"});
     let mut raw = json!({"hubs":{"a":base,"b":{"auth_mode":"oidc","oidcIssuer":"https://id.example.com","client_id":"one","natsUrl":"https://HUB.example.com:443/team/","user":"ALICE"}}});
-    let validate = |raw: &Value| host_hub::validate_hub_endpoints(raw, None);
+    let validate = |raw: &Value| host_hub::validate_hub_edit(raw, None, None);
     assert_eq!(
         validate(&raw).unwrap_err(),
         host_hub::duplicate_hub_error("a")
@@ -2795,6 +2851,16 @@ fn endpoint_admission_uses_normalized_urls_users_and_oidc_clients() {
     raw["hubs"]["b"] = json!({"url":"http://127.0.0.9:4291"});
     raw["hostHub"] = json!({"enabled":true});
     assert_eq!(validate(&raw).unwrap_err(), host_hub::OWN_HUB_ERROR);
+    for (bind, own, other) in [
+        ("::1", "[::1]", "127.0.0.1"),
+        ("127.0.0.1", "127.0.0.1", "[::1]"),
+    ] {
+        raw["hostHub"]["bind"] = json!(bind);
+        raw["hubs"]["b"]["url"] = json!(format!("http://{own}:4291"));
+        assert_eq!(validate(&raw).unwrap_err(), host_hub::OWN_HUB_ERROR);
+        raw["hubs"]["b"]["url"] = json!(format!("http://{other}:4291"));
+        validate(&raw).unwrap();
+    }
 }
 
 #[test]
@@ -2817,7 +2883,7 @@ fn reload_fences_existing_aliases_and_skips_competing_slots() -> Result<(), Stri
         assert!(active.iter().any(|r| r["hub"] == name));
     }
     let mut raw = service.raw_config()?;
-    raw["hubs"]["mirror"]["url"] = json!(format!("http://127.0.0.2:{port}"));
+    raw["hubs"]["mirror"]["url"] = json!(format!("http://127.0.0.1:{port}"));
     raw["hubs"]["primary"] = json!({"url":url});
     raw["hubs"]["work"]["url"] = json!(format!("{url}/"));
     fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
@@ -3327,23 +3393,20 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             assert_eq!(service.settings()["host_hub"]["running"], true);
             rpc(address, "previous-token")?;
 
-            // A write failure after binding must restore the old socket and credentials.
-            // Obstruct the publication lock, independent of exclusive temporary names.
-            let mut lock_name = config.config_path.as_os_str().to_os_string();
-            lock_name.push(".lock");
-            let tmp = std::path::PathBuf::from(lock_name);
-            if tmp.is_file() {
-                fs::remove_file(&tmp).map_err(|e| e.to_string())?;
-            }
-            fs::create_dir(&tmp).map_err(|e| e.to_string())?;
+            // Port zero defers endpoint validation until the new socket is bound.
+            let mut duplicate = service.raw_config()?;
+            duplicate["hubs"] =
+                json!({"a":{"url":"http://127.0.0.1:1"},"b":{"url":"http://127.0.0.1:1"}});
+            let duplicate = duplicate.to_string();
+            fs::write(&config.config_path, &duplicate).map_err(|e| e.to_string())?;
             let result =
                 service.action(&json!({"op":"set_host_hub","port":0,"token":"uncommitted-token"}));
-            fs::remove_dir(&tmp).map_err(|e| e.to_string())?;
-            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), host_hub::duplicate_hub_error("a"));
             assert_eq!(
-                fs::read(&config.config_path).map_err(|e| e.to_string())?,
-                committed.as_bytes()
+                fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
+                duplicate
             );
+            fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
             assert_eq!(service.host_server.as_ref().unwrap().address, address);
             rpc(address, "previous-token")?;
 

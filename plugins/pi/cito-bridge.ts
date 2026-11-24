@@ -118,7 +118,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   const directory = join(resolvedStateDir, "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
   const piHome = expandHome(process.env.CITO_PI_HOME ?? "~/.pi/agent");
-  const subcommands = ["on", "team", "off"];
+  const subcommands = ["on", "private", "team", "off"];
+  const commands = new Map<string, Promise<void>>();
   const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
   const hubUsage = "Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]";
@@ -410,7 +411,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       if (!/\s/.test(trimmed)) {
         return subcommands.filter(cmd => cmd.startsWith(trimmed)).map(value => ({ value, label: value }));
       }
-      const match = /^(on|team|off)\s+(\S*)$/.exec(trimmed);
+      const match = /^(on|private|team|off)\s+(\S*)$/.exec(trimmed);
       if (match && match[2]!.startsWith("-") && "--hub".startsWith(match[2]!)) {
         return [{ value: `${match[1]} --hub `, label: "--hub <hub>" }];
       }
@@ -420,6 +421,19 @@ export default function citoBridge(pi: BridgeAPI): void {
       if (shuttingDown) return;
       lastActiveMs = Date.now();
       update(ctx);
+      const id = sessionId!;
+      const epoch = commandGen;
+      const run = async () => {
+        if (!shuttingDown && sessionId === id && epoch === commandGen) await execute(args, ctx, id, epoch);
+      };
+      const previous = commands.get(id);
+      const next = previous ? previous.then(run, run) : run();
+      commands.set(id, next);
+      try { await next; }
+      finally { if (commands.get(id) === next) commands.delete(id); }
+    },
+  });
+  async function execute(args: string, ctx: BridgeContext, commandSessionId: string, generation: number) {
       const trimmed = args.trim();
       let tool: "cito_listen" | "cito_unlisten";
       let toolArgs: Record<string, unknown>;
@@ -434,7 +448,8 @@ export default function citoBridge(pi: BridgeAPI): void {
         }
       } else {
         const space = trimmed.search(/\s/);
-        const sub = space < 0 ? trimmed : trimmed.slice(0, space);
+        const token = space < 0 ? trimmed : trimmed.slice(0, space);
+        const sub = token === "private" ? "on" : token;
         let rest = space < 0 ? "" : trimmed.slice(space).trim();
         if (sub !== "on" && sub !== "team" && sub !== "off") {
           ctx.ui.notify?.(usage, "warning");
@@ -476,8 +491,6 @@ export default function citoBridge(pi: BridgeAPI): void {
           toolArgs = targetHub ? { hub: targetHub } : {};
         }
       }
-      const commandSessionId = sessionId;
-      const generation = ++commandGen;
       try {
         const payload = await callMcpTool(tool, toolArgs, commandSessionId);
         if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
@@ -498,8 +511,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
       renderBadge(ctx);
-    },
-  });
+  }
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {

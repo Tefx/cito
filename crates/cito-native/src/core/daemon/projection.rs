@@ -292,7 +292,7 @@ impl DaemonService {
                 .rpc(
                     "human_channels_list",
                     &json!({}),
-                    Some(&crate::core::auth::local_principal(
+                    Some(&crate::core::identity::principal(
                         &self
                             .config
                             .effective_user("local")

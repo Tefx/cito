@@ -158,6 +158,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let userFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
         let userW = min(availWidth, measureTextWidth(userText, font: userFont) + 2)
         line2UserLabel.isHidden = peer.harness == "human"
+        line2UserLabel.toolTip = peer.harness == "human" ? nil : userText
         line2UserLabel.stringValue = peer.harness == "human" ? "" : userText
         line2UserLabel.frame = NSRect(x: 52, y: 7, width: userW, height: 16)
         line2UserLabel.identifier = NSUserInterfaceItemIdentifier("dir_user:\(peer.scoped_id)")
@@ -243,7 +244,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         line1TitleLabel.identifier = NSUserInterfaceItemIdentifier("act_title:\(item.signal_id)")
         let time=relativeTime(item.created_at)
         let timeWidth=ceil(measureTextWidth(time,font:.systemFont(ofSize:10.5)))+4
-        line1RepoLabel.isHidden=false; line1RepoLabel.stringValue=time
+        line1RepoLabel.isHidden=false; line1RepoLabel.stringValue=time; line1RepoLabel.toolTip=nil
         line1RepoLabel.font = .systemFont(ofSize:10.5); line1RepoLabel.textColor=CitoPalette.secondaryText
         line1RepoLabel.frame=NSRect(x:52+textW-timeWidth,y:rowHeight-28,width:timeWidth,height:18)
         line1RepoLabel.identifier=NSUserInterfaceItemIdentifier("act_time:\(item.signal_id)")

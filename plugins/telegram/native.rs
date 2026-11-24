@@ -650,6 +650,11 @@ const PERMANENT_POLL_ERRORS: [&str; 6] = [
     "API 403:",
     "API 409:",
 ];
+fn permanent_poll_error(error: &ApiFailure) -> bool {
+    PERMANENT_POLL_ERRORS
+        .iter()
+        .any(|code| error.message.contains(code))
+}
 #[derive(Default)]
 struct PollBackoff {
     failures: u32,
@@ -657,12 +662,9 @@ struct PollBackoff {
 impl PollBackoff {
     fn failed(&mut self, error: &ApiFailure, jitter_ms: u64) -> (bool, Duration) {
         self.failures = self.failures.saturating_add(1);
-        let permanent = PERMANENT_POLL_ERRORS
-            .iter()
-            .any(|code| error.message.contains(code));
         let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
         (
-            permanent || self.failures >= 3,
+            self.failures >= 3,
             Duration::from_millis(delay + jitter_ms.min(499))
                 .max(Duration::from_secs(error.retry_after.unwrap_or(0))),
         )
@@ -744,21 +746,14 @@ pub fn main() {
                         } else {
                             "Check the network, Bot Token, and bot permissions."
                         };
-                        let jitter = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .subsec_millis() as u64
-                            % 500;
-                        let (report, delay) = backoff.failed(&e, jitter);
-                        if report {
+                        let (report, delay) = backoff.failed(&e, now_ms() % 500);
+                        paused = permanent_poll_error(&e);
+                        if paused || report {
                             healthy_reported = false;
                             emit(
                                 &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
                             );
                         }
-                        paused = PERMANENT_POLL_ERRORS
-                            .iter()
-                            .any(|code| e.message.contains(code));
                         next_poll = std::time::Instant::now() + delay;
                     }
                 }
@@ -826,7 +821,7 @@ mod tests {
             "Telegram getUpdates API 403: Forbidden",
             "Telegram getUpdates HTTP 409: Conflict",
         ] {
-            assert!(PollBackoff::default().failed(&failure(message), 0).0);
+            assert!(permanent_poll_error(&failure(message)));
         }
     }
     #[test]

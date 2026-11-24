@@ -277,13 +277,19 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
     let generation = f.row["binding_generation"].clone();
     let remote = f.client.kv_get(string(&f.row, "listener_id"))?.unwrap().0;
     let server = thread::spawn(move || {
-        for expected in [
+        for (index, expected) in [
             "consumer_add",
             "consumer_backlog",
             "kv_get",
             "consumer_ack",
+            "consumer_ack",
+            "consumer_ack",
+            "consumer_ack",
             "stream_get_message",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut stream = crate::core::http_boundary::accept_test_client(&listener).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -314,13 +320,16 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
             let now = 10_000_000u64; // Deliberately unrelated to the local wall clock.
             let body = if expected == "consumer_add" {
                 let signal = json!({"signal_id":"expiring","to":id,"target_generation":generation,"from":{"principal_id":"none#alice","user":"alice","host_name":"desktop"},"message":"near expiry"});
-                json!({"ok":true,"result":{"server_now_ms":now,"backlog":[{"seq":1,"created_ms":now-1_800_000+50,"data_b64":STANDARD.encode(signal.to_string())}]}})
+                json!({"ok":true,"result":{"server_now_ms":now,"backlog":[{}, {"seq":1,"data_b64":"!"},{"seq":2,"data_b64":STANDARD.encode(b"not JSON")},{"seq":3,"data_b64":STANDARD.encode(json!({"to":"c_0000000000000000"}).to_string())},{"seq":4,"created_ms":now-1_800_000+50,"data_b64":STANDARD.encode(signal.to_string())}]}})
             } else if expected == "kv_get" {
                 json!({"ok":true,"result":{"revision":1,"value_b64":STANDARD.encode(remote.to_string())}})
             } else if expected == "consumer_backlog" {
                 thread::sleep(Duration::from_millis(150));
                 json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Backlog failed"}})
-            } else { json!({"ok":true,"result":{}}) }.to_string();
+            } else {
+                if expected == "consumer_ack" { assert_eq!(request["params"]["seq"], index - 2); }
+                json!({"ok":true,"result":{}})
+            }.to_string();
             write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
     });
@@ -1253,6 +1262,98 @@ fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), Stri
 }
 
 #[test]
+fn concurrent_intent_survives_the_registration_commit() -> Result<(), String> {
+    for stale in [false, true] {
+        let f = Fixture::new()?;
+        let writer = Database::open(&f.dir.join("state.sqlite"))?;
+        let outcome = thread::scope(|scope| -> Result<_, String> {
+            let job = writer.transaction(|db| {
+                let job = scope.spawn(|| register_listener(&f.state,&f.client,"host",&json!({"about":"Concurrent registration","title":"Registration title","discovered_at":now_ms()}),&f.row));
+                wait_until(|| f.binding().is_ok_and(|(r,_)| r["about"] == "Concurrent registration"),Duration::from_secs(3))?;
+                LocalState::write_custom_title(db,"fixture","session","Newer title")?;
+                if stale { db.execute("UPDATE local_listeners SET status='UNLISTENED', retirement_reason='idle', retired_activity_revision='123',user_stopped=1,updated_at=?", &[json!(now_ms())])?; }
+                Ok(job)
+            })?;
+            job.join().map_err(|_| "Registration panicked".to_owned())
+        })?;
+        let row = f.listener()?;
+        assert_eq!(row["title"], "Newer title");
+        assert_eq!(
+            f.state.custom_title("fixture", "session")?.as_deref(),
+            Some("Newer title")
+        );
+        if stale {
+            assert!(outcome.is_err_and(|e| e.starts_with("STALE_DISCOVERY:")));
+            assert_eq!(row["status"], "UNLISTENED");
+            assert_eq!(row["retirement_reason"], "idle");
+            assert_eq!(row["retired_activity_revision"], "123");
+            assert_eq!(row["user_stopped"], 1);
+        } else {
+            assert_eq!(outcome?["title"], "Newer title");
+            assert_eq!(f.binding()?.0["title"], "Newer title");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn inactive_title_sync_does_not_publish_to_hub() -> Result<(), String> {
+    for inactive in ["local", "node", "channel"] {
+        let f = Fixture::new()?;
+        f.state.set_custom_title("fixture", "session", "Renamed")?;
+        if inactive == "local" {
+            f.state.pause_listener_for(&f.row)?;
+        } else {
+            let (mut remote, rev) = f.binding()?;
+            if inactive == "node" {
+                remote["state"] = json!("UNLISTENED");
+            } else {
+                remote["channels"]["host:fixture"]["state"] = json!("UNLISTENED");
+            }
+            f.client.kv_save(f.listener_id(), &remote, Some(rev))?;
+        }
+        let before = f.binding()?;
+        super::super::registration::sync_custom_title(&f.state, &f.client, "host", &f.row)?;
+        assert_eq!(f.binding()?, before, "{inactive}");
+    }
+    Ok(())
+}
+
+#[test]
+fn process_identity_round_trips_through_probe_and_fences_reused_pid() -> Result<(), String> {
+    let f = Fixture::new()?;
+    let args = json!({"about":"Receiver"});
+    let mut caller = f.row.clone();
+    caller["endpoint_pid"] = json!(42);
+    caller["process_identity"] = json!({"pid":42,"started_at":"first"});
+    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    let first = f.listener()?;
+    let plugin = f.plugin("print(json.dumps({'ok':False}))");
+    probe_listener(&f.state, &f.client, &first, &plugin, &f.dir)?;
+    assert_eq!(
+        f.requests()?[0]["process_identity"],
+        caller["process_identity"]
+    );
+    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    assert_eq!(f.listener()?["consecutive_probe_failures"], 1);
+    caller["process_identity"]["started_at"] = json!("second");
+    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    apply_probe(
+        &f.state,
+        &f.client,
+        &first,
+        &json!({"ok":true,"status":"closed_definitive"}),
+    )?;
+    let current = LocalState::open(&f.dir)?
+        .active()?
+        .pop()
+        .ok_or("Lost replacement")?;
+    assert_eq!(current["consecutive_probe_failures"], 0);
+    assert_eq!(current["process_identity"], caller["process_identity"]);
+    Ok(())
+}
+
+#[test]
 fn same_channel_refresh_retains_owner_and_replacement_fences_without_siblings() -> Result<(), String>
 {
     let f = Fixture::new()?;
@@ -1324,6 +1425,16 @@ fn remote_preflight_generation_mismatch_fences_captured_listener_before_spawn() 
 }
 
 #[test]
+fn reply_addresses_qualify_non_default_or_named_hubs() {
+    let config = Some(r#"{"default_hub":"local","hubs":{"local":{},"default":{"enabled":false}}}"#);
+    assert!(!qualify_on_hub("local", config, None));
+    assert!(qualify_on_hub("default", config, None));
+    assert!(qualify_on_hub("work", config, Some("work")));
+    assert!(qualify_on_hub("local", config, Some("default")));
+    assert!(!qualify_on_hub("default", config, Some("default")));
+}
+
+#[test]
 fn durable_remote_ack_reconciliation_works_after_transport_cursor_has_advanced(
 ) -> Result<(), String> {
     let f = Fixture::seeded(&["s"])?;
@@ -1332,7 +1443,14 @@ fn durable_remote_ack_reconciliation_works_after_transport_cursor_has_advanced(
         "signal_ack",
         &json!({"node_id":f.row["listener_id"],"signal_ids":["s"],"channel_id":"sibling:fixture"}),
     )?;
-    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
+    // A steady tail of new arrivals must not starve the earlier unread page.
+    for index in 0..130 {
+        f.seed(&format!("new-{index}"))?;
+    }
+    for index in 0..3 {
+        f.seed(&format!("tail-{index}"))?;
+        poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
+    }
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     assert!(f.requests()?.is_empty());

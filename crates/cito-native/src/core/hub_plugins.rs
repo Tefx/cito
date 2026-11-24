@@ -7,7 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
@@ -72,10 +72,15 @@ pub fn discover(
 mod tests;
 
 type Pending = Arc<Mutex<HashMap<String, mpsc::SyncSender<Value>>>>;
+// Monotonic: either pipe can fail; only an intentional shutdown suppresses the exit wake.
+const RUNNING: u8 = 0;
+const EXITED: u8 = 1;
+const STOPPING: u8 = 2;
+pub(super) const CHANNEL_RETRY_DELAY: Duration = Duration::from_secs(5);
 pub struct ChannelProcess {
     child: Mutex<Child>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    alive: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
     pending: Pending,
     reader: Mutex<Option<thread::JoinHandle<()>>>,
     shutdown_wake: Arc<crate::support::WakePipe>,
@@ -108,9 +113,9 @@ impl ChannelProcess {
             let fd = input.as_raw_fd();
             let flags = libc::fcntl(fd, libc::F_GETFL);
             if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(std::io::Error::last_os_error().to_string());
+                let error = std::io::Error::last_os_error();
+                let _ = crate::support::teardown_child_group(&mut child);
+                return Err(error.to_string());
             }
         }
         let stdin = Arc::new(Mutex::new(Some(input)));
@@ -125,23 +130,23 @@ impl ChannelProcess {
             if flags < 0
                 || libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
             {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(std::io::Error::last_os_error().to_string());
+                let error = std::io::Error::last_os_error();
+                let _ = crate::support::teardown_child_group(&mut child);
+                return Err(error.to_string());
             }
         }
         let exited = crate::support::child_exit_fd(child.id()).inspect_err(|_| {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = crate::support::teardown_child_group(&mut child);
         })?;
         let reader_wake = shutdown_wake.clone();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let alive = Arc::new(AtomicBool::new(true));
-        let (si, p, a) = (stdin.clone(), pending.clone(), alive.clone());
+        let state = Arc::new(AtomicU8::new(RUNNING));
+        let (si, p, reader_state) = (stdin.clone(), pending.clone(), state.clone());
+        let started = Instant::now();
         let reader = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut line = Vec::new();
-            while a.load(Ordering::SeqCst) {
+            while reader_state.load(Ordering::SeqCst) == RUNNING {
                 // A broken plugin cannot grow a line indefinitely.
                 use std::io::Read;
                 match reader
@@ -195,7 +200,7 @@ impl ChannelProcess {
                             }
                         }
                     }
-                } else if a.load(Ordering::SeqCst) {
+                } else if reader_state.load(Ordering::SeqCst) == RUNNING {
                     if let Some(reply) = callback(frame) {
                         if send_line(&si, &reply).is_err() {
                             break;
@@ -203,7 +208,7 @@ impl ChannelProcess {
                     }
                 }
             }
-            a.store(false, Ordering::SeqCst);
+            let unexpected_exit = reader_state.fetch_max(EXITED, Ordering::SeqCst) != STOPPING;
             if let Ok(mut si) = si.lock() {
                 si.take();
             }
@@ -212,18 +217,26 @@ impl ChannelProcess {
                     let _ = tx.send(json!({"ok":false,"error":"Plugin subprocess exited"}));
                 }
             }
+            if unexpected_exit {
+                // Preserve the supervisor's failed-process retry interval if the
+                // replacement itself exits immediately. Long-lived exits wake it now.
+                let retry = CHANNEL_RETRY_DELAY.saturating_sub(started.elapsed());
+                callback(
+                    json!({"op":"process_exit","error":"Plugin subprocess exited","retry_ms":retry.as_millis() as u64}),
+                );
+            }
         });
         Ok(Self {
             child: Mutex::new(child),
             stdin,
-            alive,
+            state,
             pending,
             reader: Mutex::new(Some(reader)),
             shutdown_wake,
         })
     }
     pub fn alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
+        self.state.load(Ordering::SeqCst) == RUNNING
             && self
                 .child
                 .lock()
@@ -239,7 +252,8 @@ impl ChannelProcess {
         }
         let result = send_line(&self.stdin, value);
         if result.is_err() {
-            self.alive.store(false, Ordering::SeqCst);
+            self.state.fetch_max(EXITED, Ordering::SeqCst);
+            self.shutdown_wake.notify();
             if let Ok(mut input) = self.stdin.lock() {
                 input.take();
             }
@@ -247,9 +261,7 @@ impl ChannelProcess {
         result
     }
     pub fn request(&self, mut value: Value) -> Result<Value, String> {
-        let mut bytes = [0u8; 16];
-        getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
-        let id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let id = crate::support::try_random_hex(16)?;
         value["req_id"] = json!(id);
         let (tx, rx) = mpsc::sync_channel(1);
         self.pending
@@ -277,12 +289,13 @@ impl ChannelProcess {
         if reader.is_none() {
             return;
         }
-        let _ = self.send(&json!({"op":"shutdown"}));
+        if self.state.swap(STOPPING, Ordering::SeqCst) == RUNNING {
+            let _ = send_line(&self.stdin, &json!({"op":"shutdown"}));
+        }
         // Closing stdin also triggers the protocol's plugin-side EOF lifecycle.
         if let Ok(mut stdin) = self.stdin.lock() {
             stdin.take();
         }
-        self.alive.store(false, Ordering::SeqCst);
         self.shutdown_wake.notify();
         if let Ok(mut pending) = self.pending.lock() {
             for (_, tx) in pending.drain() {
@@ -294,14 +307,8 @@ impl ChannelProcess {
             // has passed. ECHILD prevents signaling after an external reap.
             let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
             if super::plugins::peek_plugin_exit(child.id()).is_ok() {
-                // SAFETY: the owned, unreaped child still reserves its PID and
-                // process group, created by spawn. Never signal after reaping.
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
-                let _ = child.kill();
+                let _ = crate::support::teardown_child_group(&mut child);
             }
-            let _ = child.wait();
         }
         // No cursor, pairing, or delivery callback may outlive a stopped process.
         // Callers release the process registry and database locks before shutdown.

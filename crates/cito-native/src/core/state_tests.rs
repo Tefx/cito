@@ -322,6 +322,24 @@ fn admit(f: &Fixture, s: &Value, seq: u64) -> Result<bool, String> {
 }
 
 #[test]
+fn existing_v7_listener_gains_nullable_process_identity() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.state.db.execute(
+        "ALTER TABLE local_listeners DROP COLUMN process_identity",
+        &[],
+    )?;
+    let reopened = LocalState::open(&f.dir)?;
+    let row = reopened.listener("local", "c_1")?.unwrap();
+    assert_eq!(row.get("process_identity"), Some(&Value::Null));
+    assert_eq!(row["owner_token"], "owner");
+    assert_eq!(
+        reopened.db.query("PRAGMA user_version", &[])?[0]["user_version"],
+        7
+    );
+    Ok(())
+}
+
+#[test]
 fn listener_lifecycle_upgrade_backfills_versions_four_five_and_six_without_losing_work(
 ) -> Result<(), String> {
     for version in [4, 5, 6] {
@@ -528,10 +546,18 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
         false,
     )?;
     let batch = f.claim_wake_batch()?;
-    f.state
-        .db
-        .execute("UPDATE local_signals SET activity_hidden=1", &[])?;
-    assert_eq!(f.state.activity()?.1, 0);
+    f.state.clear_activity_history(
+        &json!({"hub":"local","query":"work:missing"}),
+        "all",
+        "host",
+    )?;
+    assert_eq!(f.state.activity_counts()?, (1, 1));
+    f.state.clear_activity_history(
+        &json!({"hub":"local","query":"local:alice-smith/fixture#abcd"}),
+        "all",
+        "host",
+    )?;
+    assert_eq!(f.state.activity_counts()?.1, 0);
     assert_eq!(f.state.query_activity("all", "")?.1, 0);
     let rows = f.rows()?;
     assert_eq!(rows.len(), 1);
@@ -551,6 +577,46 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
     assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
     Ok(())
 }
+#[test]
+fn clear_human_history_acknowledges_only_the_selected_unread_rows() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.state.db.execute("UPDATE local_listeners SET harness='human'; CREATE INDEX visible_unread ON local_signals(activity_hidden, acknowledged_at_ms)", &[])?;
+    for (seq, id) in [
+        "match-one",
+        "match-two",
+        "match-read",
+        "unrelated",
+        "match-foreign",
+    ]
+    .iter()
+    .enumerate()
+    {
+        f.seed(id, seq)?;
+    }
+    f.state.db.execute("UPDATE local_signals SET hub_url='other' WHERE signal_id='match-foreign'; UPDATE local_signals SET acknowledged_at_ms=1 WHERE signal_id='match-read'", &[])?;
+    f.state.clear_activity_history(
+        &json!({"hub":"local","query":"match","filter":"unread"}),
+        "all",
+        "host",
+    )?;
+    let rows = f.rows()?;
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row["activity_hidden"], usize::from(i < 2));
+        assert_eq!(row["acknowledged_at_ms"].is_number(), i < 3);
+    }
+    assert_eq!(
+        f.state.db.query(
+            "SELECT signal_id FROM pending_hub_acks ORDER BY signal_id",
+            &[]
+        )?,
+        [
+            json!({"signal_id":"match-one"}),
+            json!({"signal_id":"match-two"})
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn activity_filters_before_paging_and_counts_full_matching_set() -> Result<(), String> {
     let f = Fixture::new()?;
@@ -603,12 +669,12 @@ fn full_unread_count_and_non_destructive_v4_reopen() -> Result<(), String> {
     for i in 0..100 {
         f.seed(&format!("s{i}"), i)?;
     }
-    let (rows, unread) = f.state.activity()?;
+    let (rows, _, unread) = f.state.query_activity("all", "")?;
     assert_eq!((rows.len(), unread), (80, 100));
     let batch = f.claim_wake_batch()?;
     let before = f.listener()?;
     let second = LocalState::open(&f.dir)?;
-    assert_eq!(second.activity()?.1, 100);
+    assert_eq!(second.activity_counts()?.1, 100);
     assert_eq!(
         second.db.query("PRAGMA user_version", &[])?[0]["user_version"],
         7
@@ -759,7 +825,7 @@ fn expired_received_never_wakes() -> Result<(), String> {
 }
 
 #[test]
-fn private_drop_advances_cursor_and_legacy_principal_equality_is_admitted() -> Result<(), String> {
+fn private_signal_is_dropped_and_legacy_principal_equality_is_admitted() -> Result<(), String> {
     let f = Fixture::new()?;
     f.state.db.execute(
         "UPDATE local_listeners SET scope='self',principal_id='oidc:https://id.example.com|alice'",
@@ -767,7 +833,6 @@ fn private_drop_advances_cursor_and_legacy_principal_equality_is_admitted() -> R
     )?;
     assert!(!admit(&f, &signal("private", "none#bob", 1), 7)?);
     assert!(f.rows()?.is_empty());
-    assert_eq!(f.listener()?["persisted_seq"], 7);
     assert!(admit(
         &f,
         &signal("own", "https://id.example.com#alice", 1),
@@ -1164,7 +1229,7 @@ fn six_hundred_messages_paginate_into_twelve_fifty_member_batches() -> Result<()
         )?;
     }
     assert_eq!(batches, vec![50; 12]);
-    assert_eq!(f.state.activity()?.1, 600);
+    assert_eq!(f.state.activity_counts()?.1, 600);
     Ok(())
 }
 

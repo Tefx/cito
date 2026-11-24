@@ -23629,3 +23629,806 @@ phases:
       --locked -- -D warnings, cargo build --release --locked (7/7 staged binaries
       passed codesign --verify --strict), 246 targeted unit/integration tests passed
       (0 failed, 2 ignored subprocess helpers), git diff --check.'
+- id: v59
+  name: 'V59 Full-Repo /cs-review Ledger Closure (AF-59-01..AF-59-17) [REQUIRES_SKILL:
+    contract-and-simplicity]'
+  status: done
+  gate: All 17 admitted findings (AF-59-01..AF-59-17) across Cluster A..F are closed
+    with discriminating regressions; staged release binaries (bin/** and plugins/*/bin/**,
+    7/7) pass codesign --verify --strict at version 0.22.0; cargo fmt --all -- --check,
+    cargo clippy --workspace --all-targets --locked -- -D warnings, cargo test --workspace
+    --locked -- --test-threads=4, packaging unittest, Homebrew cask syntax check,
+    and site-clipboard test pass with 0 warnings/failures.
+  depends_on:
+  - v58
+  steps:
+  - id: v59.cluster_a_hub
+    name: 'Wave 1A: Hub Engine Admission Duality, Identity/Stream Invariants, Subprocess/Listener
+      Settlement & De-Bloat (AF-59-01..04) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [AF-59-01] `core/hub.rs:{kv_create,kv_update,kv_put,save_human,attach,publish_payload,stream_get_message,kv_keys}`
+      — enforce the `kv_snapshot` single-entry wire-size bound (`MAX_SNAPSHOT_BYTES
+      = 2 MiB`) before committing any KV/Human write; bound `signal_id` length (`<=
+      1024` bytes) at publication admission; and bound/paginate `stream_get_message`
+      and `kv_keys` so aggregate JSON responses stay within the 8 MiB HTTP frame limit.
+
+      - [AF-59-02] `core/hub.rs:{attach,human_operation,publish_payload,inbound_reply,send_reply_from_human,consumer_add,backlog_from,consumer_next,consumer_ack,ids}`
+      — reject occupied `hub_kv` keys in Human writers/ops unless same-owner (or verified
+      legacy alias) with `harness == "human" && session_id == "default"`; enforce
+      logical `signal_id` uniqueness in `hub_signals` (idempotent replay if payload/target
+      match; `INVALID_INPUT` on conflict); strip `<hub>:` prefix only in `send_reply_from_human`,
+      preserving canonical delivery-mapped `signal_id`s in `inbound_reply`; reject
+      unsupported stream names in `consumer_add` and consumer ops; and cap `ids()`
+      batch cardinality (`<= 1024`) with linear order-preserving deduplication.
+
+      - [AF-59-03] `core/hub_plugins.rs:ChannelProcess`, `core/hub.rs:{configure,hub_cli}`,
+      `core/hub/http.rs:HubServer` — emit unexpected-exit wake/callback from `ChannelProcess`
+      reader on non-shutdown EOF/exit and guard `configure` health-clear against overwriting
+      an observed exit; wake `hub_cli()` when `HubServer` stops unexpectedly, settle
+      engine, and return non-zero error.
+
+      - [AF-59-04] `core/hub.rs`, `core/hub_plugins.rs`, `core/http_boundary.rs`,
+      `core/hub/regression_tests.rs`, `tests/hub/{cases,hub_plugin_cases}.rs` — stop
+      maintaining write-only columns `hub_signals.acked`, `hub_consumers.last_acked_seq`,
+      and `hub_channel_deliveries.{from_user,from_title}` (retaining `external_msg_id`
+      legacy upgrade backfill); consolidate `save_human` and `attach` into one Human
+      KV writer; reuse `crate::support::try_random_hex(16)` in `ChannelProcess::request`;
+      redirect `hub.rs`/`cases.rs` callers of `auth::local_principal` to `identity::principal`
+      (`[DEFER_TO_CONSOLIDATE]` for `http_boundary::validate` inline and `ChannelProcess::shutdown`
+      PGID teardown helper); and close all 4 test oracle/hermeticity items in `cases.rs`,
+      `hub_plugin_cases.rs`, and `regression_tests.rs`.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Keep `http_boundary::validate`
+      intact in Wave 1 until `v59.cluster_d_daemon` / `v59.consolidate` inlines its
+      caller in `daemon/http_actions/transport.rs`.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/hub.rs", "crates/cito-native/src/core/hub/http.rs",
+      "crates/cito-native/src/core/hub_plugins.rs", "crates/cito-native/src/core/http_boundary.rs",
+      "crates/cito-native/src/core/hub/regression_tests.rs", "crates/cito-native/tests/hub/cases.rs",
+      "crates/cito-native/tests/hub/hub_plugin_cases.rs"]`
+
+      - blocked_paths: `["plan.yaml"]`
+
+
+      Admit:
+
+      - Targeted Hub unit and integration suites pass with discriminating regressions
+      for `AF-59-01..AF-59-04`.
+
+
+      Recovery:
+
+      - Revert incomplete local edits within `allowed_paths` and leave worktree clean
+      on blocker.'
+    verification: 'cargo test --manifest-path crates/cito-native/Cargo.toml --lib
+      core::hub -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --test hub cases:: -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --test hub hub_plugin_cases:: -- --test-threads=1'
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/hub/http.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/src/core/http_boundary.rs
+    - crates/cito-native/src/core/hub/regression_tests.rs
+    - crates/cito-native/tests/hub/cases.rs
+    - crates/cito-native/tests/hub/hub_plugin_cases.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T15:35:58.499876Z'
+    done_at: '2026-11-23T16:03:19.801569+00:00'
+    evidence: 'Rebased onto main and fast-forward merged v59.cluster_a_hub (original
+      candidate 520d8a77a31696f89f19a2976701b74d96d57753). Closed AF-59-01..AF-59-04
+      across 6 Rust files (hub.rs, hub/http.rs, hub_plugins.rs, hub/regression_tests.rs,
+      tests/hub/cases.rs, tests/hub/hub_plugin_cases.rs). Verification: core::hub
+      91 passed (0 failed, 1 ignored; includes 68 cases.rs & 6 hub_plugin_cases.rs),
+      transport 13 passed, cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, and git diff --check passed.'
+  - id: v59.cluster_b_core
+    name: 'Wave 1B: Core Identity, Config, OIDC/Auth, Login, Transport & Sidecar Closure
+      (AF-59-05..08) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [AF-59-05] `core/identity.rs:{listener_id,listener_id_candidates,display_address}`,
+      `core/config.rs:{repair_default_hub,try_normalize_existing_config}` — make `listener_id`
+      injective when `(principal, harness, session)` contains `|` while preserving
+      exact `c_<16hex>` IDs for `|`-free tuples (and legacy candidate lookup in `listener_id_candidates`);
+      fall back to canonical/public ID display in `display_address` when normalized
+      user slug or `owner_user` equals `"self"`; and extract one shared `default_hub`
+      selection helper in `config.rs` (preferring enabled `"local"` -> min enabled
+      hub -> `"local"` -> min hub) used by both `repair_default_hub` and `try_normalize_existing_config`.
+
+      - [AF-59-06] `core/auth.rs:{OidcVerifier::new,OidcVerifier::refresh,HubAuth}`,
+      `core/login.rs:{Settings::new,publish,recover_inner,read_cache}`, `core/config.rs`
+      — require `discovery["issuer"] == self.issuer` in `OidcVerifier::refresh`; reject
+      surrounding whitespace and control characters on OIDC `client_id` in `OidcVerifier::new`
+      and on Hub tokens across `config.rs` and `auth.rs`; enforce `data.len() <= MAX_JSON`
+      (1 MiB) before writing OIDC cache files in `login::publish`; and allow interactive
+      re-login recovery to proceed and atomically replace an unreadable (`PermissionDenied`)
+      existing cache file.
+
+      - [AF-59-07] `core/transport.rs:{HubClient::new,HubClient::rpc,HubClient::directory,EventSubscription::close}`,
+      `main.rs`, `support/subprocess.rs` — filter/skip non-registration KV entries
+      in `HubClient::directory()` and stamp both returned and cached rows with the
+      final-page Hub `server_now_ms`; attach bearer tokens only when `authMode !=
+      "none"`; set `*status = "disconnected"` and prefix `"NATS_UNAVAILABLE: "` on
+      `https://` send, body-read, and `> 8 MiB` frame errors in `HubClient::rpc` (and
+      respect bounded `kv_keys`/`stream_get_message` responses per `AF-59-01`); shut
+      down the active remote SSE socket on `EventSubscription::close` within 200ms;
+      propagate post-ready `read_sidecar_line()` framing errors in `main.rs` so the
+      sidecar child group is reaped and the host loop settles; and extract a shared
+      process-group teardown helper in `support/subprocess.rs` (re-exported via `lib.rs`
+      `support`) used by `Sidecar::drop` (`main.rs:38-46`, ready for `ChannelProcess::shutdown`
+      in `v59.consolidate`) while removing unused `pub use` in `main.rs:1-3`.
+
+      - [AF-59-08] `core/auth.rs`, `core/login.rs`, `core/transport.rs`, `core/transport_tests.rs`,
+      `tests/hub/{auth_cases,login_cases}.rs` — delete unreferenced `login::recover`
+      and `HubClient::observation_current`; switch `login.rs:180` to `crate::plugins::validate_oidc_url(issuer,
+      true)`; redirect `auth.rs` and `auth_cases.rs` callers of `auth::local_principal`
+      to `identity::principal` (keeping `auth::local_principal` wrapper until `v59.consolidate`
+      removes it after Wave 2); and replace whitebox `KeyCache` and internal timestamp
+      mutations in `auth_cases.rs` and `transport_tests.rs` with public boundary/clock
+      stimuli.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Keep `pub fn local_principal`
+      as a thin delegation in `auth.rs` during Wave 1 so `daemon/projection.rs` compiles
+      until `v59.cluster_d_daemon` and `v59.consolidate` complete.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/identity.rs", "crates/cito-native/src/core/config.rs",
+      "crates/cito-native/src/core/auth.rs", "crates/cito-native/src/core/login.rs",
+      "crates/cito-native/src/core/transport.rs", "crates/cito-native/src/main.rs",
+      "crates/cito-native/src/lib.rs", "crates/cito-native/src/support/subprocess.rs",
+      "crates/cito-native/src/core/transport_tests.rs", "crates/cito-native/tests/hub/auth_cases.rs",
+      "crates/cito-native/tests/hub/login_cases.rs"]`
+
+      - blocked_paths: `["plan.yaml"]`
+
+
+      Admit:
+
+      - Identity, config, auth, login, and transport unit/integration suites pass
+      with discriminating regressions for `AF-59-05..AF-59-08`.
+
+
+      Recovery:
+
+      - Revert incomplete local edits within `allowed_paths` and leave worktree clean
+      on blocker.'
+    verification: 'cargo test --manifest-path crates/cito-native/Cargo.toml --lib
+      core::transport -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --lib core::identity -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --test hub auth_cases:: -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --test hub login_cases:: -- --test-threads=1'
+    refs:
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/lib.rs
+    - crates/cito-native/src/support/subprocess.rs
+    - crates/cito-native/src/core/transport_tests.rs
+    - crates/cito-native/tests/hub/auth_cases.rs
+    - crates/cito-native/tests/hub/login_cases.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T15:35:58.500188Z'
+    done_at: '2026-11-23T16:14:01.395619+00:00'
+    evidence: 'Rebased onto main and fast-forward merged v59.cluster_b_core (original
+      candidate cdb11edd41c56d982a692dcb42a04adc58012e74). Closed AF-59-05..AF-59-08
+      across 11 authorized files without Cargo.toml/Cargo.lock changes (HTTP SSE direct
+      TcpStream shutdown < 200ms + 1s read timeout; HTTPS SSE 150ms timeout_read).
+      Verification: 65 tests passed (0 failed, 2 ignored), cargo fmt --all -- --check,
+      cargo clippy --workspace --all-targets --locked -- -D warnings, and git diff
+      --check passed.'
+  - id: v59.cluster_c_state
+    name: 'Wave 1C: LocalState, Registration, Receiver, SessionActivity & Process-Identity
+      Persistence Closure (AF-59-09..10, AF-59-05/15 Seam) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [AF-59-09] `core/registration.rs:{register_locked,sync_custom_title}`, `core/receiver.rs:poll_listener`,
+      `core/state.rs`, `core/state/activity.rs:clear_activity_history`, `core/session_activity.rs:SessionActivity::tick`
+      — re-read `session_custom_titles` inside the commit transaction in `register_locked`,
+      preserve `retirement_reason` and `retired_activity_revision` on `StaleDiscovery`,
+      and fence `sync_custom_title` on `status=''ACTIVE''` locally (`changed > 0`)
+      and remotely (`remote["state"] == "ACTIVE" && remote["channels"][&channel]["state"]
+      == "ACTIVE"`); acknowledge/advance past malformed or target-mismatched consumer
+      stream items in `poll_listener` and ensure bounded `ack_scan_seq` sweeps wrap
+      across the unread set deterministically even when new signals arrive between
+      polls; collect target rows before mutating `local_signals` in `clear_activity_history`;
+      and bound discovered session `title` to `.trim().chars().take(500)` at ingest
+      in `SessionActivity::tick`.
+
+      - [AF-59-05 / AF-59-01 / AF-59-15 Seam] `core/receiver.rs:{qualify_reply_ids,probe_listener}`,
+      `core/state.rs`, `core/registration.rs` — qualify reply IDs in `qualify_reply_ids`
+      whenever `hub != default || !matches!(hub, "local" | "default")`; add additive
+      `process_identity TEXT` column to `local_listeners` in `state.rs`, persist `caller["process_identity"]`
+      in `register_locked` (resetting `consecutive_probe_failures` when `process_identity`
+      changes), and pass `"process_identity": row["process_identity"]` in `receiver::probe_listener`
+      (`delta s|_partial = 0` seam for Wave 2 `v59.cluster_d_daemon` and `v59.cluster_e_plugins`).
+
+      - [AF-59-10] `core/state.rs`, `core/state_tests.rs`, `core/session_activity.rs`
+      — stop updating write-only `local_listeners.persisted_seq` and delete unreferenced
+      `LocalState::activity(&self)` (updating `state_tests.rs`); replace manual `{slug}-{suffix}`
+      parsing in `state::format_sender` with `identity::canonical_node_id` and `identity::public_listener_id`;
+      and rewrite inline tests in `session_activity.rs` (`1172, 1311, 1445-1534, 1979-2047`)
+      to drive public `tick`/`observe_badge`/provider ingress instead of mutating
+      private `DiscoveryFlight`/`Badge` fields directly.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Keep `PRAGMA user_version=7` compatible
+      via the existing `PRAGMA table_info(local_listeners)` additive column migration
+      pattern for `process_identity`.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/state.rs", "crates/cito-native/src/core/state/activity.rs",
+      "crates/cito-native/src/core/registration.rs", "crates/cito-native/src/core/receiver.rs",
+      "crates/cito-native/src/core/session_activity.rs", "crates/cito-native/src/core/state_tests.rs",
+      "crates/cito-native/src/core/receiver_tests.rs"]`
+
+      - blocked_paths: `["plan.yaml"]`
+
+
+      Admit:
+
+      - LocalState, registration, receiver, and session_activity unit tests pass with
+      discriminating regressions for `AF-59-09`, `AF-59-10`, and `qualify_reply_ids`.
+
+
+      Recovery:
+
+      - Revert incomplete local edits within `allowed_paths` and leave worktree clean
+      on blocker.'
+    verification: cargo test --manifest-path crates/cito-native/Cargo.toml --lib core::state
+      -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --lib core::receiver -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --lib core::session_activity -- --test-threads=1
+    refs:
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state/activity.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T15:35:58.500307Z'
+    done_at: '2026-11-23T15:53:08.649059+00:00'
+    evidence: 'Merged v59.cluster_c_state (commit 264e8e02f5b432d5f3ada1dd72d8799699cc528a)
+      into main. Closed AF-59-09, AF-59-10, and the AF-59-05/AF-59-15 qualify_reply_ids
+      + process_identity seam across 7 Rust files. Verification: 88 unit tests passed
+      (core::state 35, core::receiver 31, core::session_activity 18, core::registration
+      4; 0 failed), cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, and git diff --check passed.'
+  - id: v59.cluster_f_macos
+    name: 'Wave 1F: macOS Companion Settlement, Focus/Draft Isolation, Facet Keying,
+      Oracle Calibration & Swift DTO De-Bloat (AF-59-16..17) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [AF-59-16] `src/macos/{Companion,MenuSurface,SettingsSurface,DirectorySurface,DirectoryCell,UIPrimitives,HeadlessOracle}.swift`,
+      `crates/cito-native/tests/support/ui/*.rs` — (1) settle `hubInviteRequest` ("Join
+      from Clipboard") and display `settingsBannerError` on `source_op: "setup_save_hub"`
+      error frames matching `request_id == hubInviteRequest`, and trigger `appCheckedUntil[pending.target]`
+      ("✓ Checked") when `setup_apply` with `appCheck: true` settles via `op: "state"`
+      receipts as well as `op: "settings"`; (2) parameterize `MenuSurface.rebuild(preservingEditor:
+      Bool = false)` so passive background updates pass `preservingEditor: true` while
+      explicit menu navigation/toggles (`hub:<name>`, `toggle_my_remote`, `toggle_group:<harness>`)
+      pass `preservingEditor: false`; (3) guard host-hub `"sharing"` and `"access"`
+      button closures with `isPending`, and guard `MenuControl.toggleWidth` on `"Pause
+      "`/`"Resume "` prefixes while preserving toggle width in `pendingLabel` before
+      `"Pausing…"`/`"Resuming…"`; (4) collapse/reset personal channel editor on `configured:
+      false -> true` only when acknowledged values match the current user draft, and
+      bind `ChannelUIState` (`channelUI`) to the Hub''s `(url, effective_user)` authority;
+      (5) compare structured `(id, display_name)` tuples in `rebuildDirectoryFacetBar`,
+      set `line2UserLabel.toolTip` for agent `@username` labels in `DirectoryPeerCellView.configure(with:)`,
+      and reset `line1RepoLabel.toolTip = nil` in `configureActivity(with:)`; and
+      (6) fix `"cmd-v"` -> `"command-v"` + `"Draft"` assertion in `render_stability.rs:271`
+      and run `test_render_png` unconditionally in `oracle_e2e.rs:999-1009`.
+
+      - [AF-59-17] `src/macos/{Models,PaletteAndMetrics,Companion,MenuSurface,DirectorySurface,SettingsSurface,HeadlessOracle}.swift`,
+      `crates/cito-native/tests/support/ui/{settings_channels,oracle_e2e}.rs` — delete
+      unconsumed DTO structs/properties in `Models.swift` (`HubCapabilities`, `.capabilities`,
+      `HarnessVisual.id`, `ChannelAttachment.{channel_id,host_id,plugin_id}`, `Hub.human_about`,
+      `HubConfigItem.{auto_listen,human_about}`, `Listener.host_id`, `Candidate.updated_at_ms`,
+      `RemotePeer.{host_id,last_seen_at,session_id,can_set_scope,can_pin,can_rename,can_stop}`,
+      `ActivityItem.{target_scoped_id,in_reply_to,for_me}`, `ChannelFieldItem.redacted`,
+      `ChannelSetupItem.delivery_enabled`, `AppSetupItem.installed`), manual `Candidate.==`/`RemotePeer.==`,
+      and dead pass-through assignments; delete unreferenced `CitoMetrics` constants
+      (`sessionTextX`, `sessionPathWidth`, `directoryWidth`, `directoryTextX`, `directoryInset`),
+      unreachable `isCompactIcon` branch in `MenuSurface.swift`, unused `fromDaemonFrame`/`daemonMatchedCount`
+      parameters on `applyDirectoryFilters`, and implicit `editingPersonal = true`
+      in `HeadlessOracle.swift:159-166` (updating `settings_channels.rs:1047-1065`
+      and `capabilities.rs` if affected); and remove duplicate `frame.warning` assignment
+      in `Companion.swift:679-681`, align `Companion.swift:725` attachments fallback,
+      deduplicate `about` trimming in `MenuSurface.swift`, and prune redundant empty-array
+      assertions in `settings_channels.rs:368-373` and `oracle_e2e.rs:1758, 2156-2157,
+      2178-2179`.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Keep `bin/**` out of git commits
+      in Wave 1; `v59.consolidate` stages final release binaries.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["src/macos/*.swift", "crates/cito-native/tests/support/ui/*.rs"]`
+
+      - blocked_paths: `["plan.yaml", "bin/**"]`
+
+
+      Admit:
+
+      - Swift companion compiles cleanly and UI headless oracle integration tests
+      pass with discriminating regressions for `AF-59-16..AF-59-17`.
+
+
+      Recovery:
+
+      - Revert incomplete local edits within `allowed_paths` and leave worktree clean
+      on blocker.'
+    verification: 'cargo test --manifest-path crates/cito-native/Cargo.toml --test
+      integration support::ui:: -- --test-threads=1'
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - src/macos/UIPrimitives.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/Models.swift
+    - src/macos/PaletteAndMetrics.swift
+    - crates/cito-native/tests/support/ui/mod.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T15:35:58.500418Z'
+    done_at: '2026-11-23T15:59:45.413536+00:00'
+    evidence: 'Rebased onto main and fast-forward merged v59.cluster_f_macos (original
+      candidate 9a2b51c11d20a87983504cdd4bc944cd56f9b437). Closed AF-59-16 and AF-59-17
+      across src/macos/*.swift and crates/cito-native/tests/support/ui/*.rs. Verification:
+      123 ui:: tests passed (0 failed, 0 ignored), cargo fmt --all -- --check, cargo
+      clippy --workspace --all-targets --locked -- -D warnings, and git diff --check
+      passed.'
+  - id: v59.cluster_d_daemon
+    name: 'Wave 2D: Daemon Action Discriminators, Recovery Independence, Lock-Free
+      Teardown, Inbox/Channel/Receipt Bounds & Telegram De-Bloat (AF-59-11..13, AF-59-05/09/14/15
+      Seams) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [AF-59-11] `core/daemon/{mod,http_actions,host_hub,mcp,tests}.rs`, `tests/support/daemon/{config_and_hubs,discovery_and_setup}.rs`
+      — strictly validate `hub_action.action`, `cli_human_device.attach`, and `set_launch_at_login.enabled`
+      (reject missing/wrong-type discriminators with `INVALID_INPUT`); avoid duplicate
+      `STALE_GENERATION` degradation in `execute_action` and only skip `finish_action`
+      when `!ui_current`; read `row["hub_url"]` from SQLite before `raw_config()`
+      in `retire_local_locked`, skip pre-reset `reload_slots()` in `run_captured`
+      for `setup_disconnect_all`/`setup_uninstall_all`, and handle `"quit"`/`"close_*"`
+      before `reload_slots()?` in `prepare_action`; run `remove_plugin_setup` (`setup_remove_app`
+      / `begin_disconnect`) and `finish_purge`''s `SessionActivity::shutdown()` outside
+      the `service` mutex; and evaluate `is_own_host_hub_url` and `validate_hub_endpoints`
+      against `applied_host_config` and the bound socket address family / interface
+      reachability.
+
+      - [AF-59-12] `core/daemon/{mcp,channels,projection}.rs`, `tests/support/daemon/{mcp_and_inbox,human_and_channels}.rs`
+      — bound `cito_inbox` pages by serialized byte budget within the 8 MiB client
+      transport cap and commit selected local acknowledgments atomically in one transaction;
+      validate JSON object shapes on remote channel inventory items and channel action
+      RPC results before cache admission or mutable indexing; and require a valid
+      positive `seq` (`1..=i64::MAX as u64`) and non-empty `signal_id` on publication
+      receipts before settling `local_sent_idempotency` as `wake_accepted`.
+
+      - [AF-59-05 / AF-59-09 / AF-59-14 / AF-59-15 Daemon Seams] `core/daemon/{mod,http_actions}.rs`
+      — qualify reply IDs in `HubAccess::scoped` (`daemon/mod.rs:1207`) when `hub
+      != default || !matches!(hub, "local" | "default")`; propagate `process_identity`
+      through daemon discovery/probe snapshots (`AF-59-15`); and reject/surface plugin
+      setup `"conflict"` actions in `setup_apply` & `setup_remove_app` (`http_actions.rs:342-351,
+      1897-1947, 2070-2082`, `AF-59-14`).
+
+      - [AF-59-13] `core/daemon/{http_actions,mcp,projection,tests}.rs`, `core/daemon/http_actions/transport.rs`,
+      `plugins/telegram/native.rs`, `tests/support/daemon/discovery_and_setup.rs`
+      — define `HUB_TABLES` once and extract shared `teardown_hub_runtime` in `http_actions.rs`
+      for `purge_hub_state` and `save_hub` rename; remove redundant tail `self.reload_slots()`
+      calls on non-config-mutating actions in `prepare_action`; inline/delete `prepare_retire`,
+      `ToolCall::Retire`, and `DaemonService::unlisten_id` (updating `daemon/tests.rs`);
+      redirect `projection.rs:295` to `identity::principal`, `mcp.rs:663` and `discovery_and_setup.rs:1647,1678`
+      to `crate::support::alive`, and `http_actions/transport.rs:88` to `http_boundary::validate_hub(...,
+      false)`; deduplicate `PERMANENT_POLL_ERRORS` and use `now_ms() % 500` in `plugins/telegram/native.rs`;
+      and close test oracle items in `daemon/tests.rs` and `discovery_and_setup.rs:848-859`.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Keep `setup.rs` conflict status
+      enum changes in `v59.cluster_e_plugins` and verify full seam alignment in `v59.consolidate`.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/daemon/**", "plugins/telegram/native.rs",
+      "crates/cito-native/tests/support/daemon/**"]`
+
+      - blocked_paths: `["plan.yaml", "bin/**", "plugins/*/bin/**"]`
+
+
+      Admit:
+
+      - Daemon unit tests, telegram plugin tests, and daemon integration suites pass
+      with discriminating regressions for `AF-59-11..AF-59-13` and daemon seams.
+
+
+      Recovery:
+
+      - Revert incomplete local edits within `allowed_paths` and leave worktree clean
+      on blocker.'
+    verification: 'cargo test --manifest-path crates/cito-native/Cargo.toml --lib
+      core::daemon -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --test integration support::daemon:: -- --test-threads=1'
+    refs:
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/channels.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - plugins/telegram/native.rs
+    - crates/cito-native/tests/support/daemon/mod.rs
+    depends_on:
+    - v59.cluster_a_hub
+    - v59.cluster_b_core
+    - v59.cluster_c_state
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T16:14:05.758104Z'
+    done_at: '2026-11-23T16:47:34.340993+00:00'
+    evidence: 'Merged v59.cluster_d_daemon (commit dc0fce66d1387b9c49b56fec4ee8f96f39abf3ed)
+      into main. Closed AF-59-11..AF-59-13 and AF-59-05/09/14/15 daemon seams across
+      14 authorized files. Verification: 144 tests passed (core::daemon 59, detached
+      daemon:: 82, telegram 3; 0 failed), cargo fmt --all -- --check, and git diff
+      --check passed; remaining dead-function clippy on http_boundary::validate (whose
+      last prod caller was switched to validate_hub) is deferred to v59.consolidate
+      as planned.'
+  - id: v59.cluster_e_plugins
+    name: 'Wave 2E: Setup Profile/Conflict Guards, Byte-Preserving Paths, Agent Plugin
+      Harness/Deadline/Lineage & Pi/Codex/Claude Closure (AF-59-14..15) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [AF-59-14] `core/setup.rs`, `core/plugins.rs`, `plugin_support.rs`, `plugins/{pi,codex,claude}/native.rs`,
+      `tests/support/distribution.rs` — (1) protect `config_path` and its backup sidecars
+      in `keep` during non-purge `--uninstall` when `CITO_CONFIG_PATH` lies under
+      a deletion root; (2) allow `cito setup --disconnect-all --purge-data` to recover
+      profiles that parse as JSON objects but fail `load_native_config` semantic validation;
+      (3) reject orphan modifiers (`--purge-data`, `--default`, `--auth`, `--token`,
+      `--issuer`, `--client-id`, `--redirect-port`) without their owning operation
+      and restrict `--enable`/`--disable` to `agent_plugins`; (4) require valid `installed`/`configured`/`paths`
+      types in `try_inspect_plugin_setup`, restrict `plugin_setup_actions` `status`
+      to `created|updated|unchanged|removed|missing|conflict`, and surface `"conflict"`
+      actions in `remove_plugin_setup`, `disconnect_offline`, and `uninstall_setup_with_owner`
+      without deleting runtime files; (5) use byte-preserving `raw_str` instead of
+      trimming `str_at` for filesystem paths (`state_dir`, `plugin_dir`, `cwd`, `rollout_path`)
+      in `plugin_support.rs` and `plugins/{pi,codex,claude}/native.rs`; and (6) reuse
+      `setup::resolve_state_and_config_paths()` in `plugins::load_native_config`,
+      inline/delete `plugin_request_with_timeout` and `remove_plugin_setup_dry_run`,
+      redirect `setup.rs`/`plugins.rs`/`tests/support/plugins.rs` callers of `pid_alive`
+      and `validate_https_issuer` (`[DEFER_TO_CONSOLIDATE]` final symbol removal in
+      `plugins.rs` after Wave 2 merges), simplify `run_setup_cli`''s inner `run()`
+      return type to `Result<bool, String>`, and clear `CITO_BUILTIN_PLUGINS_DIR`
+      when testing relocated App bundles in `distribution.rs:318-487`.
+
+      - [AF-59-15] `plugin_support.rs`, `plugins/pi/{native.rs,cito-bridge.ts}`, `plugins/codex/native.rs`,
+      `plugins/claude/native.rs`, `tests/support/{mod.rs,plugins.rs,pi-bridge.mjs}`
+      — (1) align `is_agent_harness` with `pi`/`claude`/`codex` `matches_process`
+      across script and `.js` entrypoints; (2) enforce a total call deadline in `socket_call`
+      and share equality-gated endpoint cache publication between `pi` `resolve_caller`
+      and `discover_sessions`; (3) emit/verify `process_identity` in `plugin_support`
+      and `pi`/`claude` `probe` (consuming `req["process_identity"]` from `v59.cluster_c_state`),
+      consolidating `claude`''s 3 binding-identity checks and re-verifying endpoint
+      identity after `bridge(req)` fails in `claude` `probe`; (4) in `plugins/claude/native.rs`,
+      project/validate superseding hook bindings under the endpoint lock in `discover_sessions`,
+      fence `remove_rejected_binding` by file identity/generation, compute bound-session
+      `updated_at_ms` from that session''s transcript, and align `stdio_sidecar` (`alias_active`)
+      with `published_session` fallback so resumed session bindings clear/ignore stale
+      aliases consistently; (5) in `plugins/codex/native.rs`, preserve consumed wake
+      attribution across rollout inode replacement (`!same_source`), reconcile pending
+      `ledger["effects"]` on interrupted no-rollout queue insertions, and bound `ledger["effects"]`
+      retention; (6) serialize mutating `/cito` (`on`, `team`, `off`, `private`) tool
+      calls per session in `plugins/pi/cito-bridge.ts`; and (7) isolate `has_harness_ancestor`
+      and `Fixture` process discovery in `plugin_support.rs`, `plugins/pi/native.rs`,
+      and `tests/support/{mod,plugins}.rs` from an enclosing host `pi`/`claude`/`codex`
+      session.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Keep `bin/**` and `plugins/*/bin/**`
+      out of git commits in Wave 2; `v59.consolidate` stages final release binaries.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/plugins.rs", "crates/cito-native/src/core/setup.rs",
+      "crates/cito-native/src/plugin_support.rs", "plugins/pi/native.rs", "plugins/pi/cito-bridge.ts",
+      "plugins/codex/native.rs", "plugins/claude/native.rs", "crates/cito-native/tests/support/distribution.rs",
+      "crates/cito-native/tests/support/mod.rs", "crates/cito-native/tests/support/plugins.rs",
+      "crates/cito-native/tests/support/pi-bridge.mjs"]`
+
+      - blocked_paths: `["plan.yaml", "bin/**", "plugins/*/bin/**"]`
+
+
+      Admit:
+
+      - Setup, plugins, distribution, and Pi bridge unit/integration suites pass with
+      discriminating regressions for `AF-59-14..AF-59-15`.
+
+
+      Recovery:
+
+      - Revert incomplete local edits within `allowed_paths` and leave worktree clean
+      on blocker.'
+    verification: 'cargo test --manifest-path crates/cito-native/Cargo.toml --lib
+      core::setup -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --lib core::plugins -- --test-threads=1 && cargo test --manifest-path crates/cito-native/Cargo.toml
+      --test integration support::plugins:: -- --test-threads=1 && cargo test --manifest-path
+      crates/cito-native/Cargo.toml --test integration support::distribution:: --
+      --test-threads=1 && node --test crates/cito-native/tests/support/pi-bridge.mjs'
+    refs:
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/pi/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/codex/native.rs
+    - plugins/claude/native.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    depends_on:
+    - v59.cluster_b_core
+    - v59.cluster_c_state
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T16:14:05.758381Z'
+    done_at: '2026-11-23T16:51:40.608926+00:00'
+    evidence: 'Rebased onto main and fast-forward merged v59.cluster_e_plugins (original
+      candidate 0f930791e7ae275bb9cfab9a2436ee6d64f34140). Closed AF-59-14 and AF-59-15
+      across all 11 authorized files. Verification: 131 tests passed (core::setup
+      23, core::plugins 17, native plugins:: 70, distribution:: 7, support::tests::
+      13, pi-bridge.mjs 1; 0 failed, 1 ignored subprocess helper), cargo fmt --all
+      -- --check, cargo clippy --workspace --all-targets --locked -- -D warnings,
+      and git diff --check passed.'
+  - id: v59.consolidate
+    name: 'Wave 3: Cross-Cluster Seam Consolidation, Staged Binary Refresh & Full
+      Workspace Verification [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [Cross-Cluster `[DEFER_TO_CONSOLIDATE]` Closure] Reconcile and close all remaining
+      cross-cluster seams across `Cluster A..F`: (1) wire `ChannelProcess::shutdown`
+      (`crates/cito-native/src/core/hub_plugins.rs:294-303`) and `Sidecar::drop` (`crates/cito-native/src/main.rs:38-46`)
+      to the shared process-group teardown helper in `crates/cito-native/src/support/subprocess.rs`
+      (`AF-59-04.3`); (2) delete any remaining `[DEFER_TO_CONSOLIDATE]` wrappers (`auth::local_principal`
+      in `auth.rs`, `http_boundary::validate` in `http_boundary.rs`, `plugins::pid_alive`
+      and `plugins::validate_https_issuer` in `plugins.rs`) after verifying zero remaining
+      callers across `crates/` and `plugins/`; and (3) verify end-to-end seam alignment
+      for `process_identity` (`registration.rs` <-> `daemon/mod.rs` <-> `receiver.rs`
+      <-> `plugin_support.rs` <-> `plugins/{pi,claude}/native.rs`) and plugin setup
+      conflict propagation (`setup.rs` <-> `daemon/http_actions.rs`).
+
+      - [Staged Release Binary Refresh & Verification] Keep `version = "0.22.0"` unchanged;
+      run `cargo build --release --locked` so post-build staging refreshes all 7 signed
+      binaries (`bin/cito`, `bin/cito-daemon`, `bin/cito-ui`, `plugins/pi/bin/cito-agent-pi`,
+      `plugins/codex/bin/cito-agent-codex`, `plugins/claude/bin/cito-agent-claude`,
+      `plugins/telegram/bin/cito-channel-telegram`); verify `codesign --verify --strict`
+      on all 7 staged binaries; and run the full workspace verification gate (`cargo
+      fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D
+      warnings`, detached `cargo test --workspace --locked -- --test-threads=4`, packaging
+      unittest, Homebrew cask syntax check, and `site-clipboard.mjs`).
+
+
+      Implementation Notes (Non-Binding):
+
+      - `[REQUIRES_SKILL: contract-and-simplicity]` Do not bump `Cargo.toml` version
+      or create a release git tag.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/**", "plugins/**", "src/macos/**", "bin/**", "packaging/**"]`
+
+      - blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml"]`
+
+
+      Admit:
+
+      - Zero compiler/clippy/fmt warnings, 7/7 signed staged binaries verified, and
+      full workspace test suites pass.
+
+
+      Recovery:
+
+      - Fix any cross-cluster integration or staging mismatch in place before completing
+      `v59.consolidate`.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo build --release --locked && codesign --verify
+      --strict bin/cito bin/cito-daemon bin/cito-ui plugins/pi/bin/cito-agent-pi plugins/codex/bin/cito-agent-codex
+      plugins/claude/bin/cito-agent-claude plugins/telegram/bin/cito-channel-telegram
+      && cargo test --workspace --locked -- --test-threads=4 && PYTHONDONTWRITEBYTECODE=1
+      python3 -m unittest discover -s packaging -p 'test_*.py' && ruby -c packaging/homebrew/cito.rb
+      && node --test crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - crates/cito-native/src/lib.rs
+    - crates/cito-native/src/support/subprocess.rs
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/src/core/http_boundary.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    depends_on:
+    - v59.cluster_d_daemon
+    - v59.cluster_e_plugins
+    - v59.cluster_f_macos
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-23T16:51:42.230860Z'
+    done_at: '2026-11-23T17:07:00.791835+00:00'
+    evidence: 'Merged v59.consolidate (commit 00cb210d1159a8f4218559915a58a9a9c6b5c8ca)
+      into main. Closed cross-cluster seams (ChannelProcess::shutdown & Sidecar::drop
+      shared PGID teardown helper; removed http_boundary::validate, auth::local_principal,
+      plugins::pid_alive wrappers; verified process_identity & plugin conflict propagation).
+      Verification: detached PPID=1 cargo test --workspace --locked -- --test-threads=4
+      passed 659/659 (0 failed, 5 ignored), cargo fmt --all -- --check, cargo clippy
+      --workspace --all-targets --locked -- -D warnings (0 warnings), cargo build
+      --release --locked (7/7 codesign --verify --strict), python3 packaging tests
+      26 passed, site-clipboard.mjs 1 passed, ruby -c packaging/homebrew/cito.rb,
+      and git diff --check passed.'
+  - id: v59.gate
+    name: 'Wave 4: Independent FULL Gate Verification for V59 Ledger Closure (AF-59-01..AF-59-17)
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: gate
+
+      repo_change_policy: no_repo_change
+
+      gate_tier: FULL
+
+
+      Deliver:
+
+      - Independently verify closure of all 17 admitted findings (`AF-59-01..AF-59-17`)
+      across `Cluster A..F` against source and test evidence.
+
+      - Verify that `version = "0.22.0"` in `crates/cito-native/Cargo.toml` is unchanged,
+      all 7 staged binaries in `bin/**` and `plugins/*/bin/**` match the release build
+      and pass `codesign --verify --strict`, and the working tree is clean.
+
+      - Emit a `gate.report.v2` (`FULL` tier) verification receipt covering `cargo
+      fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D
+      warnings`, `cargo test --workspace --locked -- --test-threads=4`, `PYTHONDONTWRITEBYTECODE=1
+      python3 -m unittest discover -s packaging -p ''test_*.py''`, `ruby -c packaging/homebrew/cito.rb`,
+      and `node --test crates/cito-native/tests/support/site-clipboard.mjs`.
+
+
+      Boundary:
+
+      - owner: `gate-reviewer`
+
+      - allowed_paths: `[]`
+
+      - blocked_paths: `["plan.yaml", "crates/**", "plugins/**", "src/**", "bin/**",
+      "packaging/**"]`
+
+
+      Admit:
+
+      - `gate.report.v2` verdict is `PASS` with zero unresolved `AF-59-01..AF-59-17`
+      obligations and zero test/lint/signature failures.
+
+
+      Recovery:
+
+      - Report `FAIL` with exact file:line counterexamples if any `AF-59-01..AF-59-17`
+      postcondition or suite check is unclosed.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && codesign --verify --strict bin/cito bin/cito-daemon
+      bin/cito-ui plugins/pi/bin/cito-agent-pi plugins/codex/bin/cito-agent-codex
+      plugins/claude/bin/cito-agent-claude plugins/telegram/bin/cito-channel-telegram
+      && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging -p 'test_*.py'
+      && ruby -c packaging/homebrew/cito.rb && node --test crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - crates/cito-native/Cargo.toml
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/setup.rs
+    - src/macos/Companion.swift
+    depends_on:
+    - v59.consolidate
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-23T17:07:02.449948Z'
+    done_at: '2026-11-23T17:42:11.978229+00:00'
+    evidence: v59.gate DELTA PASS at 768d177dfbcf59629b5742afacd3499bff38f920 (review_report_validator.py
+      exit 0, valid:true, binding_checked:true, evidence_disposition:POSITIVE_GATE_EVIDENCE).
+      All 18/18 bound requirements PROVEN (v59.AF-59-01..17 + v59.checks.full_workspace),
+      0 findings. Detached PPID=1 cargo test --workspace --locked -- --test-threads=4
+      passed 659/659 (0 failed, 5 ignored); packaging 26 passed; site-clipboard.mjs
+      1 passed; cargo fmt, clippy (-D warnings), ruby -c packaging/homebrew/cito.rb,
+      7/7 codesign --verify --strict, and isolated release build correspondence passed;
+      version unchanged at 0.22.0.
