@@ -26,14 +26,11 @@ pub fn sync_custom_title(
     let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-    if client.closed.load(std::sync::atomic::Ordering::Acquire) {
-        return Err("STALE_GENERATION: Hub changed before title maintenance".into());
-    }
     let Some(title) = state.custom_title(string(row, "harness"), string(row, "session_id"))? else {
         return Ok(());
     };
     state.db.transaction(|db| {
-        if client.closed.load(std::sync::atomic::Ordering::Acquire) { return Err("STALE_GENERATION: Hub changed before title maintenance".into()); }
+        client.check_current()?;
         db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         Ok(())
     })?;
@@ -134,6 +131,10 @@ pub(super) fn register_endpoint_locked(
     caller: &Value,
 ) -> Result<Value, String> {
     let mut result = register_locked(state, client, host, args, caller)?;
+    // The daemon skips title propagation when the durable title write failed.
+    if let Some(warning) = result.get("warning").cloned() {
+        result["maintenance_warning"] = warning;
+    }
     if caller["endpoint_pid"].as_u64().is_none() || caller["harness"] == "human" {
         return Ok(result);
     }
@@ -354,8 +355,7 @@ fn register_locked(
     }
     let harness = string(caller, "harness");
     let session = string(caller, "session_id");
-    if harness.is_empty()
-        || harness.contains('|')
+    if !crate::plugins::validate_harness_id(harness)
         || session.trim().is_empty()
         || (harness == "human" && session != "default")
     {
@@ -641,10 +641,9 @@ fn register_locked(
         let mut result = json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60});
         if let Some(title) = requested_title {
             if state.set_custom_title(harness, session, title).is_err() {
-                let warning = "Listening committed; session title maintenance is incomplete";
                 result["committed"] = json!(true);
-                result["warning"] = json!(warning);
-                result["maintenance_warning"] = json!(warning);
+                result["warning"] =
+                    json!("Listening committed; session title maintenance is incomplete");
             }
         }
         return Ok(result);

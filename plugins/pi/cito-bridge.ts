@@ -138,13 +138,8 @@ export default function citoBridge(pi: BridgeAPI): void {
     } // Only a missing config falls back to the environment and default port.
     if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Cito config.json must be an object");
     const validPort = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535;
-    let configuredPort: number | undefined;
-    for (const key of ["daemonPort", "daemon_port"]) {
-      if (!Object.hasOwn(config, key)) continue;
-      const value = (config as Record<string, unknown>)[key];
-      if (!validPort(value)) throw new Error(`Invalid ${key} in Cito config.json`);
-      configuredPort ??= value;
-    }
+    const configuredPort = (config as { daemonPort?: unknown }).daemonPort;
+    if (configuredPort !== undefined && !validPort(configuredPort)) throw new Error("Invalid daemonPort in Cito config.json");
     const rawPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
     const envPort = /^\+?\d+$/.test(rawPort) ? Number(rawPort) : undefined;
     const port = validPort(envPort) ? envPort : configuredPort ?? 4290;

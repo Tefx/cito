@@ -41,8 +41,12 @@ pub fn port() -> u16 {
         .port()
 }
 #[track_caller]
-pub fn wait(mut predicate: impl FnMut() -> bool) {
-    let until = Instant::now() + Duration::from_secs(12);
+pub fn wait(predicate: impl FnMut() -> bool) {
+    wait_for(Duration::from_secs(12), predicate);
+}
+#[track_caller]
+fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) {
+    let until = Instant::now() + timeout;
     loop {
         if predicate() {
             return;
@@ -50,6 +54,12 @@ pub fn wait(mut predicate: impl FnMut() -> bool) {
         assert!(Instant::now() < until, "condition timed out");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+#[track_caller]
+pub fn read_json(path: impl AsRef<Path>) -> Value {
+    let path = path.as_ref();
+    let contents = fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_slice(&contents).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 pub fn script(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -323,6 +333,15 @@ impl Fixture {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
     }
+    pub fn frames_for<'a>(
+        &self,
+        index: usize,
+        op: &'a str,
+    ) -> impl DoubleEndedIterator<Item = Value> + 'a {
+        self.frames(index)
+            .into_iter()
+            .filter(move |frame| frame["op"] == op)
+    }
     pub fn eof(&self, index: usize) {
         self.children.borrow_mut()[index].child.stdin.take();
     }
@@ -357,7 +376,7 @@ impl Fixture {
             self.send_raw(i, input.as_bytes());
         }
         self.eof(i);
-        wait(|| self.exited(i));
+        wait_for(Duration::from_secs(30), || self.exited(i));
         let success = self.children.borrow_mut()[i]
             .stop()
             .unwrap_or_else(|error| panic!("Process cleanup failed: {error}"))
@@ -408,6 +427,15 @@ impl Fixture {
     pub fn action(&self, value: Value) -> (u16, Value) {
         http(self.port, "/ui", Some(&value))
     }
+    #[track_caller]
+    pub fn action_ok(&self, action: Value) -> Value {
+        let (status, body) = self.action(action);
+        assert_eq!(status, 200, "{body}");
+        body
+    }
+    pub fn snapshot(&self) -> Value {
+        self.action_ok(json!({"op":"get_snapshot"}))
+    }
     pub fn mcp(&self, method: &str, params: Value) -> Value {
         let (s, v) = http(
             self.port,
@@ -434,6 +462,12 @@ impl Fixture {
     }
     pub fn rows(&self, sql: &str) -> Vec<Value> {
         self.db("state.sqlite").query(sql, &[]).unwrap()
+    }
+    pub fn recording_daemon(&self) -> usize {
+        self.daemon(&[
+            ("CITO_DISABLE_UI", "0"),
+            ("CITO_UI_BINARY", self.recording_ui().to_str().unwrap()),
+        ])
     }
     pub fn recording_ui(&self) -> PathBuf {
         let path = self.dir.join("ui.py");

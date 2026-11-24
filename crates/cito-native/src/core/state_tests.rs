@@ -18,6 +18,10 @@ impl Fixture {
             .listener("local", "c_1")?
             .ok_or_else(|| "Missing fixture listener".into())
     }
+    fn claim_wake_batch(&self) -> Result<Vec<Value>, String> {
+        self.state
+            .claim_wake_batch_for("local", &self.listener()?, false)
+    }
     fn seed(&self, id: &str, seq: usize) -> Result<(), String> {
         self.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'c_1',?,1,'alice','host.local','','message','2026-01-01T00:00:00.000Z',?,'RECEIVED','local://','none#alice')", &[json!(id), json!(seq), json!(now_ms()+60_000)])?;
         Ok(())
@@ -171,7 +175,7 @@ fn signal_reads_and_acknowledgments_isolate_origin_and_accept_principal_aliases(
     assert_eq!((rows.len(), total, unread), (2, 2, 2));
     assert_eq!(f.state.current_signals("local", "c_1", 1)?.len(), 1);
     f.state.schedule_wake_retry_for(&f.listener()?, 5000)?;
-    f.state.isolate_stale_signals(&f.listener()?)?;
+    f.state.restore_passive("local", &f.listener()?)?;
     for row in f.rows()? {
         if !["current", "legacy-principal"].contains(&string(&row, "signal_id")) {
             assert_eq!(row["state"], "STORED_PASSIVE");
@@ -229,7 +233,7 @@ fn hub_clock_remaining_lifetime_survives_client_skew_at_admission() -> Result<()
             expires,
             &Value::Null,
         )?;
-        let rows = f.state.claim_wake_batch("local", "c_1")?;
+        let rows = f.claim_wake_batch()?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["signal_id"], "skewed");
         assert!(rows[0]["batch_expires_at_ms"].as_u64().unwrap() > local_now);
@@ -387,7 +391,7 @@ fn inbound_activity_is_credited_once_per_signal_and_dispatch_grace_once_per_deli
     assert!(!admit(&f, &signal("one", "none#alice", 1), 1)?);
     assert_eq!(f.listener()?["last_activity_at_ms"], initial - 100);
     let listener = f.listener()?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     assert!(!batch.is_empty());
     f.state.finish_wake_batch(
         &listener,
@@ -475,7 +479,7 @@ fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() ->
         "UPDATE local_signals SET message=? WHERE signal_id='maximum'",
         &[json!("😀".repeat(65_536))],
     )?;
-    let rows = f.state.claim_wake_batch("local", "c_1")?;
+    let rows = f.claim_wake_batch()?;
     assert_eq!(rows.len(), 1);
     assert!(rows[0]["held_reason"].is_null());
     assert_eq!(rows[0]["state"], "DISPATCHING");
@@ -512,7 +516,7 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
         "UPDATE local_listeners SET hub='local'; UPDATE local_signals SET hub='local'",
         &[],
     )?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     f.state.finish_wake_batch(
         &f.listener()?,
         &batch[0],
@@ -523,7 +527,7 @@ fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> 
         false,
         false,
     )?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     f.state
         .db
         .execute("UPDATE local_signals SET activity_hidden=1", &[])?;
@@ -601,7 +605,7 @@ fn full_unread_count_and_non_destructive_v4_reopen() -> Result<(), String> {
     }
     let (rows, unread) = f.state.activity()?;
     assert_eq!((rows.len(), unread), (80, 100));
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     let before = f.listener()?;
     let second = LocalState::open(&f.dir)?;
     assert_eq!(second.activity()?.1, 100);
@@ -615,7 +619,9 @@ fn full_unread_count_and_non_destructive_v4_reopen() -> Result<(), String> {
     );
     assert_eq!(f.rows()?[0]["batch_id"], batch[0]["batch_id"]);
     assert_eq!(f.rows()?[0]["state"], "DISPATCHING");
-    assert!(second.claim_wake_batch("local", "c_1")?.is_empty());
+    assert!(second
+        .claim_wake_batch_for("local", &before, false)?
+        .is_empty());
     Ok(())
 }
 
@@ -625,15 +631,19 @@ fn independent_sqlite_handles_have_one_atomic_winner() -> Result<(), String> {
     for i in 0..10 {
         f.seed(&format!("s{i}"), i)?;
     }
+    let listener = f.listener()?;
     let handles = [LocalState::open(&f.dir)?, LocalState::open(&f.dir)?];
     let barrier = Arc::new(Barrier::new(3));
     let threads: Vec<_> = handles
         .into_iter()
         .map(|state| {
             let barrier = barrier.clone();
+            let listener = listener.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                state.claim_wake_batch("local", "c_1").map(|v| v.len())
+                state
+                    .claim_wake_batch_for("local", &listener, false)
+                    .map(|v| v.len())
             })
         })
         .collect();
@@ -660,7 +670,7 @@ fn recovered_frozen_batch_precedes_new_rows_and_keeps_card_queue_and_deadline() 
 {
     let f = Fixture::new()?;
     f.seed("old", 1)?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     let captured = f.listener()?;
     f.state.finish_wake_batch(
         &captured,
@@ -680,7 +690,7 @@ fn recovered_frozen_batch_precedes_new_rows_and_keeps_card_queue_and_deadline() 
         "UPDATE local_signals SET from_title='Changed sender' WHERE signal_id='old'",
         &[],
     )?;
-    let recovered = LocalState::open(&f.dir)?.claim_wake_batch("local", "c_1")?;
+    let recovered = LocalState::open(&f.dir)?.claim_wake_batch_for("local", &captured, false)?;
     assert_eq!(recovered.len(), 1);
     for field in ["batch_id", "batch_card", "batch_expires_at_ms"] {
         assert_eq!(recovered[0][field], batch[0][field]);
@@ -700,10 +710,10 @@ fn recovered_frozen_batch_precedes_new_rows_and_keeps_card_queue_and_deadline() 
 fn explicit_locked_startup_recovery_preserves_frozen_rows() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s1", 1)?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     let reopened = LocalState::open(&f.dir)?;
     reopened.recover_dispatch_leases()?;
-    let recovered = reopened.claim_wake_batch("local", "c_1")?;
+    let recovered = reopened.claim_wake_batch_for("local", &f.listener()?, false)?;
     assert_eq!(recovered[0]["batch_id"], batch[0]["batch_id"]);
     assert_eq!(recovered[0]["batch_card"], batch[0]["batch_card"]);
     assert_ne!(
@@ -723,11 +733,11 @@ fn whole_batch_expires_at_earliest_member_not_lease_deadline() -> Result<(), Str
         "UPDATE local_signals SET expires_at_ms=? WHERE signal_id='early'",
         &[json!(early)],
     )?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     assert!(batch.iter().all(|r| r["batch_expires_at_ms"] == early));
     f.state.db.execute("UPDATE local_listeners SET lease_until_ms=0; UPDATE local_signals SET batch_expires_at_ms=1 WHERE batch_id IS NOT NULL", &[])?;
     f.seed("new", 3)?;
-    let next = f.state.claim_wake_batch("local", "c_1")?;
+    let next = f.claim_wake_batch()?;
     assert_eq!(next.len(), 1);
     assert_eq!(next[0]["signal_id"], "new");
     assert!(f.rows()?[..2]
@@ -743,7 +753,7 @@ fn expired_received_never_wakes() -> Result<(), String> {
     f.state
         .db
         .execute("UPDATE local_signals SET expires_at_ms=1", &[])?;
-    assert!(f.state.claim_wake_batch("local", "c_1")?.is_empty());
+    assert!(f.claim_wake_batch()?.is_empty());
     assert_eq!(f.rows()?[0]["state"], "EXPIRED_UNSENT");
     Ok(())
 }
@@ -781,7 +791,7 @@ fn workspace_peers_wake_normally_and_unequal_generations_are_passive() -> Result
         assert_eq!(r["state"], "STORED_PASSIVE");
         assert_eq!(r["held_reason"], "stale_generation");
     }
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     assert_eq!(batch.len(), 1);
     assert_eq!(batch[0]["signal_id"], "peer");
     Ok(())
@@ -799,7 +809,7 @@ fn duplicate_received_recovers_schedule_but_passive_redelivery_keeps_fallback() 
         f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
         1
     );
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     f.state.finish_wake_batch(
         &f.listener()?,
         &batch[0],
@@ -833,7 +843,7 @@ fn acked_members_rebatch_remaining_unread_without_losing_queue_checkpoint() -> R
         let f = Fixture::new()?;
         f.seed("read", 1)?;
         f.seed("unread", 2)?;
-        let original = f.state.claim_wake_batch("local", "c_1")?;
+        let original = f.claim_wake_batch()?;
         f.state.finish_wake_batch(
             &f.listener()?,
             &original[0],
@@ -847,7 +857,7 @@ fn acked_members_rebatch_remaining_unread_without_losing_queue_checkpoint() -> R
         f.state
             .acknowledge("local", "c_1", &[json!("read")], "other")?;
         f.seed("fresh", 3)?;
-        let next = f.state.claim_wake_batch("local", "c_1")?;
+        let next = f.claim_wake_batch()?;
         assert_eq!(next.len(), 1);
         assert_eq!(next[0]["signal_id"], "unread");
         assert_ne!(next[0]["batch_id"], original[0]["batch_id"]);
@@ -867,7 +877,7 @@ fn acked_members_rebatch_remaining_unread_without_losing_queue_checkpoint() -> R
             false,
             false,
         )?;
-        let fresh = f.state.claim_wake_batch("local", "c_1")?;
+        let fresh = f.claim_wake_batch()?;
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0]["signal_id"], "fresh");
         assert_eq!(fresh[0]["queue_written"], 0);
@@ -894,7 +904,7 @@ fn new_batches_separate_persisted_queue_confirmation_checkpoints() -> Result<(),
         (vec!["confirmed"], 1, 1),
         (vec!["fresh"], 0, 0),
     ] {
-        let batch = f.state.claim_wake_batch("local", "c_1")?;
+        let batch = f.claim_wake_batch()?;
         assert_eq!(
             batch
                 .iter()
@@ -926,7 +936,7 @@ fn middle_member_ack_cannot_reuse_batch_identity_for_a_different_card() -> Resul
     for i in 1..=3 {
         f.seed(&format!("s{i}"), i)?;
     }
-    let original = f.state.claim_wake_batch("local", "c_1")?;
+    let original = f.claim_wake_batch()?;
     f.state.finish_wake_batch(
         &f.listener()?,
         &original[0],
@@ -939,7 +949,7 @@ fn middle_member_ack_cannot_reuse_batch_identity_for_a_different_card() -> Resul
     )?;
     f.state
         .acknowledge("local", "c_1", &[json!("s2")], "other")?;
-    let next = f.state.claim_wake_batch("local", "c_1")?;
+    let next = f.claim_wake_batch()?;
     assert_eq!(next.len(), 2);
     assert_eq!(next[0]["seq"], original[0]["seq"]);
     assert_eq!(next[1]["seq"], original[2]["seq"]);
@@ -954,7 +964,7 @@ fn stale_owner_cannot_claim_or_complete_successors_batch() -> Result<(), String>
     let f = Fixture::new()?;
     f.seed("s", 1)?;
     let old_listener = f.listener()?;
-    let old = f.state.claim_wake_batch("local", "c_1")?;
+    let old = f.claim_wake_batch()?;
     f.state.db.execute(
         "UPDATE local_listeners SET owner_token='successor',lease_until_ms=0",
         &[],
@@ -963,7 +973,7 @@ fn stale_owner_cannot_claim_or_complete_successors_batch() -> Result<(), String>
         .state
         .claim_wake_batch_for("local", &old_listener, false)
         .is_err());
-    let next = f.state.claim_wake_batch("local", "c_1")?;
+    let next = f.claim_wake_batch()?;
     f.state.schedule_wake_retry_for(&f.listener()?, 30_500)?;
     let retry = f
         .state
@@ -1000,7 +1010,7 @@ fn stale_owner_cannot_claim_or_complete_successors_batch() -> Result<(), String>
 fn local_lease_renewal_and_ack_cancellation_are_token_fenced() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s", 1)?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     let listener = f.listener()?;
     f.state.db.execute(
         "UPDATE local_listeners SET lease_until_ms=?",
@@ -1023,7 +1033,7 @@ fn completion_preserves_concurrent_ack_and_commits_pending_hub_acks_atomically(
 ) -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s", 1)?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     f.state
         .db
         .execute("UPDATE local_signals SET acknowledged_at_ms=123", &[])?;
@@ -1056,7 +1066,7 @@ fn unlisten_racing_final_completion_cannot_business_ack_or_resurrect_dispatch() 
     let f = Fixture::new()?;
     f.seed("s", 1)?;
     let listener = f.listener()?;
-    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    let batch = f.claim_wake_batch()?;
     f.state
         .db
         .execute("UPDATE local_listeners SET status='UNLISTENED'", &[])?;
@@ -1137,7 +1147,7 @@ fn six_hundred_messages_paginate_into_twelve_fifty_member_batches() -> Result<()
     }
     let mut batches = Vec::new();
     loop {
-        let batch = f.state.claim_wake_batch("local", "c_1")?;
+        let batch = f.claim_wake_batch()?;
         if batch.is_empty() {
             break;
         }

@@ -14,11 +14,7 @@ struct ClosedLoop<'a> {
 }
 impl<'a> ClosedLoop<'a> {
     fn new(f: &'a Fixture) -> Self {
-        let recorder = f.recording_ui();
-        f.daemon(&[
-            ("CITO_DISABLE_UI", "0"),
-            ("CITO_UI_BINARY", recorder.to_str().unwrap()),
-        ]);
+        f.recording_daemon();
         Self {
             f,
             ui: start(f),
@@ -34,11 +30,7 @@ impl<'a> ClosedLoop<'a> {
             self.results.push((action.clone(), status, result));
         }
         self.actions = actions.len();
-        let frames: Vec<Value> = fs::read_to_string(self.f.home.join("ui-frames"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|s| serde_json::from_str(s).ok())
-            .collect();
+        let frames = ui_frames(self.f);
         for frame in &frames[self.frames.len()..] {
             self.f.send(self.ui, frame.clone());
             inspect(self.f, self.ui);
@@ -142,6 +134,16 @@ fn listener() -> Value {
 fn state() -> Value {
     json!({"op":"state","hubs":hubs(),"listeners":[listener()],"harnesses":[{"id":"fixture","display_name":"Fixture","sf_symbol":"terminal","tint":"purple","tier":"stable","order":0}],"unread_count":0,"directory_online_count":2})
 }
+fn state_with_settings(settings: Value) -> Value {
+    let mut frame = state();
+    frame["settings"] = settings;
+    frame
+}
+fn ui_fixture() -> (Fixture, usize) {
+    let f = Fixture::new(json!({}));
+    let ui = start(&f);
+    (f, ui)
+}
 fn start(f: &Fixture) -> usize {
     let ui = root().join("bin/cito-ui-darwin-arm64");
     f.spawn(ui.to_str().unwrap(), &[], &[])
@@ -211,23 +213,40 @@ fn nodes(tree: &Value) -> Vec<Value> {
     }
     result
 }
+trait SnapshotViews {
+    fn menu(&self, id: &str) -> Value;
+    fn settings(&self, id: &str) -> Value;
+    fn directory(&self, id: &str) -> Value;
+}
+impl SnapshotViews for Value {
+    fn menu(&self, id: &str) -> Value {
+        node(self, "items", id)
+    }
+    fn settings(&self, id: &str) -> Value {
+        node(self, "settings_items", id)
+    }
+    fn directory(&self, id: &str) -> Value {
+        node(self, "directory_items", id)
+    }
+}
 fn node(snapshot: &Value, surface: &str, id: &str) -> Value {
-    nodes(&snapshot[surface])
-        .into_iter()
-        .find(|v| v["id"] == id)
-        .unwrap_or(Value::Null)
+    fn find<'a>(children: &'a Value, id: &str) -> Option<&'a Value> {
+        children.as_array()?.iter().find_map(|child| {
+            if child["id"] == id {
+                Some(child)
+            } else {
+                find(&child["children"], id)
+            }
+        })
+    }
+    find(&snapshot[surface], id).cloned().unwrap_or_default()
 }
 fn control(f: &Fixture, p: usize, id: &str) {
     f.send(p, json!({"op":"test_control","id":id}));
 }
 fn confirm_channel_action(f: &Fixture, p: usize, op: &str) {
     inspect(f, p);
-    let action = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == op)
-        .unwrap();
+    let action = f.frames_for(p, op).next_back().unwrap();
     f.send(p, json!({"op":"settings","ok":true,"committed":true,"hub":action["hub"],"channel_id":action["channel_id"],"source_op":op,"request_id":action["request_id"]}));
 }
 /// Synthetic directory frames echo the real UI request, just as the daemon does.

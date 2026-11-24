@@ -95,7 +95,6 @@ pub struct HubClient {
     pub bearer: Option<String>,
     pub expires_at: u64,
     pub auth_retry_at: u64,
-    pub auth_rejected_hash: Option<String>,
     pub rejected_bearer: Arc<Mutex<Option<String>>>,
     directory_cache: Arc<Mutex<Vec<Value>>>,
     directory_revision: Arc<AtomicU64>,
@@ -113,7 +112,7 @@ pub struct HubClient {
     human_observed_at: Arc<Mutex<Option<Instant>>>,
     event_credentials: Arc<Mutex<Option<String>>>,
     pub closed: Arc<AtomicBool>,
-    pub registration: Arc<Mutex<()>>,
+    pub(super) commit_gate: Arc<Mutex<()>>,
     agent: ureq::Agent,
 }
 impl HubClient {
@@ -132,7 +131,6 @@ impl HubClient {
             bearer,
             expires_at: u64::MAX,
             auth_retry_at: 0,
-            auth_rejected_hash: None,
             rejected_bearer: Arc::new(Mutex::new(None)),
             directory_cache: Arc::new(Mutex::new(Vec::new())),
             directory_revision: Arc::new(AtomicU64::new(0)),
@@ -147,7 +145,7 @@ impl HubClient {
             directory_observed_at: Arc::new(Mutex::new(None)),
             human_observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
-            registration: Arc::new(Mutex::new(())),
+            commit_gate: Arc::default(),
             agent: ureq::AgentBuilder::new()
                 .redirects(0)
                 .timeout_connect(Duration::from_secs(5))
@@ -333,6 +331,7 @@ impl HubClient {
         self.directory_observed_at = old.directory_observed_at.clone();
         self.human_observed_at = old.human_observed_at.clone();
         self.closed = old.closed.clone();
+        self.commit_gate = old.commit_gate.clone();
         self.event_credentials = old.event_credentials.clone();
         if let Ok(mut token) = self.event_credentials.lock() {
             *token = self.bearer.clone();

@@ -37,8 +37,7 @@ pub(super) fn render_state(f: &Fixture, p: usize) -> Value {
 #[test]
 fn menu_visibility_defers_views_but_status_updates_and_visibility_ipc_are_immediate() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut frame = state();
     f.send(p, frame.clone());
     let initial = render_state(&f, p);
@@ -136,10 +135,8 @@ fn menu_visibility_defers_views_but_status_updates_and_visibility_ipc_are_immedi
 #[test]
 fn closed_settings_reselects_disabled_hub_without_reopening_discovery() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
-    let mut frame = state();
-    frame["settings"] = settings();
+    let (f, p) = ui_fixture();
+    let frame = state_with_settings(settings());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
@@ -166,17 +163,13 @@ fn closed_settings_reselects_disabled_hub_without_reopening_discovery() {
 #[test]
 fn closing_inline_rename_dirties_the_cached_menu_without_a_hidden_rebuild() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     f.send(p, state());
     f.send(p, json!({"op":"test_menu_open"}));
     control(&f, p, "rename:personal:repo-abcdefghijkl");
-    assert!(!node(
-        &inspect(&f, p),
-        "items",
-        "rename_field:personal:repo-abcdefghijkl"
-    )
-    .is_null());
+    assert!(!inspect(&f, p)
+        .menu("rename_field:personal:repo-abcdefghijkl")
+        .is_null());
     let editing = render_state(&f, p);
     f.send(p, json!({"op":"test_menu_close"}));
     let closed = render_state(&f, p);
@@ -184,20 +177,16 @@ fn closing_inline_rename_dirties_the_cached_menu_without_a_hidden_rebuild() {
     assert_eq!(closed["menu_rebuilds"], editing["menu_rebuilds"]);
     f.send(p, json!({"op":"test_menu_open"}));
     let reopened = inspect(&f, p);
-    assert!(node(
-        &reopened,
-        "items",
-        "rename_field:personal:repo-abcdefghijkl"
-    )
-    .is_null());
-    assert!(!node(&reopened, "items", "rename:personal:repo-abcdefghijkl").is_null());
+    assert!(reopened
+        .menu("rename_field:personal:repo-abcdefghijkl")
+        .is_null());
+    assert!(!reopened.menu("rename:personal:repo-abcdefghijkl").is_null());
 }
 
 #[test]
 fn hidden_panels_retain_models_and_flush_only_on_open_inspect_or_capture() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut frame = state();
     let mut cfg = settings();
     frame["settings"] = cfg.clone();
@@ -213,12 +202,7 @@ fn hidden_panels_retain_models_and_flush_only_on_open_inspect_or_capture() {
     control(&f, p, "close_settings");
     control(&f, p, "close_directory");
     let closed = render_state(&f, p);
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|v| v["op"] == "open_directory")
-        .unwrap();
+    let request = f.frames_for(p, "open_directory").next_back().unwrap();
     let mut directory =
         json!({"op":"directory","peers":[peer("deferred")],"matched_count":1,"online_count":7});
     for key in ["request_id", "query", "scope", "harness"] {
@@ -250,7 +234,7 @@ fn hidden_panels_retain_models_and_flush_only_on_open_inspect_or_capture() {
     assert_eq!(reopened["directory_dirty"], false);
     let snapshot = inspect(&f, p);
     assert_eq!(
-        node(&snapshot, "directory_items", "dir_title:personal:deferred")["text"],
+        snapshot.directory("dir_title:personal:deferred")["text"],
         "deferred"
     );
     control(&f, p, "close_settings");
@@ -258,19 +242,14 @@ fn hidden_panels_retain_models_and_flush_only_on_open_inspect_or_capture() {
     cfg["launch_at_login"] = json!(false);
     f.send(p, json!({"op":"settings","settings":cfg}));
     // The active request changed when the panel reopened.
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|v| v["op"] == "open_directory")
-        .unwrap();
+    let request = f.frames_for(p, "open_directory").next_back().unwrap();
     directory["request_id"] = request["request_id"].clone();
     directory["peers"][0]["title"] = json!("Inspection title");
     f.send(p, directory.clone());
     let before_inspect = render_state(&f, p);
     let inspected = inspect(&f, p);
     assert_eq!(
-        node(&inspected, "directory_items", "dir_title:personal:deferred")["text"],
+        inspected.directory("dir_title:personal:deferred")["text"],
         "Inspection title"
     );
     let flushed = render_state(&f, p);
@@ -309,10 +288,8 @@ fn hidden_panels_retain_models_and_flush_only_on_open_inspect_or_capture() {
 #[test]
 fn panel_hover_uses_exit_and_resign_events_and_menu_fallback_is_tracking_only() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
-    let mut frame = state();
-    frame["settings"] = settings();
+    let (f, p) = ui_fixture();
+    let frame = state_with_settings(settings());
     f.send(p, frame);
     f.send(p, json!({"op":"test_open_panel","surface":"settings"}));
     f.send(p, json!({"op":"test_open_panel","surface":"directory"}));
@@ -350,8 +327,7 @@ fn panel_hover_uses_exit_and_resign_events_and_menu_fallback_is_tracking_only() 
 #[test]
 fn cached_dates_and_fast_text_width_match_appkit_reference_metrics() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let metrics = report(
         &f,
         p,

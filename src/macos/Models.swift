@@ -250,6 +250,10 @@ struct HostHubSummary: Decodable, Equatable {
     let auth_mode: String?
     let error: String?
 }
+struct HubFormProfile: Equatable {
+    var name: String
+    let url: String, issuer: String, clientId: String, redirectPort: String
+}
 struct HubConfigItem: Decodable, Equatable {
     let name: String
     let url: String
@@ -276,10 +280,12 @@ struct HubConfigItem: Decodable, Equatable {
     var supports_workspace_scope: Bool? = nil
     var can_login: Bool? = nil
     var redirect_port: Int? = nil
+    var formProfile: HubFormProfile {
+        HubFormProfile(name: name, url: normalizedHubURL(url), issuer: issuer ?? "", clientId: client_id ?? "", redirectPort: redirect_port.map(String.init) ?? "")
+    }
 }
 struct SettingsPayload: Decodable, Equatable {
     var apps: [AppSetupItem]
-    let channel_hub: String?
     let settings_hub: String?
     var channels: [ChannelSetupItem]?
     var channel_inventory_error: String? = nil
@@ -307,7 +313,6 @@ struct HubInviteConfig: Decodable {
 }
 struct Frame: Decodable {
     let config: HubInviteConfig?
-    let truncated: Bool?
     let truncated_collections: [String]?
     let op: String
     let hub: String?
@@ -352,47 +357,33 @@ struct Frame: Decodable {
     let part: Int?
     let complete: Bool?
 
-    func preservesCollection(_ key: String, alias: String? = nil) -> Bool {
-        guard request_id == nil, truncated == true else { return false }
-        // Older producers only reported a frame-wide flag.
-        guard let collections = truncated_collections else { return true }
-        return collections.contains(key) || alias.map { collections.contains($0) } == true
+    func preservesCollection(_ key: String) -> Bool {
+        truncated_collections?.contains(key) == true
     }
 }
 
 struct ChannelUiState: Equatable {
-    struct PairingAttempt: Equatable {
-        let request: String?
-        let instruction: String
-        let command: String?
-        let url: String?
-
-        func matches(_ current: Self) -> Bool {
-            request.map { $0 == current.request } ?? (self == current)
-        }
-    }
-
     var editingGateway = false
     var editingPersonal = false
     var manualEntry = false
     var drafts: [String: String] = [:]
-    var pendingPairRequest: String?
-    var pairingPreviewRequest: String?
+    enum Pairing: Equatable {
+        case requested(String), displayed(String)
+        var id: String { switch self { case .requested(let id), .displayed(let id): return id } }
+    }
+    var pairing: Pairing?
+    var waitingForPairCode: Bool { if case .requested = pairing { return true }; return false }
     var pairingInstruction = ""
     var pairingCommand: String?
     var pairingURL: String?
     var pairCopiedUntil = Date.distantPast
-    var pairingAttempt: PairingAttempt {
-        PairingAttempt(request: pendingPairRequest ?? (pairingInstruction.isEmpty ? nil : pairingPreviewRequest),
-                       instruction: pairingInstruction, command: pairingCommand, url: pairingURL)
-    }
     var savedUntil: [String: Date] = [:]
     var testResult: (ok: Bool, detail: String)?
     var testResultIsLatest = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.editingGateway == rhs.editingGateway && lhs.editingPersonal == rhs.editingPersonal && lhs.manualEntry == rhs.manualEntry &&
-        lhs.drafts == rhs.drafts && lhs.pendingPairRequest == rhs.pendingPairRequest && lhs.pairingPreviewRequest == rhs.pairingPreviewRequest && lhs.pairingInstruction == rhs.pairingInstruction &&
+        lhs.drafts == rhs.drafts && lhs.pairing == rhs.pairing && lhs.pairingInstruction == rhs.pairingInstruction &&
         lhs.pairingCommand == rhs.pairingCommand && lhs.pairingURL == rhs.pairingURL && lhs.pairCopiedUntil == rhs.pairCopiedUntil &&
         lhs.savedUntil == rhs.savedUntil && lhs.testResult?.ok == rhs.testResult?.ok && lhs.testResult?.detail == rhs.testResult?.detail &&
         lhs.testResultIsLatest == rhs.testResultIsLatest
@@ -401,12 +392,11 @@ struct ChannelUiState: Equatable {
     mutating func resetPersonal(preservePendingPair: Bool = false) {
         editingPersonal = false
         manualEntry = false
-        if !preservePendingPair { pendingPairRequest = nil }
+        if !preservePendingPair { pairing = nil }
         clearPairingInstructions()
         savedUntil.removeValue(forKey: "user")
     }
     mutating func clearPairingInstructions() {
-        pairingPreviewRequest = nil
         pairingInstruction = ""
         pairingCommand = nil
         pairingURL = nil

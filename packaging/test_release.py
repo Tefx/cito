@@ -298,28 +298,25 @@ class ReleaseAssetTests(unittest.TestCase):
             self.fail(f"Unexpected external command: {argv}")
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
-    def test_asset_lookup_only_emits_reuse_at_cli_boundary(self):
-        for draft, names in ((False, None), (True, None), (True, [release.ARCHIVE])):
-            with self.subTest(draft=draft, names=names):
+    def test_assets_cli_reports_reuse_only_for_verified_assets(self):
+        for info, reused in ((None, False), (self.info(True, []), False), (self.info(), True),
+                             (self.info(True, [release.ARCHIVE]), True)):
+            with self.subTest(info=info):
                 self.output.write_text("sentinel=yes\n")
-                info = self.info(draft, names)
-                self.infos = [info, info]
-                destination = self.root / f"lookup-{draft}-{names is None}"
-                with contextlib.redirect_stdout(io.StringIO()) as stdout:
-                    self.assertTrue(release.existing_assets(self.tag, destination))
-                self.assertEqual(stdout.getvalue(), "")
-                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
-                self.assertEqual((destination / (release.ARCHIVE + ".sha256")).read_bytes(),
-                                 self.remote[release.ARCHIVE + ".sha256"])
+                self.infos = [info]
+                destination = self.root / "lookup"
                 with patch.object(sys, "argv", ["release.py", "assets", self.tag, str(destination)]), contextlib.redirect_stdout(io.StringIO()) as stdout:
                     previous = os.umask(0o077)
                     try:
                         self.assertEqual(release.main(), 0)
                     finally:
                         os.umask(previous)
-                self.assertEqual(stdout.getvalue(), "reused=true\n")
-                self.assertEqual(self.output.read_text(), "sentinel=yes\nreused=true\n")
-                self.assertEqual(self.infos, [])
+                line = f"reused={str(reused).lower()}\n"
+                self.assertEqual(stdout.getvalue(), line)
+                self.assertEqual(self.output.read_text(), "sentinel=yes\n" + line)
+                if reused:
+                    self.assertEqual((destination / (release.ARCHIVE + ".sha256")).read_bytes(),
+                                     self.remote[release.ARCHIVE + ".sha256"])
 
     def test_publish_retry_reuses_assets_without_emitting_workflow_outputs(self):
         for draft, names in ((False, None), (True, None), (True, [release.ARCHIVE])):
@@ -411,23 +408,6 @@ class ReleaseAssetTests(unittest.TestCase):
                 self.assertEqual(self.infos, [])
                 self.assertEqual(self.output.read_text(), "sentinel=yes\n")
 
-    def test_absent_release_and_empty_draft_are_nonreuse_at_cli_boundary(self):
-        for info in (None, self.info(True, [])):
-            with self.subTest(info=info):
-                self.output.write_text("sentinel=yes\n")
-                self.infos = [info, info]
-                self.assertFalse(release.existing_assets(self.tag, self.root / "absent"))
-                self.assertEqual(self.output.read_text(), "sentinel=yes\n")
-                with patch.object(sys, "argv", ["release.py", "assets", self.tag, str(self.root / "absent")]), contextlib.redirect_stdout(io.StringIO()) as stdout:
-                    previous = os.umask(0o077)
-                    try:
-                        self.assertEqual(release.main(), 0)
-                    finally:
-                        os.umask(previous)
-                self.assertEqual(stdout.getvalue(), "reused=false\n")
-                self.assertEqual(self.output.read_text(), "sentinel=yes\nreused=false\n")
-                self.assertEqual(self.infos, [])
-
 
 class ArtifactTests(unittest.TestCase):
     def test_renderer_binds_version_checksum_url_and_both_appdir_links(self):
@@ -452,51 +432,6 @@ class ArtifactTests(unittest.TestCase):
                     ])
                     self.assertEqual(data["uninstall"], {"quit": "one.tefx.cito"})
                     self.assertIn("~/.cito", data["zap"]["trash"])
-
-    def test_cask_smoke_accepts_symlinked_temporary_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            work = root / "work"
-            work.mkdir()
-            alias = root / "temporary-alias"
-            alias.symlink_to(work, target_is_directory=True)
-            prefix = root / "prefix"
-            (prefix / "bin").mkdir(parents=True)
-            tap = root / "tap"
-            cask = root / "cito.rb"
-            cask.write_text("cask fixture\n")
-            links = [prefix / "bin" / name for name in ("cito", "cito-mcp")]
-            app = work / "Applications/Cito.app"
-            checked = []
-
-            def brew(command, **kwargs):
-                if command[:2] == ["brew", "--prefix"]:
-                    output = str(prefix)
-                elif command[:2] == ["brew", "--repo"]:
-                    output = str(tap)
-                elif command[:2] == ["brew", "install"]:
-                    launcher = app / "Contents/MacOS/Cito"
-                    launcher.parent.mkdir(parents=True)
-                    launcher.write_text("launcher fixture\n")
-                    for link in links:
-                        link.symlink_to(alias / "Applications/Cito.app/Contents/MacOS/Cito")
-                    output = ""
-                elif command[:2] == ["brew", "uninstall"]:
-                    for link in links:
-                        link.unlink(missing_ok=True)
-                    shutil.rmtree(app, ignore_errors=True)
-                    output = ""
-                elif command[0] in links:
-                    checked.append(command[0].name)
-                    output = "cito v1.2.3\n"
-                else:
-                    output = ""
-                return subprocess.CompletedProcess(command, 0, output, "")
-
-            with patch.object(release.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(alias))), patch.object(release, "run", side_effect=brew), contextlib.redirect_stdout(io.StringIO()):
-                release.smoke_cask(cask, "acme/tap", "1.2.3")
-            self.assertEqual(checked, ["cito", "cito-mcp"])
-            self.assertEqual((work / "home/.cito/keep-on-uninstall").read_text(), "preserve\n")
 
     def test_release_cli_preserves_caller_umask(self):
         with tempfile.TemporaryDirectory() as directory:

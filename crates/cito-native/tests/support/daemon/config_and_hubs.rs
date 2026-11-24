@@ -27,7 +27,11 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
     let daemon = f.daemon(&[("CITO_BROWSER_BIN", opener.to_str().unwrap())]);
     let port = f.port;
     let login = std::thread::spawn(move || {
-        http(port, "/ui", Some(&json!({"op":"login_hub","hub":"work"})))
+        http(
+            port,
+            "/ui",
+            Some(&json!({"op":"hub_action","action":"login","hub":"work"})),
+        )
     });
     wait(|| f.home.join("callback-url").exists());
     let url = url::Url::parse(&fs::read_to_string(f.home.join("callback-url")).unwrap()).unwrap();
@@ -41,7 +45,7 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
     // Creating or editing a different Hub must leave the default Hub's callback live.
     for action in [
         json!({"op":"setup_save_hub","name":"personal","url":"local://"}),
-        json!({"op":"save_hub","edit":true,"name":"personal","autoListen":false}),
+        json!({"op":"setup_save_hub","edit":true,"name":"personal","autoListen":false}),
     ] {
         let result = f.action(action);
         assert_eq!(result.0, 200, "{result:?}");
@@ -205,7 +209,7 @@ fn gui_purge_removes_credentials_idempotency_hub_history_and_personal_profile_da
         .query("SELECT * FROM hub_signals", &[])
         .unwrap()
         .is_empty());
-    let fresh = f.action(json!({"op":"get_snapshot"})).1;
+    let fresh = f.snapshot();
     assert_eq!(fresh["hubs"][0]["human_paused"], false);
     assert_eq!(fresh["hubs"][0]["human_about"], "Human");
     assert_eq!(fresh["hubs"][0]["human_control_revision"], 1);
@@ -215,12 +219,8 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     f.daemon(&[("CITO_TAILSCALE_HOST", "mac-studio.tailnet.ts.net.")]);
-    assert_eq!(
-        f.action(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}))
-            .0,
-        200
-    );
-    let host = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    f.action_ok(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}));
+    let host = f.snapshot()["settings"]["host_hub"].clone();
     assert_eq!(host["enabled"], false);
     assert_eq!(host["running"], false);
     assert_eq!(host["token"].as_str().unwrap().len(), 64);
@@ -239,25 +239,14 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
     assert_eq!(host["tailscale_url"], host["endpoint_url"]);
     assert!(host["lan_url"].as_str().unwrap().starts_with("http://"));
     assert_eq!(host["tailscale_invite_command"], host["invite_command"]);
-    let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let saved: Value = read_json(&f.config);
     assert_eq!(saved["host_hub"]["token"], host["token"]);
-    assert_eq!(
-        f.action(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"]["token"],
-        host["token"]
-    );
+    f.action_ok(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}));
+    assert_eq!(f.snapshot()["settings"]["host_hub"]["token"], host["token"]);
     // An explicit listener interface must not advertise an unrelated Tailscale address.
     for bind in ["127.0.0.1", "192.0.2.10", "::1"] {
-        assert_eq!(
-            f.action(json!({"op":"set_host_hub","enabled":false,"bind":bind}))
-                .0,
-            200
-        );
-        let host = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+        f.action_ok(json!({"op":"set_host_hub","enabled":false,"bind":bind}));
+        let host = f.snapshot()["settings"]["host_hub"].clone();
         let authority = if bind.contains(':') {
             format!("[{bind}]")
         } else {
@@ -294,11 +283,11 @@ fn lifecycle_sign_in_enables_disabled_hub_before_bounded_discovery_failure() {
         json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}"),"enabled":false,"authMode":"oidc","issuer":format!("http://127.0.0.1:{port}"),"clientId":"client"}},"default_hub":"local"}),
     );
     f.daemon(&[]);
-    let result = f.action(json!({"op":"login_hub","hub":"work"}));
+    let result = f.action(json!({"op":"hub_action","action":"login","hub":"work"}));
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     server.join().unwrap();
     assert_eq!(result.0, 400, "{result:?}");
-    let raw: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let raw: Value = read_json(&f.config);
     assert_eq!(raw["hubs"]["work"]["enabled"], true);
     assert!(
         !f.home.join("mock-calls").exists(),
@@ -312,14 +301,14 @@ fn lifecycle_hub_edit_preserves_secrets_disabled_state_default_and_host_error_ro
         json!({"hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"token","token":"saved","enabled":false,"clientSecret":"retained"}},"default_hub":"local"}),
     );
     f.daemon(&[]);
-    assert_eq!(f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"renamed","url":"http://127.0.0.1:2","auth_mode":"token","token":"","clientSecret":""})).0,200);
-    let raw: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    f.action_ok(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"renamed","url":"http://127.0.0.1:2","auth_mode":"token","token":"","clientSecret":""}));
+    let raw: Value = read_json(&f.config);
     assert_eq!(raw["default_hub"], "local");
     assert!(raw["hubs"].get("work").is_none());
     assert_eq!(raw["hubs"]["renamed"]["token"], "saved");
     assert_eq!(raw["hubs"]["renamed"]["clientSecret"], "retained");
     assert_eq!(raw["hubs"]["renamed"]["enabled"], false);
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert!(!snapshot["hubs"]
         .as_array()
         .unwrap()
@@ -333,8 +322,10 @@ fn lifecycle_hub_edit_preserves_secrets_disabled_state_default_and_host_error_ro
         .unwrap();
     assert_eq!(h["status"], "disconnected");
     assert_eq!(h["connected"], false);
-    assert_eq!(f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1","auth_mode":"none"})).0,200);
-    let running = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    f.action_ok(
+        json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1","auth_mode":"none"}),
+    );
+    let running = f.snapshot()["settings"]["host_hub"].clone();
     let blocked = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = blocked.local_addr().unwrap().port();
     assert_eq!(
@@ -342,16 +333,12 @@ fn lifecycle_hub_edit_preserves_secrets_disabled_state_default_and_host_error_ro
             .0,
         400
     );
-    let failed = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    let failed = f.snapshot()["settings"]["host_hub"].clone();
     assert_eq!(failed["port"], running["port"]);
     assert!(failed["error"].is_string());
     assert_eq!(failed["running"], true);
-    assert_eq!(
-        f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"auth_mode":"token"}))
-            .0,
-        200
-    );
-    let success = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    f.action_ok(json!({"op":"set_host_hub","enabled":true,"port":0,"auth_mode":"token"}));
+    let success = f.snapshot()["settings"]["host_hub"].clone();
     assert!(success["error"].is_null());
     assert_eq!(success["auth_mode"], "token");
 }
@@ -364,7 +351,7 @@ fn live_user_reload_and_auth_mode_canonicalization_survive_restart() {
     let daemon = f.daemon(&[]);
     let a = enroll(&f, human());
     assert!(a["listener_id"].as_str().unwrap().starts_with("alice-"));
-    let mut config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let mut config: Value = read_json(&f.config);
     config["user"] = json!("bob");
     fs::write(&f.config, config.to_string()).unwrap();
     let b = enroll(&f, human());
@@ -380,12 +367,8 @@ fn live_user_reload_and_auth_mode_canonicalization_survive_restart() {
         .starts_with("bob-"));
     // Disabled slots lose their in-memory predecessor, but retained bindings still
     // belong to the original principal and URL across edits and restarts.
-    assert_eq!(
-        f.action(
-            json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
-        )
-        .0,
-        200
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"}),
     );
     config["hubs"]["local"]["enabled"] = json!(false);
     fs::write(&f.config, config.to_string()).unwrap();
@@ -427,18 +410,10 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         assert_eq!(v["error"], "INVALID_INPUT: Invalid hub invite");
         assert_eq!(fs::read(&f.config).unwrap(), before);
     }
-    assert_eq!(f.action(json!({"op":"paste_hub_invite","invite":"{\"name\":\"work\",\"url\":\"local://\",\"authMode\":\"none\"}"})).0,200);
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"setup_save_hub","name":"other","url":"local://","auth_mode":"none"}))
-            .0,
-        200
-    );
-    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    f.action_ok(json!({"op":"paste_hub_invite","invite":"{\"name\":\"work\",\"url\":\"local://\",\"authMode\":\"none\"}"}));
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":false}));
+    f.action_ok(json!({"op":"setup_save_hub","name":"other","url":"local://","auth_mode":"none"}));
+    let config: Value = read_json(&f.config);
     assert_eq!(config["hubs"]["local"]["autoListen"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
     for (name,invite) in [
@@ -448,42 +423,26 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         ("equals",format!("cito setup --hub=equals --url=http://127.0.0.1:{} --default",port())),
     ] {
         let (ok,out,err)=f.command(NATIVE,&["setup","--invite",&invite,"--json"],""); assert!(ok,"{out} {err}");
-        let config:Value=serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+        let config:Value=read_json(&f.config);
         assert!(config["hubs"][name].is_object()); assert_eq!(config["default_hub"],name);
     }
-    let (status, error) = f.action(json!({"op":"test_hub","hub":"json"}));
-    assert_eq!(status, 400);
-    let state = f.action(json!({"op":"get_snapshot"})).1;
-    assert_eq!(
-        state["settings"]["hubs"]
+    let joined = || {
+        f.snapshot()["settings"]["hubs"]
             .as_array()
             .unwrap()
             .iter()
             .find(|h| h["name"] == "json")
-            .unwrap()["error"],
-        error["error"]
-    );
-    assert_eq!(
-        f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"json","name":"json","url":"local://","auth_mode":"none"}))
-            .0,
-        200
-    );
-    assert_eq!(f.action(json!({"op":"test_hub","hub":"json"})).0, 200);
-    let state = f.action(json!({"op":"get_snapshot"})).1;
-    assert!(state["settings"]["hubs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|h| h["name"] == "json")
-        .unwrap()["error"]
-        .is_null());
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(joined()["connected"], false);
+    f.action_ok(json!({"op":"setup_save_hub","edit":true,"original_name":"json","name":"json","url":"local://","auth_mode":"none"}));
+    let recovered = joined();
+    assert_eq!(recovered["connected"], true);
+    assert!(recovered["error"].is_null());
 
-    assert_eq!(
-        f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1"}))
-            .0,
-        200
-    );
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    f.action_ok(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1"}));
+    let snapshot = f.snapshot();
     let hosted = &snapshot["settings"]["host_hub"];
     let (ok, out, err) = f.command(NATIVE, &["setup", "--print-invite", "--json"], "");
     assert!(ok, "{out} {err}");
@@ -546,11 +505,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     // The same host on another port remains a valid remote Hub.
     let different = if port == 65535 { port - 1 } else { port + 1 };
     let invite = json!({"name":"different-port","url":format!("http://127.0.0.1:{different}"),"auth_mode":"none"});
-    assert_eq!(
-        f.action(json!({"op":"paste_hub_invite","invite":invite.to_string()}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"paste_hub_invite","invite":invite.to_string()}));
 }
 #[test]
 fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_errors() {
@@ -560,34 +515,22 @@ fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_e
     let f = Fixture::new(
         json!({"hubs":{"shared":{"url":format!("http://127.0.0.1:{port}")}},"defaultHub":"shared"}),
     );
-    let recorder = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
+    let connected = |rows: &Value| {
+        rows.as_array()?.iter().find(|h| h["name"] == "shared")?["connected"].as_bool()
+    };
+    wait(|| connected(&f.snapshot()["hubs"]) == Some(true));
     host.stop(server);
-    let (status, error) = f.action(json!({"op":"test_hub","hub":"shared"}));
-    assert_eq!(status, 400);
-    assert!(error["error"]
-        .as_str()
-        .unwrap()
-        .starts_with("NATS_UNAVAILABLE:"));
-    let failed = f.action(json!({"op":"get_snapshot"})).1;
-    for hubs in [&failed["hubs"], &failed["settings"]["hubs"]] {
-        assert_eq!(
-            hubs.as_array()
-                .unwrap()
-                .iter()
-                .find(|h| h["name"] == "shared")
-                .unwrap()["error"],
-            error["error"]
-        );
-    }
+    wait(|| {
+        let failed = f.snapshot();
+        connected(&failed["hubs"]) == Some(false)
+            && connected(&failed["settings"]["hubs"]) == Some(false)
+    });
     let frames_path = f.home.join("ui-frames");
     wait(|| {
-        fs::read_to_string(&frames_path)
-            .unwrap_or_default()
-            .contains(error["error"].as_str().unwrap())
+        ui_frames(&f)
+            .iter()
+            .any(|frame| frame["op"] == "state" && connected(&frame["hubs"]) == Some(false))
     });
     let before = fs::read_to_string(&frames_path).unwrap().len();
     host.spawn(
@@ -625,11 +568,8 @@ fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_e
                     })
             })
     });
-    let recovered = f.action(json!({"op":"get_snapshot"})).1;
-    assert_eq!(
-        f.action(json!({"op":"open_settings","hub":"shared"})).0,
-        200
-    );
+    let recovered = f.snapshot();
+    f.action_ok(json!({"op":"open_settings","hub":"shared"}));
     let mut settings = Value::Null;
     wait(|| {
         settings = fs::read_to_string(&frames_path)
@@ -663,8 +603,8 @@ fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_e
         .starts_with("INVALID_INPUT:"));
     // A healthy connection must not hide a rejected configuration edit, even
     // after another background poll has observed the recovered transport.
-    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    f.action_ok(json!({"op":"refresh_available"}));
+    let snapshot = f.snapshot();
     assert_eq!(
         snapshot["settings"]["hubs"]
             .as_array()
@@ -689,11 +629,11 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
         ),
         (
             "defaultHub",
-            "remove_hub",
+            "setup_remove_hub",
             json!({"local":{"url":"local://"}}),
             "local",
         ),
-        ("default_hub", "remove_hub", json!({}), "local"),
+        ("default_hub", "setup_remove_hub", json!({}), "local"),
         (
             "defaultHub",
             "setup_remove_hub",
@@ -702,7 +642,7 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
         ),
         (
             "default_hub",
-            "remove_hub",
+            "setup_remove_hub",
             json!({"local":{"url":"local://","enabled":false},"shared":{"url":"local://","enabled":true},"zeta":{"url":"local://"}}),
             "shared",
         ),
@@ -730,11 +670,11 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
         initial[key] = json!("work");
         fs::write(&f.config, initial.to_string()).unwrap();
         let daemon = f.daemon(&[]);
-        assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
+        assert_eq!(f.snapshot()["hub"], "work");
         let (status, response) =
             f.action(json!({"op":op,"hub":"work","enabled":false,"action":"disconnect"}));
         assert_eq!(status, 200, "{op}: {response}");
-        let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        let saved: Value = read_json(&f.config);
         assert_eq!(saved["default_hub"], expected, "{op}: {saved}");
         assert!(saved.get("defaultHub").is_none());
         if matches!(op, "setup_toggle_hub" | "hub_action") {
@@ -742,7 +682,7 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
         } else {
             assert!(saved["hubs"].get("work").is_none());
         }
-        assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], expected);
+        assert_eq!(f.snapshot()["hub"], expected);
         let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
         assert!(ok, "{err}");
         let inspection: Value = serde_json::from_str(&out).unwrap();
@@ -766,11 +706,7 @@ fn peer_mutations_return_committed_receipts_only_after_success() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let meta = f.provider("delivered");
-    let recorder = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
     let human = f
         .rows("SELECT * FROM local_listeners WHERE harness='human'")
         .remove(0);
@@ -803,7 +739,7 @@ fn peer_mutations_return_committed_receipts_only_after_success() {
         .rows("SELECT * FROM local_listeners WHERE harness='fixture'")
         .remove(0);
     assert_eq!(agent["title"], "CLI renamed");
-    let (status, result) = f.action(json!({"op":"unlisten","listener_id":agent["listener_id"]}));
+    let (status, result) = f.action(json!({"op":"unlisten_session","hub":"local","harness":agent["harness"],"session_id":agent["session_id"]}));
     assert_eq!(status, 200, "{result}");
     assert_eq!(result["committed"], true);
     assert_eq!(
@@ -862,7 +798,7 @@ fn cli_removal_purges_only_removed_hub_across_reload_and_restart() {
         })
         .collect();
     // A disabled Hub retains data; reload must distinguish it from removal.
-    assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+    f.action_ok(json!({"op":"get_snapshot"}));
     for table in tables {
         assert_eq!(
             db.query(&format!("SELECT * FROM {table} WHERE hub='work'"), &[])
@@ -882,7 +818,7 @@ fn cli_removal_purges_only_removed_hub_across_reload_and_restart() {
             f.stop(daemon);
             f.daemon(&[]);
         }
-        assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+        f.action_ok(json!({"op":"get_snapshot"}));
         for (table, expected) in tables.iter().zip(&surviving) {
             assert!(
                 db.query(&format!("SELECT * FROM {table} WHERE hub='work'"), &[])
@@ -919,7 +855,7 @@ fn dual_default_hub_aliases_allow_cli_removal_and_restart() {
         "",
     );
     assert!(ok, "{out}\n{err}");
-    let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    let saved: Value = read_json(&f.config);
     assert_eq!(saved["default_hub"], "local");
     assert!(saved.get("defaultHub").is_none());
     assert!(saved["hubs"].get("work").is_none());
@@ -944,7 +880,7 @@ fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
     let _lock = serial();
     let f = Fixture::new(json!({"default_hub":"work","hubs":{"work":{"url":"local://"}}}));
     let daemon = f.daemon(&[]);
-    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
+    assert_eq!(f.snapshot()["hub"], "work");
     for (key, hubs, expected) in [
         (
             "default_hub",
@@ -980,7 +916,7 @@ fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
     }
     f.stop(daemon);
     let overridden = f.daemon(&[("CITO_HUB", "work")]);
-    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
+    assert_eq!(f.snapshot()["hub"], "work");
     f.stop(overridden);
 }
 #[test]
@@ -1029,7 +965,7 @@ fn disabled_hub_alias_reenable_paths_activate_slots_across_restart() {
                 f.action(json!({"op":op,"hub":"work","enabled":true,"action":"reconnect"}));
             assert_eq!(status, 200, "{op}: {response}");
         }
-        let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        let saved: Value = read_json(&f.config);
         assert_eq!(saved["hubs"]["work"]["enabled"], true, "{op}: {saved}");
         assert!(
             saved["hubs"]["work"].get("disabled").is_none(),
@@ -1065,49 +1001,41 @@ fn disabled_hub_alias_saves_preserve_effective_enablement() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"}}}));
     f.daemon(&[]);
-    for op in ["setup_save_hub", "save_hub"] {
-        for (fields, enabled) in [
-            (json!({"disabled":true}), false),
-            (json!({"enabled":true,"disabled":true}), false),
-            (json!({"enabled":false,"disabled":false}), false),
-            (json!({"enabled":true,"disabled":false}), true),
-        ] {
-            let mut cfg = fields;
-            cfg["url"] = json!("local://");
-            let action = if op == "setup_save_hub" {
-                cfg["op"] = json!(op);
-                cfg["name"] = json!("work");
-                cfg
-            } else {
-                json!({"op":op,"name":"work","config":cfg})
-            };
-            let (status, response) = f.action(action.clone());
-            assert_eq!(status, 200, "{action}: {response}");
-            let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
-            assert_eq!(
-                saved["hubs"]["work"]["enabled"], enabled,
-                "{action}: {saved}"
-            );
-            assert!(
-                saved["hubs"]["work"].get("disabled").is_none(),
-                "{action}: {saved}"
-            );
-            let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
-            assert_eq!(status, 200, "{snapshot}");
-            let work = snapshot["settings"]["hubs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|hub| hub["name"] == "work")
-                .unwrap();
-            assert_eq!(work["enabled"], enabled, "{action}: {work}");
-            let result = f.tool_result(
-                "cito_find",
-                json!({"hub":"work","user":"absent"}),
-                json!({}),
-            );
-            assert_eq!(result["isError"] == true, !enabled, "{action}: {result}");
-        }
+    for (mut action, enabled) in [
+        (json!({"disabled":true}), false),
+        (json!({"enabled":true,"disabled":true}), false),
+        (json!({"enabled":false,"disabled":false}), false),
+        (json!({"enabled":true,"disabled":false}), true),
+    ] {
+        action["url"] = json!("local://");
+        action["op"] = json!("setup_save_hub");
+        action["name"] = json!("work");
+        let (status, response) = f.action(action.clone());
+        assert_eq!(status, 200, "{action}: {response}");
+        let saved: Value = read_json(&f.config);
+        assert_eq!(
+            saved["hubs"]["work"]["enabled"], enabled,
+            "{action}: {saved}"
+        );
+        assert!(
+            saved["hubs"]["work"].get("disabled").is_none(),
+            "{action}: {saved}"
+        );
+        let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+        assert_eq!(status, 200, "{snapshot}");
+        let work = snapshot["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hub| hub["name"] == "work")
+            .unwrap();
+        assert_eq!(work["enabled"], enabled, "{action}: {work}");
+        let result = f.tool_result(
+            "cito_find",
+            json!({"hub":"work","user":"absent"}),
+            json!({}),
+        );
+        assert_eq!(result["isError"] == true, !enabled, "{action}: {result}");
     }
 }
 #[test]
@@ -1140,35 +1068,27 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","scopes":["openid","invalid scope"]}),
         json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","redirectPort":65536}),
     ];
-    for op in ["setup_save_hub", "save_hub"] {
-        for fields in &invalid {
-            let mut cfg = json!({"url":"local://","auth_mode":"none","set_default":true});
-            cfg.as_object_mut()
+    for fields in &invalid {
+        let mut action = json!({"op":"setup_save_hub","name":"work","url":"local://","auth_mode":"none","set_default":true});
+        action
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let (status, response) = f.action(action.clone());
+        assert_eq!(status, 400, "{action}: {response}");
+        assert!(
+            response["error"]
+                .as_str()
                 .unwrap()
-                .extend(fields.as_object().unwrap().clone());
-            let action = if op == "setup_save_hub" {
-                cfg["op"] = json!(op);
-                cfg["name"] = json!("work");
-                cfg
-            } else {
-                json!({"op":op,"name":"work","config":cfg})
-            };
-            let (status, response) = f.action(action.clone());
-            assert_eq!(status, 400, "{action}: {response}");
-            assert!(
-                response["error"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("INVALID_INPUT:"),
-                "{response}"
-            );
-            assert_eq!(fs::read(&f.config).unwrap(), before, "{action}");
-            let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
-            assert_eq!(status, 200, "{snapshot}");
-            assert_eq!(snapshot["hub"], "local");
-            assert_eq!(snapshot["activity"], json!([]));
-            assert_eq!(snapshot["unread_count"], 0);
-        }
+                .starts_with("INVALID_INPUT:"),
+            "{response}"
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), before, "{action}");
+        let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+        assert_eq!(status, 200, "{snapshot}");
+        assert_eq!(snapshot["hub"], "local");
+        assert_eq!(snapshot["activity"], json!([]));
+        assert_eq!(snapshot["unread_count"], 0);
     }
     for user in [
         Value::Null,
@@ -1177,10 +1097,10 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         json!("a".repeat(64)),
     ] {
         let (status, response) = f.action(
-            json!({"op":"save_hub","name":"work","url":"local://","auth_mode":"none","user":user}),
+            json!({"op":"setup_save_hub","name":"work","url":"local://","auth_mode":"none","user":user}),
         );
         assert_eq!(status, 200, "{response}");
-        let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        let config: Value = read_json(&f.config);
         assert_eq!(config["hubs"]["work"]["user"], user);
     }
     for fields in [
@@ -1195,7 +1115,7 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         let (status, response) =
             f.action(json!({"op":"setup_save_hub","name":"work","config":cfg}));
         assert_eq!(status, 200, "{response}");
-        let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        let config: Value = read_json(&f.config);
         for (key, value) in fields.as_object().unwrap() {
             let canonical = match key.as_str() {
                 "client_id" | "oidcClientId" => "clientId",
@@ -1233,11 +1153,7 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
     }
     f.stop(daemon);
     f.daemon(&[]);
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
-            .0,
-        200
-    );
-    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":false}));
+    let config: Value = read_json(&f.config);
     assert_eq!(config["hubs"]["local"]["autoListen"], false);
 }

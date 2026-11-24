@@ -298,13 +298,6 @@ impl LocalState {
         )?;
         Ok(())
     }
-    #[cfg(test)]
-    pub fn claim_wake_batch(&self, hub: &str, id: &str) -> Result<Vec<Value>, String> {
-        let Some(listener) = self.listener(hub, id)? else {
-            return Ok(Vec::new());
-        };
-        self.claim_wake_batch_for(hub, &listener, false)
-    }
     pub fn claim_wake_batch_for(
         &self,
         hub: &str,
@@ -442,7 +435,7 @@ impl LocalState {
         self.db.transaction(|c| {
             let hub = string(listener, "hub");
             let current = current_listener(c, hub, string(listener, "listener_id"))?;
-            if !batch["dispatcher_token"].is_string() || !batch["batch_id"].is_string() || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] || current["dispatcher_token"] != batch["dispatcher_token"] {
+            if current["dispatcher_token"].is_null() || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] || current["dispatcher_token"] != batch["dispatcher_token"] {
                 return Ok(false);
             }
             let accepted = current["status"] == "ACTIVE";
@@ -529,13 +522,6 @@ impl LocalState {
         }
         reconcile_wake_retry(c, hub, node)?;
         Ok(()) })
-    }
-    pub fn isolate_stale_signals(&self, listener: &Value) -> Result<(), String> {
-        self.db.transaction(|db| {
-            let current =
-                current_listener(db, string(listener, "hub"), string(listener, "listener_id"))?;
-            isolate_foreign_work(db, &current)
-        })
     }
     /// Unread identity and dispatch metadata; payloads stay in paginated inbox reads.
     pub fn current_signal_metadata(
@@ -667,7 +653,7 @@ pub(super) fn reconcile_wake_retry(c: &Connection, hub: &str, id: &str) -> Resul
     Ok(retryable)
 }
 
-fn isolate_foreign_work(c: &Connection, listener: &Value) -> Result<(), String> {
+pub(super) fn isolate_foreign_work(c: &Connection, listener: &Value) -> Result<(), String> {
     for row in c.query("SELECT signal_id,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND (state IN ('RECEIVED','DISPATCHING') OR state='STORED_PASSIVE' AND COALESCE(held_reason,'') IN ('','stale_generation','driver_unavailable'))", &[listener["hub"].clone(),listener["listener_id"].clone()])? {
         if signal_matches_listener(&row, listener) {continue;}
         c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='authority_mismatch',dispatcher_token=NULL WHERE hub=? AND signal_id=?", &[listener["hub"].clone(),row["signal_id"].clone()])?;
@@ -762,7 +748,7 @@ fn acknowledge_current(
     Ok(())
 }
 
-fn current_listener(c: &Connection, hub: &str, id: &str) -> Result<Value, String> {
+pub(super) fn current_listener(c: &Connection, hub: &str, id: &str) -> Result<Value, String> {
     c.query(
         "SELECT * FROM local_listeners WHERE hub=? AND listener_id=?",
         &[json!(hub), json!(id)],

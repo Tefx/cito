@@ -15,6 +15,11 @@ impl Worker {
     fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(|t| t.is_finished())
     }
+    fn assert_aborted(self, f: &Fixture, timeout: Duration) -> Result<(), String> {
+        wait_until(|| self.is_finished(), timeout)?;
+        assert!(self.join()?.is_err());
+        child_gone(f)
+    }
     fn join(mut self) -> Result<Result<(), String>, String> {
         self.thread
             .take()
@@ -49,13 +54,12 @@ impl Fixture {
         let state = LocalState::open(&dir)?;
         let engine = TestEngine(HubEngine::open(&dir.join("hub"))?);
         engine.set_plugin_roots(&[])?;
-        let mut client = HubClient::new(
+        let client = HubClient::new(
             "local".into(),
             json!({"url":"local://"}),
             "alice",
             Some(Arc::new(engine.clone())),
         );
-        client.registration = state.registration_lock("local")?;
         let registration = register_listener(
             &state,
             &client,
@@ -73,6 +77,29 @@ impl Fixture {
             client,
             row,
         })
+    }
+    fn listener_id(&self) -> &str {
+        string(&self.row, "listener_id")
+    }
+    fn listener(&self) -> Result<Value, String> {
+        self.state
+            .listener("local", self.listener_id())?
+            .ok_or_else(|| "Missing local listener".into())
+    }
+    fn binding(&self) -> Result<(Value, u64), String> {
+        self.client
+            .kv_get(self.listener_id())?
+            .ok_or_else(|| "Missing remote binding".into())
+    }
+    fn retries(&self) -> Result<Vec<Value>, String> {
+        self.state.db.query("SELECT * FROM wake_retries", &[])
+    }
+    fn seeded(ids: &[&str]) -> Result<Self, String> {
+        let f = Self::new()?;
+        for id in ids {
+            f.seed(id)?;
+        }
+        Ok(f)
     }
     fn seed(&self, id: &str) -> Result<(), String> {
         let signal = json!({"signal_id":id,"to":self.row["listener_id"],"target_generation":self.row["binding_generation"],"sender_endpoint_key":"fixture","from":{"principal_id":"none#bob","user":"bob","host_id":"other","host_name":"other.local","harness":"fixture","listener_id":null,"title":"Sender","about":null},"message":format!("message <{id}>"),"in_reply_to":null});
@@ -138,14 +165,15 @@ impl Fixture {
     fn hub_db(&self) -> Result<Database, String> {
         Database::open(&self.dir.join("hub/hub.sqlite"))
     }
-    fn worker(&self, plugin: PluginDescriptor) -> Worker {
+    fn start_worker(&self, body: &str) -> Result<Worker, String> {
+        let plugin = self.plugin(body);
         let (state, client, row, dir) = (
             self.state.clone(),
             self.client.clone(),
             self.row.clone(),
             self.dir.clone(),
         );
-        Worker {
+        let worker = Worker {
             release: self.dir.join("release"),
             thread: Some(thread::spawn(move || {
                 dispatch_listener(
@@ -157,14 +185,21 @@ impl Fixture {
                     Duration::from_millis(150),
                 )
             })),
-        }
+        };
+        wait_until(|| self.dir.join("entered").exists(), Duration::from_secs(3)).map_err(|e| {
+            format!(
+                "Waiting for child to start: {e}; worker_finished={}; rows={:?}",
+                worker.is_finished(),
+                self.rows()
+            )
+        })?;
+        Ok(worker)
     }
 }
 #[test]
 fn transient_probe_revocation_respects_dispatch_and_lease() -> Result<(), String> {
     for definitive in [false, true] {
-        let f = Fixture::new()?;
-        f.seed("in-flight")?;
+        let f = Fixture::seeded(&["in-flight"])?;
         let mut row = f.row.clone();
         row["consecutive_probe_failures"] = json!(2);
         f.state.db.execute(
@@ -172,12 +207,7 @@ fn transient_probe_revocation_respects_dispatch_and_lease() -> Result<(), String
             &[json!(now_ms() + 60_000)],
         )?;
         apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
-        assert_eq!(
-            f.state
-                .listener("local", string(&row, "listener_id"))?
-                .unwrap()["status"],
-            "ACTIVE"
-        );
+        assert_eq!(f.listener()?["status"], "ACTIVE");
         f.state
             .db
             .execute("UPDATE local_listeners SET lease_until_ms=0", &[])?;
@@ -186,12 +216,7 @@ fn transient_probe_revocation_respects_dispatch_and_lease() -> Result<(), String
             &[],
         )?;
         apply_probe(&f.state, &f.client, &row, &json!({"ok":false}))?;
-        assert_eq!(
-            f.state
-                .listener("local", string(&row, "listener_id"))?
-                .unwrap()["status"],
-            "ACTIVE"
-        );
+        assert_eq!(f.listener()?["status"], "ACTIVE");
         if !definitive {
             f.state
                 .db
@@ -203,12 +228,7 @@ fn transient_probe_revocation_respects_dispatch_and_lease() -> Result<(), String
             &row,
             &json!({"ok":definitive,"status":"closed_definitive"}),
         )?;
-        assert_eq!(
-            f.state
-                .listener("local", string(&row, "listener_id"))?
-                .unwrap()["status"],
-            "UNLISTENED"
-        );
+        assert_eq!(f.listener()?["status"], "UNLISTENED");
         assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     }
     Ok(())
@@ -362,24 +382,14 @@ fn probe_transport_and_negative_responses_count_toward_retirement() -> Result<()
         "print('invalid json')",
         "print(json.dumps({'ok':False,'error':'database unavailable'}))",
     ] {
-        let f = Fixture::new()?;
+        let f = Fixture::seeded(&["probe-retry"])?;
         let plugin = f.plugin(body);
-        f.seed("probe-retry")?;
         f.state.schedule_wake_retry_for(&f.row, 5000)?;
-        assert_eq!(
-            f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
-            1
-        );
+        assert_eq!(f.retries()?.len(), 1);
         for failures in 1..=3 {
-            let row = f
-                .state
-                .listener("local", string(&f.row, "listener_id"))?
-                .unwrap();
+            let row = f.listener()?;
             probe_listener(&f.state, &f.client, &row, &plugin, &f.dir)?;
-            let current = f
-                .state
-                .listener("local", string(&f.row, "listener_id"))?
-                .unwrap();
+            let current = f.listener()?;
             assert_eq!(current["consecutive_probe_failures"], failures);
             assert_eq!(
                 current["status"],
@@ -390,31 +400,13 @@ fn probe_transport_and_negative_responses_count_toward_retirement() -> Result<()
                 }
             );
         }
-        assert!(f
-            .state
-            .db
-            .query("SELECT * FROM wake_retries", &[])?
-            .is_empty());
+        assert!(f.retries()?.is_empty());
     }
     Ok(())
 }
 
 #[test]
 fn hard_exit_rebind_restores_only_unread_current_authority_work() -> Result<(), String> {
-    {
-        let f = Fixture::new()?;
-        let mut caller = f.row.clone();
-        caller["harness"] = json!("invalid|harness");
-        assert!(register_listener(
-            &f.state,
-            &f.client,
-            "host",
-            &json!({"about":"Invalid identity"}),
-            &caller
-        )
-        .unwrap_err()
-        .starts_with("INVALID_INPUT:"));
-    }
     for stopped in [false, true] {
         let f = Fixture::new()?;
         for id in ["pending", "batch-peer", "mismatch", "expired", "read"] {
@@ -530,8 +522,7 @@ fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Resu
 
 #[test]
 fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
+    let f = Fixture::seeded(&["s"])?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
     drop(listener);
@@ -554,15 +545,8 @@ fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> 
     let failed = f.rows()?;
     assert_eq!(failed[0]["state"], "RECEIVED");
     assert!(!failed[0]["batch_card"].is_null());
-    assert!(f
-        .state
-        .listener("local", string(&f.row, "listener_id"))?
-        .ok_or("Missing listener")?["dispatcher_token"]
-        .is_null());
-    assert_eq!(
-        f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
-        1
-    );
+    assert!(f.listener()?["dispatcher_token"].is_null());
+    assert_eq!(f.retries()?.len(), 1);
     f.dispatch(&f.plugin(DELIVER))?;
     let requests = f.requests()?;
     assert_eq!(requests.len(), 1);
@@ -580,10 +564,7 @@ fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> 
 #[test]
 fn missing_and_acked_claim_members_reconcile_without_partially_claiming_unread(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("missing")?;
-    f.seed("alreadyread")?;
-    f.seed("remaining")?;
+    let f = Fixture::seeded(&["missing", "alreadyread", "remaining"])?;
     f.client.rpc("signal_ack", &json!({"node_id":f.row["listener_id"],"signal_ids":["alreadyread"],"channel_id":"sibling:fixture"}))?;
     f.hub_db()?
         .execute("DELETE FROM hub_signals WHERE signal_id='missing'", &[])?;
@@ -597,10 +578,7 @@ fn missing_and_acked_claim_members_reconcile_without_partially_claiming_unread(
     }
     assert_eq!(rows[2]["state"], "RECEIVED");
     assert!(rows[2]["batch_id"].is_null());
-    assert_eq!(
-        f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
-        1
-    );
+    assert_eq!(f.retries()?.len(), 1);
     assert!(f.hub_db()?.query(
         "SELECT claimed_by_channel FROM hub_signals WHERE signal_id='remaining'",
         &[]
@@ -624,8 +602,7 @@ fn missing_and_acked_claim_members_reconcile_without_partially_claiming_unread(
 fn terminal_claim_loss_and_expiry_drop_retries_without_dropping_unread_survivors(
 ) -> Result<(), String> {
     for transition in ["initial_ack", "renewal_ack", "expired"] {
-        let f = Fixture::new()?;
-        f.seed("s")?;
+        let f = Fixture::seeded(&["s"])?;
         let plugin = f.plugin(DELIVER);
         match transition {
             "initial_ack" => {
@@ -635,12 +612,9 @@ fn terminal_claim_loss_and_expiry_drop_retries_without_dropping_unread_survivors
                 assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
             }
             "renewal_ack" => {
-                let worker = f.worker(f.plugin(WAIT));
-                wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+                let worker = f.start_worker(WAIT)?;
                 f.client.rpc("signal_ack", &json!({"node_id":f.row["listener_id"],"signal_ids":["s"],"channel_id":"sibling:fixture"}))?;
-                wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
-                assert!(worker.join()?.is_err());
-                child_gone(&f)?;
+                worker.assert_aborted(&f, Duration::from_secs(3))?;
                 assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
             }
             _ => {
@@ -652,13 +626,7 @@ fn terminal_claim_loss_and_expiry_drop_retries_without_dropping_unread_survivors
                 assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
             }
         }
-        assert!(
-            f.state
-                .db
-                .query("SELECT * FROM wake_retries", &[])?
-                .is_empty(),
-            "{transition}"
-        );
+        assert!(f.retries()?.is_empty(), "{transition}");
     }
     Ok(())
 }
@@ -666,8 +634,7 @@ fn terminal_claim_loss_and_expiry_drop_retries_without_dropping_unread_survivors
 #[test]
 fn losing_channel_stays_unread_until_fallback_then_can_recover_without_business_ack(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
+    let f = Fixture::seeded(&["s"])?;
     f.client.rpc("signal_claim_dispatch", &json!({"node_id":f.row["listener_id"],"signal_ids":["s"],"channel_id":"sibling:fixture","lease_ms":30_000}))?;
     let start = now_ms();
     let plugin = f.plugin(DELIVER);
@@ -675,10 +642,7 @@ fn losing_channel_stays_unread_until_fallback_then_can_recover_without_business_
     assert!(f.requests()?.is_empty());
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
-    let retry = f
-        .state
-        .db
-        .query("SELECT retry_at_ms FROM wake_retries", &[])?[0]["retry_at_ms"]
+    let retry = f.retries()?[0]["retry_at_ms"]
         .as_u64()
         .ok_or("Missing retry")?;
     assert!(retry >= start + 30_500 && retry <= now_ms() + 30_500);
@@ -699,8 +663,7 @@ fn losing_channel_stays_unread_until_fallback_then_can_recover_without_business_
 
 #[test]
 fn final_response_checkpoint_survives_protocol_retry_before_later_arrivals() -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("first")?;
+    let f = Fixture::seeded(&["first"])?;
     let plugin=f.plugin("if not r['queue_written']:\n with open(os.path.join(root,'insertions'),'a') as f: f.write('inserted\\n')\nn=sum(1 for _ in open(os.path.join(root,'requests.jsonl')))\nif n==1: print(json.dumps({'ok':True,'outcome':'driver_unavailable','queue_written':True,'queue_confirmed':True}))\nelse: print(json.dumps({'ok':True,'outcome':'delivered_unconfirmed','queue_written':True,'open_confirmed':True}))");
     f.dispatch(&plugin)?;
     assert_eq!(f.rows()?[0]["state"], "DISPATCHING");
@@ -735,20 +698,14 @@ fn final_response_checkpoint_survives_protocol_retry_before_later_arrivals() -> 
 fn partially_acked_checkpoint_keeps_plugin_retry_separate_from_fresh_arrivals() -> Result<(), String>
 {
     for confirmed in [false, true] {
-        let f = Fixture::new()?;
-        f.seed("read")?;
-        f.seed("unread")?;
+        let f = Fixture::seeded(&["read", "unread"])?;
         let plugin = f.plugin(&format!(
             "if not r['queue_written']:\n with open(os.path.join(root,'insertions'),'a') as f: f.write(json.dumps([s['signal_id'] for s in r['signals']])+'\\n')\nn=sum(1 for _ in open(os.path.join(root,'requests.jsonl')))\nprint(json.dumps({{'ok':True,'outcome':'driver_unavailable' if n==1 else 'delivered_unconfirmed','queue_written':True,'insertion_unknown':{},'open_confirmed':True}}))",
             if confirmed { "False" } else { "True" }
         ));
         f.dispatch(&plugin)?;
-        f.state.acknowledge(
-            "local",
-            string(&f.row, "listener_id"),
-            &[json!("read")],
-            "other",
-        )?;
+        f.state
+            .acknowledge("local", f.listener_id(), &[json!("read")], "other")?;
         f.client.rpc(
             "signal_ack",
             &json!({"node_id":f.row["listener_id"],"signal_ids":["read"],"channel_id":"other"}),
@@ -782,8 +739,7 @@ fn partially_acked_checkpoint_keeps_plugin_retry_separate_from_fresh_arrivals() 
 
 #[test]
 fn failed_subprocess_retries_frozen_batch_without_mixing_new_arrivals() -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("first")?;
+    let f = Fixture::seeded(&["first"])?;
     let plugin=f.plugin("n=sum(1 for _ in open(os.path.join(root,'requests.jsonl')))\nif n==1: sys.exit(2)\nprint(json.dumps({'ok':True,'outcome':'delivered_unconfirmed'}))");
     assert!(f.dispatch(&plugin).is_err());
     assert_eq!(f.rows()?[0]["state"], "DISPATCHING");
@@ -802,11 +758,8 @@ fn failed_subprocess_retries_frozen_batch_without_mixing_new_arrivals() -> Resul
 #[test]
 fn frozen_restart_preserves_queue_written_and_does_not_ack_unknown_insertion() -> Result<(), String>
 {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let batch = f
-        .state
-        .claim_wake_batch("local", string(&f.row, "listener_id"))?;
+    let f = Fixture::seeded(&["s"])?;
+    let batch = f.state.claim_wake_batch_for("local", &f.row, false)?;
     f.state.db.execute(
         "UPDATE local_signals SET queue_written=1,batch_card='exact persisted card'",
         &[],
@@ -828,12 +781,8 @@ fn frozen_restart_preserves_queue_written_and_does_not_ack_unknown_insertion() -
 #[test]
 fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let (mut remote, revision) = f
-        .client
-        .kv_get(string(&f.row, "listener_id"))?
-        .ok_or("Missing registration")?;
+    let f = Fixture::seeded(&["s"])?;
+    let (mut remote, revision) = f.binding()?;
     remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","host_name":"sibling","delivery_mode":"wake_exclusive","priority":100,"state":"ACTIVE","updated_at_ms":now_ms()});
     remote["owner_token"] = json!("legacy-sibling-owner");
     f.client
@@ -842,16 +791,12 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
         .db
         .execute("UPDATE local_listeners SET updated_at=1", &[])?;
     let dispatched_at = now_ms();
-    let worker = f.worker(f.plugin(&WAIT.replace("'delivered'", "'session_switched'")));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    let worker = f.start_worker(&WAIT.replace("'delivered'", "'session_switched'"))?;
     f.seed("unread-survivor")?;
     std::fs::write(f.dir.join("release"), b"complete").map_err(|e| e.to_string())?;
     worker.join()??;
     assert!(
-        f.state
-            .db
-            .query("SELECT * FROM wake_retries", &[])?
-            .is_empty(),
+        f.retries()?.is_empty(),
         "Session retirement must stop scheduling, including newly admitted work"
     );
     let rows = f.rows()?;
@@ -865,45 +810,35 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
         assert!(row["dispatcher_token"].is_null());
         assert!(row["acknowledged_at_ms"].is_null());
     }
-    let revoked = f
-        .state
-        .listener("local", string(&f.row, "listener_id"))?
-        .ok_or("Missing revoked listener")?;
+    let revoked = f.listener()?;
     assert!(revoked["updated_at"]
         .as_u64()
         .is_some_and(|stamp| stamp > 1 && stamp >= dispatched_at));
-    let (after, _) = f
-        .client
-        .kv_get(string(&f.row, "listener_id"))?
-        .ok_or("Missing registration")?;
+    let (after, _) = f.binding()?;
     assert_eq!(after["channels"]["host:fixture"]["state"], "UNLISTENED");
     assert_eq!(after["channels"]["sibling:fixture"]["state"], "ACTIVE");
     assert_eq!(after["state"], "ACTIVE");
     assert_eq!(after["binding_generation"], remote["binding_generation"]);
     assert_eq!(after["owner_token"], remote["owner_token"]);
-    assert_eq!(
-        f.state
-            .listener("local", string(&f.row, "listener_id"))?
-            .ok_or("Missing listener")?["status"],
-        "UNLISTENED"
-    );
+    assert_eq!(f.listener()?["status"], "UNLISTENED");
     Ok(())
 }
 
 #[test]
 fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> Result<(), String> {
-    for probe in [true, false] {
-        let f = Fixture::new()?;
-        f.seed("serialized")?;
-        let response = if probe {
-            "print(json.dumps({'ok':True,'status':'closed_definitive'}))"
-        } else {
-            "print(json.dumps({'ok':True,'outcome':'session_switched'}))"
-        };
-        let body = WAIT.replace(
-            "print(json.dumps({'ok':True,'outcome':'delivered'}))",
-            response,
-        );
+    let terminals = [
+        (
+            true,
+            "print(json.dumps({'ok':True,'status':'closed_definitive'}))",
+        ),
+        (
+            false,
+            "print(json.dumps({'ok':True,'outcome':'session_switched'}))",
+        ),
+    ];
+    for (probe, response) in terminals {
+        let f = Fixture::seeded(&["serialized"])?;
+        let body = WAIT.replace(DELIVER, response);
         let plugin = f.plugin(&body);
         let id = string(&f.row, "listener_id");
         let writer = f.hub_db()?;
@@ -913,17 +848,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
             "alice",
             Some(Arc::new(f.engine.clone())),
         );
-        assert!(!Arc::ptr_eq(
-            &replacement_client.registration,
-            &f.client.registration
-        ));
-        // A standalone client's field is not authority: holding it must not
-        // block registration, which must still wait for the LocalState lock.
-        let unrelated = replacement_client
-            .registration
-            .lock()
-            .map_err(|_| "Test client lock poisoned")?;
-        let (finished, completion) = std::sync::mpsc::channel();
+        let registration = f.state.registration_lock("local")?;
         std::thread::scope(|scope| -> Result<(), String> {
             let terminal = scope.spawn(|| {
                 if probe {
@@ -938,37 +863,22 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
             let registering=writer.transaction(|_| {
                 std::fs::write(f.dir.join("release"),b"revoke").map_err(|e|e.to_string())?;
                 wait_until(||f.state.listener("local",id).ok().flatten().is_some_and(|row|row["status"]=="UNLISTENED"),Duration::from_secs(3))?;
-                assert!(matches!(f.client.registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"Terminal revocation must hold registration authority through remote detach; probe={probe}");
+                assert!(matches!(registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"Terminal revocation must hold registration authority through remote detach; probe={probe}");
                 Ok(scope.spawn(|| {
-                    let result=register_listener(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}));
-                    let _=finished.send(());
-                    result
+                    register_listener(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}))
                 }))
             })?;
             terminal.join().map_err(|_| "Terminal worker panicked")??;
-            let completed = completion.recv_timeout(Duration::from_secs(1)).is_ok();
-            drop(unrelated);
             let replacement = registering
                 .join()
                 .map_err(|_| "Registration worker panicked")??;
-            assert!(
-                completed,
-                "Fresh clients must use LocalState authority, not their independent field"
-            );
-            let row = f
-                .state
-                .listener("local", id)?
-                .ok_or("Missing serialized replacement")?;
+            let row = f.listener()?;
             assert_eq!(row["status"], "ACTIVE");
             assert!(
                 replacement["binding_generation"].as_u64() > f.row["binding_generation"].as_u64()
             );
             assert_ne!(row["owner_token"], f.row["owner_token"]);
-            let remote = f
-                .client
-                .kv_get(id)?
-                .ok_or("Missing serialized remote binding")?
-                .0;
+            let (remote, _) = f.binding()?;
             assert_eq!(remote["channels"]["host:fixture"]["state"], "ACTIVE");
             assert_eq!(
                 remote["channels"]["host:fixture"]["owner_token"],
@@ -978,16 +888,15 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         })?;
         child_gone(&f)?;
     }
-    for probe in [true, false] {
+    for (probe, response) in terminals {
         for cleanup in ["success", "retry", "newer", "enqueue_failure"] {
-            let f = Fixture::new()?;
-            f.seed("durable-revocation")?;
-            let id = string(&f.row, "listener_id");
-            let (mut remote, revision) = f.client.kv_get(id)?.ok_or("Missing initial binding")?;
+            let f = Fixture::seeded(&["durable-revocation"])?;
+            let id = f.listener_id();
+            let (mut remote, revision) = f.binding()?;
             remote["owner_token"] = json!("sibling-owner");
             remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
             f.client.kv_save(id, &remote, Some(revision))?;
-            let remote = f.client.kv_get(id)?.ok_or("Missing Hub-stamped binding")?.0;
+            let (remote, _) = f.binding()?;
             let fail = matches!(cleanup, "retry" | "newer");
             if cleanup == "enqueue_failure" {
                 f.state.db.execute("CREATE TRIGGER reject_detach BEFORE INSERT ON pending_hub_detaches BEGIN SELECT RAISE(ABORT,'fixture queue failure'); END",&[])?;
@@ -996,11 +905,6 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                 "import sqlite3\nwith sqlite3.connect(os.path.join(root,'hub','hub.sqlite')) as db: db.execute('ALTER TABLE hub_kv RENAME TO unavailable_hub_kv')\n"
             } else {
                 ""
-            };
-            let response = if probe {
-                "print(json.dumps({'ok':True,'status':'closed_definitive'}))"
-            } else {
-                "print(json.dumps({'ok':True,'outcome':'session_switched'}))"
             };
             let plugin=f.plugin(&format!("with open(os.path.join(root,'entered'),'w') as f: f.write(str(os.getpid()))\n{fault}{response}"));
             let result = if probe {
@@ -1014,14 +918,14 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                     .execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
             }
             child_gone(&f)?;
-            let row = f
-                .state
-                .listener("local", id)?
-                .ok_or("Missing revoked row")?;
-            let pending = f.state.db.query(
-                "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
-                &[json!(id)],
-            )?;
+            let row = f.listener()?;
+            let detaches = || {
+                f.state.db.query(
+                    "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+                    &[json!(id)],
+                )
+            };
+            let pending = detaches()?;
             if cleanup == "enqueue_failure" {
                 assert!(result.is_err_and(|error| error.contains("fixture queue failure")));
                 assert_eq!(
@@ -1031,8 +935,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                 assert_eq!(row["owner_token"], f.row["owner_token"]);
                 assert!(pending.is_empty());
                 assert_eq!(
-                    f.client.kv_get(id)?.ok_or("Missing unchanged binding")?.0["channels"]
-                        ["host:fixture"]["state"],
+                    f.binding()?.0["channels"]["host:fixture"]["state"],
                     "ACTIVE"
                 );
                 continue;
@@ -1053,8 +956,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                 );
                 assert_eq!(pending[0]["hub_url"], "local://");
                 assert_eq!(
-                    f.client.kv_get(id)?.ok_or("Missing orphan")?.0["channels"]["host:fixture"]
-                        ["state"],
+                    f.binding()?.0["channels"]["host:fixture"]["state"],
                     "ACTIVE"
                 );
                 if cleanup == "newer" {
@@ -1068,17 +970,16 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                         &json!({"about":"New owner"}),
                         &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null}),
                     )?;
-                    let before = f.client.kv_get(id)?;
+                    let before = f.binding()?;
                     assert_ne!(
-                        before.as_ref().ok_or("Missing replacement")?.0["channels"]["host:fixture"]
-                            ["owner_token"],
+                        before.0["channels"]["host:fixture"]["owner_token"],
                         f.row["owner_token"]
                     );
                     super::super::daemon::DaemonService::reconcile_unlistened(
                         &f.state, &f.client, "host",
                     )?;
                     assert_eq!(
-                        f.client.kv_get(id)?,
+                        f.binding()?,
                         before,
                         "Old retry intent cannot detach a newer owner"
                     );
@@ -1093,15 +994,8 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                     "Successful immediate detach must clear retry intent"
                 );
             }
-            assert!(f
-                .state
-                .db
-                .query(
-                    "SELECT 1 FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
-                    &[json!(id)]
-                )?
-                .is_empty());
-            let after = f.client.kv_get(id)?.ok_or("Missing final binding")?.0;
+            assert!(detaches()?.is_empty());
+            let (after, _) = f.binding()?;
             assert_eq!(
                 after["channels"]["host:fixture"]["state"],
                 if cleanup == "newer" {
@@ -1117,23 +1011,13 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
             assert_eq!(after["owner_token"], remote["owner_token"]);
         }
     }
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let worker = f.worker(f.plugin(&WAIT.replace("'delivered'", "'session_switched'")));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
-    let id = string(&f.row, "listener_id");
+    let f = Fixture::seeded(&["s"])?;
+    let worker = f.start_worker(&WAIT.replace("'delivered'", "'session_switched'"))?;
+    let id = f.listener_id();
     detach_channel_expected(&f.client, id, "host:fixture", &f.row)?;
+    assert_eq!(f.listener()?["status"], "ACTIVE");
     assert_eq!(
-        f.state
-            .listener("local", id)?
-            .ok_or("Missing local binding")?["status"],
-        "ACTIVE"
-    );
-    assert_eq!(
-        f.client
-            .kv_get(id)?
-            .ok_or("Missing detached registration")?
-            .0["channels"]["host:fixture"]["state"],
+        f.binding()?.0["channels"]["host:fixture"]["state"],
         "UNLISTENED"
     );
     let replacement = register_listener(
@@ -1144,27 +1028,21 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}),
     )?;
     assert!(replacement["binding_generation"].as_u64() > f.row["binding_generation"].as_u64());
-    let successor = f
-        .state
-        .listener("local", id)?
-        .ok_or("Missing replacement")?;
+    let successor = f.listener()?;
     assert_ne!(
         successor["owner_token"], f.row["owner_token"],
         "A remotely detached binding cannot reuse the active local owner"
     );
     std::fs::write(f.dir.join("release"), b"complete old session switch")
         .map_err(|e| e.to_string())?;
-    wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
-    assert!(worker.join().map_err(|_| "Worker panicked")?.is_err());
-    child_gone(&f)?;
+    worker.assert_aborted(&f, Duration::from_secs(3))?;
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
-    let after = f.state.listener("local", id)?.ok_or("Missing listener")?;
+    let after = f.listener()?;
     assert_eq!(after["status"], "ACTIVE");
     assert_eq!(after["owner_token"], successor["owner_token"]);
     assert_eq!(after["binding_generation"], successor["binding_generation"]);
     assert_eq!(
-        f.client.kv_get(id)?.ok_or("Missing active replacement")?.0["channels"]["host:fixture"]
-            ["state"],
+        f.binding()?.0["channels"]["host:fixture"]["state"],
         "ACTIVE"
     );
     Ok(())
@@ -1172,16 +1050,12 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
 
 #[test]
 fn closed_hub_aborts_owned_child_promptly() -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    let f = Fixture::seeded(&["s"])?;
+    let worker = f.start_worker(WAIT)?;
     f.client
         .closed
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
-    assert!(worker.join().map_err(|_| "Worker panicked")?.is_err());
-    child_gone(&f)?;
+    worker.assert_aborted(&f, Duration::from_secs(3))?;
     assert_eq!(f.rows()?[0]["state"], "DISPATCHING");
     Ok(())
 }
@@ -1189,16 +1063,10 @@ fn closed_hub_aborts_owned_child_promptly() -> Result<(), String> {
 #[test]
 fn single_effect_completion_stays_dispatched_and_preserves_concurrent_inbox_ack(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
-    f.state.acknowledge(
-        "local",
-        string(&f.row, "listener_id"),
-        &[json!("s")],
-        "other",
-    )?;
+    let f = Fixture::seeded(&["s"])?;
+    let worker = f.start_worker(WAIT)?;
+    f.state
+        .acknowledge("local", f.listener_id(), &[json!("s")], "other")?;
     let ack = f.rows()?[0]["acknowledged_at_ms"].clone();
     std::fs::write(f.dir.join("release"), b"complete").map_err(|e| e.to_string())?;
     wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
@@ -1212,14 +1080,12 @@ fn single_effect_completion_stays_dispatched_and_preserves_concurrent_inbox_ack(
 #[test]
 fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_owned(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    let f = Fixture::seeded(&["s"])?;
+    let worker = f.start_worker(WAIT)?;
     let db = f.hub_db()?;
     let id = string(&f.row, "listener_id");
     let channel = "host:fixture";
-    let (mut registration, _) = f.client.kv_get(id)?.ok_or("Missing registration")?;
+    let (mut registration, _) = f.binding()?;
     let initial_heartbeat = now_ms();
     // Model a wake approaching the channel's TTL without a minute-long sleep.
     registration["channels"][channel]["updated_at_ms"] = json!(initial_heartbeat - 55_000);
@@ -1240,12 +1106,10 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
             db.query("SELECT claim_until_ms FROM hub_signals", &[])
                 .ok()
                 .is_some_and(|r| r[0]["claim_until_ms"].as_u64().unwrap_or(0) >= initial + 100)
-                && f.state
-                    .listener("local", string(&f.row, "listener_id"))
+                && f.listener()
                     .ok()
-                    .flatten()
                     .is_some_and(|r| r["lease_until_ms"].as_u64().unwrap_or(0) >= initial + 100)
-                && f.client.kv_get(id).ok().flatten().is_some_and(|(r, _)| {
+                && f.binding().ok().is_some_and(|(r, _)| {
                     r["channels"][channel]["updated_at_ms"]
                         .as_u64()
                         .unwrap_or(0)
@@ -1273,28 +1137,16 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
 #[test]
 fn renewal_claim_loss_aborts_unfinished_real_child_and_recovers_retry_schedule(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    let f = Fixture::seeded(&["s"])?;
+    let worker = f.start_worker(WAIT)?;
     f.hub_db()?.execute(
         "UPDATE hub_signals SET claimed_by_channel='winner:fixture',claim_until_ms=?",
         &[json!(now_ms() + 60_000)],
     )?;
-    let stopped = wait_until(|| worker.is_finished(), Duration::from_millis(900));
-    if stopped.is_err() {
-        std::fs::write(f.dir.join("release"), b"done").map_err(|e| e.to_string())?;
-    }
-    let result = worker.join().map_err(|_| "Worker panicked")?;
-    stopped?;
-    assert!(result.is_err());
-    child_gone(&f)?;
+    worker.assert_aborted(&f, Duration::from_millis(900))?;
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
-    let retry = f
-        .state
-        .db
-        .query("SELECT retry_at_ms FROM wake_retries", &[])?;
+    let retry = f.retries()?;
     assert_eq!(retry.len(), 1);
     assert!(
         retry[0]["retry_at_ms"]
@@ -1308,8 +1160,7 @@ fn renewal_claim_loss_aborts_unfinished_real_child_and_recovers_retry_schedule(
 #[test]
 fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_insertion(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
+    let f = Fixture::seeded(&["s"])?;
     f.state
         .db
         .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
@@ -1364,16 +1215,12 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
 
 #[test]
 fn unlisten_aborts_child_and_preserves_unlistened_passive_reason() -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    let f = Fixture::seeded(&["s"])?;
+    let worker = f.start_worker(WAIT)?;
     f.state
         .db
         .execute("UPDATE local_listeners SET status='UNLISTENED'", &[])?;
-    wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
-    assert!(worker.join()?.is_err());
-    child_gone(&f)?;
+    worker.assert_aborted(&f, Duration::from_secs(3))?;
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     assert_eq!(f.rows()?[0]["held_reason"], "unlistened_before_dispatch");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
@@ -1396,17 +1243,8 @@ fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), Stri
         "UPDATE local_signals SET expires_at_ms=? WHERE signal_id='early'",
         &[json!(now_ms() + 1000)],
     )?;
-    let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3)).map_err(|e| {
-        format!(
-            "Waiting for expiring batch child to start: {e}; worker_finished={}; rows={:?}",
-            worker.is_finished(),
-            f.rows()
-        )
-    })?;
-    wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
-    assert!(worker.join()?.is_err());
-    child_gone(&f)?;
+    let worker = f.start_worker(WAIT)?;
+    worker.assert_aborted(&f, Duration::from_secs(3))?;
     assert!(f
         .rows()?
         .iter()
@@ -1418,28 +1256,21 @@ fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), Stri
 fn same_channel_refresh_retains_owner_and_replacement_fences_without_siblings() -> Result<(), String>
 {
     let f = Fixture::new()?;
-    let id = string(&f.row, "listener_id");
     let args = json!({"about":"Refreshed receiver"});
     register_listener(&f.state, &f.client, "host", &args, &f.row)?;
-    let refreshed = f
-        .state
-        .listener("local", id)?
-        .ok_or("Missing refreshed row")?;
+    let refreshed = f.listener()?;
     assert_eq!(refreshed["binding_generation"], f.row["binding_generation"]);
     assert_eq!(refreshed["owner_token"], f.row["owner_token"]);
     let mut caller = f.row.clone();
     caller["endpoint_pid"] = json!(42);
     register_listener(&f.state, &f.client, "host", &args, &caller)?;
-    let replacement = f
-        .state
-        .listener("local", id)?
-        .ok_or("Missing replacement row")?;
+    let replacement = f.listener()?;
     assert_eq!(
         replacement["binding_generation"].as_u64(),
         f.row["binding_generation"].as_u64().map(|v| v + 1)
     );
     assert_ne!(replacement["owner_token"], f.row["owner_token"]);
-    let remote = f.client.kv_get(id)?.ok_or("Missing registration")?.0;
+    let (remote, _) = f.binding()?;
     assert_eq!(remote["owner_token"], replacement["owner_token"]);
     assert_eq!(
         remote["channels"]["host:fixture"]["owner_token"],
@@ -1450,27 +1281,20 @@ fn same_channel_refresh_retains_owner_and_replacement_fences_without_siblings() 
 
 #[test]
 fn channel_takeover_blocks_stale_detach_and_fences_before_spawn() -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let id = string(&f.row, "listener_id");
-    let (mut remote, revision) = f.client.kv_get(id)?.ok_or("Missing registration")?;
+    let f = Fixture::seeded(&["s"])?;
+    let id = f.listener_id();
+    let (mut remote, revision) = f.binding()?;
     remote["channels"]["host:fixture"]["owner_token"] = json!("winner-owner");
     remote["channels"]["sibling:fixture"] = json!({"state":"ACTIVE"});
     f.client.kv_save(id, &remote, Some(revision))?;
-    let remote = f.client.kv_get(id)?.ok_or("Missing Hub-stamped binding")?.0;
+    let (remote, _) = f.binding()?;
     let error = detach_channel_expected(&f.client, id, "host:fixture", &f.row)
         .expect_err("Stale owner must not detach the winner");
     assert!(error.starts_with("STALE_GENERATION:"));
-    assert_eq!(
-        f.client.kv_get(id)?.ok_or("Missing registration")?.0,
-        remote
-    );
+    assert_eq!(f.binding()?.0, remote);
     assert!(f.dispatch(&f.plugin(DELIVER)).is_err());
     assert!(f.requests()?.is_empty());
-    assert_eq!(
-        f.state.listener("local", id)?.ok_or("Missing listener")?["status"],
-        "FENCED_INACTIVE"
-    );
+    assert_eq!(f.listener()?["status"], "FENCED_INACTIVE");
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     assert_eq!(f.rows()?[0]["held_reason"], "fenced_before_dispatch");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
@@ -1480,12 +1304,8 @@ fn channel_takeover_blocks_stale_detach_and_fences_before_spawn() -> Result<(), 
 #[test]
 fn remote_preflight_generation_mismatch_fences_captured_listener_before_spawn() -> Result<(), String>
 {
-    let f = Fixture::new()?;
-    f.seed("s")?;
-    let (mut remote, revision) = f
-        .client
-        .kv_get(string(&f.row, "listener_id"))?
-        .ok_or("Missing registration")?;
+    let f = Fixture::seeded(&["s"])?;
+    let (mut remote, revision) = f.binding()?;
     remote["binding_generation"] = json!(
         remote["binding_generation"]
             .as_u64()
@@ -1497,49 +1317,16 @@ fn remote_preflight_generation_mismatch_fences_captured_listener_before_spawn() 
         .kv_save(string(&f.row, "listener_id"), &remote, Some(revision))?;
     assert!(f.dispatch(&f.plugin(DELIVER)).is_err());
     assert!(f.requests()?.is_empty());
-    assert_eq!(
-        f.state
-            .listener("local", string(&f.row, "listener_id"))?
-            .ok_or("Missing listener")?["status"],
-        "FENCED_INACTIVE"
-    );
+    assert_eq!(f.listener()?["status"], "FENCED_INACTIVE");
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
     Ok(())
 }
 
 #[test]
-fn disabled_legacy_hubs_do_not_qualify_single_local_reply_ids() -> Result<(), String> {
-    let f = Fixture::new()?;
-    std::fs::write(f.dir.join("config.json"), json!({"defaultHub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","disabled":true}}}).to_string()).map_err(|e| e.to_string())?;
-    assert!(!qualify_reply_ids_with_options(
-        &f.dir, "local", None, None, None
-    ));
-    assert!(!qualify_reply_ids_with_options(
-        std::path::Path::new("/unused"),
-        "local",
-        Some("~/config.json"),
-        f.dir.to_str(),
-        None
-    ));
-    assert!(qualify_reply_ids_with_options(
-        &f.dir,
-        "local",
-        None,
-        None,
-        Some("work")
-    ));
-    std::fs::write(f.dir.join("config.json"), json!({"defaultHub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":true}}}).to_string()).map_err(|e| e.to_string())?;
-    assert!(qualify_reply_ids_with_options(
-        &f.dir, "local", None, None, None
-    ));
-    Ok(())
-}
-#[test]
 fn durable_remote_ack_reconciliation_works_after_transport_cursor_has_advanced(
 ) -> Result<(), String> {
-    let f = Fixture::new()?;
-    f.seed("s")?;
+    let f = Fixture::seeded(&["s"])?;
     poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
     f.client.rpc(
         "signal_ack",

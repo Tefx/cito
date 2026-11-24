@@ -1901,50 +1901,7 @@ fn publish_human_reply(
     let host_name = p["host_name"].as_str().unwrap_or(channel);
     let msg_id = p["msg_id"]
         .as_str()
-        .map(|key| {
-            let current = hash(&json!([pid, host_id, "human", target_id, key]).to_string());
-            let legacy = hash(&format!("{pid}|{host_id}|human|{target_id}|{key}"));
-            let window = stream_info(c, SIGNALS)?["config"]["duplicate_window"]
-                .as_i64()
-                .unwrap_or(1_800_000_000_000)
-                / 1_000_000;
-            // Prefer the unambiguous key; retain live pre-upgrade publications.
-            let cutoff = now_ms() - window.max(0);
-            if let Some(row) = one(
-                c,
-                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE msg_id=? AND created_ms>=?",
-                &[json!(current), json!(cutoff)],
-            )? {
-                let stored = parse(&row, "data");
-                if stored["message"] != text || stored["in_reply_to"] != json!(in_reply_to) {
-                    return Err("IDEMPOTENCY_CONFLICT: reply payload differs".into());
-                }
-            } else if let Some(row) = one(
-                    c,
-                    "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE msg_id=? AND created_ms>=?",
-                    &[json!(legacy), json!(cutoff)],
-                )? {
-                    // The legacy hash lost tuple boundaries. Prove stable identity
-                    // separately from payload compatibility, ignoring display names.
-                    let stored = parse(&row, "data");
-                    if stored["from"]["principal_id"] == pid
-                        && stored["from"]["host_id"] == host_id
-                        && stored["from"]["harness"] == "human"
-                        && super::identity::canonical_node_id(s(&stored["from"], "listener_id"))
-                            .is_ok_and(|id| id == human)
-                        && stored["to"] == target_id
-                    {
-                        if stored["message"] != text
-                            || stored["in_reply_to"] != json!(in_reply_to)
-                        {
-                            return Err("IDEMPOTENCY_CONFLICT: retained legacy reply payload differs".into());
-                        }
-                        return Ok(legacy);
-                    }
-            }
-            Ok::<_, String>(current)
-        })
-        .transpose()?;
+        .map(|key| hash(&json!([pid, host_id, "human", target_id, key]).to_string()));
     let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":"Human","about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
     let published = publish(
         c,
@@ -1955,12 +1912,25 @@ fn publish_human_reply(
         events,
     )?;
     // A retry must return the committed signal ID, not the newly generated candidate.
-    let stored = one(
-        c,
-        "SELECT signal_id FROM hub_signals WHERE seq=?",
-        &[published["seq"].clone()],
-    )?
-    .ok_or("Published reply missing")?;
+    let signal_id = if published["duplicate"] == true {
+        let row = one(
+            c,
+            "SELECT signal_id, CAST(data AS TEXT) AS data FROM hub_signals WHERE seq=?",
+            &[published["seq"].clone()],
+        )?
+        .ok_or("Published reply missing")?;
+        if msg_id.is_some() {
+            let stored = parse(&row, "data");
+            if stored["message"] != payload["message"]
+                || stored["in_reply_to"] != payload["in_reply_to"]
+            {
+                return Err("IDEMPOTENCY_CONFLICT: reply payload differs".into());
+            }
+        }
+        row["signal_id"].clone()
+    } else {
+        json!(sig)
+    };
     let (ack_request, acked_at_ms) = if let Some(source) = in_reply_to {
         let request = json!({"node_id":human,"signal_ids":[source],"channel_id":format!("{host_id}:{channel}")});
         if one(
@@ -1979,7 +1949,7 @@ fn publish_human_reply(
         (None, Value::Null)
     };
     Ok((
-        json!({"ok":true,"seq":published["seq"],"signal_id":stored["signal_id"],"target_display":registration["public_id"],"acked_at_ms":acked_at_ms,"error":null}),
+        json!({"ok":true,"seq":published["seq"],"signal_id":signal_id,"target_display":registration["public_id"],"acked_at_ms":acked_at_ms,"error":null}),
         ack_request,
     ))
 }
@@ -3298,11 +3268,7 @@ fn human_operation(
 
 fn find_human(c: &Connection, principal: &Value) -> Result<Option<String>, String> {
     let mut principals = Vec::new();
-    for key in [
-        "principal_id",
-        "legacy_principal_id",
-        "canonical_principal_id",
-    ] {
+    for key in ["principal_id", "legacy_principal_id"] {
         let value = s(principal, key);
         if value.is_empty() {
             continue;

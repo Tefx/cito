@@ -162,17 +162,18 @@ impl Drop for BrowserGuard {
     }
 }
 
-pub(super) struct Settings<'a> {
-    issuer: &'a str,
-    client: &'a str,
+pub(super) struct Settings {
+    issuer: String,
+    client: String,
     port: u16,
-    scopes: Option<Vec<&'a str>>,
+    scopes: Option<String>,
 }
-impl<'a> Settings<'a> {
-    pub(super) fn new(config: &'a Value) -> Result<Self, String> {
+impl Settings {
+    pub(super) fn new(config: &Value) -> Result<Self, String> {
+        let mut config = config.clone();
+        super::config::canonicalize_hub_aliases(&mut config);
         let issuer = config
             .get("issuer")
-            .or_else(|| config.get("oidcIssuer"))
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: issuer required")?;
@@ -180,41 +181,23 @@ impl<'a> Settings<'a> {
             .map_err(|error| format!("INVALID_INPUT: {error}"))?;
         let client = config
             .get("clientId")
-            .or_else(|| config.get("client_id"))
-            .or_else(|| config.get("oidcClientId"))
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: clientId required")?;
         if client.trim() != client {
             return Err("INVALID_INPUT: clientId must not have surrounding whitespace".into());
         }
-        let mut port = config
-            .get("redirectPort")
-            .or_else(|| config.get("redirect_port"))
-            .or_else(|| config.get("oidcRedirectPort"))
-            .map(|value| {
-                value
-                    .as_u64()
-                    .and_then(|value| u16::try_from(value).ok())
-                    .ok_or("INVALID_INPUT: redirectPort must be an integer from 0 to 65535")
-            })
-            .transpose()?
-            .unwrap_or(0);
-        if config
-            .get("redirectPort")
-            .or_else(|| config.get("redirect_port"))
-            .or_else(|| config.get("oidcRedirectPort"))
-            .is_none()
-        {
-            if let Ok(raw) = std::env::var("CITO_OIDC_REDIRECT_PORT") {
-                port = raw.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or(
+        let port = match super::config::redirect_port(&config)? {
+            Some(port) => port,
+            None => match std::env::var("CITO_OIDC_REDIRECT_PORT") {
+                Ok(raw) => raw.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or(
                     "INVALID_INPUT: CITO_OIDC_REDIRECT_PORT must be an integer in 1..65535",
-                )?;
-            }
-        }
+                )?,
+                Err(_) => 0,
+            },
+        };
         let scopes = config
             .get("scopes")
-            .or_else(|| config.get("oidcScopes"))
             .map(|value| {
                 let scopes: Vec<_> = value
                     .as_array()
@@ -235,12 +218,12 @@ impl<'a> Settings<'a> {
                 if !scopes.contains(&"openid") {
                     return Err("INVALID_INPUT: OIDC scopes must include openid");
                 }
-                Ok(scopes)
+                Ok(scopes.join(" "))
             })
             .transpose()?;
         Ok(Self {
-            issuer,
-            client,
+            issuer: issuer.to_owned(),
+            client: client.to_owned(),
             port,
             scopes,
         })
@@ -261,34 +244,27 @@ impl<'a> Settings<'a> {
         {
             return Err("AUTH_UNAVAILABLE: OIDC provider does not support openid".into());
         }
-        Ok(self
-            .scopes
-            .clone()
-            .unwrap_or_else(|| {
-                OIDC_DEFAULT_SCOPES
-                    .into_iter()
-                    .filter(|scope| {
-                        supported
-                            .as_ref()
-                            .is_none_or(|values| values.contains(scope))
-                    })
-                    .collect()
-            })
-            .join(" "))
+        Ok(self.scopes.clone().unwrap_or_else(|| {
+            OIDC_DEFAULT_SCOPES
+                .into_iter()
+                .filter(|scope| {
+                    supported
+                        .as_ref()
+                        .is_none_or(|values| values.contains(scope))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }))
     }
 }
 
 fn cache_path(dir: &Path, hub: &str) -> Result<PathBuf, String> {
-    if hub.is_empty()
-        || !hub
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-    {
+    if !crate::plugins::validate_hub_name(hub) {
         return Err("INVALID_INPUT: Invalid hub name".into());
     }
     Ok(dir.join(format!("oidc-token-{hub}.json")))
 }
-fn read_cache(path: &Path, settings: &Settings<'_>) -> Result<Option<Value>, String> {
+fn read_cache(path: &Path, settings: &Settings) -> Result<Option<Value>, String> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -340,14 +316,14 @@ fn fresh(cache: &Value) -> bool {
 }
 fn verify_cache(
     cache: &Value,
-    settings: &Settings<'_>,
+    settings: &Settings,
     deadline: &Deadline<'_>,
 ) -> Result<LoginResult, String> {
     deadline.remaining()?;
     let token = cache["id_token"]
         .as_str()
         .ok_or("UNAUTHORIZED: Invalid cache token")?;
-    let identity = OidcVerifier::new(settings.issuer, settings.client)?
+    let identity = OidcVerifier::new(&settings.issuer, &settings.client)?
         .verify_with_deadline(token, deadline.at)?;
     deadline.remaining()?;
     Ok((token.to_owned(), identity))
@@ -423,30 +399,11 @@ pub fn recover(
         config,
         rejected_hash,
         interactive,
-        &super::daemon::shutdown_requested,
-        None,
+        false,
+        (&super::daemon::shutdown_requested, None),
     )
 }
 pub fn recover_cancellable(
-    dir: &Path,
-    hub: &str,
-    config: &Value,
-    rejected_hash: Option<&str>,
-    interactive: bool,
-    cancelled: &dyn Fn() -> bool,
-    cancellation_fd: Option<i32>,
-) -> Result<LoginResult, String> {
-    recover_cancellable_with_options(
-        dir,
-        hub,
-        config,
-        rejected_hash,
-        interactive,
-        false,
-        (cancelled, cancellation_fd),
-    )
-}
-pub fn recover_cancellable_with_options(
     dir: &Path,
     hub: &str,
     config: &Value,
@@ -473,7 +430,7 @@ pub fn recover_cancellable_with_options(
 fn recover_inner(
     dir: &Path,
     hub: &str,
-    settings: &Settings<'_>,
+    settings: &Settings,
     rejected: Option<&str>,
     interactive: bool,
     force_account_select: bool,
@@ -498,7 +455,7 @@ fn recover_inner(
             result => return result,
         }
     }
-    let verifier = OidcVerifier::new(settings.issuer, settings.client)?;
+    let verifier = OidcVerifier::new(&settings.issuer, &settings.client)?;
     let agent = ureq::AgentBuilder::new().redirects(0).build();
     let discovery = response_json(
         deadline
@@ -518,7 +475,7 @@ fn recover_inner(
     let authorization = endpoint(&discovery, "authorization_endpoint")?;
     let refreshed = if let Some(refresh) = old_refresh {
         match deadline.request(agent.post(&token_url))?.send_form(&[
-            ("client_id", settings.client),
+            ("client_id", settings.client.as_str()),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh),
         ]) {
@@ -568,7 +525,7 @@ fn recover_inner(
         let mut url = url::Url::parse(&authorization).map_err(|e| e.to_string())?;
         url.query_pairs_mut().extend_pairs([
             ("response_type", "code"),
-            ("client_id", settings.client),
+            ("client_id", settings.client.as_str()),
             ("redirect_uri", redirect.as_str()),
             ("scope", scopes.as_str()),
             ("state", state.as_str()),
@@ -634,7 +591,7 @@ fn recover_inner(
             deadline
                 .request(agent.post(&token_url))?
                 .send_form(&[
-                    ("client_id", settings.client),
+                    ("client_id", settings.client.as_str()),
                     ("grant_type", "authorization_code"),
                     ("code", &code),
                     ("redirect_uri", &redirect),
@@ -666,21 +623,10 @@ fn recover_inner(
     if nonce.is_some_and(|nonce| claims["nonce"] != nonce) {
         return Err("UNAUTHORIZED: OIDC nonce mismatch".into());
     }
-    let previous_principal = old
+    let same_principal = old
         .as_ref()
-        .and_then(|cache| cache["verified_principal_id"].as_str());
-    let same_principal = previous_principal.is_some_and(|previous| {
-        [
-            "principal_id",
-            "canonical_principal_id",
-            "legacy_principal_id",
-        ]
-        .iter()
-        .any(|key| identity[*key].as_str() == Some(previous))
-            || claims["sub"]
-                .as_str()
-                .is_some_and(|sub| previous == format!("{}#{sub}", settings.issuer))
-    });
+        .and_then(|cache| cache["verified_principal_id"].as_str())
+        .is_some_and(|prev| super::auth::principal_matches(prev, &identity));
     let refresh = body["refresh_token"].as_str().or({
         if is_refresh && same_principal {
             old_refresh

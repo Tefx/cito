@@ -25,8 +25,7 @@ extension Companion: NSMenuDelegate {
         }
         guard let error = menuBannerError else { return }
         let message = presentationError(error)
-        let labelHeight = max(30, ceil((message as NSString).boundingRect(with:NSSize(width:320,height:CGFloat.greatestFiniteMagnitude),
-            options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:10)]).height) + 2)
+        let labelHeight = max(30, measureWrappedHeight(message, width: 320, font: .systemFont(ofSize: 10)) + 2)
         let row = NSView(frame:NSRect(x:0,y:0,width:380,height:labelHeight+6))
         row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
         row.appearance = testAppearance
@@ -256,7 +255,7 @@ extension Companion: NSMenuDelegate {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
-                let height = ceil((statusText as NSString).boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: detail.font ?? NSFont.systemFont(ofSize: 11)]).height) + 4
+                let height = measureWrappedHeight(statusText, width: width, font: detail.font ?? .systemFont(ofSize: 11)) + 4
                 detail.frame = NSRect(x: 12, y: 32, width: width, height: height)
                 drawer.frame.size.height = height + 40
                 layoutBar(in: drawer, y: 5, height: 22, spacing: 4, trailing: drawerControls)
@@ -594,7 +593,7 @@ extension Companion: NSMenuDelegate {
                 let text = item.status == "scanning" ? "\(visual.name) · Scanning sessions…" : "\(visual.name) · " + presentationError(item.error ?? "Session discovery failed. Try refreshing.")
                 let label = textLabel(text,NSRect(x:46,y:4,width:322,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
                 label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = text
-                label.frame.size.height = max(26, ceil((text as NSString).boundingRect(with:NSSize(width:322,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:label.font!]).height) + 4)
+                label.frame.size.height = max(26, measureWrappedHeight(text, width: 322, font: label.font!) + 4)
                 let row = NSView(frame:NSRect(x:0,y:0,width:CitoMetrics.menuWidth,height:label.frame.height + 8))
                 row.addSubview(label); _ = host(row,id:"discovery:\(item.harness)")
             }
@@ -673,8 +672,7 @@ extension Companion: NSMenuDelegate {
                     for c in items {
                         let needsReload = c.needs_reload == true
                         let hintText = c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen"
-                        let hintHeight = needsReload ? max(14, ceil((hintText as NSString).boundingRect(with:NSSize(width:244,height:CGFloat.greatestFiniteMagnitude),
-                            options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:10)]).height) + 2) : 0
+                        let hintHeight = needsReload ? max(14, measureWrappedHeight(hintText, width: 244, font: .systemFont(ofSize: 10)) + 2) : 0
                         let rowHeight: CGFloat = needsReload ? 44+hintHeight : 44
                         let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
                         let rowId = "candidate:\(c.harness):\(c.session_id)"

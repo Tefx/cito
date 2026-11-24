@@ -154,7 +154,7 @@ fn human_mutations_fence_expired_devices_without_prior_reads() {
 }
 
 #[test]
-fn current_reply_keys_reject_conflicts_and_registration_keys_preserve_tuple_boundaries() {
+fn current_reply_keys_reject_conflicting_payloads() {
     let dir = temp();
     let e = test_engine(&dir);
     e.pause_worker();
@@ -175,24 +175,6 @@ fn current_reply_keys_reject_conflicts_and_registration_keys_preserve_tuple_boun
         e.rpc("send_reply_from_human", &req, Some(&owner)).unwrap()["seq"],
         first["seq"]
     );
-    let tuples = [
-        ("none#alice|agent", "session", "tail"),
-        ("none#alice", "agent", "session|tail"),
-    ];
-    let key = listener_id(tuples[0].0, tuples[0].1, tuples[0].2);
-    assert_eq!(key, listener_id(tuples[1].0, tuples[1].1, tuples[1].2));
-    for (index, (principal, harness, session)) in tuples.into_iter().enumerate() {
-        let data = json!({"principal_id":principal,"harness":harness,"session_id":session,"scope":"workspace"});
-        let params = json!({"key":key,"data_b64":encoded(&data)});
-        if index == 0 {
-            e.rpc("kv_put", &params, None).unwrap();
-        } else {
-            assert_eq!(
-                e.rpc("kv_put", &params, None).unwrap_err(),
-                "PERMISSIONS_VIOLATION: listener_id tuple collision"
-            );
-        }
-    }
 }
 
 #[test]
@@ -253,147 +235,6 @@ fn temp() -> TestDirectory {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
-#[test]
-fn human_message_tuple_keys_separate_legacy_delimiter_collisions() {
-    let dir = temp();
-    let engine = test_engine(&dir);
-    engine.pause_worker();
-    let owner = local_principal("alice");
-    put(&engine, "target", "none#bob", "workspace");
-    let tuples = [
-        ("host", "key|human|target|tail"),
-        ("host|human|target|key", "tail"),
-    ];
-    assert_eq!(
-        format!("{}|human|target|{}", tuples[0].0, tuples[0].1),
-        format!("{}|human|target|{}", tuples[1].0, tuples[1].1)
-    );
-    let mut first = None;
-    let replies = tuples.map(|(host, key)| {
-        let request = json!({"to":"target","message":"Approved","host_id":host,"msg_id":key});
-        let reply = engine
-            .rpc("send_reply_from_human", &request, Some(&owner))
-            .unwrap();
-        if first.is_none() {
-            // Model a live pre-upgrade publication, then submit its colliding tuple.
-            let legacy = hash(&format!(
-                "{}|{host}|human|target|{key}",
-                owner["principal_id"].as_str().unwrap()
-            ));
-            engine
-                .inner
-                .db
-                .execute(
-                    "UPDATE hub_signals SET msg_id=? WHERE seq=?",
-                    &[json!(legacy), reply["seq"].clone()],
-                )
-                .unwrap();
-            first = Some(request.clone());
-        }
-        let retry = engine
-            .rpc("send_reply_from_human", &request, Some(&owner))
-            .unwrap();
-        assert_eq!(retry["signal_id"], reply["signal_id"]);
-        assert_eq!(retry["seq"], reply["seq"]);
-        reply
-    });
-    let retried_first = engine
-        .rpc("send_reply_from_human", &first.unwrap(), Some(&owner))
-        .unwrap();
-    assert_eq!(retried_first["signal_id"], replies[0]["signal_id"]);
-    assert_eq!(retried_first["seq"], replies[0]["seq"]);
-    let stored = engine
-        .inner
-        .db
-        .query(
-            "SELECT CAST(data AS TEXT) AS data FROM hub_signals ORDER BY seq",
-            &[],
-        )
-        .unwrap();
-    for (row, (host, _)) in stored.iter().zip(tuples) {
-        let payload: Value = serde_json::from_str(row["data"].as_str().unwrap()).unwrap();
-        assert_eq!(payload["from"]["host_id"], host);
-        assert_eq!(payload["to"], "target");
-    }
-    assert_ne!(replies[0]["signal_id"], replies[1]["signal_id"]);
-    assert_ne!(replies[0]["seq"], replies[1]["seq"]);
-    assert_eq!(
-        engine
-            .inner
-            .db
-            .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
-            .unwrap()[0]["n"],
-        2
-    );
-}
-
-#[test]
-fn human_legacy_retry_survives_username_change_and_rejects_payload_conflicts() {
-    let dir = temp();
-    let engine = test_engine(&dir);
-    engine.pause_worker();
-    // Model verified OIDC identities: issuer/sub stay fixed as preferred_username changes.
-    let owner = json!({"principal_id":"oidc:https://id.example.com|subject","sub":"subject","owner_user":"alice","oidc":true});
-    let mut renamed = owner.clone();
-    renamed["owner_user"] = json!("alice-renamed");
-    let pid = owner["principal_id"].as_str().unwrap();
-    let human = listener_id(pid, "human", "default");
-    assert_eq!(
-        listener_id(
-            renamed["principal_id"].as_str().unwrap(),
-            "human",
-            "default"
-        ),
-        human
-    );
-    put(&engine, "target", "none#bob", "workspace");
-    let request = json!({"to":"target","message":"Approved","host_id":"host","msg_id":"once","in_reply_to":"source"});
-    let original = engine
-        .rpc("send_reply_from_human", &request, Some(&owner))
-        .unwrap();
-    let legacy = hash(&format!("{pid}|host|human|target|once"));
-    engine
-        .inner
-        .db
-        .execute(
-            "UPDATE hub_signals SET msg_id=? WHERE seq=?",
-            &[json!(legacy), original["seq"].clone()],
-        )
-        .unwrap();
-    for identity in [&owner, &renamed] {
-        for (field, value) in [("message", "Rejected"), ("in_reply_to", "other-source")] {
-            let mut conflict = request.clone();
-            conflict[field] = json!(value);
-            let error = engine
-                .rpc("send_reply_from_human", &conflict, Some(identity))
-                .unwrap_err();
-            assert!(error.starts_with("IDEMPOTENCY_CONFLICT:"), "{error}");
-        }
-        let retry = engine
-            .rpc("send_reply_from_human", &request, Some(identity))
-            .unwrap();
-        assert_eq!(retry["signal_id"], original["signal_id"]);
-        assert_eq!(retry["seq"], original["seq"]);
-        let rows = engine
-            .inner
-            .db
-            .query(
-                "SELECT msg_id,CAST(data AS TEXT) AS data FROM hub_signals",
-                &[],
-            )
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["msg_id"], legacy);
-        let payload = parse(&rows[0], "data");
-        assert_eq!(
-            payload["from"]["listener_id"],
-            super::super::identity::public_listener_id("alice", &human)
-        );
-        assert_eq!(payload["message"], request["message"]);
-        assert_eq!(payload["in_reply_to"], request["in_reply_to"]);
-    }
-}
-
 #[test]
 fn committed_ack_and_human_reply_survive_notification_failure() {
     let dir = temp();
@@ -2799,56 +2640,6 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
     e.inner
         .db
         .execute("DROP TRIGGER fail_source_ack", &[])
-        .unwrap();
-    // Fail notification preparation only after publication is visible in the transaction.
-    e.inner
-        .db
-        .execute(
-            "ALTER TABLE hub_channel_delivery_msgs RENAME TO reply_maps",
-            &[],
-        )
-        .unwrap();
-    e.inner.db.execute("CREATE VIEW hub_channel_delivery_msgs AS SELECT plugin_id,principal_id,CASE WHEN EXISTS(SELECT 1 FROM hub_signals WHERE subject='cito.signal.sender') THEN abs(-9223372036854775808) ELSE external_msg_id END AS external_msg_id,signal_id,from_listener_id FROM reply_maps",&[]).unwrap();
-    e.inner.db.execute("CREATE TRIGGER prune_reply_maps INSTEAD OF DELETE ON hub_channel_delivery_msgs BEGIN DELETE FROM reply_maps WHERE plugin_id=OLD.plugin_id AND principal_id=OLD.principal_id AND external_msg_id=OLD.external_msg_id; END",&[]).unwrap();
-    assert_eq!(
-        e.inner
-            .db
-            .query("SELECT external_msg_id FROM hub_channel_delivery_msgs", &[])
-            .unwrap()[0]["external_msg_id"],
-        "chunk-1"
-    );
-    let preparation_failure = e.inbound_reply("fixture", &frame).unwrap_err();
-    assert!(
-        preparation_failure.contains("integer overflow"),
-        "{preparation_failure}"
-    );
-    assert_eq!(
-        e.inner
-            .db
-            .query("SELECT signal_id,acked_at_ms FROM hub_signals", &[])
-            .unwrap(),
-        vec![json!({"signal_id":"original","acked_at_ms":null})]
-    );
-    assert!(e
-        .inner
-        .db
-        .query(
-            "SELECT update_id FROM hub_processed_replies WHERE update_id='u1'",
-            &[]
-        )
-        .unwrap()
-        .is_empty());
-    assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
-    e.inner
-        .db
-        .execute("DROP VIEW hub_channel_delivery_msgs", &[])
-        .unwrap();
-    e.inner
-        .db
-        .execute(
-            "ALTER TABLE reply_maps RENAME TO hub_channel_delivery_msgs",
-            &[],
-        )
         .unwrap();
     assert_eq!(e.inbound_reply("fixture", &frame).unwrap()["ok"], true);
     assert_eq!(

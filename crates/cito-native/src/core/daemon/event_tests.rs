@@ -110,7 +110,7 @@ fn session_actions_validate_selectors_titles_and_retained_sessions() -> Result<(
     let mut raw = f.service.raw_config()?;
     raw["hubs"]["disabled"] = json!({"url":"local://","enabled":false});
     fs::write(&f.service.config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
-    for op in ["unlisten", "unlisten_session", "unlisten_all"] {
+    for op in ["unlisten_session", "unlisten_all"] {
         for hub in [json!(17), json!("missing"), json!("disabled")] {
             assert!(f
                 .service
@@ -143,8 +143,9 @@ fn session_actions_validate_selectors_titles_and_retained_sessions() -> Result<(
         f.service.state.custom_title("agent", "initial")?,
         Some("Retained".into())
     );
-    f.service
-        .action(&json!({"op":"unlisten","hub":"local","listener_id":id}))?;
+    f.service.action(
+        &json!({"op":"unlisten_session","hub":"local","harness":"agent","session_id":"initial"}),
+    )?;
     assert_eq!(
         f.service.state.listener("local", id)?.unwrap()["user_stopped"],
         1
@@ -160,8 +161,7 @@ fn save_hub_honors_outer_default_selection_before_nested_config() -> Result<(), 
         ("cloud", Some(false), true, "personal"),
         ("shared", None, true, "shared"),
     ] {
-        let mut action =
-            json!({"op":"save_hub","name":name,"config":{"url":"local://","set_default":nested}});
+        let mut action = json!({"op":"setup_save_hub","name":name,"config":{"url":"local://","set_default":nested}});
         if let Some(outer) = outer {
             action["set_default"] = json!(outer);
         }
@@ -175,17 +175,25 @@ fn save_hub_honors_outer_default_selection_before_nested_config() -> Result<(), 
 fn hub_saves_cancel_only_the_edited_and_saved_profiles() -> Result<(), String> {
     let mut f = Fixture::new()?;
     let s = &mut f.service;
-    s.action(&json!({"op":"save_hub","name":"work","url":"local://","set_default":true}))?;
-    let work = s.logins.entry("work".into()).or_default().clone();
+    s.action(&json!({"op":"setup_save_hub","name":"work","url":"local://","set_default":true}))?;
+    let login = |s: &mut DaemonService, hub: &str| {
+        s.hub_controls
+            .entry(hub.into())
+            .or_default()
+            .login
+            .get_or_insert_with(Default::default)
+            .clone()
+    };
+    let work = login(s, "work");
     s.active_settings_hub = Some("work".into());
     for action in [
         json!({"op":"setup_save_hub","name":"personal","url":"local://","user":"bob"}),
-        json!({"op":"save_hub","edit":true,"original_name":"","name":"personal","hub":"work","autoListen":false}),
+        json!({"op":"setup_save_hub","edit":true,"original_name":"","name":"personal","hub":"work","autoListen":false}),
     ] {
-        let personal = s.logins.entry("personal".into()).or_default().clone();
+        let personal = login(s, "personal");
         s.action(&action)?;
         assert!(personal.cancelled.load(Ordering::SeqCst));
-        assert!(!s.logins.contains_key("personal"));
+        assert!(s.hub_controls["personal"].login.is_none());
         assert!(!work.cancelled.load(Ordering::SeqCst));
         assert_eq!(s.active_settings_hub.as_deref(), Some("work"));
         assert_eq!(s.raw_config()?["hubs"]["personal"]["user"], "bob");
@@ -195,12 +203,15 @@ fn hub_saves_cancel_only_the_edited_and_saved_profiles() -> Result<(), String> {
         ("office", "personal", "personal"),
     ] {
         s.active_settings_hub = Some(selected.into());
-        let from = s.logins.entry(original.into()).or_default().clone();
-        let to = s.logins.entry(name.into()).or_default().clone();
+        let from = login(s, original);
+        let to = login(s, name);
         s.action(&json!({"op":"setup_save_hub","edit":true,"original_name":original,"name":name}))?;
         assert!(from.cancelled.load(Ordering::SeqCst) && to.cancelled.load(Ordering::SeqCst));
         assert!(s.active_settings_hub.is_none());
-        assert!(Arc::ptr_eq(&s.logins["work"], &work));
+        assert!(Arc::ptr_eq(
+            s.hub_controls["work"].login.as_ref().unwrap(),
+            &work
+        ));
         assert!(!work.cancelled.load(Ordering::SeqCst));
     }
     Ok(())
@@ -296,9 +307,9 @@ fn discovery_demand_restores_only_configured_manual_hard_exits() -> Result<(), S
             &[json!(harness),json!(status),json!(stopped),json!(mode),json!(reason)],
         )?;
         if disconnected {
-            f.service
-                .last_app_action
-                .insert(harness.into(), "disconnect".into());
+            fs::write(f.root.join("unconfigured"), "").map_err(|e| e.to_string())?;
+            f.service.invalidate_setup(harness);
+            super::tests::settle_setup_inspections(&mut f.service);
         }
         if !enabled {
             f.service.slots.remove("work").unwrap().close();

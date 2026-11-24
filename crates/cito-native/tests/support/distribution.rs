@@ -221,9 +221,7 @@ fn distribution_versions_native_manifests_cask_and_signed_ui() {
         f.command("/usr/bin/ruby", &["-c", cask.to_str().unwrap()], "")
             .0
     );
-    let v: Value =
-        serde_json::from_str(&fs::read_to_string(r.join("plugins/pi/package.json")).unwrap())
-            .unwrap();
+    let v: Value = read_json(r.join("plugins/pi/package.json"));
     assert_eq!(v["private"], true);
     assert_eq!(v["type"], "module");
     assert_eq!(v["pi"]["extensions"], json!(["./cito-bridge.ts"]));
@@ -436,8 +434,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
         fs::read(app.join("Contents/Resources/AppIcon.icns")).unwrap(),
         fs::read(root().join("bin/AppIcon.icns")).unwrap()
     );
-    let settings: Value =
-        serde_json::from_slice(&fs::read(f.home.join(".claude/settings.json")).unwrap()).unwrap();
+    let settings: Value = read_json(f.home.join(".claude/settings.json"));
     let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();

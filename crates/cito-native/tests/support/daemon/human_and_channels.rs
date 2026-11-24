@@ -394,11 +394,7 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
         "channel",
         json!([{"key":"credential","scope":"hub","type":"string","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
     );
-    let ui = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", ui.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
     let large = "canonical-value".repeat(21_000);
     assert!(large.len() > 260 * 1024);
     for (op, request) in [
@@ -422,7 +418,7 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
         assert_eq!(receipt["ok"], true, "{receipt}");
         assert_eq!(receipt["committed"], true);
         assert_eq!(receipt["hub"], "local");
-        assert_eq!(receipt["channel"], "channel");
+        assert_eq!(receipt["channel_id"], "channel");
         assert_eq!(receipt["action"], op);
         assert_eq!(receipt["authority_changed"], false);
         assert!(receipt["warning"].is_string());
@@ -448,59 +444,53 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
         "channel",
         json!([{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
     );
-    let ui = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", ui.to_str().unwrap()),
-    ]);
-    assert_eq!(f.action(json!({"op":"channel_save","channel_id":"channel","enabled":true,"values":{"credential":"saved","address":"room"}})).0, 200);
+    f.recording_daemon();
+    f.action_ok(json!({"op":"channel_save","channel_id":"channel","enabled":true,"values":{"credential":"saved","address":"room"}}));
     let frames = || ui_frames(&f);
-    for op in ["channel_test", "test_human_channel"] {
-        for (id, expected_error, expected_status) in [
-            ("channel", "Invalid token", 200),
-            (
-                "missing",
-                "INVALID_INPUT: Unknown human channel plugin: missing",
-                400,
-            ),
-        ] {
-            let before = frames().len();
-            let action = json!({"op":op,"channel_id":id,"values":if id == "channel" {
-                json!({"credential":"invalid"})
-            } else {
-                json!({"botToken":"x"})
-            }});
-            let (status, result) = f.action(action);
-            assert_eq!(status, expected_status, "{result}");
-            assert_eq!(result["ok"], false);
-            assert_eq!(result["error"], expected_error);
-            wait(|| {
-                let frames = frames();
-                let Some(index) = frames.iter().enumerate().skip(before).find_map(|(i, v)| {
-                    (v["op"] == "channel_test_result" && v["channel_id"] == id).then_some(i)
-                }) else {
+    for (id, expected_error, expected_status) in [
+        ("channel", "Invalid token", 200),
+        (
+            "missing",
+            "INVALID_INPUT: Unknown human channel plugin: missing",
+            400,
+        ),
+    ] {
+        let before = frames().len();
+        let action = json!({"op":"channel_test","channel_id":id,"values":if id == "channel" {
+            json!({"credential":"invalid"})
+        } else {
+            json!({"botToken":"x"})
+        }});
+        let (status, result) = f.action(action);
+        assert_eq!(status, expected_status, "{result}");
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], expected_error);
+        wait(|| {
+            let frames = frames();
+            let Some(index) = frames.iter().enumerate().skip(before).find_map(|(i, v)| {
+                (v["op"] == "channel_test_result" && v["channel_id"] == id).then_some(i)
+            }) else {
+                return false;
+            };
+            assert_eq!(frames[index]["ok"], false);
+            assert_eq!(frames[index]["error"], expected_error);
+            assert_eq!(frames[index]["hub"], "local");
+            let subsequent = &frames[index + 1..];
+            for op in ["settings", "state"] {
+                let Some(refresh) = subsequent.iter().find(|v| v["op"] == op) else {
                     return false;
                 };
-                assert_eq!(frames[index]["ok"], false);
-                assert_eq!(frames[index]["error"], expected_error);
-                assert_eq!(frames[index]["hub"], "local");
-                let subsequent = &frames[index + 1..];
-                for op in ["settings", "state"] {
-                    let Some(refresh) = subsequent.iter().find(|v| v["op"] == op) else {
-                        return false;
-                    };
-                    let channel = refresh["settings"]["channels"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|ch| ch["id"] == "channel")
-                        .unwrap();
-                    assert_eq!(channel["configured"], true);
-                    assert_eq!(channel["status"], "ready");
-                }
-                true
-            });
-        }
+                let channel = refresh["settings"]["channels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|ch| ch["id"] == "channel")
+                    .unwrap();
+                assert_eq!(channel["configured"], true);
+                assert_eq!(channel["status"], "ready");
+            }
+            true
+        });
     }
 }
 
@@ -518,22 +508,14 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         json!({"hubs":{"local":{"url":"local://"},"shared":{"url":format!("http://127.0.0.1:{port}"),"autoListen":false}},"default_hub":"local"}),
     );
     f.daemon(&[]);
-    assert_eq!(
-        f.action(json!({"op":"cli_human_device","hub":"shared","attach":true}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"cli_human_device","hub":"shared","attach":false}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"cli_human_device","hub":"shared","attach":true}));
+    f.action_ok(json!({"op":"cli_human_device","hub":"shared","attach":false}));
     assert!(!f.state.join("plugins/remote-channel").exists());
     let (status,result)=f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}}));
     assert_eq!(status, 200, "{result}");
     let db = cito_native::database::Database::open(&host.state.join("hub/hub.sqlite")).unwrap();
     let before = db.query("SELECT * FROM hub_plugin_services", &[]).unwrap();
-    assert_eq!(f.action(json!({"op":"channel_test","hub":"shared","channel_id":"remote-channel","values":{"credential":"candidate","address":"test-room"}})).0,200);
+    f.action_ok(json!({"op":"channel_test","hub":"shared","channel_id":"remote-channel","values":{"credential":"candidate","address":"test-room"}}));
     assert_eq!(
         db.query("SELECT * FROM hub_plugin_services", &[]).unwrap(),
         before
@@ -549,7 +531,7 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE hub='shared' AND harness='human' AND status='ACTIVE'")
         .is_empty());
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     let projected = snapshot["hubs"]
         .as_array()
         .unwrap()
@@ -594,17 +576,13 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     assert_eq!(ch["fields"][0]["hidden"], false);
     assert_eq!(ch["setup_guide"], json!(["Configure service, then pair."]));
     let bindings = db.query("SELECT * FROM hub_human_channels", &[]).unwrap();
-    assert_eq!(f.action(json!({"op":"human_inbox_update","hub":"shared","expected_control_revision":projected["human_control_revision"],"paused":true})).0,200);
-    let paused = f.action(json!({"op":"get_snapshot"})).1;
+    f.action_ok(json!({"op":"human_inbox_update","hub":"shared","expected_control_revision":projected["human_control_revision"],"paused":true}));
+    let paused = f.snapshot();
     assert_eq!(paused["settings"]["channels"][0]["inbox_paused"], true);
     assert_eq!(paused["settings"]["channels"][0]["delivery_enabled"], false);
+    f.action_ok(json!({"op":"human_inbox_update","hub":"shared","paused":false}));
     assert_eq!(
-        f.action(json!({"op":"human_inbox_update","hub":"shared","paused":false}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["delivery_enabled"],
+        f.snapshot()["settings"]["channels"][0]["delivery_enabled"],
         true
     );
     assert_eq!(
@@ -612,16 +590,8 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         bindings
     );
     assert_eq!(f.action(json!({"op":"channel_toggle","hub":"shared","channel_id":"remote-channel","enabled":false})).1["channels"][0]["status"],"paused");
-    assert_eq!(
-        f.action(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"channel_cancel_pair","hub":"shared","channel_id":"remote-channel"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}));
+    f.action_ok(json!({"op":"channel_cancel_pair","hub":"shared","channel_id":"remote-channel"}));
     assert!(db
         .query(
             "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
@@ -638,7 +608,7 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         f.action(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}));
     assert_eq!(paired.0, 200, "{paired:?}");
     assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"],
+        f.snapshot()["settings"]["channels"][0]["status"],
         "pairing_pending"
     );
     let code = db
@@ -662,13 +632,11 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         .unwrap()
         .is_empty()
     });
-    wait(|| {
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "ready"
-    });
+    wait(|| f.snapshot()["settings"]["channels"][0]["status"] == "ready");
     let personal = db
         .query("SELECT user_config_json FROM hub_human_channels", &[])
         .unwrap();
-    assert_eq!(f.action(json!({"op":"clear_channel_service","hub":"shared","channel_id":"remote-channel","reset_user":false})).0,200);
+    f.action_ok(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true,"reset_user":false}));
     assert_eq!(
         db.query("SELECT user_config_json FROM hub_human_channels", &[])
             .unwrap(),
@@ -676,7 +644,7 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         "Clearing service credentials must preserve personal destinations"
     );
     assert_eq!(f.action(json!({"op":"save_hub_service","hub":"shared","channel_id":"remote-channel","values":{"credential":"replacement"}})).1["channels"][0]["status"],"ready");
-    assert_eq!(f.action(json!({"op":"clear_channel_service","hub":"shared","channel_id":"remote-channel","reset_user":true})).0,200);
+    f.action_ok(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true,"reset_user":true}));
     assert_eq!(
         db.query("SELECT user_config_json FROM hub_human_channels", &[])
             .unwrap()[0]["user_config_json"],
@@ -766,16 +734,12 @@ server.serve_forever()
         ],
         &[],
     );
-    wait(|| f.frames(proxy).iter().any(|frame| frame["op"] == "ready"));
+    wait(|| f.frames_for(proxy, "ready").next().is_some());
     f.daemon(&[]);
     assert_eq!(f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}})).1["channels"][0]["status"], "ready");
-    assert_eq!(
-        f.action(json!({"op":"open_settings","hub":"shared"})).0,
-        200
-    );
+    f.action_ok(json!({"op":"open_settings","hub":"shared"}));
     let hub_db = host.db("hub/hub.sqlite");
-    let current_channel =
-        || f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0].clone();
+    let current_channel = || f.snapshot()["settings"]["channels"][0].clone();
     wait(|| current_channel()["status"] == "ready");
     hub_db
         .execute(
@@ -828,7 +792,7 @@ server.serve_forever()
     gate("alice-old", "alice", "rotated-credential", true);
     gate("bob-current", "bob", "rotated-credential", false);
     gate("bob-periodic", "bob", "rotated-credential", false);
-    let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    let mut config: Value = read_json(&f.config);
     config["hubs"]["shared"]["token"] = json!("rotated-credential");
     fs::write(&f.config, config.to_string()).unwrap();
     wait(|| seen("alice-old"));
@@ -843,29 +807,19 @@ server.serve_forever()
     };
     assert_eq!(local("/health")["ok"], true);
     let daemon_port = f.port;
-    for op in ["open_settings", "settings_select_hub"] {
-        let opened = std::thread::spawn(move || {
-            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
-                .timeout(std::time::Duration::from_millis(750))
-                .send_json(json!({"op":op,"hub":"shared"}))
-                .map_err(|error| error.to_string())
-                .and_then(|response| {
-                    response
-                        .into_json::<Value>()
-                        .map_err(|error| error.to_string())
-                })
-        })
-        .join()
+    let opened: Value = ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+        .timeout(std::time::Duration::from_millis(750))
+        .send_json(json!({"op":"open_settings","hub":"shared"}))
         .unwrap()
+        .into_json()
         .unwrap();
-        assert_eq!(opened["ok"], true);
-        assert_eq!(
-            http(proxy_port, "/status", None).1["waiting"],
-            json!(["alice-old"]),
-            "{op} must share the held inventory request"
-        );
-        assert_eq!(local("/health")["ok"], true);
-    }
+    assert_eq!(opened["ok"], true);
+    assert_eq!(
+        http(proxy_port, "/status", None).1["waiting"],
+        json!(["alice-old"]),
+        "open_settings must share the held inventory request"
+    );
+    assert_eq!(local("/health")["ok"], true);
     let snapshot: Value = ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
         .timeout(std::time::Duration::from_millis(750))
         .send_json(json!({"op":"get_snapshot"}))
@@ -884,16 +838,14 @@ server.serve_forever()
     wait(|| seen("bob-current"));
     assert_eq!(local("/health")["ok"], true);
     release("bob-current");
-    wait(|| {
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
-    });
+    wait(|| f.snapshot()["settings"]["channels"][0]["status"] == "hub_ready");
     release("alice-old");
     wait(|| {
         http(proxy_port, "/status", None).1["completed"]
             .as_array()
             .is_some_and(|ids| ids.contains(&json!("alice-old")))
     });
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], false);
     assert_eq!(snapshot["settings"]["channels"][0]["status"], "hub_ready");
 
@@ -908,11 +860,7 @@ server.serve_forever()
     config["hubs"]["shared"]["token"] = json!("next-credential");
     fs::write(&f.config, config.to_string()).unwrap();
     wait(|| seen("save-inventory"));
-    assert_eq!(
-        f.action(json!({"op":"settings_select_hub","hub":"local"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"open_settings","hub":"local"}));
     std::thread::scope(|scope| {
         let saved = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -925,23 +873,15 @@ server.serve_forever()
         // Observe that dispatch, then select local while inventory is still held.
         // This stops new periodic remote reads; any already queued read shares
         // save-inventory's generation instead of consuming the schema gate.
-        wait(|| f.action(json!({"op":"get_snapshot"})).1["settings"]["settings_hub"] == "shared");
-        assert_eq!(
-            f.action(json!({"op":"settings_select_hub","hub":"local"}))
-                .0,
-            200
-        );
+        wait(|| f.snapshot()["settings"]["settings_hub"] == "shared");
+        f.action_ok(json!({"op":"open_settings","hub":"local"}));
         assert_eq!(local("/health")["ok"], true);
         assert!(!seen("save-schema"));
         release("save-inventory");
         wait(|| seen("save-schema"));
         // Only the dispatched mutation can now own this RPC. Restore the remote
         // selection while its schema is held, before checking the remaining flow.
-        assert_eq!(
-            f.action(json!({"op":"settings_select_hub","hub":"shared"}))
-                .0,
-            200
-        );
+        f.action_ok(json!({"op":"open_settings","hub":"shared"}));
         assert_eq!(
             local("/health")["ok"],
             true,
@@ -958,15 +898,12 @@ server.serve_forever()
             true,
             "Post-mutation inventory must release service"
         );
-        assert_eq!(
-            f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
-            false
-        );
+        assert_eq!(f.snapshot()["settings"]["channels"][0]["configured"], false);
         release("save-post");
         let result = saved.join().unwrap().unwrap();
         assert_eq!(result["channels"][0]["status"], "ready");
     });
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert_eq!(snapshot["settings"]["channels"][0]["status"], "ready");
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], true);
 
@@ -991,8 +928,8 @@ server.serve_forever()
         let receipt: Value = changed.join().unwrap().unwrap().into_json().unwrap();
         assert_eq!(receipt["committed"], true);
         assert_eq!(receipt["authority_changed"], true);
-        assert_eq!(receipt["receipt_authority"]["hub"], "shared");
-        assert_eq!(receipt["receipt_authority"]["principal_id"], "none#bob");
+        assert_eq!(receipt["hub"], "shared");
+        assert_eq!(receipt["channel_id"], "remote-channel");
         assert!(receipt["maintenance_warning"]
             .as_str()
             .unwrap()
@@ -1000,28 +937,21 @@ server.serve_forever()
     });
     assert_eq!(local("/health")["ok"], true);
     release("replacement");
-    wait(|| {
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
-    });
+    wait(|| f.snapshot()["settings"]["channels"][0]["status"] == "hub_ready");
     release("unpair-post");
     wait(|| {
         http(proxy_port, "/status", None).1["completed"]
             .as_array()
             .is_some_and(|ids| ids.contains(&json!("unpair-post")))
     });
-    assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
-        false
-    );
+    assert_eq!(f.snapshot()["settings"]["channels"][0]["configured"], false);
     config["hubs"]["shared"]["enabled"] = json!(false);
     fs::write(&f.config, config.to_string()).unwrap();
-    for op in ["open_settings", "settings_select_hub"] {
-        assert_eq!(
-            f.action(json!({"op":op,"hub":"shared"})).0,
-            200,
-            "Disabled hubs must remain configurable"
-        );
-    }
+    assert_eq!(
+        f.action(json!({"op":"open_settings","hub":"shared"})).0,
+        200,
+        "Disabled hubs must remain configurable"
+    );
 }
 
 #[test]
@@ -1034,13 +964,9 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
         "channel",
         json!([{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
     );
-    let ui = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", ui.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
     let target = enroll(&f, meta.clone());
-    assert_eq!(f.action(json!({"op":"channel_save","hub":"work","channel_id":"channel","enabled":true,"values":{"credential":"test-only","address":"reply-test"}})).0, 200);
+    f.action_ok(json!({"op":"channel_save","hub":"work","channel_id":"channel","enabled":true,"values":{"credential":"test-only","address":"reply-test"}}));
     let hub = f.db("hub.sqlite");
     let channel_frames = || -> Vec<Value> {
         fs::read_to_string(channel.join("frames.jsonl"))
@@ -1088,39 +1014,20 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             .is_null());
     };
     let untouched = source();
-    for op in ["send_signal", "send_reply_from_human"] {
+    {
         let id = source();
         let results_before = ui_results().len();
         let result = {
-            let action = if op == "send_signal" {
-                json!({"op":op,"request_id":format!("{op}-{id}"),"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
-            } else {
-                json!({"op":op,"request_id":format!("{op}-{id}"),"to_listener_id":target["listener_id"],"text":"Approved","in_reply_to":null,"signal_id":format!("work:{id}")})
-            };
+            let action = json!({"op":"send_signal","request_id":id,"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")});
             let (status, result) = f.action(action);
             assert_eq!(status, 200, "{result}");
             wait(|| ui_results().len() == results_before + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], true);
             assert!(ui_results().last().unwrap().get("warning").is_none());
-            assert_eq!(
-                ui_results().last().unwrap()["request_id"],
-                format!("{op}-{id}")
-            );
+            assert_eq!(ui_results().last().unwrap()["request_id"], id);
             result
         };
-        if op == "send_reply_from_human" {
-            assert!(!result["signal_id"].as_str().unwrap().contains(':'));
-            assert_eq!(
-                result["target_display"],
-                target["listener_id"]
-                    .as_str()
-                    .unwrap()
-                    .rsplit(':')
-                    .next()
-                    .unwrap()
-            );
-            assert_eq!(result["error"], Value::Null);
-        }
+        assert!(result["signal_id"].as_str().unwrap().starts_with("work:"));
         let reply = result["signal_id"]
             .as_str()
             .unwrap()
@@ -1177,32 +1084,27 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let before = hub
         .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
         .unwrap();
-    for op in ["send_signal", "send_reply_from_human"] {
-        let args = json!({"to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":format!("retry-{op}")});
-        {
-            let mut action = args;
-            action["op"] = json!(op);
-            let count = ui_results().len();
-            let (status, result) = f.action(action);
-            assert_eq!(status, 400, "{result}");
-            assert!(result.to_string().contains("injected ack failure"));
-            wait(|| ui_results().len() == count + 1);
-            assert_eq!(ui_results().last().unwrap()["ok"], false);
-        }
-        assert_unread(&retried);
-        assert_eq!(
-            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
-                .unwrap(),
-            before
-        );
-        assert!(f
-            .rows(&format!(
-                "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
-            ))
-            .is_empty());
+    let args = json!({"op":"send_signal","to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":"retry-reply"});
+    {
+        let count = ui_results().len();
+        let (status, result) = f.action(args.clone());
+        assert_eq!(status, 400, "{result}");
+        assert!(result.to_string().contains("injected ack failure"));
+        wait(|| ui_results().len() == count + 1);
+        assert_eq!(ui_results().last().unwrap()["ok"], false);
     }
+    assert_unread(&retried);
+    assert_eq!(
+        hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+            .unwrap(),
+        before
+    );
+    assert!(f
+        .rows(&format!(
+            "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
+        ))
+        .is_empty());
     hub.execute("DROP TRIGGER reject_ack", &[]).unwrap();
-    let args = json!({"to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":"retry-send_reply_from_human","op":"send_reply_from_human"});
     let count = ui_results().len();
     let (status, reply) = f.action(args.clone());
     assert_eq!(status, 200, "{reply}");
@@ -1286,20 +1188,18 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let before = hub
         .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
         .unwrap();
-    for op in ["send_signal", "send_reply_from_human"] {
-        for (message, reply_to) in [
-            ("   ", format!("work:{failed}")),
-            ("Wrong hub", format!("elsewhere:{failed}")),
-        ] {
-            let count = ui_results().len();
-            let request_id = format!("{op}-failure-{count}");
-            let (status, result) = f.action(json!({"op":op,"request_id":request_id,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
-            assert_eq!(status, 400, "{result}");
-            wait(|| ui_results().len() == count + 1);
-            assert_eq!(ui_results().last().unwrap()["ok"], false);
-            assert_eq!(ui_results().last().unwrap()["request_id"], request_id);
-            assert_unread(&failed);
-        }
+    for (message, reply_to) in [
+        ("   ", format!("work:{failed}")),
+        ("Wrong hub", format!("elsewhere:{failed}")),
+    ] {
+        let count = ui_results().len();
+        let request_id = format!("send-failure-{count}");
+        let (status, result) = f.action(json!({"op":"send_signal","request_id":request_id,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
+        assert_eq!(status, 400, "{result}");
+        wait(|| ui_results().len() == count + 1);
+        assert_eq!(ui_results().last().unwrap()["ok"], false);
+        assert_eq!(ui_results().last().unwrap()["request_id"], request_id);
+        assert_unread(&failed);
     }
     hub.execute("CREATE TRIGGER reject_reply BEFORE INSERT ON hub_signals BEGIN SELECT RAISE(ABORT,'injected reply failure'); END", &[]).unwrap();
     let count = ui_results().len();
@@ -1309,24 +1209,18 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     hub.execute("DROP TRIGGER reject_reply", &[]).unwrap();
     assert_unread(&failed);
     f.tool("cito_unlisten", json!({"hub":"work"}), meta);
-    for op in ["send_signal", "send_reply_from_human"] {
-        let count = ui_results().len();
-        assert_eq!(f.action(json!({"op":op,"to":target["listener_id"],"message":"Revoked target","in_reply_to":format!("work:{failed}")})).0, 400);
-        wait(|| ui_results().len() == count + 1);
-        assert_eq!(ui_results().last().unwrap()["ok"], false);
-        assert_unread(&failed);
-    }
+    let count = ui_results().len();
+    assert_eq!(f.action(json!({"op":"send_signal","to":target["listener_id"],"message":"Revoked target","in_reply_to":format!("work:{failed}")})).0, 400);
+    wait(|| ui_results().len() == count + 1);
+    assert_eq!(ui_results().last().unwrap()["ok"], false);
+    assert_unread(&failed);
     assert_eq!(
         hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
             .unwrap(),
         before
     );
     // A request/response barrier drains the channel's stdin before checking absence.
-    assert_eq!(
-        f.action(json!({"op":"channel_test","hub":"work","channel_id":"channel"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"channel_test","hub":"work","channel_id":"channel"}));
     assert!(!channel_frames()
         .iter()
         .any(|frame| frame["op"] == "on_acked"
@@ -1355,11 +1249,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     let plugin = f.state.join("plugins/channel");
     fs::create_dir_all(&plugin).unwrap();
     fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
-    let ui = f.recording_ui();
-    let daemon = f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", ui.to_str().unwrap()),
-    ]);
+    let daemon = f.recording_daemon();
     for op in [
         "refresh_available",
         "open_settings",
@@ -1394,14 +1284,10 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
             .unwrap()
             .is_empty());
     }
-    assert_eq!(f.action(json!({"op":"listen_session","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"})).0,200);
+    f.action_ok(json!({"op":"listen_session","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"}));
     let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     let id = row["listener_id"].clone();
-    assert_eq!(
-        f.action(json!({"op":"switch_hub","from_hub":"local","to_hub":"work","listener_id":id}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"switch_hub","from_hub":"local","to_hub":"work","listener_id":id}));
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE hub='local' AND harness='fixture'")[0]
             ["status"],
@@ -1428,11 +1314,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         "workspace"
     );
     for scope in ["self", "workspace"] {
-        assert_eq!(
-            f.action(json!({"op":"set_scope","hub":"work","listener_id":id,"scope":scope}))
-                .0,
-            200
-        );
+        f.action_ok(json!({"op":"set_scope","hub":"work","listener_id":id,"scope":scope}));
         assert_eq!(
             f.rows("SELECT scope FROM local_listeners WHERE hub='work' AND harness='fixture'")[0]
                 ["scope"],
@@ -1450,7 +1332,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         assert_eq!(value["scope"], scope);
     }
     for op in ["setup_apply", "setup_remove_app"] {
-        assert_eq!(f.action(json!({"op":op,"harness":"fixture"})).0, 200);
+        f.action_ok(json!({"op":op,"harness":"fixture"}));
     }
     let calls = fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl")).unwrap();
     assert!(calls
@@ -1528,46 +1410,34 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
                 && v["expires_at_ms"] == paired["expires_at_ms"]
         })
     });
-    assert_eq!(
-        f.action(json!({"op":"set_launch_at_login","enabled":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_launch_at_login","enabled":true}));
     assert!(f
         .home
         .join("Library/LaunchAgents/com.tefx.cito.daemon.plist")
         .exists());
-    assert_eq!(
-        f.action(json!({"op":"set_launch_at_login","enabled":false}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_launch_at_login","enabled":false}));
     assert!(!f
         .home
         .join("Library/LaunchAgents/com.tefx.cito.daemon.plist")
         .exists());
     let p = port();
-    assert_eq!(f.action(json!({"op":"set_host_hub","enabled":true,"port":p,"bind":"127.0.0.1","auth_mode":"none"})).0,200);
+    f.action_ok(
+        json!({"op":"set_host_hub","enabled":true,"port":p,"bind":"127.0.0.1","auth_mode":"none"}),
+    );
     assert!(rpc(p, "kv_snapshot", json!({}))["entries"].is_array());
-    let configured: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let configured: Value = read_json(&f.config);
     let token = configured["host_hub"]["token"].as_str().unwrap();
     assert_eq!(token.len(), 64);
     assert!(token
         .bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-    assert_eq!(
-        f.action(json!({"op":"set_host_hub","enabled":false})).0,
-        200
-    );
+    f.action_ok(json!({"op":"set_host_hub","enabled":false}));
     // Disconnect now revokes this harness's listeners. Reconnect explicitly before testing delivery.
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
-        200
-    );
-    assert_eq!(f.action(json!({"op":"listen_session","hub":"work","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"})).0,200);
+    f.action_ok(json!({"op":"setup_apply","harness":"fixture"}));
+    f.action_ok(json!({"op":"listen_session","hub":"work","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"}));
     let sent = f.action(json!({"op":"send_signal","hub":"work","to":id,"message":"Agent inbox"}));
     assert_eq!(sent.0, 200, "{}", sent.1);
     wait(|| !f.rows("SELECT * FROM local_signals").is_empty());
@@ -1586,49 +1456,22 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         !f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL")
             .is_empty()
     });
-    assert_eq!(
-        f.action(json!({"op":"ack_signals","hub":"local","ack_all":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"ack_signals","hub":"local","ack_all":true}));
     assert!(f
         .rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL")
         .is_empty());
-    assert_eq!(
-        f.action(json!({"op":"unlisten","hub":"work","listener_id":id}))
-            .0,
-        200
-    );
-    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
-    assert_eq!(
-        f.action(json!({"op":"setup_save_hub","name":"extra","url":"local://","auth_mode":"none"}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"setup_toggle_hub","hub":"extra","enabled":false}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"setup_remove_hub","hub":"extra"})).0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"hub_action","hub":"work","action":"reconnect"}))
-            .0,
-        200
-    );
-    assert_eq!(f.action(json!({"op":"quit"})).0, 200);
+    f.action_ok(json!({"op":"unlisten_session","hub":"work","harness":row["harness"],"session_id":row["session_id"]}));
+    f.action_ok(json!({"op":"unlisten_all"}));
+    f.action_ok(json!({"op":"setup_save_hub","name":"extra","url":"local://","auth_mode":"none"}));
+    f.action_ok(json!({"op":"setup_toggle_hub","hub":"extra","enabled":false}));
+    f.action_ok(json!({"op":"setup_remove_hub","hub":"extra"}));
+    f.action_ok(json!({"op":"hub_action","hub":"work","action":"reconnect"}));
+    f.action_ok(json!({"op":"quit"}));
     wait(|| f.exited(daemon));
     let g = Fixture::new(json!({}));
     fs::write(g.state.join("retain-data"), "keep").unwrap();
     let daemon = g.daemon(&[]);
-    assert_eq!(
-        g.action(json!({"op":"setup_uninstall_all","purge_data":false}))
-            .0,
-        200
-    );
+    g.action_ok(json!({"op":"setup_uninstall_all","purge_data":false}));
     wait(|| g.exited(daemon));
     assert_eq!(
         fs::read_to_string(g.state.join("retain-data")).unwrap(),
@@ -1663,7 +1506,7 @@ fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
             .len(),
         2
     );
-    assert_eq!(f.action(json!({"op":"unlisten_all","hub":"work"})).0, 200);
+    f.action_ok(json!({"op":"unlisten_all","hub":"work"}));
     assert_eq!(
         f.rows("SELECT hub,status FROM local_listeners WHERE harness='fixture' ORDER BY hub"),
         vec![
@@ -1701,7 +1544,7 @@ fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
     )
     .unwrap();
     wait(|| {
-        f.action(json!({"op":"get_snapshot"})).1["listeners"]
+        f.snapshot()["listeners"]
             .as_array()
             .unwrap()
             .iter()
@@ -1714,7 +1557,7 @@ fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
                 })
             })
     });
-    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
+    f.action_ok(json!({"op":"unlisten_all"}));
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
@@ -1794,7 +1637,7 @@ fn remote_human_scope_updates_admit_cross_principal_activity() {
             );
             !f.rows(&format!("SELECT signal_id FROM local_signals WHERE signal_id='{signal_id}' AND activity_hidden=0")).is_empty()
         });
-        let activity = f.action(json!({"op":"get_snapshot"})).1["activity"].clone();
+        let activity = f.snapshot()["activity"].clone();
         assert!(
             activity
                 .as_array()
@@ -1882,7 +1725,7 @@ fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
         }
     }
     run(&["unlisten", "--harness", "human", "--hub", "local", "--json"]);
-    let detached = f.action(json!({"op":"get_snapshot"})).1;
+    let detached = f.snapshot();
     assert_eq!(detached["hubs"][0]["human_paused"], false);
     assert_eq!(detached["hubs"][0]["human_about"], "Release approvals");
     assert_eq!(
@@ -1950,21 +1793,17 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
     // Human enrollment covers both networks, independently of defaultHub.
     // Both Hubs use none auth, so their default Human scope remains workspace.
     wait(|| {
-        let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+        let snapshot = f.snapshot();
         ["local", "remote"].iter().all(|hub| {
             snapshot["listeners"].as_array().unwrap().iter().any(|row| {
                 row["hub"] == *hub && row["harness"] == "human" && row["scope"] == "workspace"
             })
         })
     });
-    assert_eq!(
-        f.action(
-            json!({"op":"unlisten_session","hub":"remote","harness":"human","session_id":"default"})
-        )
-        .0,
-        200
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"remote","harness":"human","session_id":"default"}),
     );
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert!(!snapshot["listeners"]
         .as_array()
         .unwrap()
@@ -2021,18 +1860,14 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
             serde_json::from_str(config[0]["config_json"].as_str().unwrap()).unwrap();
         assert_eq!(config, json!({"credential":"channel_save"}));
     }
-    assert_eq!(f.action(json!({"op":"channel_save","hub":"remote","channel_id":"channel","enabled":true,"values":{"address":"personal"}})).0,200);
+    f.action_ok(json!({"op":"channel_save","hub":"remote","channel_id":"channel","enabled":true,"values":{"address":"personal"}}));
     assert_eq!(rows()[0]["enabled"], 1);
-    assert_eq!(
-        f.action(
-            json!({"op":"channel_toggle","hub":"remote","channel_id":"channel","enabled":false})
-        )
-        .0,
-        200
+    f.action_ok(
+        json!({"op":"channel_toggle","hub":"remote","channel_id":"channel","enabled":false}),
     );
     let paused = rows();
-    assert_eq!(f.action(json!({"op":"save_hub_service","hub":"remote","channel_id":"channel","values":{"credential":"rotated"}})).0,200);
+    f.action_ok(json!({"op":"save_hub_service","hub":"remote","channel_id":"channel","values":{"credential":"rotated"}}));
     assert_eq!(rows(), paused);
-    assert_eq!(f.action(json!({"op":"channel_test","hub":"remote","channel_id":"channel","values":{"address":"candidate"}})).0,200);
+    f.action_ok(json!({"op":"channel_test","hub":"remote","channel_id":"channel","values":{"address":"candidate"}}));
     assert_eq!(rows(), paused, "Non-persisting tests cannot write bindings");
 }

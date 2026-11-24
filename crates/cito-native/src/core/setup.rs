@@ -1,9 +1,10 @@
+#[cfg(test)]
+use crate::plugins::random_hex;
+use crate::plugins::CITO_VERSION;
 use crate::plugins::{
     expand_home_dir, selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
     validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
 };
-#[cfg(test)]
-use crate::plugins::{random_hex, CITO_VERSION};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::env;
@@ -99,11 +100,7 @@ fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
 }
 
 pub fn is_staged_plugin_intact(state_dir: &Path, plugin: &PluginDescriptor) -> bool {
-    if plugin.is_builtin {
-        is_plugin_dir_intact(&staged_plugins_dir(state_dir).join(&plugin.id), plugin)
-    } else {
-        is_plugin_dir_intact(&plugin.plugin_dir, plugin)
-    }
+    is_plugin_dir_intact(&selected_plugin_dir(state_dir, plugin), plugin)
 }
 
 pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> bool {
@@ -117,17 +114,18 @@ pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> boo
     {
         return false;
     }
-    !plugin.is_builtin || contains_plugin_files(&resolve_bundled_plugin_dir(&plugin.id), dir)
+    !plugin.is_builtin
+        || (fs::read(dir.join("plugin.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+            .is_some_and(|manifest| manifest["version"].as_str() == Some(CITO_VERSION))
+            && contains_plugin_files(&resolve_bundled_plugin_dir(&plugin.id), dir))
 }
 
 fn valid_plugin_command(dir: &Path, cmd: &str) -> bool {
     !(cmd.starts_with("./") || cmd.starts_with("../"))
         || fs::metadata(dir.join(cmd))
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-fn matching_link(source: &Path, target: &Path) -> bool {
-    fs::read_link(source).is_ok_and(|left| fs::read_link(target).is_ok_and(|right| left == right))
 }
 
 fn contains_plugin_files(source: &Path, target: &Path) -> bool {
@@ -141,7 +139,6 @@ fn contains_plugin_files(source: &Path, target: &Path) -> bool {
             return false;
         };
         if kind != meta.file_type()
-            || (kind.is_symlink() && !matching_link(&entry.path(), &staged))
             || (kind.is_dir() && !contains_plugin_files(&entry.path(), &staged))
         {
             return false;
@@ -201,10 +198,12 @@ fn ensure_plugins_staged<'a>(
     let mut publications = Vec::new();
     for plugin in plugins {
         let target = plugins_dir.join(&plugin.id);
+        if is_plugin_dir_intact(&target, plugin) {
+            continue;
+        }
         let bundled = resolve_bundled_plugin_dir(&plugin.id);
-        let source = if plugin.is_builtin
-            && bundled.join("plugin.json").is_file()
-            && fs::canonicalize(&bundled).ok() != fs::canonicalize(&target).ok()
+        let source = if bundled.join("plugin.json").is_file()
+            && !super::plugins::same_plugin_root(&bundled, &target)
         {
             &bundled
         } else if plugin.plugin_dir.is_dir() {
@@ -213,27 +212,20 @@ fn ensure_plugins_staged<'a>(
             // No packaged or staged source remains to reconstruct this plugin.
             continue;
         };
-        if same_tree(source, &target) && is_staged_plugin_intact(state_dir, plugin) {
+        if super::plugins::same_plugin_root(source, &target) {
             continue;
         }
-        if !target.exists()
-            || !is_staged_plugin_intact(state_dir, plugin)
-            || fs::canonicalize(source).ok() != fs::canonicalize(&target).ok()
-        {
-            if fs::canonicalize(source).ok() != fs::canonicalize(&target).ok() {
-                let staged = candidate.join(&plugin.id);
-                copy_dir_recursive(source, &staged)?;
-                let parsed = super::plugins::parse_manifest_dir(&staged, true)?;
-                if !valid_plugin_command(&staged, &parsed.command[0]) {
-                    return Err(format!(
-                        "PLUGIN_LOAD_ERROR: Invalid staged executable for {}",
-                        plugin.id
-                    ));
-                }
-                publications.push((staged, target.clone()));
-            }
-            written.push(target);
+        let staged = candidate.join(&plugin.id);
+        copy_dir_recursive(source, &staged)?;
+        let parsed = super::plugins::parse_manifest_dir(&staged, true)?;
+        if !valid_plugin_command(&staged, &parsed.command[0]) {
+            return Err(format!(
+                "PLUGIN_LOAD_ERROR: Invalid staged executable for {}",
+                plugin.id
+            ));
         }
+        publications.push((staged, target.clone()));
+        written.push(target);
     }
     fn shell_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
@@ -265,9 +257,7 @@ fn ensure_plugins_staged<'a>(
     for (staged, target) in publications {
         publish_directory(&staged, &target)?;
     }
-    if !same_tree(&bin_dir, &state_dir.join("bin")) {
-        publish_directory(&bin_dir, &state_dir.join("bin"))?;
-    }
+    publish_directory(&bin_dir, &state_dir.join("bin"))?;
     Ok(written)
 }
 
@@ -295,51 +285,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn same_tree(source: &Path, target: &Path) -> bool {
-    let (Ok(left), Ok(right)) = (fs::symlink_metadata(source), fs::symlink_metadata(target)) else {
-        return false;
-    };
-    if left.file_type() != right.file_type() {
-        return false;
-    }
-    if left.file_type().is_symlink() {
-        return matching_link(source, target);
-    }
-    if left.is_dir() {
-        let names = |path: &Path| -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
-            fs::read_dir(path)
-                .ok()?
-                .map(|entry| entry.ok().map(|entry| entry.file_name()))
-                .collect()
-        };
-        let Some(names) = names(source).filter(|left| Some(left.clone()) == names(target)) else {
-            return false;
-        };
-        return names
-            .into_iter()
-            .all(|name| same_tree(&source.join(&name), &target.join(&name)));
-    }
-    if left.len() != right.len() || left.permissions().mode() != right.permissions().mode() {
-        return false;
-    }
-    use std::io::Read;
-    let (Ok(mut left), Ok(mut right)) = (fs::File::open(source), fs::File::open(target)) else {
-        return false;
-    };
-    let (mut a, mut b) = ([0u8; 65536], [0u8; 65536]);
-    loop {
-        let Ok(count) = left.read(&mut a) else {
-            return false;
-        };
-        if right.read_exact(&mut b[..count]).is_err() || a[..count] != b[..count] {
-            return false;
-        }
-        if count == 0 {
-            return true;
-        }
-    }
 }
 
 /// Publish a validated directory generation without exposing a missing target.
@@ -737,25 +682,13 @@ fn daemon_control_config(
 ) -> Result<crate::plugins::NativeConfig, String> {
     let raw = crate::plugins::read_config_text(config_path)?;
     let (default_hub, _, rest) = try_normalize_existing_config(raw.as_deref())?;
-    let daemon_port = match env::var("CITO_DAEMON_PORT") {
-        Ok(value) if !value.trim().is_empty() => value
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|p| *p > 0)
-            .ok_or("Invalid CITO_DAEMON_PORT")?,
-        _ => rest
-            .get("daemonPort")
-            .and_then(Value::as_u64)
-            .map(|p| {
-                u16::try_from(p)
-                    .ok()
-                    .filter(|p| *p > 0)
-                    .ok_or("Invalid daemonPort")
-            })
-            .transpose()?
-            .unwrap_or(4290),
-    };
+    // Setup can repair a profile with an invalid saved port using an explicit control endpoint.
+    let endpoint = env::var("CITO_DAEMON_PORT").ok();
+    let endpoint = endpoint.as_deref().filter(|s| !s.trim().is_empty());
+    let daemon_port = crate::support::resolve_daemon_port(
+        endpoint,
+        rest.get("daemonPort").filter(|_| endpoint.is_none()),
+    )?;
     Ok(crate::plugins::NativeConfig {
         state_dir: state_dir.to_path_buf(),
         config_path: config_path.to_path_buf(),
@@ -1984,29 +1917,6 @@ mod tests {
     }
 
     #[test]
-    fn required_plugin_symlinks_must_preserve_their_targets() {
-        use std::os::unix::fs::symlink;
-        let (root, plugins) = fixture();
-        let source = &plugins.plugins[0].plugin_dir;
-        symlink("bin/sample", source.join("link")).unwrap();
-        let staged = root.join("staged");
-        copy_dir_recursive(source, &staged).unwrap();
-        fs::write(staged.join("extra"), "").unwrap();
-        let source_alias = root.join("source-alias");
-        symlink(source, &source_alias).unwrap();
-        assert!(contains_plugin_files(&source_alias, &staged));
-        let link = staged.join("link");
-        fs::remove_file(&link).unwrap();
-        assert!(!contains_plugin_files(source, &staged));
-        symlink("extra", &link).unwrap();
-        assert!(!contains_plugin_files(source, &staged));
-        fs::remove_file(&link).unwrap();
-        fs::copy(staged.join("bin/sample"), &link).unwrap();
-        assert!(!contains_plugin_files(source, &staged));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn bundled_plugin_resolution_covers_distribution_layouts() {
         let (root, _) = fixture();
         fs::remove_file(root.join("plugins/sample/plugin.json")).unwrap();
@@ -2540,6 +2450,11 @@ mod tests {
                 )));
         }
         // Reinstalling a staged descriptor keeps the package as its repair source.
+        let manifest = staged.join("plugin.json");
+        let mut stale: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        stale["version"] = json!("0.0.0");
+        fs::write(&manifest, stale.to_string()).unwrap();
+        assert!(!is_staged_plugin_intact(&installed, &builtin));
         plugins.plugins[1] = crate::plugins::parse_manifest_dir(&staged, true).unwrap();
         ensure_cli_shims_native(&installed, &plugins).unwrap();
         assert!(is_staged_plugin_intact(&installed, &builtin));

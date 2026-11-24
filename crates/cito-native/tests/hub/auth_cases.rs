@@ -517,26 +517,19 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         cache.keys = Some(serde_json::from_value(keys).unwrap());
         cache.refresh_at = Some(Instant::now() - Duration::from_secs(61));
     }
-    // Hold the correct key at the HTTP fixture until all follower threads have
-    // rejected the cached signature and entered the single-flight wait branch.
+    // Concurrent callers recover the rotated key with a single JWKS request.
     let before = requests.load(Ordering::SeqCst);
-    let (observed, waiting) = std::sync::mpsc::channel();
-    verifier.cache.lock().unwrap().signature_miss_wait = Some(observed);
+    let start = std::sync::Barrier::new(4);
     let deadline = Instant::now() + Duration::from_secs(3);
     std::thread::scope(|scope| {
-        let release = keys.lock().unwrap();
         let callers: Vec<_> = (0..4)
-            .map(|_| scope.spawn(|| verifier.verify_with_deadline(&token, deadline)))
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    verifier.verify_with_deadline(&token, deadline)
+                })
+            })
             .collect();
-        let mut followers = std::collections::HashSet::new();
-        while followers.len() < callers.len() - 1 {
-            followers.insert(
-                waiting
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .unwrap(),
-            );
-        }
-        drop(release);
         for caller in callers {
             assert_eq!(
                 caller.join().unwrap().unwrap()["principal_id"],

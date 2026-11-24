@@ -1,7 +1,7 @@
 use super::{
     identity::{iso, string},
     registration::remote_matches_listener,
-    state::LocalState,
+    state::{current_listener, isolate_foreign_work, LocalState},
     transport::HubClient,
 };
 use crate::plugins::{now_ms, PluginDescriptor};
@@ -10,21 +10,14 @@ use std::time::Duration;
 
 // LocalState operations such as admit and finish_wake_batch own their SQLite
 // transactions. Fence those short commits against slot retirement without ever
-// draining the network registration lock. ':' cannot occur in a Hub name.
+// draining the network registration lock.
 impl HubClient {
-    fn commit_gate(
+    pub(super) fn with_current<T>(
         &self,
-        state: &LocalState,
-    ) -> Result<std::sync::Arc<std::sync::Mutex<()>>, String> {
-        state.registration_lock(&format!("commit:{}", self.name))
-    }
-    pub(super) fn with_current_state<T>(
-        &self,
-        state: &LocalState,
         f: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
-        let gate = self.commit_gate(state)?;
-        let _guard = gate
+        let _guard = self
+            .commit_gate
             .lock()
             .map_err(|_| "STATE_ERROR: Local commit lock poisoned")?;
         self.check_current()?;
@@ -37,12 +30,12 @@ impl HubClient {
             Ok(())
         }
     }
-    pub(super) fn close_for_state(&self, state: &LocalState) -> Result<(), String> {
+    pub(super) fn close_and_drain(&self) -> Result<(), String> {
         self.close();
         // A writer admitted before close must finish before replacement/purge.
-        let gate = self.commit_gate(state)?;
         drop(
-            gate.lock()
+            self.commit_gate
+                .lock()
                 .map_err(|_| "STATE_ERROR: Local commit lock poisoned")?,
         );
         Ok(())
@@ -78,108 +71,106 @@ fn plugin_request_owned(
     let mut claim_loss = None;
     let mut last_renew = Duration::ZERO;
     let mut checked_remote = false;
-    let mut progress =
-        |elapsed: Duration| {
-            if super::daemon::shutdown_requested() {
-                return Err("Daemon is shutting down".into());
+    let mut progress = |elapsed: Duration| {
+        if super::daemon::shutdown_requested() {
+            return Err("Daemon is shutting down".into());
+        }
+        if let Some((client, _)) = renew {
+            if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("NATS_UNAVAILABLE: Hub disconnected during wake".into());
             }
-            if let Some((client, _)) = renew {
-                if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err("NATS_UNAVAILABLE: Hub disconnected during wake".into());
-                }
+        }
+        if let Some((state, row)) = fence {
+            let current = state
+                .listener(string(row, "hub"), string(row, "listener_id"))?
+                .ok_or("STALE_GENERATION: Listener removed")?;
+            if current["status"] != "ACTIVE"
+                || current["binding_generation"] != row["binding_generation"]
+                || current["owner_token"] != row["owner_token"]
+            {
+                return Err("STALE_GENERATION: Listener changed during wake".into());
             }
-            if let Some((state, row)) = fence {
-                let current = state
-                    .listener(string(row, "hub"), string(row, "listener_id"))?
-                    .ok_or("STALE_GENERATION: Listener removed")?;
-                if current["status"] != "ACTIVE"
-                    || current["binding_generation"] != row["binding_generation"]
-                    || current["owner_token"] != row["owner_token"]
-                {
-                    return Err("STALE_GENERATION: Listener changed during wake".into());
-                }
-                if let Some(batch) = row.get("wake_batch") {
-                    state.check_dispatch_in_flight(row, batch, false)?;
-                }
+            if let Some(batch) = row.get("wake_batch") {
+                state.check_dispatch_in_flight(row, batch, false)?;
             }
-            let renewal_due = elapsed.saturating_sub(last_renew) >= renewal_interval;
-            if !checked_remote || renewal_due {
-                if let (Some((client, claim)), Some((state, row))) = (renew, fence) {
-                    let channel = string(claim, "channel_id");
-                    let Some((mut remote, revision)) =
-                        client.kv_get(string(row, "listener_id"))?.filter(|(r, _)| {
-                            r.is_object()
-                                && r["state"] == "ACTIVE"
-                                && remote_matches_listener(r, row, channel)
-                                && r["channels"][channel]["state"] == "ACTIVE"
-                        })
-                    else {
-                        client.with_current_state(state, || {
-                            state.fence_listener_for(row, "fenced_before_dispatch")
-                        })?;
-                        return Err("STALE_GENERATION: Remote listener changed during wake".into());
-                    };
-                    if renewal_due {
-                        if let Some(ch) = remote["channels"].get_mut(channel) {
-                            let now = client.server_now();
-                            ch.as_object_mut()
-                                .ok_or("INVALID_INPUT: Listener channel must be an object")?
-                                .insert("updated_at_ms".into(), json!(now));
-                            remote["updated_at_ms"] = json!(now);
-                            client.kv_save(string(row, "listener_id"), &remote, Some(revision))?;
-                        }
+        }
+        let renewal_due = elapsed.saturating_sub(last_renew) >= renewal_interval;
+        if !checked_remote || renewal_due {
+            if let (Some((client, claim)), Some((state, row))) = (renew, fence) {
+                let channel = string(claim, "channel_id");
+                let Some((mut remote, revision)) =
+                    client.kv_get(string(row, "listener_id"))?.filter(|(r, _)| {
+                        r.is_object()
+                            && r["state"] == "ACTIVE"
+                            && remote_matches_listener(r, row, channel)
+                            && r["channels"][channel]["state"] == "ACTIVE"
+                    })
+                else {
+                    client
+                        .with_current(|| state.fence_listener_for(row, "fenced_before_dispatch"))?;
+                    return Err("STALE_GENERATION: Remote listener changed during wake".into());
+                };
+                if renewal_due {
+                    if let Some(ch) = remote["channels"].get_mut(channel) {
+                        let now = client.server_now();
+                        ch.as_object_mut()
+                            .ok_or("INVALID_INPUT: Listener channel must be an object")?
+                            .insert("updated_at_ms".into(), json!(now));
+                        remote["updated_at_ms"] = json!(now);
+                        client.kv_save(string(row, "listener_id"), &remote, Some(revision))?;
                     }
                 }
-                checked_remote = true;
             }
-            if renewal_due {
-                if let Some((client, claim)) = renew {
-                    match client.rpc("signal_claim_dispatch", claim) {
-                        Ok(v) if v["claimed"] == true => {}
-                        Ok(v) => {
-                            if let (Some((state, row)), Some(acked)) =
-                                (fence, v["acked_ids"].as_array())
-                            {
-                                client.with_current_state(state, || {
-                                    state.acknowledge(
-                                        string(row, "hub"),
-                                        string(row, "listener_id"),
-                                        acked,
-                                        string(claim, "channel_id"),
-                                    )
-                                })?;
-                            }
-                            claim_loss = Some(if v["reason"] == "already_acked" {
-                                ClaimLoss::AlreadyAcked
-                            } else {
-                                ClaimLoss::AlreadyClaimed
-                            });
-                            return Err(
+            checked_remote = true;
+        }
+        if renewal_due {
+            if let Some((client, claim)) = renew {
+                match client.rpc("signal_claim_dispatch", claim) {
+                    Ok(v) if v["claimed"] == true => {}
+                    Ok(v) => {
+                        if let (Some((state, row)), Some(acked)) =
+                            (fence, v["acked_ids"].as_array())
+                        {
+                            client.with_current(|| {
+                                state.acknowledge(
+                                    string(row, "hub"),
+                                    string(row, "listener_id"),
+                                    acked,
+                                    string(claim, "channel_id"),
+                                )
+                            })?;
+                        }
+                        claim_loss = Some(if v["reason"] == "already_acked" {
+                            ClaimLoss::AlreadyAcked
+                        } else {
+                            ClaimLoss::AlreadyClaimed
+                        });
+                        return Err(
                             "Wake lease renewal lost; delivery is at-least-once under partition"
                                 .into(),
                         );
-                        }
-                        Err(_) => return Err(
+                    }
+                    Err(_) => {
+                        return Err(
                             "Wake lease renewal failed; delivery is at-least-once under partition"
                                 .into(),
-                        ),
+                        )
                     }
                 }
-                if let Some((state, row)) = fence {
-                    if let Some(batch) = row.get("wake_batch") {
-                        if let Some((client, _)) = renew {
-                            client.with_current_state(state, || {
-                                state.check_dispatch_in_flight(row, batch, true)
-                            })?;
-                        } else {
-                            state.check_dispatch_in_flight(row, batch, true)?;
-                        }
-                    }
-                }
-                last_renew = elapsed;
             }
-            Ok(())
-        };
+            if let Some((state, row)) = fence {
+                if let Some(batch) = row.get("wake_batch") {
+                    if let Some((client, _)) = renew {
+                        client.with_current(|| state.check_dispatch_in_flight(row, batch, true))?;
+                    } else {
+                        state.check_dispatch_in_flight(row, batch, true)?;
+                    }
+                }
+            }
+            last_renew = elapsed;
+        }
+        Ok(())
+    };
     // Validate ownership before spawning, as well as before every pipe operation.
     progress(Duration::ZERO).map_err(|message| WakeFailure {
         message,
@@ -231,7 +222,11 @@ pub fn poll_listener(
     {
         return Err("STALE_GENERATION: Listener authority changed".into());
     }
-    client.with_current_state(local, || local.isolate_stale_signals(row))?;
+    client.with_current(|| {
+        local
+            .db
+            .transaction(|db| isolate_foreign_work(db, &current_listener(db, hub, id)?))
+    })?;
     let name = format!("{}_{}", string(row, "host_id"), id);
     let added=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
     // A fallback response keeps its own clock observation, including time spent
@@ -259,9 +254,7 @@ pub fn poll_listener(
         if !remote_matches_listener(&remote, row, &channel)
             || remote["channels"][&channel]["state"] != "ACTIVE"
         {
-            client.with_current_state(local, || {
-                local.fence_listener_for(row, "fenced_before_dispatch")
-            })?;
+            client.with_current(|| local.fence_listener_for(row, "fenced_before_dispatch"))?;
             return Err("STALE_GENERATION: Human attachment superseded".into());
         }
         super::daemon::DaemonService::reconcile_human_scope(
@@ -280,9 +273,7 @@ pub fn poll_listener(
         if !remote_matches_listener(&remote, row, &channel)
             || remote["channels"][&channel]["state"] != "ACTIVE"
         {
-            client.with_current_state(local, || {
-                local.fence_listener_for(row, "fenced_before_dispatch")
-            })?;
+            client.with_current(|| local.fence_listener_for(row, "fenced_before_dispatch"))?;
             return Err("STALE_GENERATION: Listener attachment superseded".into());
         }
         None
@@ -309,7 +300,7 @@ pub fn poll_listener(
             .filter(|v| v.is_number())
             .or_else(|| signal.get("acked_at_ms"))
             .unwrap_or(&Value::Null);
-        let admitted = client.with_current_state(local, || {
+        let admitted = client.with_current(|| {
             local.admit(
                 hub,
                 row,
@@ -368,7 +359,7 @@ pub fn poll_listener(
         return Ok(());
     }
     // A losing channel retries after the remote claim lease, preserving unread state.
-    client.with_current_state(local, || local.restore_passive(hub, row))?;
+    client.with_current(|| local.restore_passive(hub, row))?;
     if string(row, "harness") == "human" {
         return Ok(());
     }
@@ -487,8 +478,7 @@ fn dispatch_listener(
     let hub = &client.name;
     let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
     let qualify = qualify_reply_ids(state_dir, hub);
-    let batch =
-        client.with_current_state(local, || local.claim_wake_batch_for(hub, row, qualify))?;
+    let batch = client.with_current(|| local.claim_wake_batch_for(hub, row, qualify))?;
     if batch.is_empty() {
         return Ok(());
     }
@@ -499,7 +489,7 @@ fn dispatch_listener(
     let claimed = match client.rpc("signal_claim_dispatch", &claim) {
         Ok(v) => v,
         Err(e) => {
-            client.with_current_state(local, || {
+            client.with_current(|| {
                 local
                     .finish_wake_batch(row, first, "RECEIVED", None, false, false, false, false)?;
                 local.schedule_wake_retry_for(row, 1500)
@@ -508,7 +498,7 @@ fn dispatch_listener(
         }
     };
     if claimed["claimed"] != true {
-        return client.with_current_state(local, || {
+        return client.with_current(|| {
             if let Some(acked) = claimed["acked_ids"].as_array() {
                 local.acknowledge(hub, id, acked, &channel)?;
             }
@@ -566,8 +556,8 @@ fn dispatch_listener(
         Some((local, &fenced)),
         renewal_interval,
     );
-    let commit_gate = client.commit_gate(local)?;
-    let commit = commit_gate
+    let commit = client
+        .commit_gate
         .lock()
         .map_err(|_| "STATE_ERROR: Local commit lock poisoned")?;
     client.check_current()?;
@@ -777,23 +767,16 @@ pub fn detach_channel_expected(
 }
 
 fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
-    qualify_reply_ids_with_options(
-        state_dir,
-        hub,
-        std::env::var("CITO_CONFIG_PATH").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-        std::env::var("CITO_HUB").ok().as_deref(),
-    )
-}
-fn qualify_reply_ids_with_options(
-    state_dir: &std::path::Path,
-    hub: &str,
-    config_path: Option<&str>,
-    home: Option<&str>,
-    default: Option<&str>,
-) -> bool {
-    let path = config_path
-        .and_then(|raw| crate::plugins::expand_home_dir(raw, "CITO_CONFIG_PATH", home).ok())
+    let path = std::env::var("CITO_CONFIG_PATH")
+        .ok()
+        .and_then(|raw| {
+            crate::plugins::expand_home_dir(
+                &raw,
+                "CITO_CONFIG_PATH",
+                std::env::var("HOME").ok().as_deref(),
+            )
+            .ok()
+        })
         .unwrap_or_else(|| state_dir.join("config.json"));
     let config = std::fs::read_to_string(path).ok();
     let Some((configured_default, hubs, _)) = config
@@ -804,10 +787,11 @@ fn qualify_reply_ids_with_options(
     };
     let enabled = hubs.values().filter(|h| h["enabled"] != false).count();
     let count = if enabled == 0 { hubs.len() } else { enabled };
-    let default = default
+    let default = std::env::var("CITO_HUB")
+        .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or(&configured_default);
-    count != 1 || !matches!(default, "local" | "default")
+        .unwrap_or(configured_default);
+    count != 1 || !matches!(default.as_str(), "local" | "default")
 }
 
 #[cfg(test)]

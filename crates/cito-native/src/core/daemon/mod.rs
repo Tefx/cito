@@ -4,7 +4,7 @@ use self::ui_ipc::{spawn_ui, UiChild, UiMailbox};
 use crate::core::{
     config::repair_default_hub,
     hub::HubEngine,
-    identity::{hash, listener_id, string},
+    identity::{listener_id, string},
     receiver::{detach_channel_expected, poll_listener},
     state::LocalState,
     transport::HubClient,
@@ -85,6 +85,13 @@ struct OidcRecovery {
     worker: thread::JoinHandle<Result<(String, Value), String>>,
 }
 
+#[derive(Default)]
+struct HubControl {
+    login: Option<Arc<InteractiveLogin>>,
+    recovery: Option<OidcRecovery>,
+    backoff: crate::support::RetryBackoff,
+}
+
 struct EndpointProbe {
     due: Instant,
     calm: u32,
@@ -152,7 +159,7 @@ impl std::ops::DerefMut for DaemonService {
 pub struct DaemonService {
     access: HubAccess,
     pub local: Arc<HubEngine>,
-    configured_hubs: HashSet<String>,
+    hub_controls: HashMap<String, HubControl>,
     events: Vec<thread::JoinHandle<()>>,
     receivers: HashMap<String, thread::JoinHandle<()>>,
     caller_cache: Mutex<HashMap<u64, Value>>,
@@ -161,7 +168,6 @@ pub struct DaemonService {
     session_activity: Option<super::session_activity::SessionActivity>,
     ui: Option<Arc<UiMailbox>>,
     ui_generation: u64,
-    logins: HashMap<String, Arc<InteractiveLogin>>,
     last_ui: Instant,
     closing: bool,
     purging: bool,
@@ -174,12 +180,9 @@ pub struct DaemonService {
     directory_request: u64,
     last_ui_revision: Mutex<Option<Value>>,
     last_ui_frame: Mutex<Option<Value>>,
-    oidc_recoveries: HashMap<String, OidcRecovery>,
-    auth_backoff: HashMap<String, crate::support::RetryBackoff>,
     ack_backoff: Arc<Mutex<HashMap<String, (Instant, crate::support::RetryBackoff)>>>,
     setup_serial: Arc<Mutex<()>>,
     retired_auth: Vec<OidcRecovery>,
-    last_app_action: HashMap<String, String>,
     setup_inspections: HashMap<String, SetupInspection>,
     setup_completion: Arc<(Mutex<u64>, std::sync::Condvar)>,
     host_hub_error: Option<HostHubError>,
@@ -519,7 +522,7 @@ impl DaemonService {
                 host_id,
             },
             local,
-            configured_hubs: HashSet::new(),
+            hub_controls: HashMap::new(),
             events: Vec::new(),
             receivers: HashMap::new(),
             caller_cache: Mutex::new(HashMap::new()),
@@ -530,7 +533,6 @@ impl DaemonService {
             )),
             ui: None,
             ui_generation: 0,
-            logins: HashMap::new(),
             last_ui: Instant::now() - Duration::from_secs(1),
             closing: false,
             purging: false,
@@ -543,12 +545,9 @@ impl DaemonService {
             directory_request: 0,
             last_ui_revision: Mutex::new(None),
             last_ui_frame: Mutex::new(None),
-            oidc_recoveries: HashMap::new(),
-            auth_backoff: HashMap::new(),
             ack_backoff: Arc::default(),
             setup_serial: Arc::default(),
             retired_auth: Vec::new(),
-            last_app_action: HashMap::new(),
             // The first poll or on-demand refresh starts inspections after publication.
             setup_inspections: plugins
                 .agent_plugins()
@@ -674,24 +673,25 @@ impl DaemonService {
             .unwrap_or(default);
         // Only a previously configured profile proves removal. Unconfigured
         // legacy recovery rows are retained; disabled profiles remain configured.
-        let configured_hubs: HashSet<String> = hubs.keys().cloned().collect();
         let removed: Vec<_> = self
-            .configured_hubs
-            .difference(&configured_hubs)
+            .hub_controls
+            .keys()
+            .filter(|name| !hubs.contains_key(*name))
             .cloned()
             .collect();
         for name in removed {
             self.purge_hub_state(&name)?;
         }
-        self.configured_hubs = configured_hubs;
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
             crate::plugins::apply_hub_url_override(&name, &self.config.default_hub, &mut hub)?;
+            let control = self.hub_controls.entry(name.clone()).or_default();
             if hub["enabled"] == false {
                 continue;
             }
-            if self.logins.contains_key(&name)
-                && self.slots.get(&name).is_some_and(|old| old.config == hub)
+            let access = &self.access;
+            if control.login.is_some()
+                && access.slots.get(&name).is_some_and(|old| old.config == hub)
             {
                 keep.push(name);
                 continue;
@@ -712,28 +712,17 @@ impl DaemonService {
             if hub["url"].is_null() {
                 hub["url"] = json!("local://");
             }
-            let user = self.config.effective_user(&name)?.to_ascii_lowercase();
+            let user = access.config.effective_user(&name)?.to_ascii_lowercase();
             keep.push(name.clone());
-            let rejected_hash = self
-                .slots
-                .get(&name)
-                .filter(|old| old.config == hub)
-                .and_then(|old| {
-                    old.rejected_bearer
-                        .lock()
-                        .ok()
-                        .and_then(|v| v.clone())
-                        .or_else(|| old.auth_rejected_hash.clone())
-                        .or_else(|| {
-                            old.status
-                                .lock()
-                                .ok()
-                                .filter(|status| status.as_str() == "auth_required")
-                                .and_then(|_| old.bearer.as_deref().map(hash))
-                        })
-                });
+            let old_slot = access.slots.get(&name);
+            let rejected_hash = old_slot.filter(|old| old.config == hub).and_then(|old| {
+                old.rejected_bearer
+                    .lock()
+                    .ok()
+                    .and_then(|hash| hash.clone())
+            });
             let mut recovered = None;
-            if let Some(pending) = self.oidc_recoveries.remove(&name) {
+            if let Some(pending) = control.recovery.take() {
                 if pending.config != hub || pending.rejected != rejected_hash {
                     pending.cancelled.store(true, Ordering::SeqCst);
                     self.retired_auth.push(pending);
@@ -742,8 +731,8 @@ impl DaemonService {
                         Err("AUTH_UNAVAILABLE: recovery worker panicked".into())
                     }));
                 } else {
-                    self.oidc_recoveries.insert(name.clone(), pending);
-                    if self.slots.get(&name).is_some_and(|old| {
+                    control.recovery = Some(pending);
+                    if old_slot.is_some_and(|old| {
                         old.config == hub
                             && rejected_hash.is_none()
                             && old.expires_at > now_ms() / 1000
@@ -753,7 +742,7 @@ impl DaemonService {
                 }
             }
             if recovered.is_none()
-                && self.slots.get(&name).is_some_and(|old| {
+                && old_slot.is_some_and(|old| {
                     old.config == hub
                         && (auth == "oidc" || string(&old.identity, "owner_user") == user)
                         && (auth != "oidc"
@@ -766,8 +755,7 @@ impl DaemonService {
             {
                 continue;
             }
-            let registration = self.state.registration_lock(&name)?;
-            let mut previous = self.slots.get(&name).cloned();
+            let mut previous = old_slot.cloned();
             let mut retired_rows = Vec::new();
             if let Some(old) = &previous {
                 let changed = old.config["url"] != hub["url"]
@@ -777,14 +765,14 @@ impl DaemonService {
                             &format!("none#{user}"),
                         ));
                 if changed {
-                    for row in self
+                    for row in access
                         .state
                         .active()?
                         .into_iter()
                         .filter(|r| r["hub"] == name)
                     {
                         if old.local.is_some() {
-                            let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
+                            let channel = format!("{}:{}", access.host_id, string(&row, "harness"));
                             let _ = detach_channel_expected(
                                 old,
                                 string(&row, "listener_id"),
@@ -794,7 +782,8 @@ impl DaemonService {
                         } else {
                             retired_rows.push(row.clone());
                         }
-                        self.state
+                        access
+                            .state
                             .fence_listener_for(&row, "fenced_before_dispatch")?;
                     }
                 }
@@ -809,10 +798,9 @@ impl DaemonService {
                     None
                 },
             );
-            client.registration = registration;
             if auth == "oidc" {
-                if recovered.is_none() && !self.oidc_recoveries.contains_key(&name) {
-                    let dir = self.config.state_dir.clone();
+                if recovered.is_none() && control.recovery.is_none() {
+                    let dir = self.access.config.state_dir.clone();
                     let hub_name = name.clone();
                     let config = hub.clone();
                     let rejected = rejected_hash.clone();
@@ -825,27 +813,23 @@ impl DaemonService {
                             &config,
                             rejected.as_deref(),
                             false,
-                            &|| cancel.load(Ordering::SeqCst) || shutdown_requested(),
-                            Some(cancel.fd()?),
+                            false,
+                            (
+                                &|| cancel.load(Ordering::SeqCst) || shutdown_requested(),
+                                Some(cancel.fd()?),
+                            ),
                         )
                     });
-                    self.oidc_recoveries.insert(
-                        name.clone(),
-                        OidcRecovery {
-                            config: hub.clone(),
-                            rejected: rejected_hash.clone(),
-                            cancelled,
-                            worker,
-                        },
-                    );
+                    control.recovery = Some(OidcRecovery {
+                        config: hub.clone(),
+                        rejected: rejected_hash.clone(),
+                        cancelled,
+                        worker,
+                    });
                 }
                 let failed = recovered.as_ref().is_some_and(|result| result.is_err());
                 let retry_delay = if failed {
-                    self.auth_backoff
-                        .entry(name.clone())
-                        .or_default()
-                        .failed()
-                        .as_millis() as u64
+                    control.backoff.failed().as_millis() as u64
                 } else {
                     1000
                 };
@@ -867,7 +851,7 @@ impl DaemonService {
                 match recovered.unwrap_or_else(|| Err("AUTH_UNAVAILABLE: recovery pending".into()))
                 {
                     Ok((token, identity)) => {
-                        self.auth_backoff.remove(&name);
+                        control.backoff.reset();
                         client.expires_at = jwt_exp(&token).unwrap_or(0);
                         client.bearer = Some(token);
                         client.identity = identity;
@@ -876,7 +860,10 @@ impl DaemonService {
                         client.bearer = None;
                         client.expires_at = 0;
                         client.auth_retry_at = now_ms() + retry_delay;
-                        client.auth_rejected_hash = rejected_hash.clone();
+                        *client
+                            .rejected_bearer
+                            .lock()
+                            .map_err(|_| "Rejected bearer lock poisoned")? = rejected_hash.clone();
                         if let Some(identity) =
                             super::login::offline_identity(&self.config.state_dir, &name, &hub)
                         {
@@ -902,7 +889,7 @@ impl DaemonService {
                 if retained {
                     client.inherit_authority(old);
                 } else {
-                    old.close_for_state(&self.state)?;
+                    old.close_and_drain()?;
                     // A failed fence must leave the replacement eligible for retry.
                     self.slots.remove(&name);
                 }
@@ -959,14 +946,11 @@ impl DaemonService {
             }
             self.slots.insert(name.clone(), client);
         }
-        let obsolete: Vec<_> = self
-            .oidc_recoveries
-            .keys()
-            .filter(|name| !keep.contains(name))
-            .cloned()
-            .collect();
-        for name in obsolete {
-            if let Some(pending) = self.oidc_recoveries.remove(&name) {
+        for (name, control) in &mut self.hub_controls {
+            if keep.contains(name) {
+                continue;
+            }
+            if let Some(pending) = control.recovery.take() {
                 pending.cancelled.store(true, Ordering::SeqCst);
                 self.retired_auth.push(pending);
             }
@@ -980,7 +964,7 @@ impl DaemonService {
         for name in removed {
             self.channel_inventories.remove(&name);
             if let Some(slot) = self.slots.remove(&name) {
-                slot.close_for_state(&self.state)?;
+                slot.close_and_drain()?;
             }
         }
         if self
@@ -1114,7 +1098,7 @@ impl DaemonService {
 
     fn ensure_human_nodes(&mut self) -> Result<(), String> {
         for (slot_name, client) in self.slots.clone() {
-            let registration = client.registration.clone();
+            let registration = self.state.registration_lock(&slot_name)?;
             let _local_guard = if client.local.is_some() {
                 let Some(guard) = try_registration(&registration)? else {
                     continue;
@@ -1353,7 +1337,7 @@ impl DaemonService {
                         .and_then(|record| record["channels"][&channel]["updated_at_ms"].as_u64());
                     if updated.is_none_or(|updated| slot.server_now().saturating_sub(updated) >= 20_000) {
                     if let Err(error) = slot.human_request("human_device_heartbeat",&json!({"node_id":row["listener_id"],"channel_id":channel,"binding_generation":row["binding_generation"],"owner_token":row["owner_token"]})) {
-                        if error.starts_with("STALE_GENERATION:") { let _ = slot.with_current_state(&state,||state.fence_listener_for(&row,"fenced_before_dispatch")); }
+                        if error.starts_with("STALE_GENERATION:") { let _ = slot.with_current(||state.fence_listener_for(&row,"fenced_before_dispatch")); }
                         return;
                     }
                     }
@@ -1403,9 +1387,7 @@ impl DaemonService {
             if !super::registration::remote_matches_listener(&remote, &row, channel)
                 || remote["channels"][channel]["state"] != "ACTIVE"
             {
-                slot.with_current_state(state, || {
-                    state.fence_listener_for(&row, "fenced_before_dispatch")
-                })?;
+                slot.with_current(|| state.fence_listener_for(&row, "fenced_before_dispatch"))?;
                 return Ok(false);
             }
             state.db.transaction(|db| {
@@ -1712,13 +1694,6 @@ impl DaemonService {
                 continue;
             };
             if self
-                .last_app_action
-                .get(harness)
-                .is_some_and(|action| action == "disconnect")
-            {
-                continue;
-            }
-            if self
                 .setup_inspections
                 .get(harness)
                 .is_none_or(|e| e.worker.is_some())
@@ -1833,7 +1808,11 @@ impl DaemonService {
                     if slot.local.is_none() {
                         args["_expected_revision"] = candidate["discovery_revision"].clone();
                         remote.entry(hub.clone()).or_default().push((args, caller));
-                    } else if let Some(_guard) = try_registration(&slot.registration)? {
+                    } else {
+                        let lock = self.state.registration_lock(hub)?;
+                        let Some(_guard) = try_registration(&lock)? else {
+                            continue;
+                        };
                         match super::registration::register_endpoint_locked(
                             &self.state,
                             slot,
@@ -1907,7 +1886,9 @@ impl DaemonService {
             .agent_plugins()
             .into_iter()
             .filter(|plugin| {
-                self.last_app_action.get(&plugin.id).map(String::as_str) != Some("disconnect")
+                self.setup_inspections
+                    .get(&plugin.id)
+                    .is_some_and(|e| e.worker.is_none())
                     && self
                         .inspect_setup(plugin)
                         .is_ok_and(|(_, configured, _)| configured)
@@ -2055,15 +2036,27 @@ impl DaemonService {
     fn cancel_logins(&self) {
         // Wake callback and lock waits before joining workers. Do not acquire
         // publication locks here: login workers release them before re-entering service.
-        for attempt in self.logins.values() {
+        for attempt in self.hub_controls.values().filter_map(|c| c.login.as_ref()) {
             attempt.cancelled.store(true, Ordering::SeqCst);
         }
         for pending in self
-            .oidc_recoveries
+            .hub_controls
             .values()
+            .filter_map(|c| c.recovery.as_ref())
             .chain(self.retired_auth.iter())
         {
             pending.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn join_recoveries(&mut self) {
+        for pending in self
+            .hub_controls
+            .values_mut()
+            .filter_map(|c| c.recovery.take())
+            .chain(self.retired_auth.drain(..))
+        {
+            let _ = pending.worker.join();
         }
     }
 
@@ -2075,16 +2068,9 @@ impl DaemonService {
                 let _ = worker.join();
             }
         }
-        for pending in self
-            .oidc_recoveries
-            .drain()
-            .map(|(_, p)| p)
-            .chain(self.retired_auth.drain(..))
-        {
-            let _ = pending.worker.join();
-        }
+        self.join_recoveries();
         for slot in self.slots.values() {
-            let _ = slot.close_for_state(&self.state);
+            let _ = slot.close_and_drain();
         }
         for (_, receiver) in self.receivers.drain() {
             let _ = receiver.join();

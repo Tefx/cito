@@ -110,10 +110,7 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     }
     let command = process_command(pid)?;
     if has_harness_ancestor(pid, |ancestor, command| {
-        let path = state(req).join(format!("sockets/pi-pid-{ancestor}.sock"));
-        is_agent_harness(command)
-            || (path.exists()
-                && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true))
+        is_agent_harness(command) || live_bridge(req, "pi", ancestor)
     }) {
         return Ok(false);
     }
@@ -437,7 +434,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ));
             }
             if cs.is_empty() {
-                match cached_caller(req, "pi", None, matches_process, |_| Ok(())) {
+                match cached_caller(req, "pi", None, None, matches_process, |_| Ok(())) {
                     Ok(Some(c)) => {
                         if !allow_process_only(req)
                             && !pid(&c).is_some_and(|p| {
@@ -474,11 +471,15 @@ pub fn handle(req: &Value) -> Result<Value> {
             let (p, v) = &cs[0];
             let c = as_caller(req, *p, v);
             if !endpoint_responded
-                && has_generic_session_mismatch(req, raw_str_at(v, "session_id").unwrap_or(""))
+                && has_generic_session_mismatch(
+                    req,
+                    raw_str_at(v, "session_id").unwrap_or(""),
+                    None,
+                )
             {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
             }
-            if let Err(e) = verify(&c, req) {
+            if let Err(e) = verify(&c, req, None) {
                 return Ok(error("INVALID_INPUT", e));
             }
             let c = remember_process(c);
@@ -547,7 +548,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     req,
                     &path,
                     p,
-                    req["session_id"].as_str().unwrap_or(""),
+                    raw_str_at(req, "session_id").unwrap_or(""),
                     matches_process,
                 );
             }

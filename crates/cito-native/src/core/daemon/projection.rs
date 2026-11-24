@@ -252,9 +252,9 @@ impl DaemonService {
             .collect()
     }
     pub(super) fn settings_for_hub(&self, channel_hub: &str) -> Value {
-        self.settings_sample(channel_hub, &self.hub_samples())
+        self.settings_snapshot(channel_hub, &self.hub_samples())
     }
-    fn settings_apps(&self) -> Vec<Value> {
+    fn app_settings_snapshot(&self) -> Vec<Value> {
         self.plugins.agent_plugins().into_iter().map(|p| {
             let inspection = self.inspect_setup(p);
             if let Err(error) = &inspection {
@@ -265,39 +265,30 @@ impl DaemonService {
             let configured=configured_in_host && !repair;
             let detail=if repair { "Staged Cito files missing — click Repair to restore" }
                 else if configured { p.post_setup_hint.as_deref().unwrap_or("Connected and ready") }
-                else if self.last_app_action.get(&p.id).map(String::as_str)==Some("disconnect") { p.post_disconnect_hint.as_deref().unwrap_or("Disconnected · Click Set Up to reconnect") }
                 else if installed { "Click Set Up to connect" } else { "Not detected; Set Up to pre-configure" };
             json!({"id":p.id,"display_name":p.display_name,"tier":p.tier,"installed":installed,"configured":configured,"paths":paths,
                 "status":if repair{"repair_needed"}else if configured{"ready"}else{"not_configured"},"detail":detail})
         }).collect()
     }
 
-    fn settings_sample(&self, channel_hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
-        let apps = self.settings_apps();
-        let mut hubs = self.enabled_hubs(samples);
-        let mut channels = Vec::new();
-        let mut channel_inventory_error: Option<String> = None;
-        if let Some(slot) = self.slots.get(channel_hub) {
-            let inventory = if slot.local.is_some() {
+    fn channel_settings_snapshot(
+        &self,
+        hub: &str,
+        paused: Option<bool>,
+    ) -> (Vec<Value>, Option<String>) {
+        let inventory = if let Some(slot) = self.slots.get(hub) {
+            if slot.local.is_some() {
                 slot.rpc("human_channels_list", &json!({}))
                     .unwrap_or_else(|e| json!({"status":"error","detail":e}))
             } else {
                 self.channel_inventories
-                    .get(channel_hub)
+                    .get(hub)
                     .filter(|entry| entry.identity == remote_channels_identity(slot))
                     .and_then(|entry| entry.cached.lock().ok().map(|cached| cached.value.clone()))
                     .unwrap_or_else(|| json!({"status":"loading"}))
-            };
-            channels = inventory["channels"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            if inventory["status"] == "error" {
-                channel_inventory_error = Some(string(&inventory, "detail").to_owned());
             }
-        } else if channel_hub == "local" {
-            let inventory = self
-                .local
+        } else if hub == "local" {
+            self.local
                 .rpc(
                     "human_channels_list",
                     &json!({}),
@@ -308,24 +299,29 @@ impl DaemonService {
                             .unwrap_or_else(|_| "local".into()),
                     )),
                 )
-                .unwrap_or_else(|e| json!({"status":"error","detail":e}));
-            channels = inventory["channels"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            if inventory["status"] == "error" {
-                channel_inventory_error = Some(string(&inventory, "detail").to_owned());
-            }
-        }
-        let channel_human = hubs
-            .get(channel_hub)
+                .unwrap_or_else(|e| json!({"status":"error","detail":e}))
+        } else {
+            return (Vec::new(), None);
+        };
+        let mut channels = inventory["channels"]
+            .as_array()
             .cloned()
-            .unwrap_or_else(|| self.human_projection(channel_hub));
-        if let Some(inbox_paused) = channel_human["human_paused"].as_bool() {
+            .unwrap_or_default();
+        if let Some(inbox_paused) = paused {
             for channel in &mut channels {
                 super::channels::overlay_inbox_state(channel, inbox_paused);
             }
         }
+        let error =
+            (inventory["status"] == "error").then(|| string(&inventory, "detail").to_owned());
+        (channels, error)
+    }
+
+    fn settings_snapshot(&self, hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
+        let apps = self.app_settings_snapshot();
+        let mut hubs = self.enabled_hubs(samples);
+        let paused = hubs.get(hub).and_then(|row| row["human_paused"].as_bool());
+        let (channels, channel_inventory_error) = self.channel_settings_snapshot(hub, paused);
         let raw = self.raw_config().unwrap_or_else(|_| json!({}));
         let configured = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()));
         if let Ok((_, configured, _)) = &configured {
@@ -388,7 +384,7 @@ impl DaemonService {
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":running,"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.host_hub_error.as_ref().map(super::HostHubError::message)},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
+        json!({"apps":apps,"settings_hub":hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":running,"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.host_hub_error.as_ref().map(super::HostHubError::message)},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
     }
 
     pub(super) fn display_address(&self, hub: &str, row: &Value) -> String {
@@ -508,7 +504,7 @@ impl DaemonService {
         &self,
         samples: &HashMap<&str, HubSample>,
     ) -> Result<Value, String> {
-        let settings = self.settings_sample(self.selected_settings_hub(), samples);
+        let settings = self.settings_snapshot(self.selected_settings_hub(), samples);
         let (activity, activity_total, activity_unread) = self
             .state
             .query_activity(&self.activity_filter, &self.activity_query)?;
@@ -516,8 +512,7 @@ impl DaemonService {
             if self.activity_filter == "all" && self.activity_query.trim().is_empty() {
                 (activity_total, activity_unread)
             } else {
-                let (_, total, unread) = self.state.query_activity("all", "")?;
-                (total, unread)
+                self.state.activity_counts()?
             };
         let addresses = self.sample_addresses(samples);
         let sessions = self.local_sessions(samples, &addresses)?;
@@ -533,7 +528,7 @@ impl DaemonService {
             .filter(|hub| self.slots.contains_key(string(hub, "name")))
             .collect();
         Ok(
-            json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"available":available,"discovery":discovery,"my_remote_listeners":remote,"activity":activity,"activity_total":activity_total,"activity_all_total":activity_all_total,"activity_has_any":activity_all_total>0,"activity_unread_count":activity_unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":unread,"total_online":online,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),
+            json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"available":available,"discovery":discovery,"my_remote_listeners":remote,"activity":activity,"activity_total":activity_total,"activity_has_any":activity_all_total>0,"activity_unread_count":activity_unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":unread,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),
         )
     }
 
@@ -830,7 +825,6 @@ impl DaemonService {
             .map(|(id, entry)| (id, &entry.value))
             .collect();
         Ok(json!({"inspections": inspections, "state": [
-            self.last_app_action,
             self.host_server.as_ref().is_some_and(HubServer::is_running),
             inventories,
             self.last_hub_errors,
@@ -872,14 +866,14 @@ impl DaemonService {
         let addresses = self.sample_addresses(&samples);
         let sessions = self.local_sessions(&samples, &addresses)?;
         if inspections_changed {
-            let (available, discovery) = self.discovery_rows(&sessions, &self.settings_apps())?;
+            let (available, discovery) =
+                self.discovery_rows(&sessions, &self.app_settings_snapshot())?;
             frame["available"] = json!(available);
             frame["discovery"] = json!(discovery);
         }
         let (total, unread) = self.state.activity_counts()?;
         frame["unread_count"] = json!(unread);
         frame["activity_has_any"] = json!(total > 0);
-        frame["activity_all_total"] = json!(total);
         frame["status"] = json!(if sessions.is_empty() {
             "idle"
         } else {
@@ -887,7 +881,6 @@ impl DaemonService {
         });
         let (remote, online) = self.remote_listeners(&samples, &sessions, &addresses);
         frame["my_remote_listeners"] = json!(remote);
-        frame["total_online"] = json!(online);
         frame["directory_online_count"] = json!(online);
         frame["listeners"] = json!(sessions);
         let hubs: Vec<_> = self.enabled_hubs(&samples).into_values().collect();

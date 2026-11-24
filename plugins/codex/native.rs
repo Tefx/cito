@@ -579,26 +579,17 @@ fn row_caller(req: &Value, r: &Value) -> Value {
     let cwd = str_at(r, "cwd")
         .or_else(|| str_at(req, "cwd"))
         .unwrap_or("");
+    let sid = raw_str_at(r, "id").unwrap_or("");
     let title = str_at(r, "name").or_else(|| str_at(r, "title"));
     if r.get("git_branch").is_some() || r.get("git_origin_url").is_some() {
         // SQLite metadata is authoritative, including absent values. Do not
         // launch git once per historical thread during discovery.
-        return json!({"harness":"codex","session_id":r["id"],"cwd":cwd,
+        return json!({"harness":"codex","session_id":sid,"cwd":cwd,
             "endpoint_pid":pid(req),"branch":r["git_branch"],
             "repo":str_at(r,"git_origin_url").and_then(normalize_repo),
             "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
     }
-    caller(
-        req,
-        "codex",
-        r["id"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(""),
-        cwd,
-        pid(req),
-        title,
-    )
+    caller(req, "codex", sid, cwd, pid(req), title)
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
@@ -672,9 +663,14 @@ pub fn handle(req: &Value) -> Result<Value> {
                 || (explicit.is_none()
                     && ((!transport_pid && str_at(req, "cli_cmd").is_none()) || all.is_empty()));
             if needs_cached_pid && (!transport_pid || req["cached_caller"].is_object()) {
-                match cached_caller(req, "codex", explicit.as_deref(), matches_process, |_| {
-                    Ok(())
-                }) {
+                match cached_caller(
+                    req,
+                    "codex",
+                    explicit.as_deref(),
+                    None,
+                    matches_process,
+                    |_| Ok(()),
+                ) {
                     Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),
                     Ok(None) => {}
@@ -726,11 +722,15 @@ pub fn handle(req: &Value) -> Result<Value> {
             // A generic session fence cannot turn an inferred thread into an
             // authoritative cross-provider conflict. Let other providers resolve it.
             if explicit.is_none()
-                && has_generic_session_mismatch(req, c["session_id"].as_str().unwrap_or(""))
+                && has_generic_session_mismatch(
+                    req,
+                    raw_str_at(&c, "session_id").unwrap_or(""),
+                    None,
+                )
             {
                 return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
             }
-            if let Err(e) = verify(&c, req) {
+            if let Err(e) = verify(&c, req, None) {
                 return Ok(error("INVALID_INPUT", e));
             }
             Ok(json!({"ok":true,"caller":remember_process(c)}))

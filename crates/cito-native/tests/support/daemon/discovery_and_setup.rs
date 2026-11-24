@@ -44,7 +44,7 @@ fn paused_cli_and_mcp_status_discover_sessions_started_after_idle() {
     assert!(started.elapsed() < std::time::Duration::from_millis(1500));
 
     let options_path = provider.join("options.json");
-    let mut options: Value = serde_json::from_slice(&fs::read(&options_path).unwrap()).unwrap();
+    let mut options: Value = read_json(&options_path);
     options["discover_delay_ms"] = json!(2000);
     fs::write(options_path, options.to_string()).unwrap();
     let resolve_calls = || {
@@ -88,7 +88,7 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         &[script.to_str().unwrap()],
         &[("FIXTURE_HARNESS", "pi")],
     );
-    wait(|| f.frames(endpoint).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(endpoint, "ready").next().is_some());
     assert_eq!(
         f.plugin(PI, json!({"op":"discover_sessions"}))["sessions"]
             .as_array()
@@ -97,14 +97,14 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         1
     );
     f.daemon(&[]);
-    let available = || f.action(json!({"op":"get_snapshot"})).1["available"].clone();
+    let available = || f.snapshot()["available"].clone();
     assert_eq!(available(), json!([]));
-    assert!(!f.action(json!({"op":"get_snapshot"})).1["discovery"]
+    assert!(!f.snapshot()["discovery"]
         .as_array()
         .unwrap()
         .iter()
         .any(|r| r["harness"] == "pi"));
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    f.action_ok(json!({"op":"setup_apply","harness":"pi"}));
     let candidates = available();
     let candidate = candidates
         .as_array()
@@ -114,24 +114,20 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         .expect("fast discovery must be visible on the first snapshot")
         .clone();
     assert!(candidate["endpoint_pid"].is_number());
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert_eq!(snapshot["hubs"][0]["auto_listen"], false);
     // A different principal's pause must not suppress this principal's enrollment.
     let db = f.db("state.sqlite");
     db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(\'local\',\'c_0123456789abcdef\',\'none#bob\',\'bob\',\'other-host\',\'other-host\',\'pi\',?,\'/tmp\',\'Other session\',\'\',\'self\',\'UNLISTENED\')", &[candidate["session_id"].clone()]).unwrap();
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":true}));
     wait(|| {
-        f.action(json!({"op":"get_snapshot"})).1["listeners"]
+        f.snapshot()["listeners"]
             .as_array()
             .unwrap()
             .iter()
             .any(|v| v["harness"] == "pi" && v["scope"] == "workspace")
     });
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert_eq!(snapshot["hubs"][0]["auto_listen"], true);
     assert_eq!(snapshot["settings"]["hubs"][0]["auto_listen"], true);
     assert!(
@@ -147,36 +143,25 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         &[],
     )
     .unwrap();
-    let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let saved: Value = read_json(&f.config);
     assert_eq!(saved["hubs"]["local"]["autoListen"], true);
-    assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"pi","session_id":candidate["session_id"]})).0, 200);
-    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    f.action_ok(json!({"op":"unlisten_session","hub":"local","harness":"pi","session_id":candidate["session_id"]}));
+    f.action_ok(json!({"op":"refresh_available"}));
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE harness='pi'")[0]["status"],
         "UNLISTENED"
     );
-    assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
-        true
-    );
+    assert_eq!(f.snapshot()["hubs"][0]["auto_listen"], true);
     assert_eq!(
         f.rows("SELECT user_stopped FROM local_listeners WHERE harness='pi'")[0]["user_stopped"],
         1
     );
     // Re-enabling requests fresh discovery before restoring agent enrollment,
     // while preserving the independent Human pause on the same Hub.
-    assert_eq!(
-        f.action(
-            json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
-        )
-        .0,
-        200
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"}),
     );
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":true}));
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE harness='human'")[0]["status"],
         "UNLISTENED"
@@ -184,30 +169,20 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     wait(|| {
         f.rows("SELECT status FROM local_listeners WHERE harness=\'pi\'")[0]["status"] == "ACTIVE"
     });
-    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
-    assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
-        false
-    );
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"setup_remove_app","harness":"pi"})).0,
-        200
-    );
+    f.action_ok(json!({"op":"unlisten_all"}));
+    assert_eq!(f.snapshot()["hubs"][0]["auto_listen"], false);
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":true}));
+    f.action_ok(json!({"op":"setup_remove_app","harness":"pi"}));
     assert_eq!(available(), json!([]));
     wait(|| {
-        !f.action(json!({"op":"get_snapshot"})).1["discovery"]
+        !f.snapshot()["discovery"]
             .as_array()
             .unwrap()
             .iter()
             .any(|r| r["harness"] == "pi")
     });
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
-    assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    f.action_ok(json!({"op":"setup_apply","harness":"pi"}));
+    f.action_ok(json!({"op":"setup_disconnect_all"}));
     assert_eq!(available(), json!([]));
 }
 
@@ -248,20 +223,12 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
     let pinned = f
         .rows("SELECT * FROM local_listeners WHERE harness='codex' AND session_id='pinned'")[0]
         .clone();
-    assert_eq!(f.action(json!({"op":"set_listen_mode","hub":"local","listener_id":pinned["listener_id"],"listen_mode":"manual"})).0, 200);
-    assert_eq!(
-        f.action(
-            json!({"op":"unlisten_session","hub":"local","harness":"codex","session_id":"stopped"})
-        )
-        .0,
-        200
+    f.action_ok(json!({"op":"set_listen_mode","hub":"local","listener_id":pinned["listener_id"],"listen_mode":"manual"}));
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"local","harness":"codex","session_id":"stopped"}),
     );
     // Integration close/reopen is deterministic even with unrelated host providers.
-    assert_eq!(
-        f.action(json!({"op":"setup_remove_app","harness":"codex"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_remove_app","harness":"codex"}));
     f.stop(process);
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
@@ -291,11 +258,8 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
         .unwrap()
         .iter()
         .all(|r| r["session_id"].as_str().unwrap().starts_with("menu-")));
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"codex"})).0,
-        200
-    );
-    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    f.action_ok(json!({"op":"setup_apply","harness":"codex"}));
+    f.action_ok(json!({"op":"refresh_available"}));
     wait(|| {
         f.rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
             .len()
@@ -326,7 +290,7 @@ fn cli_disable_stops_active_listeners_and_invalidates_cached_discovery() {
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
     let options = f.state.join("plugins/fixture/options.json");
-    let mut config: Value = serde_json::from_str(&fs::read_to_string(&options).unwrap()).unwrap();
+    let mut config: Value = read_json(&options);
     config["configured"] = json!(false);
     fs::write(&options, config.to_string()).unwrap();
     let (ok, out, error) = f.command(NATIVE, &["setup", "--disable", "fixture", "--json"], "");
@@ -334,7 +298,7 @@ fn cli_disable_stops_active_listeners_and_invalidates_cached_discovery() {
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
-    assert!(!f.action(json!({"op":"get_snapshot"})).1["available"]
+    assert!(!f.snapshot()["available"]
         .as_array()
         .unwrap()
         .iter()
@@ -370,7 +334,7 @@ fn daemon_plugins_strip_inherited_caller_identity_but_honor_explicit_request_env
             .collect::<Vec<_>>()
     };
     for op in ["setup_apply", "setup_remove_app"] {
-        assert_eq!(f.action(json!({"op":op,"harness":"fixture"})).0, 200);
+        f.action_ok(json!({"op":op,"harness":"fixture"}));
     }
     let calls = records();
     for op in ["setup_inspect", "setup_apply", "setup_remove"] {
@@ -506,25 +470,18 @@ fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     let initial = count();
     assert_eq!(initial, 1);
     for _ in 0..3 {
-        assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+        f.action_ok(json!({"op":"get_snapshot"}));
     }
     assert_eq!(count(), initial, "Snapshots reuse setup inspection");
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_apply","harness":"fixture"}));
     assert_eq!(count(), initial + 1);
-    assert_eq!(
-        f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_remove_app","harness":"fixture"}));
     assert_eq!(count(), initial + 2);
     let db = f.db("state.sqlite");
     db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) SELECT 'work',listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,'UNLISTENED','https://hub.example.com' FROM local_listeners WHERE hub='local' AND harness='human'",&[]).unwrap();
     db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) SELECT 'work','pending',listener_id,1,0,'bob','laptop','','Keep','now',9999999999999,'STORED_PASSIVE' FROM local_listeners WHERE hub='work'; INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,'pending','device:human',1,hub_url,principal_id FROM local_listeners WHERE hub='work'; INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) SELECT hub,listener_id,hub_url FROM local_listeners WHERE hub='work'",&[]).unwrap();
     fs::write(f.state.join("oidc-token-work.json"), "retained credential").unwrap();
-    assert_eq!(f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"cloud","url":"https://hub.example.com","enabled":false})).0,200);
+    f.action_ok(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"cloud","url":"https://hub.example.com","enabled":false}));
     for table in [
         "local_listeners",
         "local_signals",
@@ -552,7 +509,7 @@ fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     let failed = f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"cloud","name":"blocked","url":"https://hub.example.com","enabled":false}));
     assert_eq!(failed.0, 400);
     assert!(failed.1.to_string().contains("injected rename failure"));
-    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let config: Value = read_json(&f.config);
     assert!(config["hubs"]["cloud"].is_object());
     assert!(config["hubs"].get("blocked").is_none());
     assert!(f.state.join("oidc-token-cloud.json").exists());
@@ -575,8 +532,7 @@ fn setup_refresh_preserves_cached_settings_without_blocking_hub_or_mcp_and_fence
     let options_path = f.state.join("plugins/fixture/options.json");
     let calls_path = f.state.join("plugins/fixture/calls.jsonl");
     let gate = f.dir.join("release-setup");
-    let mut options: Value =
-        serde_json::from_str(&fs::read_to_string(&options_path).unwrap()).unwrap();
+    let mut options: Value = read_json(&options_path);
     options["configured"] = json!(false);
     options["setup_gate"] = json!(gate);
     fs::write(&options_path, options.to_string()).unwrap();
@@ -636,7 +592,7 @@ fn setup_refresh_preserves_cached_settings_without_blocking_hub_or_mcp_and_fence
         count("setup_inspect") >= 3,
         "A superseded inspection must refresh at the current generation"
     );
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     assert_eq!(
         snapshot["settings"]["apps"]
             .as_array()
@@ -683,20 +639,16 @@ print(json.dumps(reply))
         true
     );
     wait(|| dir.join("old-badge").exists());
-    assert!(f.action(json!({"op":"get_snapshot"})).1["available"]
+    assert!(f.snapshot()["available"]
         .as_array()
         .unwrap()
         .iter()
         .any(|r| r["session_id"] == "old-session"));
     fs::write(dir.join("arm"), b"").unwrap();
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":true}));
     wait(|| dir.join("old-flight").exists());
     let manifest = dir.join("plugin.json");
-    let mut changed: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let mut changed: Value = read_json(&manifest);
     changed["command"] = json!(["python3", "./updated.py"]);
     fs::write(dir.join("updated.py"), driver).unwrap();
     fs::write(manifest, changed.to_string()).unwrap();
@@ -739,15 +691,10 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
     f.provider("delivered");
     let options_path = f.state.join("plugins/fixture/options.json");
     let calls_path = f.state.join("plugins/fixture/calls.jsonl");
-    let mut options: Value =
-        serde_json::from_str(&fs::read_to_string(&options_path).unwrap()).unwrap();
+    let mut options: Value = read_json(&options_path);
     options["configured"] = json!(false);
     fs::write(&options_path, options.to_string()).unwrap();
-    let recorder = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
     assert_initial_fixture_setup(&f, false);
     let frames = || ui_frames(&f);
     let inspections = || {
@@ -789,13 +736,9 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
         std::thread::scope(|scope| {
             let pending = scope.spawn(move || http(port, "/ui", Some(&action)));
             wait(|| inspections() > before);
-            let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+            let snapshot = f.snapshot();
             // This unrelated correlated frame is an ordered mailbox barrier.
-            assert_eq!(
-                f.action(json!({"op":"set_user","user":"alice","request_id":marker}))
-                    .0,
-                200
-            );
+            f.action_ok(json!({"op":"set_user","user":"alice","request_id":marker}));
             wait(|| frames().iter().any(|frame| frame["request_id"] == marker));
             let premature = frames()
                 .into_iter()
@@ -853,7 +796,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     );
     f.provider("delivered");
     let daemon = f.daemon(&[]);
-    let snapshot = || f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = || f.snapshot();
     let local_auto_listen = || {
         snapshot()["hubs"]
             .as_array()
@@ -871,35 +814,26 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
             .any(|v| v["harness"] == "fixture")
     });
     let options = f.state.join("plugins/fixture/options.json");
-    let mut config: Value = serde_json::from_str(&fs::read_to_string(&options).unwrap()).unwrap();
+    let mut config: Value = read_json(&options);
     config["configured"] = json!(false);
     fs::write(&options, config.to_string()).unwrap();
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_apply","harness":"fixture"}));
     assert_eq!(snapshot()["available"], json!([]));
     config["configured"] = json!(true);
     fs::write(&options, config.to_string()).unwrap();
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_apply","harness":"fixture"}));
     assert!(snapshot()["available"]
         .as_array()
         .unwrap()
         .iter()
         .any(|v| v["harness"] == "fixture"));
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
-            .0,
-        200
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":true}));
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"}),
     );
-    assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
     assert_eq!(local_auto_listen(), true);
     f.stop(daemon);
-    let mut preferences: Value =
-        serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let mut preferences: Value = read_json(&f.config);
     preferences["hubs"]["local"]["autoListen"] = json!(true);
     fs::write(&f.config, preferences.to_string()).unwrap();
     config["session_id"] = json!("live");
@@ -937,12 +871,8 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         )[0]["status"]
             == "UNLISTENED"
     });
-    assert_eq!(
-        f.action(
-            json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"live"})
-        )
-        .0,
-        200
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"live"}),
     );
     assert_eq!(
         local_auto_listen(),
@@ -952,18 +882,14 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     config["configured"] = json!(true);
     config["status"] = json!("alive");
     fs::write(&options, config.to_string()).unwrap();
-    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    f.action_ok(json!({"op":"refresh_available"}));
     assert_eq!(f.rows("SELECT user_stopped FROM local_listeners WHERE harness='fixture' AND session_id='live'")[0]["user_stopped"],1);
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE harness='fixture' AND session_id='live'")
             [0]["status"],
         "UNLISTENED"
     );
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":true}));
     wait(|| {
         snapshot()["listeners"]
             .as_array()
@@ -1041,12 +967,8 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         "Dispatch revocation must reject the pre-revocation discovery cache"
     );
     // Cache evidence from S cannot enroll on a destination that has no S row.
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
-            .0,
-        200
-    );
-    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":false}));
+    f.action_ok(json!({"op":"refresh_available"}));
     let discoveries = || {
         fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl"))
             .unwrap()
@@ -1073,11 +995,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     assert!(f
         .rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")
         .is_empty());
-    assert_eq!(
-        f.action(json!({"op":"set_auto_listen","hub":"work","enabled":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"set_auto_listen","hub":"work","enabled":true}));
     assert!(
         f.rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")
             .is_empty(),
@@ -1085,7 +1003,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     );
     config["discover_error"] = json!(false);
     fs::write(&options, config.to_string()).unwrap();
-    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    f.action_ok(json!({"op":"refresh_available"}));
     wait(|| {
         f.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='fixture' AND session_id='dispatch-replacement'").iter().any(|row|row["status"]=="ACTIVE")
     });
@@ -1130,10 +1048,7 @@ fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
                     (true, true, vec![dirs[index].display().to_string()])
                 );
                 assert!(!config.state_dir.join("runtime/plugins/pi").exists());
-                let manifest: Value = serde_json::from_slice(
-                    &fs::read(config.state_dir.join("plugins/pi/plugin.json")).unwrap(),
-                )
-                .unwrap();
+                let manifest: Value = read_json(config.state_dir.join("plugins/pi/plugin.json"));
                 assert_eq!(
                     manifest["displayName"], "User override",
                     "Staging cannot overwrite a user plugin"
@@ -1373,10 +1288,7 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
             for id in ids.into_iter().filter(|id| *id != "human") {
                 let plugin = loaded.find_by_id(id).unwrap();
                 assert!(plugin.is_builtin, "{id}");
-                let manifest: Value = serde_json::from_slice(
-                    &fs::read(plugin.plugin_dir.join("plugin.json")).unwrap(),
-                )
-                .unwrap();
+                let manifest: Value = read_json(plugin.plugin_dir.join("plugin.json"));
                 assert_eq!(manifest["version"], plugins::CITO_VERSION);
             }
         } else {
@@ -1517,7 +1429,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
     let daemon = f.daemon(&[]);
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    f.action_ok(json!({"op":"setup_apply","harness":"pi"}));
     f.stop(daemon);
     let custom = f.state.join("plugins/custom-agent");
     fs::create_dir_all(&custom).unwrap();
@@ -1550,7 +1462,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     check_plugins(&mut f);
     let mut daemon = f.daemon(&[]);
     let app = |f: &Fixture, id: &str| {
-        let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+        let snapshot = f.snapshot();
         let apps: Vec<_> = snapshot["settings"]["apps"]
             .as_array()
             .unwrap()
@@ -1575,7 +1487,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         let staged = f.state.join("runtime/plugins/pi").join(asset);
         fs::remove_file(&staged).unwrap();
         assert_eq!(app(&f, "pi")["status"], "repair_needed", "{asset}");
-        assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+        f.action_ok(json!({"op":"setup_apply","harness":"pi"}));
         assert_eq!(
             fs::read(&staged).unwrap(),
             fs::read(root().join("plugins/pi").join(asset)).unwrap()
@@ -1583,10 +1495,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         assert_eq!(app(&f, "pi")["status"], "ready", "{asset}");
     }
     assert!(!codex_manifest.exists());
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"codex"})).0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_apply","harness":"codex"}));
     assert!(codex_manifest.exists());
     let alias = f.dir.join("staged-plugins");
     std::os::unix::fs::symlink(f.state.join("runtime/plugins"), &alias).unwrap();
@@ -1617,7 +1526,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
                 custom_app["paths"],
                 json!([fs::canonicalize(&custom).unwrap()])
             );
-            assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+            f.action_ok(json!({"op":"setup_apply","harness":"pi"}));
             for asset in ["plugin.json", "bin/cito-plugin-pi", "cito-bridge.ts"] {
                 assert_eq!(
                     fs::read(staged.join(asset)).unwrap(),
@@ -1649,18 +1558,10 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         .to_string(),
     )
     .unwrap();
-    let ui = f.recording_ui();
-    let daemon = f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", ui.to_str().unwrap()),
-    ]);
+    let daemon = f.recording_daemon();
     wait(|| f.home.join("ui-pid").exists());
     enroll(&f, meta.clone());
-    assert_eq!(
-        f.action(json!({"op":"setup_apply","harness":"pi","request_id":"app-setup"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_apply","harness":"pi","request_id":"app-setup"}));
     let app = |snapshot: Value| {
         snapshot["settings"]["apps"]
             .as_array()
@@ -1670,30 +1571,20 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
             .unwrap()
             .clone()
     };
-    assert_eq!(
-        app(f.action(json!({"op":"get_snapshot"})).1)["status"],
-        "ready"
-    );
+    assert_eq!(app(f.snapshot())["status"], "ready");
     fs::remove_dir_all(f.state.join("bin")).unwrap();
     fs::remove_dir_all(f.state.join("runtime/plugins")).unwrap();
     assert!(f.state.join("plugins/fixture/plugin.json").is_file());
-    assert_eq!(
-        app(f.action(json!({"op":"get_snapshot"})).1)["status"],
-        "repair_needed"
-    );
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    assert_eq!(app(f.snapshot())["status"], "repair_needed");
+    f.action_ok(json!({"op":"setup_apply","harness":"pi"}));
     assert!(f.state.join("bin/cito-mcp").is_file());
     assert!(f.state.join("runtime/plugins/pi/plugin.json").is_file());
-    assert!(app(f.action(json!({"op":"get_snapshot"})).1)["detail"]
+    assert!(app(f.snapshot())["detail"]
         .as_str()
         .unwrap()
         .contains("/reload"));
     enroll(&f, meta.clone());
-    assert_eq!(
-        f.action(json!({"op":"setup_remove_app","harness":"fixture","request_id":"app-remove"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_remove_app","harness":"fixture","request_id":"app-remove"}));
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
@@ -1712,16 +1603,13 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         });
     }
     enroll(&f, meta);
-    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"Backend API"})).0,200);
+    f.action_ok(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"Backend API"}));
     let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     f.db("state.sqlite").execute(
         "INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','purge-history',?,1,?,'bob','laptop','Sender','Retain until purge','2030-01-01T00:00:00.000Z',4102444800000,'STORED_PASSIVE')",
         &[row["listener_id"].clone(), row["binding_generation"].clone()],
     ).unwrap();
-    assert_eq!(
-        f.action(json!({"op":"save_hub_service","hub":"local","channel_id":"channel","values":{"credential":"saved-gateway"}})).0,
-        200
-    );
+    f.action_ok(json!({"op":"save_hub_service","hub":"local","channel_id":"channel","values":{"credential":"saved-gateway"}}));
     let service_config = || {
         let rows = f
             .db("hub.sqlite")
@@ -1743,7 +1631,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert!(!f
         .rows("SELECT * FROM local_signals WHERE signal_id='purge-history'")
         .is_empty());
-    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let config: Value = read_json(&f.config);
     assert!(config["hubs"].get("work").is_some());
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness!='human' AND status='ACTIVE'")
@@ -1760,20 +1648,14 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert_eq!(http(f.port, "/health", None).0, 200);
     assert!(f.state.join("bin/cito-mcp").is_file());
     assert!(f.state.join("runtime/plugins/pi").is_dir());
-    let host: Value =
-        serde_json::from_str(&fs::read_to_string(f.home.join(".pi/agent/settings.json")).unwrap())
-            .unwrap();
+    let host: Value = read_json(f.home.join(".pi/agent/settings.json"));
     assert!(
         host["packages"].is_null() || host["packages"] == json!([]),
         "{host}"
     );
-    assert_eq!(
-        f.action(json!({"op":"setup_disconnect_all","purge_data":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_disconnect_all","purge_data":true}));
     assert!(f.rows("SELECT * FROM session_custom_titles").is_empty());
-    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let config: Value = read_json(&f.config);
     assert_eq!(config["default_hub"], "local");
     assert!(config.get("defaultHub").is_none());
     assert_eq!(config["hubs"], json!({}));
@@ -1801,11 +1683,7 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
     let f = Fixture::new(json!({}));
     f.provider("delivered");
     fs::write(f.state.join("plugins/fixture/options.json"), "{").unwrap();
-    let recorder = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
     f.action(json!({"op":"open_settings"}));
     let mut settings = Value::Null;
     wait(|| {
@@ -1929,7 +1807,7 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
     fs::write(&f.config, "{\"daemonPort\":0}").unwrap();
     let (ok, out, err) = f.command(NATIVE, &["setup", "--share-hub", "--json"], "");
     assert!(ok, "{out} {err}");
-    let resulting_config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    let resulting_config: Value = read_json(&f.config);
     assert_eq!(resulting_config["daemonPort"], 0);
     assert_eq!(resulting_config["host_hub"]["enabled"], true);
     assert_eq!(

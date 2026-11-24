@@ -123,19 +123,8 @@ pub fn attachments(reg: &Value, local_host: &str, now: u64) -> Vec<Value> {
         let location = if hub { "hub" } else { "device" };
         let mut attachment = json!({"channel_id":id,"location":location,"display_name":display,"availability":availability,"is_local":!hub && host==local_host});
         let identity = if hub {
-            let plugin = if id.is_empty() {
-                channel["plugin_id"].as_str().unwrap_or("")
-            } else {
-                id.strip_prefix("hub:").unwrap_or(id)
-            };
-            attachment["plugin_id"] = json!(plugin);
-            if !id.is_empty() {
-                id
-            } else if !plugin.is_empty() {
-                plugin
-            } else {
-                display
-            }
+            attachment["plugin_id"] = json!(id.strip_prefix("hub:").unwrap_or(id));
+            id.as_str()
         } else {
             attachment["host_id"] = json!(host);
             display

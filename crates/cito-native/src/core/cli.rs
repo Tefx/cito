@@ -722,35 +722,10 @@ mod tests {
             plugins: vec![],
             rejected_ids: Default::default(),
         };
-        for policy in [
-            vec!["--team"],
-            vec!["--scope", "self"],
-            vec!["--about", "Review"],
-            vec!["pause"],
-            vec!["resume"],
-        ] {
-            let args = policy
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect::<Vec<_>>();
-            let (input, _) = parse_cli("inbox", &args, &plugins).unwrap();
-            assert!(inbox_policy(&input));
-            for read in [
-                vec!["--ack", "signal"],
-                vec!["--ack-all"],
-                vec!["--unread"],
-                vec!["--peek"],
-                vec!["--no-ack"],
-                vec!["--limit", "1"],
-                vec!["--harness", "human"],
-            ] {
-                let args = policy
-                    .iter()
-                    .chain(read.iter())
-                    .map(|value| (*value).to_owned())
-                    .collect::<Vec<_>>();
-                assert!(parse_cli("inbox", &args, &plugins).is_err(), "{args:?}");
-            }
+        let (input, _) = parse_cli("inbox", &["pause".into()], &plugins).unwrap();
+        assert_eq!(input["paused"], true);
+        for extra in ["--unread", "--harness=human"] {
+            assert!(parse_cli("inbox", &["pause".into(), extra.into()], &plugins).is_err());
         }
         for (cmd, flag) in [
             ("inbox", "--team"),

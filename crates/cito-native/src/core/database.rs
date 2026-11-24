@@ -8,6 +8,19 @@ use std::sync::{Arc, Mutex};
 
 use crate::support::sqlite::*;
 
+extern "C" {
+    fn sqlite3_close_v2(db: *mut libc::c_void) -> i32;
+    fn sqlite3_errmsg(db: *mut libc::c_void) -> *const libc::c_char;
+    fn sqlite3_bind_null(stmt: *mut libc::c_void, index: i32) -> i32;
+    fn sqlite3_bind_int64(stmt: *mut libc::c_void, index: i32, value: i64) -> i32;
+    fn sqlite3_bind_double(stmt: *mut libc::c_void, index: i32, value: f64) -> i32;
+    fn sqlite3_column_type(stmt: *mut libc::c_void, column: i32) -> i32;
+    fn sqlite3_column_int64(stmt: *mut libc::c_void, column: i32) -> i64;
+    fn sqlite3_column_double(stmt: *mut libc::c_void, column: i32) -> f64;
+    fn sqlite3_changes(db: *mut libc::c_void) -> i32;
+    fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
+}
+
 pub struct Connection {
     raw: *mut libc::c_void,
 }

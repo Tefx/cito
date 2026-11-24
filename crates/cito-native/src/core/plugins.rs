@@ -509,56 +509,36 @@ pub(super) fn is_staged_plugins_root(root: &Path, state_dir: &Path) -> bool {
         })
 }
 
-/// Discovery skips legacy copies and aliases of the authoritative bundled source.
-pub(super) fn is_legacy_staged_plugin(sub: &Path, manifest: &Value) -> bool {
-    let Some(id) = manifest["id"].as_str() else {
+/// Skip legacy copies and aliases even when discovery is read-only.
+fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
+    let read_manifest = |dir: &Path| {
+        serde_json::from_slice::<serde_json::Map<String, Value>>(
+            &fs::read(dir.join("plugin.json")).ok()?,
+        )
+        .ok()
+    };
+    let Some(mut manifest) = read_manifest(sub) else {
+        return false;
+    };
+    let Some(id) = manifest.get("id").and_then(Value::as_str) else {
         return false;
     };
     if !validate_harness_id(id) || sub.file_name().and_then(|s| s.to_str()) != Some(id) {
         return false;
     }
     let bundled = super::setup::resolve_bundled_plugin_dir(id);
-    let Some(mut shipped) = fs::read(bundled.join("plugin.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-    else {
+    let Some(mut shipped) = read_manifest(&bundled) else {
         return false;
     };
-    if same_plugin_root(sub, &bundled) {
-        return true;
-    }
-    if manifest["version"] == shipped["version"] {
-        return false;
-    }
-    let Some(fields) = shipped.as_object_mut() else {
-        return false;
-    };
-    match manifest.get("version") {
-        Some(version) => fields.insert("version".into(), version.clone()),
-        None => fields.remove("version"),
-    };
-    shipped == *manifest
-}
-
-/// Even if cleanup is disabled or removal fails, discovery uses the bundled fallback.
-pub(super) fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
-    let Some(manifest) = fs::read(sub.join("plugin.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-    else {
-        return false;
-    };
-    if !is_legacy_staged_plugin(sub, &manifest) {
+    let alias = same_plugin_root(sub, &bundled);
+    if !alias && (manifest.remove("version") == shipped.remove("version") || manifest != shipped) {
         return false;
     }
     if cleanup {
         if fs::symlink_metadata(sub).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             // Unlink the entry itself, never the plugin directory it points to.
             let _ = fs::remove_file(sub);
-        } else if manifest["id"]
-            .as_str()
-            .is_some_and(|id| !same_plugin_root(sub, &super::setup::resolve_bundled_plugin_dir(id)))
-        {
+        } else if !alias {
             let _ = fs::remove_dir_all(sub);
         }
     }
@@ -805,7 +785,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
             return Err("Invalid host-id UUID".into());
         }
     }
-    let mut cfg_daemon_port: Option<u16> = None;
+    let mut cfg_daemon_port = None;
     let mut default_hub = env::var("CITO_HUB")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -814,7 +794,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
     if explicit_config.is_some() || config_path.exists() {
         let raw = fs::read_to_string(&config_path)
             .map_err(|_| format!("Cannot load hub configuration: {}", config_path.display()))?;
-        let Value::Object(map) = serde_json::from_str::<Value>(&raw)
+        let Value::Object(mut map) = serde_json::from_str::<Value>(&raw)
             .map_err(|e| format!("Invalid JSON in {}: {e}", config_path.display()))?
         else {
             return Err(format!(
@@ -851,28 +831,13 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
                 user = config_user.to_string();
             }
         }
-        if let Some(value) = map.get("daemonPort") {
-            let p = value
-                .as_u64()
-                .filter(|p| (1..=65535).contains(p))
-                .ok_or("daemonPort must be an integer in 1..65535")?;
-            cfg_daemon_port = Some(p as u16);
-        }
+        cfg_daemon_port = map.remove("daemonPort");
     }
 
-    let daemon_port = match env::var("CITO_DAEMON_PORT") {
-        Ok(val) => {
-            let parsed = val
-                .trim()
-                .parse::<u32>()
-                .map_err(|_| "CITO_DAEMON_PORT must be an integer in 1..65535".to_string())?;
-            if !(1..=65535).contains(&parsed) {
-                return Err("CITO_DAEMON_PORT must be an integer in 1..65535".to_string());
-            }
-            parsed as u16
-        }
-        Err(_) => cfg_daemon_port.unwrap_or(4290),
-    };
+    let daemon_port = crate::support::resolve_daemon_port(
+        env::var("CITO_DAEMON_PORT").ok().as_deref(),
+        cfg_daemon_port.as_ref(),
+    )?;
 
     let config = NativeConfig {
         state_dir,

@@ -105,9 +105,8 @@ fn action_hub(action: &Value) -> Result<&str, String> {
 }
 
 pub(super) fn interactive_login(action: &Value) -> bool {
-    action["op"] == "login_hub"
-        || (action["op"] == "hub_action"
-            && matches!(action["action"].as_str(), Some("login" | "switch_account")))
+    action["op"] == "hub_action"
+        && matches!(action["action"].as_str(), Some("login" | "switch_account"))
 }
 
 /// Authoritative success survives failures rebuilding a secondary local view.
@@ -124,6 +123,13 @@ fn committed_projection(mut result: Value, projection: Result<(), String>) -> Va
         }
     }
     result
+}
+
+fn refreshes_setup(action: &Value) -> bool {
+    matches!(
+        string(action, "op"),
+        "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
+    )
 }
 
 pub(super) fn dispatch_action(
@@ -151,10 +157,7 @@ pub(super) fn dispatch_action(
         .transpose()?;
     let mut result = dispatch_action_inner(service, action, ui_generation);
     drop(_setup);
-    let refresh_setup = matches!(
-        string(action, "op"),
-        "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
-    );
+    let refresh_setup = refreshes_setup(action);
     // Await invalidated inspections without holding service. Retain the final
     // guard so another mutation cannot invalidate them before receipt publication.
     let completion = service
@@ -169,10 +172,7 @@ pub(super) fn dispatch_action(
         if !refresh_setup {
             // Composer actions settle under their original guard, including
             // preflight errors. Do not replace that receipt after re-entry.
-            if !matches!(
-                string(action, "op"),
-                "send_signal" | "send_reply_from_human"
-            ) {
+            if action["op"] != "send_signal" {
                 if let Err(error) = s.validate_ui_generation(ui_generation) {
                     return match result {
                         Ok(value) if value["committed"] == true => {
@@ -216,17 +216,12 @@ pub(super) fn dispatch_action(
             )
             .unwrap_or_else(|e| e.into_inner());
     };
-    if interactive_login(action)
-        || (result.is_err() && matches!(string(action, "op"), "setup_save_hub" | "save_hub"))
-    {
+    if interactive_login(action) {
         s.record_hub_result(action, &result, None);
     }
     if let Err(error) = &result {
         if channel_action_kind(action) != Some(super::channels::ChannelActionKind::Mutation)
-            && !matches!(
-                string(action, "op"),
-                "set_host_hub" | "send_signal" | "send_reply_from_human"
-            )
+            && !matches!(string(action, "op"), "set_host_hub" | "send_signal")
         {
             s.emit(
             json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
@@ -234,7 +229,7 @@ pub(super) fn dispatch_action(
         }
     }
     if refresh_setup && result.is_ok() {
-        s.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings(),"warning":result.as_ref().ok().and_then(|value| value.get("warning"))}));
+        s.emit_settings_receipt(action, &result);
         s.push_ui_result(Some(action));
     } else {
         s.push_ui();
@@ -252,7 +247,6 @@ fn dispatch_action_inner(
     if action["op"] == "setup_apply" {
         let id = action["harness"]
             .as_str()
-            .or_else(|| action["app"].as_str())
             .ok_or("INVALID_INPUT: harness required")?;
         let (descriptor, retired, inspections) = {
             let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
@@ -288,7 +282,8 @@ fn dispatch_action_inner(
                 .map(|a| a.reload(&config, &plugins, &changed));
             let mut inspections = Vec::new();
             s.setup_inspections.retain(|id, entry| {
-                let keep = plugins.agent_plugins().iter().any(|p| &p.id == id);
+                let keep =
+                    !changed.contains(id) && plugins.agent_plugins().iter().any(|p| &p.id == id);
                 if !keep {
                     if let Some((_, worker)) = entry.worker.take() {
                         inspections.push(worker);
@@ -304,9 +299,12 @@ fn dispatch_action_inner(
                         && !changed.contains(string(v, "harness"))
                 });
             s.plugins = plugins;
-            for changed_id in &changed {
-                s.invalidate_setup(changed_id);
+            // A replacement descriptor needs its own initial inspection. Snapshots may
+            // reuse cached settings only while refreshing the same descriptor.
+            for id in changed {
+                s.setup_inspections.entry(id).or_default();
             }
+            s.refresh_setup_inspections();
             (s.plugins.find_by_id(id).cloned(), retired, inspections)
         };
         drop(retired);
@@ -318,7 +316,6 @@ fn dispatch_action_inner(
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
         s.invalidate_setup(id);
         result?;
-        s.last_app_action.insert(id.to_owned(), "setup".into());
         return Ok(committed_projection(
             json!({"ok":true,"committed":true}),
             s.refresh_available(),
@@ -327,245 +324,13 @@ fn dispatch_action_inner(
     if let Some(kind) = channel_action_kind(action) {
         return dispatch_channel_action(service, action, kind, ui_generation);
     }
-    if matches!(
-        string(action, "op"),
-        "setup_save_hub" | "save_hub" | "paste_hub_invite"
-    ) && action["parse_only"] != true
-    {
-        let before = {
-            let s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-            s.validate_ui_generation(ui_generation)?;
-            if action["op"] == "paste_hub_invite" {
-                s.reject_own_hub_invite(&parse_hub_invite(string(action, "invite"))?)?;
-            }
-            s.raw_config()?
-        };
-        let mut prepared = action.clone();
-        let submitted = if action["op"] == "paste_hub_invite" {
-            parse_hub_invite(string(action, "invite"))?
-        } else {
-            action.clone()
-        };
-        let patch = submitted
-            .get("config")
-            .filter(|v| v.is_object())
-            .unwrap_or(&submitted);
-        let base = edited_hub(&submitted)
-            .and_then(|original| before["hubs"].get(original))
-            .unwrap_or(&Value::Null);
-        let config = crate::core::config::discover_hub_config(
-            crate::core::config::merge_hub_config(base, patch),
-        );
-        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-        s.validate_ui_generation(ui_generation)?;
-        if s.closing || shutdown_requested() {
-            return Err("Shutting down".into());
-        }
-        prepared["config"] = match config {
-            Ok(config) => config,
-            Err(error) => {
-                if action["op"] == "paste_hub_invite" && s.raw_config()? == before {
-                    let name = invite_hub_name(&submitted, &before);
-                    s.record_hub_result(
-                        &json!({"op":"setup_save_hub","name":name}),
-                        &Err(error.clone()),
-                        Some(&name),
-                    );
-                }
-                return Err(error);
-            }
-        };
-        return s.action_with_precondition(&prepared, Some(&before));
-    }
-    if matches!(
-        string(action, "op"),
-        "test_hub" | "set_scope" | "human_inbox_update"
-    ) {
-        let (slot, state, host) = {
-            let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-            s.validate_ui_generation(ui_generation)?;
-            if s.closing || shutdown_requested() {
-                return Err("Shutting down".into());
-            }
-            s.reload_slots()?;
-            let hub = action["hub"].as_str().unwrap_or(&s.config.default_hub);
-            (s.slot(hub)?.clone(), s.state.clone(), s.host_id.clone())
-        };
-        let result = hub_control(&slot, &state, &host, action);
-        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-        let current = !s.closing
-            && !slot.closed.load(Ordering::Acquire)
-            && s.slots
-                .get(&slot.name)
-                .is_some_and(|live| Arc::ptr_eq(&slot.closed, &live.closed));
-        if !current || s.validate_ui_generation(ui_generation).is_err() {
-            let error = "STALE_GENERATION: Hub or UI authority changed during request";
-            return match result {
-                Ok(value) if value["committed"] == true => {
-                    Ok(committed_projection(value, Err(error.into())))
-                }
-                _ => Err(error.into()),
-            };
-        }
-        let mut target = action.clone();
-        target["hub"] = json!(slot.name);
-        return s.settle_action(action, &target, None, result);
-    }
-    if matches!(string(action, "op"), "open_directory" | "query_directory") {
-        let (access, work, request, hub) = {
-            let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-            s.validate_ui_generation(ui_generation)?;
-            if s.closing || shutdown_requested() {
-                return Err("Shutting down".into());
-            }
-            s.reload_slots()?;
-            let hub = action["hub"]
-                .as_str()
-                .unwrap_or(&s.config.default_hub)
-                .to_owned();
-            let work = s.prepare_directory(action, &hub)?;
-            (s.access.clone(), work, s.directory_request, hub)
-        };
-        let result = run_captured(service, access.clone(), &work)?;
-        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-        s.validate_ui_generation(ui_generation)?;
-        if !s.directory_open || s.directory_request != request || !work.current(&s, &access) {
-            return Err("STALE_GENERATION: Directory query superseded".into());
-        }
-        let result = s.directory_result(action, &hub, &result);
-        return s.settle_action(action, action, None, result);
+    if !interactive_login(action) {
+        return execute_action(service, action, ui_generation);
     }
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-        if matches!(
-            string(action, "op"),
-            "send_signal" | "send_reply_from_human"
-        ) {
-            let preflight = s.validate_ui_generation(ui_generation).and_then(|()| {
-                if s.closing || shutdown_requested() {
-                    Err("Shutting down".into())
-                } else {
-                    Ok(())
-                }
-            });
-            if let Err(error) = preflight {
-                let result = Err(error);
-                s.emit_composer_result(action, &result);
-                return result;
-            }
-            let prepared = s.reload_slots().and_then(|()| human_send_args(action));
-            let args = match prepared {
-                Ok(args) => args,
-                Err(error) => {
-                    let result = Err(error);
-                    s.emit_composer_result(action, &result);
-                    return result;
-                }
-            };
-            let hub = args["hub"]
-                .as_str()
-                .unwrap_or(&s.config.default_hub)
-                .to_owned();
-            let access = s.access.clone();
-            drop(s);
-            let mut result = access.send_human(&hub, &args, action);
-            let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-            let target = string(&args, "to")
-                .split_once(':')
-                .map_or(hub.as_str(), |(h, _)| h);
-            let current = access
-                .slots
-                .get(target)
-                .zip(s.slots.get(target))
-                .is_some_and(|(old, live)| {
-                    Arc::ptr_eq(&old.closed, &live.closed) && !old.closed.load(Ordering::Acquire)
-                });
-            let ui_current = s.validate_ui_generation(ui_generation).is_ok()
-                && !s.closing
-                && !shutdown_requested();
-            if !current || !ui_current {
-                if let Ok(value) = &mut result {
-                    value["committed"] = json!(true);
-                    super::mcp::add_warning(
-                        value,
-                        "maintenance_warning",
-                        "STALE_GENERATION: Hub or UI authority changed after send",
-                    );
-                }
-            }
-            if !ui_current {
-                return result;
-            }
-            return s.settle_action(action, action, None, result);
-        }
-        s.validate_ui_generation(ui_generation)?;
-        if s.closing || shutdown_requested() {
-            return Err("Shutting down".into());
-        }
-        if !interactive_login(action) {
-            let mut resolved_hub = None;
-            let prepared = s.action_inner(action, &mut resolved_hub, None);
-            let result = match prepared {
-                Ok(ToolCall::Ready(v)) => Ok(v),
-                Err(e) => Err(e),
-                Ok(mut work) => {
-                    if let ToolCall::RegistrationEdit {
-                        ui_generation: target,
-                        ..
-                    } = &mut work
-                    {
-                        *target = ui_generation;
-                    }
-                    let access = s.access.clone();
-                    let lifecycle = matches!(
-                        string(action, "op"),
-                        "setup_disconnect_all" | "setup_uninstall_all"
-                    )
-                    .then(|| s.raw_config())
-                    .transpose()?;
-                    drop(s);
-                    let result = run_captured(service, access.clone(), &work);
-                    s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-                    let stale = !work.current(&s, &access)
-                        || s.validate_ui_generation(ui_generation).is_err();
-                    if let Some(before) = lifecycle {
-                        if stale
-                            || s.raw_config()? != before
-                            || s.slots.len() != access.slots.len()
-                            || access.slots.iter().any(|(hub, slot)| {
-                                s.slots
-                                    .get(hub)
-                                    .is_none_or(|live| !Arc::ptr_eq(&slot.closed, &live.closed))
-                            })
-                        {
-                            return Err("STALE_GENERATION: Listener retirement started; setup operation was not completed".into());
-                        }
-                    }
-                    if stale {
-                        return result.map(|v| {
-                            committed_projection(
-                                v,
-                                Err("STALE_GENERATION: Hub or UI authority changed".into()),
-                            )
-                        });
-                    }
-                    result
-                }
-            };
-            return DaemonService::finish_action(
-                service,
-                s,
-                action,
-                action,
-                resolved_hub.as_deref(),
-                result,
-            );
-        }
-        let hub = if action["op"] == "hub_action" || action.get("hub").is_some() {
-            action_hub(action)?.to_owned()
-        } else {
-            s.config.default_hub.clone()
-        };
+        s.check_action(ui_generation)?;
+        let hub = action_hub(action)?.to_owned();
         s.reload_slots()?;
         s.mutate_config(|v| {
             if !v["hubs"].is_object() || !v["hubs"][&hub].is_object() {
@@ -581,7 +346,13 @@ fn dispatch_action_inner(
         let config = s.slot(&hub)?.config.clone();
         let snapshot =
             login_cache_snapshot(&s.config.state_dir.join(format!("oidc-token-{hub}.json")));
-        let attempt = s.logins.entry(hub.clone()).or_default().clone();
+        let attempt = s
+            .hub_controls
+            .entry(hub.clone())
+            .or_default()
+            .login
+            .get_or_insert_with(Default::default)
+            .clone();
         (hub, config, s.config.state_dir.clone(), attempt, snapshot)
     };
     // Browser callbacks and cache-lock waits never hold the daemon's global mutex.
@@ -599,13 +370,13 @@ fn dispatch_action_inner(
                 .as_ref()
                 .and_then(|(cache, _)| cache["token_sha256"].as_str())
         };
-        crate::core::login::recover_cancellable_with_options(
+        crate::core::login::recover_cancellable(
             &state_dir,
             &hub,
             &config,
             rejected,
             true,
-            action["action"] == "switch_account" || action["force_interactive"] == true,
+            action["action"] == "switch_account",
             (
                 &|| shutdown_requested() || attempt.cancelled.load(Ordering::SeqCst),
                 Some(attempt.cancelled.fd()?),
@@ -616,10 +387,16 @@ fn dispatch_action_inner(
     // may hold service while cancelling and waiting for this publication lock.
     drop(_serial);
     let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-    let current = s.logins.get(&hub).is_some_and(|c| Arc::ptr_eq(c, &attempt));
-    if current && Arc::strong_count(&attempt) == 2 {
-        s.logins.remove(&hub);
-    }
+    let current = s.hub_controls.get_mut(&hub).is_some_and(|control| {
+        let current = control
+            .login
+            .as_ref()
+            .is_some_and(|login| Arc::ptr_eq(login, &attempt));
+        if current && Arc::strong_count(&attempt) == 2 {
+            control.login = None;
+        }
+        current
+    });
     if !current || attempt.cancelled.load(Ordering::SeqCst) || s.closing || shutdown_requested() {
         return Err("OIDC_LOGIN_TIMEOUT: OIDC login cancelled".into());
     }
@@ -629,7 +406,7 @@ fn dispatch_action_inner(
     }
     let (token, identity) = result?;
     if let Some(old) = s.slots.remove(&hub) {
-        old.close_for_state(&s.state)?;
+        old.close_and_drain()?;
     }
     for row in s.state.active()?.into_iter().filter(|row| {
         row["hub"] == hub
@@ -647,18 +424,143 @@ fn dispatch_action_inner(
     )
 }
 
+/// Capture the work under service, release it for discovery, registration locks and RPCs,
+/// then settle against the captured Hub and UI generations.
+fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
+    owner: &Mutex<S>,
+    action: &Value,
+    ui: Option<u64>,
+) -> Result<Value, String> {
+    let mut guard = owner.lock().map_err(|_| "Daemon lock poisoned")?;
+    let s = (*guard).borrow_mut();
+    let op = string(action, "op");
+    let send = op == "send_signal";
+    if let Err(error) = s.check_action(ui) {
+        let result = Err(error);
+        if send {
+            s.emit_composer_result(action, &result);
+        }
+        return result;
+    }
+    if op == "setup_save_hub" || (op == "paste_hub_invite" && action["parse_only"] != true) {
+        let before = s.raw_config()?;
+        let mut resolved = None;
+        let mut submitted = if op == "paste_hub_invite" {
+            let mut parsed = parse_hub_invite(string(action, "invite"))?;
+            s.reject_own_hub_invite(&parsed, &before)?;
+            parsed["request_id"] = action["request_id"].clone();
+            parsed
+        } else {
+            action.clone()
+        };
+        let patch = if op == "setup_save_hub" {
+            submitted
+                .get("config")
+                .filter(|v| v.is_object())
+                .unwrap_or(&submitted)
+        } else {
+            &submitted
+        };
+        let base = edited_hub(&submitted)
+            .and_then(|original| before["hubs"].get(original))
+            .unwrap_or(&Value::Null);
+        let merged = crate::core::config::merge_hub_config(base, patch);
+        drop(guard);
+        let discovered = crate::core::config::discover_hub_config(merged);
+        guard = owner.lock().map_err(|_| "Daemon lock poisoned")?;
+        let s = (*guard).borrow_mut();
+        s.check_action(ui)?;
+        if op == "paste_hub_invite" {
+            // Discovery may normalize the URL. Resolve collisions against the same
+            // config snapshot that the save will check under its publication lock.
+            resolved = Some(invite_hub_name(
+                discovered.as_ref().unwrap_or(&submitted),
+                &before,
+            ));
+            submitted["name"] = json!(resolved);
+        }
+        let result = discovered.and_then(|config| {
+            submitted["config"] = config;
+            s.reload_slots()?;
+            s.save_hub(&submitted, &mut resolved, &before)?;
+            Ok(committed_projection(json!({"ok":true}), s.reload_slots()))
+        });
+        return DaemonService::finish_action(
+            owner,
+            guard,
+            action,
+            &submitted,
+            resolved.as_deref(),
+            result,
+        );
+    }
+    let prepared = s.prepare_action(action, ui);
+    let result = match prepared {
+        Ok(ToolCall::Ready(value)) => Ok(value),
+        Err(error) => Err(error),
+        Ok(work) => {
+            let access = s.access.clone();
+            let request = s.directory_request;
+            let hub = action["hub"].as_str().unwrap_or(&access.config.default_hub);
+            let lifecycle = matches!(op, "setup_disconnect_all" | "setup_uninstall_all")
+                .then(|| s.raw_config())
+                .transpose()?;
+            drop(guard);
+            // UI sends publish exactly once; MCP's recovery and poll are specific to tool calls.
+            let result = if send || matches!(work, ToolCall::HubControl { .. }) {
+                work.execute(&access)
+            } else {
+                run_captured(owner, access.clone(), &work)
+            };
+            guard = owner.lock().map_err(|_| "Daemon lock poisoned")?;
+            let s = (*guard).borrow_mut();
+            let ui_current = s.check_action(ui).is_ok();
+            let stale = !ui_current || !work.current(s, &access);
+            if let Some(before) = lifecycle {
+                if stale
+                    || s.raw_config()? != before
+                    || s.slots.len() != access.slots.len()
+                    || access.slots.iter().any(|(hub, old)| {
+                        s.slots
+                            .get(hub)
+                            .is_none_or(|live| !Arc::ptr_eq(&live.closed, &old.closed))
+                    })
+                {
+                    return Err("STALE_GENERATION: Listener retirement started; setup operation was not completed".into());
+                }
+            }
+            if matches!(work, ToolCall::Find { .. }) {
+                if stale || !s.directory_open || request != s.directory_request {
+                    return Err("STALE_GENERATION: Directory query superseded".into());
+                }
+                result.and_then(|value| s.directory_result(action, hub, &value))
+            } else if stale {
+                let degraded = work.degraded(
+                    result,
+                    "STALE_GENERATION: Hub or UI authority changed during request",
+                );
+                if !send || !ui_current {
+                    return degraded;
+                }
+                degraded
+            } else {
+                result
+            }
+        }
+    };
+    DaemonService::finish_action(owner, guard, action, action, None, result)
+}
+
 pub(super) fn mutating_action(action: &Value) -> bool {
     (action["op"] == "paste_hub_invite" && action["parse_only"] != true)
         || matches!(
             string(action, "op"),
             "setup_save_hub"
-                | "save_hub"
                 | "set_host_hub"
                 | "setup_apply"
                 | "setup_remove_app"
                 | "setup_disconnect_all"
                 | "setup_remove_hub"
-                | "remove_hub"
                 | "setup_toggle_hub"
                 | "hub_action"
                 | "set_user"
@@ -669,16 +571,12 @@ pub(super) fn mutating_action(action: &Value) -> bool {
                 | "set_listen_mode"
                 | "human_inbox_update"
                 | "listen_session"
-                | "unlisten"
                 | "rename_session"
                 | "cli_rename"
                 | "cli_human_device"
-                | "login_hub"
                 | "unlisten_session"
                 | "unlisten_all"
                 | "ack_signals"
-                | "mark_activity_read"
-                | "mark_all_activity_read"
                 | "clear_activity_history"
         )
 }
@@ -690,31 +588,6 @@ fn human_send_args(action: &Value) -> Result<Value, String> {
         .ok_or("INVALID_INPUT: Action must be an object")?;
     fields.remove("op");
     fields.remove("request_id");
-    if action["op"] == "send_reply_from_human" {
-        fields.insert(
-            "to".into(),
-            json!(action["to_listener_id"]
-                .as_str()
-                .or_else(|| action["to"].as_str())),
-        );
-        fields.insert(
-            "message".into(),
-            json!(action["message"]
-                .as_str()
-                .or_else(|| action["text"].as_str())),
-        );
-        fields.remove("in_reply_to");
-        if let Some(source) = action
-            .get("in_reply_to")
-            .filter(|v| !v.is_null())
-            .or_else(|| action.get("signal_id").filter(|v| !v.is_null()))
-        {
-            fields.insert("in_reply_to".into(), source.clone());
-        }
-        for key in ["to_listener_id", "text", "signal_id"] {
-            fields.remove(key);
-        }
-    }
     validate_tool_input("cito_send", &args)?;
     Ok(args)
 }
@@ -763,29 +636,14 @@ impl super::HubAccess {
         };
         Ok(committed_projection(attached, retire))
     }
-    fn send_human(&self, hub: &str, args: &Value, action: &Value) -> Result<Value, String> {
-        let caller = json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
-        let result = self.send_from(hub, args, Some(caller))?;
-        if action["op"] == "send_reply_from_human" {
-            let unscoped = |key| string(&result, key).rsplit(':').next().unwrap_or("");
-            Ok(
-                json!({"ok":true,"signal_id":unscoped("signal_id"),"seq":result["seq"],"target_display":unscoped("to"),"error":null,"maintenance_warning":result["maintenance_warning"]}),
-            )
-        } else {
-            Ok(result)
-        }
-    }
 }
 
-fn hub_control(
+pub(super) fn hub_control(
     slot: &crate::core::transport::HubClient,
     state: &crate::core::state::LocalState,
     host: &str,
     action: &Value,
 ) -> Result<Value, String> {
-    if action["op"] == "test_hub" {
-        return slot.rpc("account_info", &json!({}));
-    }
     let registration = state.registration_lock(&slot.name)?;
     let _guard = registration
         .lock()
@@ -863,6 +721,14 @@ fn hub_control(
 }
 
 impl DaemonService {
+    fn check_action(&self, ui: Option<u64>) -> Result<(), String> {
+        self.validate_ui_generation(ui)?;
+        if self.closing || shutdown_requested() {
+            return Err("Shutting down".into());
+        }
+        Ok(())
+    }
+
     fn validate_configured_hub(&self, hub: &str) -> Result<(), String> {
         let (_, hubs, _) =
             crate::plugins::try_normalize_existing_config(Some(&self.raw_config()?.to_string()))?;
@@ -875,18 +741,9 @@ impl DaemonService {
     pub(super) fn purge_hub_state(&mut self, hub: &str) -> Result<(), String> {
         self.cancel_hub_interaction(hub);
         if let Some(slot) = self.slots.remove(hub) {
-            slot.close_for_state(&self.state)?;
+            slot.close_and_drain()?;
         }
-        if let Some(pending) = self.oidc_recoveries.remove(hub) {
-            pending.cancelled.store(true, Ordering::SeqCst);
-            let _ = pending.worker.join();
-        }
-        // Retired recoveries were cancelled when their profile changed. Join
-        // them before credential deletion so a final publication cannot outlive purge.
-        for pending in self.retired_auth.drain(..) {
-            pending.cancelled.store(true, Ordering::SeqCst);
-            let _ = pending.worker.join();
-        }
+        self.stop_hub_recovery(hub);
         let belongs = |key: &str| {
             key.starts_with(&format!("{hub}:"))
                 || ["directory", "channels", "auto", "acks", "auto-agent"]
@@ -920,7 +777,6 @@ impl DaemonService {
             Ok(())
         })?;
         self.last_hub_errors.remove(hub);
-        self.auth_backoff.remove(hub);
         self.channel_inventories.remove(hub);
         self.observations.retain(|key, _| !belongs(key));
         if let Ok(mut retries) = self.ack_backoff.lock() {
@@ -933,16 +789,17 @@ impl DaemonService {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.to_string()),
-        }
+        }?;
+        self.hub_controls.remove(hub);
+        Ok(())
     }
 
-    fn reject_own_hub_invite(&self, invite: &Value) -> Result<(), String> {
+    fn reject_own_hub_invite(&self, invite: &Value, raw: &Value) -> Result<(), String> {
         let Some(server) = &self.host_server else {
             return Ok(());
         };
         let url =
             url::Url::parse(string(invite, "url")).map_err(|_| "INVALID_INPUT: Invalid Hub URL")?;
-        let raw = self.raw_config()?;
         let host = raw
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
@@ -979,52 +836,251 @@ impl DaemonService {
         Ok(())
     }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
-        self.action_with_precondition(action, None)
+        execute_action(&Mutex::new(self), action, None)
     }
 
-    fn action_with_precondition(
+    fn save_hub(
         &mut self,
         action: &Value,
-        precondition: Option<&Value>,
-    ) -> Result<Value, String> {
-        let invite;
-        let operation = if action["op"] == "paste_hub_invite" && action["parse_only"] != true {
-            let mut parsed = match (action.get("config"), precondition) {
-                (Some(config), Some(_)) => config.clone(),
-                _ => parse_hub_invite(string(action, "invite"))?,
-            };
-            self.reject_own_hub_invite(&parsed)?;
-            if !string(&parsed, "name").is_empty() {
-                parsed["name"] = json!(invite_hub_name(&parsed, &self.raw_config()?));
+        resolved_hub: &mut Option<String>,
+        before: &Value,
+    ) -> Result<(), String> {
+        let requested_name = string(action, "name").trim();
+        if !requested_name.is_empty() && !requested_name.chars().any(|c| c.is_ascii_alphanumeric())
+        {
+            return Err("INVALID_INPUT: Invalid hub name".into());
+        }
+        let mut cfg = action["config"].clone();
+        let editing = action["edit"] == true;
+        let original = edited_hub(action).unwrap_or_default();
+        if editing && original.is_empty() {
+            return Err("INVALID_INPUT: Unknown hub to edit".into());
+        }
+        let mut rename_before = Value::Null;
+        let mut renamed_config = Value::Null;
+        self.mutate_config(|v| {
+            if before != v {
+                return Err("INVALID_INPUT: Configuration changed during discovery; retry".into());
             }
-            parsed["op"] = json!("setup_save_hub");
-            parsed["request_id"] = action["request_id"].clone();
-            invite = parsed;
-            &invite
-        } else {
-            action
-        };
-        let mut resolved_hub = None;
-        let result = self
-            .action_inner(operation, &mut resolved_hub, precondition)
-            .and_then(|work| {
-                if matches!(work, ToolCall::RegistrationEdit { .. }) {
-                    let access = self.access.clone();
-                    run_captured(&std::sync::Mutex::new(&mut *self), access, &work)
-                } else {
-                    work.execute(&self.access)
+            rename_before = v.clone();
+            // Materialize the implicit local Hub before saving/editing a
+            // first explicit Hub, so first-run edits cannot discard it.
+            if v["hubs"].is_null() {
+                v["hubs"] = json!({"local":{"url":"local://"}});
+            }
+            if !v["hubs"].is_object() {
+                return Err("INVALID_INPUT: Hubs must be an object".into());
+            }
+            if editing && !v["hubs"][&original].is_object() {
+                return Err("INVALID_INPUT: Unknown hub to edit".into());
+            }
+            let base_name = if requested_name.is_empty() {
+                hub_name_from_url(string(&cfg, "url"))
+            } else {
+                normalize_slug(requested_name)
+            };
+            let name = if requested_name.is_empty() {
+                available_hub_name(
+                    base_name,
+                    &v["hubs"],
+                    &cfg["url"],
+                    editing.then_some(original.as_str()),
+                )
+            } else {
+                base_name
+            };
+            *resolved_hub = Some(name.clone());
+            if !crate::plugins::validate_hub_name(&name) {
+                return Err("INVALID_INPUT: Invalid hub name".into());
+            }
+            if name == "local" && cfg["url"] != "local://" {
+                return Err("INVALID_INPUT: The local hub must use local://".into());
+            }
+            if editing && original == "local" && name != "local" {
+                return Err("INVALID_INPUT: Cannot rename the local hub".into());
+            }
+            if !editing
+                && (name == "local"
+                    || v["hubs"]
+                        .get(&name)
+                        .is_some_and(|existing| existing["url"] != cfg["url"]))
+            {
+                return Err("INVALID_INPUT: Hub name already exists".into());
+            }
+            if cfg["user"].is_null() {
+                if let Some(m) = cfg.as_object_mut() {
+                    m.remove("user");
                 }
+            }
+            let set_default = action["set_default"]
+                .as_bool()
+                .or_else(|| cfg["set_default"].as_bool())
+                .unwrap_or(false);
+            if let Some(m) = cfg.as_object_mut() {
+                if let Some(disabled) = m.remove("disabled") {
+                    let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
+                        && disabled.as_bool() != Some(true);
+                    m.insert("enabled".to_string(), json!(enabled));
+                }
+                for k in [
+                    "op",
+                    "name",
+                    "hub",
+                    "set_default",
+                    "edit",
+                    "original_name",
+                    "request_id",
+                ] {
+                    m.remove(k);
+                }
+            }
+            if editing && original != name {
+                if self
+                    .config
+                    .state_dir
+                    .join(format!("oidc-token-{name}.json"))
+                    .exists()
+                {
+                    return Err("INVALID_INPUT: Destination Hub credentials already exist".into());
+                }
+                if !v["hubs"][&name].is_null() {
+                    return Err("INVALID_INPUT: Hub name already exists".into());
+                }
+                for table in [
+                    "local_listeners",
+                    "local_signals",
+                    "pending_hub_acks",
+                    "pending_hub_detaches",
+                    "local_sent_idempotency",
+                    "wake_retries",
+                ] {
+                    if !self
+                        .state
+                        .db
+                        .query(
+                            &format!("SELECT 1 FROM {table} WHERE hub=? LIMIT 1"),
+                            &[json!(name)],
+                        )?
+                        .is_empty()
+                    {
+                        return Err(
+                            "INVALID_INPUT: Destination Hub name has retained local data".into(),
+                        );
+                    }
+                }
+                if let Some(h) = v["hubs"].as_object_mut() {
+                    h.remove(&original);
+                }
+                let default = v
+                    .get("default_hub")
+                    .or_else(|| v.get("defaultHub"))
+                    .and_then(Value::as_str);
+                if default == Some(original.as_str()) {
+                    v["default_hub"] = json!(name);
+                    if let Some(m) = v.as_object_mut() {
+                        m.remove("defaultHub");
+                    }
+                }
+            }
+            renamed_config = cfg.clone();
+            v["hubs"][&name] = cfg;
+            if set_default {
+                v["default_hub"] = json!(name);
+                if let Some(m) = v.as_object_mut() {
+                    m.remove("defaultHub");
+                }
+            }
+            Ok(())
+        })?;
+        if let Some(name) = resolved_hub.as_deref() {
+            self.cancel_hub_interaction(name);
+        }
+        if let Some(name) = resolved_hub
+            .as_ref()
+            .filter(|name| editing && **name != original)
+        {
+            self.cancel_hub_interaction(&original);
+            if let Some(old) = self.slots.remove(&original) {
+                old.close_and_drain()?;
+            }
+            let keys: Vec<_> = self
+                .receivers
+                .keys()
+                .filter(|key| {
+                    key.starts_with(&format!("{original}:")) || **key == format!("auto:{original}")
+                })
+                .cloned()
+                .collect();
+            for key in keys {
+                if let Some(worker) = self.receivers.remove(&key) {
+                    self.events.push(worker);
+                }
+            }
+            self.stop_hub_recovery(&original);
+            let old_token = self
+                .config
+                .state_dir
+                .join(format!("oidc-token-{original}.json"));
+            let new_token = self
+                .config
+                .state_dir
+                .join(format!("oidc-token-{name}.json"));
+            let migration = self.state.db.transaction(|db| {
+                for table in [
+                    "local_listeners",
+                    "local_signals",
+                    "pending_hub_acks",
+                    "pending_hub_detaches",
+                    "local_sent_idempotency",
+                    "wake_retries",
+                ] {
+                    db.execute(
+                        &format!("UPDATE {table} SET hub=? WHERE hub=?"),
+                        &[json!(name), json!(original)],
+                    )?;
+                }
+                if old_token.exists() {
+                    fs::rename(&old_token, &new_token).map_err(|e| e.to_string())?;
+                }
+                Ok(())
             });
-        let owner = Mutex::new(self);
-        let guard = owner.lock().map_err(|_| "Daemon lock poisoned")?;
-        Self::finish_action(
-            &owner,
-            guard,
-            action,
-            operation,
-            resolved_hub.as_deref(),
-            result,
-        )
+            if let Err(error) = migration {
+                if !old_token.exists() && new_token.exists() {
+                    fs::rename(&new_token, &old_token).map_err(|recovery| {
+                        format!(
+                            "Hub rename failed: {error}; credential rollback failed: {recovery}"
+                        )
+                    })?;
+                }
+                self.mutate_config(|v| {
+                    if v["hubs"][name] != renamed_config {
+                        return Err(
+                            "Hub rename rollback conflicts with a newer configuration".into()
+                        );
+                    }
+                    if let Some(hubs) = v["hubs"].as_object_mut() {
+                        hubs.remove(name);
+                        if !rename_before["hubs"][&original].is_null() {
+                            hubs.insert(original.clone(), rename_before["hubs"][&original].clone());
+                        }
+                    }
+                    if v["default_hub"] == *name {
+                        v["default_hub"] = rename_before
+                            .get("default_hub")
+                            .or_else(|| rename_before.get("defaultHub"))
+                            .cloned()
+                            .unwrap_or(json!("local"));
+                    }
+                    Ok(())
+                })
+                .map_err(|recovery| {
+                    format!("Hub rename failed: {error}; configuration rollback failed: {recovery}")
+                })?;
+                return Err(error);
+            }
+            self.channel_inventories.remove(&original);
+        }
+        Ok(())
     }
     fn finish_action<'a, S: std::borrow::BorrowMut<DaemonService>>(
         owner: &'a Mutex<S>,
@@ -1088,38 +1144,15 @@ impl DaemonService {
                 committed_projection(v, Err("STALE_GENERATION: UI changed during reset".into()))
             });
         }
-        s.settle_action(action, operation, resolved_hub, result)
-    }
-
-    fn settle_action(
-        &mut self,
-        action: &Value,
-        operation: &Value,
-        resolved_hub: Option<&str>,
-        result: Result<Value, String>,
-    ) -> Result<Value, String> {
-        if matches!(
-            string(action, "op"),
-            "send_signal" | "send_reply_from_human"
-        ) {
-            self.emit_composer_result(action, &result);
+        if action["op"] == "send_signal" {
+            s.emit_composer_result(action, &result);
         }
-        self.record_hub_result(operation, &result, resolved_hub);
-        if action["op"] == "set_host_hub" {
-            if let Err(error) = &result {
-                self.emit(json!({"op":"settings","ok":false,"source_op":"set_host_hub","request_id":action["request_id"],"error":error,"settings":self.settings()}));
-            }
-        }
-        let saving = matches!(string(operation, "op"), "setup_save_hub" | "save_hub");
-        if result.is_ok() && saving {
-            self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings(),"warning":result.as_ref().ok().and_then(|value| value.get("warning"))}));
-        }
-        if action["op"] != "paste_hub_invite"
-            && !matches!(
-                string(action, "op"),
-                "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
-            )
+        s.record_hub_result(operation, &result, resolved_hub);
+        if action["op"] == "set_host_hub" || (operation["op"] == "setup_save_hub" && result.is_ok())
         {
+            s.emit_settings_receipt(action, &result);
+        }
+        if action["op"] != "paste_hub_invite" && !refreshes_setup(action) {
             if let Some(warning) = result
                 .as_ref()
                 .ok()
@@ -1131,22 +1164,31 @@ impl DaemonService {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
             {
-                self.emit(json!({"op":"state","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"warning":warning}));
+                s.emit(json!({"op":"state","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"warning":warning}));
             }
         }
         if result
             .as_ref()
             .is_ok_and(|value| value["committed"] == true)
-            && !matches!(
-                string(action, "op"),
-                "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
-            )
+            && !refreshes_setup(action)
         {
-            self.push_ui_result(Some(action));
+            s.push_ui_result(Some(action));
         } else {
-            self.push_ui();
+            s.push_ui();
         }
         result
+    }
+
+    fn emit_settings_receipt(&self, action: &Value, result: &Result<Value, String>) {
+        let mut frame = json!({"op":"settings", "ok":result.is_ok(), "source_op":action["op"], "request_id":action["request_id"], "settings":self.settings()});
+        match result {
+            Ok(value) => {
+                frame["committed"] = json!(true);
+                frame["warning"] = value["warning"].clone();
+            }
+            Err(error) => frame["error"] = json!(error),
+        }
+        self.emit(frame);
     }
 
     fn emit_composer_result(&self, action: &Value, result: &Result<Value, String>) {
@@ -1170,14 +1212,9 @@ impl DaemonService {
     ) {
         if matches!(
             string(action, "op"),
-            "login_hub"
-                | "hub_action"
-                | "test_hub"
-                | "setup_save_hub"
-                | "save_hub"
-                | "setup_toggle_hub"
+            "hub_action" | "setup_save_hub" | "setup_toggle_hub"
         ) {
-            let saving = matches!(string(action, "op"), "setup_save_hub" | "save_hub");
+            let saving = action["op"] == "setup_save_hub";
             let mut hubs = Vec::new();
             if saving {
                 if let Some(hub) = resolved_hub {
@@ -1258,8 +1295,7 @@ impl DaemonService {
             if self.activity_filter == "all" && self.activity_query.trim().is_empty() {
                 (total, unread)
             } else {
-                let (_, total, unread) = self.state.query_activity("all", "")?;
-                (total, unread)
+                self.state.activity_counts()?
             };
         let activity = self.activity_dto(activity, &self.address_book());
         let warnings: Vec<_> = result["warnings"]
@@ -1268,53 +1304,55 @@ impl DaemonService {
             .flatten()
             .map(|w| format!("{}: {}", string(w, "hub"), string(w, "message")))
             .collect();
-        let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":string(action,"query"),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"warnings":warnings,"activity":activity,"activity_total":total,"activity_all_total":all_total,"activity_has_any":all_total>0,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":all_unread});
+        let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":string(action,"query"),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"warnings":warnings,"activity":activity,"activity_total":total,"activity_has_any":all_total>0,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":all_unread});
         self.emit(frame.clone());
         Ok(frame)
     }
 
-    fn prepare_retire(
-        &self,
-        hub: String,
-        id: String,
-        agent: Option<Value>,
-    ) -> Result<ToolCall, String> {
+    fn prepare_retire(&self, hub: String, id: String) -> Result<ToolCall, String> {
         if self
             .slots
             .get(&hub)
             .is_none_or(|slot| slot.closed.load(Ordering::Acquire))
         {
-            if let Some(row) = agent {
-                self.ensure_agent_stop_row(
-                    &hub,
-                    string(&row, "harness"),
-                    string(&row, "session_id"),
-                )?;
-            }
             let removed = self.unlisten_id(&hub, &id)?;
             return Ok(ToolCall::Ready(
                 json!({"ok":true,"removed":u8::from(removed)}),
             ));
         }
-        Ok(ToolCall::Retire { hub, id, agent })
+        Ok(ToolCall::Retire { hub, id })
+    }
+
+    fn stop_hub_recovery(&mut self, hub: &str) {
+        if let Some(pending) = self
+            .hub_controls
+            .get_mut(hub)
+            .and_then(|c| c.recovery.take())
+        {
+            pending.cancelled.store(true, Ordering::SeqCst);
+            self.retired_auth.push(pending);
+        }
+        // A retired credential writer must exit before a cache is moved or deleted.
+        for pending in self.retired_auth.drain(..) {
+            let _ = pending.worker.join();
+        }
     }
 
     fn cancel_hub_interaction(&mut self, hub: &str) {
         if self.active_settings_hub.as_deref() == Some(hub) {
             self.active_settings_hub = None;
         }
-        if let Some(attempt) = self.logins.remove(hub) {
+        if let Some(attempt) = self.hub_controls.get_mut(hub).and_then(|c| c.login.take()) {
             attempt.cancelled.store(true, Ordering::SeqCst);
             // The lock guards no data; wait for any in-flight publication to finish.
             drop(attempt.serial.lock().unwrap_or_else(|e| e.into_inner()));
         }
     }
 
-    fn action_inner(
+    fn prepare_action(
         &mut self,
         action: &Value,
-        resolved_hub: &mut Option<String>,
-        precondition: Option<&Value>,
+        ui_generation: Option<u64>,
     ) -> Result<ToolCall, String> {
         if !action.is_object() {
             return Err("INVALID_INPUT: Action must be an object".into());
@@ -1329,7 +1367,7 @@ impl DaemonService {
                 return Err("NOT_FOUND: Unknown hub".into());
             }
         }
-        if matches!(op, "unlisten" | "unlisten_session" | "unlisten_all") {
+        if matches!(op, "unlisten_session" | "unlisten_all") {
             if action
                 .get("hub")
                 .is_some_and(|v| !v.is_null() && !v.is_string())
@@ -1340,14 +1378,14 @@ impl DaemonService {
                 return Err("INVALID_INPUT: Human session must be default".into());
             }
         }
-        let hub = action["hub"]
-            .as_str()
-            .unwrap_or(&self.config.default_hub)
-            .to_string();
-        if matches!(op, "setup_remove_hub" | "remove_hub")
+        if op == "setup_remove_hub"
             || (op == "hub_action" && action["action"] == "disconnect")
             || (op == "setup_toggle_hub" && action["enabled"] == false)
         {
+            let hub = action["hub"]
+                .as_str()
+                .unwrap_or(&self.config.default_hub)
+                .to_owned();
             self.cancel_hub_interaction(&hub);
         }
         self.reload_slots()?;
@@ -1364,54 +1402,13 @@ impl DaemonService {
             return Ok(ToolCall::RegistrationEdit {
                 hubs: self.registration_targets(action)?,
                 action: action.clone(),
-                ui_generation: None,
+                ui_generation,
             });
         }
-        self.apply_action(action, resolved_hub, precondition)
-    }
-
-    pub(super) fn registration_targets(&self, action: &Value) -> Result<Vec<String>, String> {
-        if let Some(hub) = action["hub"]
-            .as_str()
-            .filter(|_| !string(action, "op").starts_with("setup_"))
-        {
-            // Reject unknown input before allocating a persistent lock registry entry.
-            if matches!(string(action, "op"), "set_auto_listen" | "set_listen_mode") {
-                self.slot(hub)?;
-            } else {
-                self.validate_configured_hub(hub)?;
-            }
-            return Ok(vec![hub.into()]);
-        }
-        if matches!(string(action, "op"), "set_auto_listen" | "set_listen_mode") {
-            return Ok(vec![self.config.default_hub.clone()]);
-        }
-        let mut hubs = self.configured_hubs.clone();
-        hubs.extend(self.slots.keys().cloned());
-        hubs.extend(
-            self.state
-                .db
-                .query("SELECT DISTINCT hub FROM local_listeners", &[])?
-                .iter()
-                .map(|r| string(r, "hub").to_owned()),
-        );
-        let mut hubs: Vec<_> = hubs.into_iter().collect();
-        hubs.sort();
-        Ok(hubs)
-    }
-
-    pub(super) fn apply_action(
-        &mut self,
-        action: &Value,
-        resolved_hub: &mut Option<String>,
-        precondition: Option<&Value>,
-    ) -> Result<ToolCall, String> {
         let hub = action["hub"]
             .as_str()
             .unwrap_or(&self.config.default_hub)
             .to_owned();
-        let op = string(action, "op");
-        let mut detaches = Detaches::default();
         match op {
             "get_snapshot" => {
                 self.refresh_available()?;
@@ -1438,11 +1435,23 @@ impl DaemonService {
                     });
                 }
                 let id = self.session_node_id(&hub, "human", "default")?;
-                return self.prepare_retire(hub, id, None);
+                return self.prepare_retire(hub, id);
             }
-            "test_hub" | "set_scope" | "human_inbox_update" => {
-                return hub_control(self.slot(&hub)?, &self.state, &self.host_id, action)
-                    .map(ToolCall::Ready)
+            "set_scope" | "human_inbox_update" => {
+                self.slot(&hub)?;
+                return Ok(ToolCall::HubControl {
+                    hub,
+                    action: action.clone(),
+                });
+            }
+            "send_signal" => {
+                return Ok(ToolCall::Send {
+                    hub,
+                    args: human_send_args(action)?,
+                    caller: Some(
+                        json!({"harness":"human","session_id":"default","cwd":"","title":"Human"}),
+                    ),
+                })
             }
             "cli_rename" => {
                 let caller = self
@@ -1481,58 +1490,6 @@ impl DaemonService {
                     title: string(action, "title").to_owned(),
                 });
             }
-            "unlisten_session" => {
-                if !action["hub"].is_null() {
-                    self.validate_configured_hub(&hub)?;
-                }
-                let mut detach_errors = Vec::new();
-                if action["harness"] != "human" {
-                    let targets: Vec<String> = self
-                        .session_hubs(string(action, "harness"), string(action, "session_id"))?
-                        .into_iter()
-                        .filter(|name| action["hub"].is_null() || *name == hub)
-                        .collect();
-                    for name in targets {
-                        self.ensure_agent_stop_row_locked(
-                            &name,
-                            string(action, "harness"),
-                            string(action, "session_id"),
-                        )?;
-                        let slot = self.slots.get(&name);
-                        let rows=self.state.db.query("SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE'",&[json!(name),action["harness"].clone(),action["session_id"].clone()])?;
-                        for row in rows.into_iter().filter(|row| {
-                            slot.is_none_or(|slot| {
-                                crate::core::auth::principal_ids_equal(
-                                    string(row, "principal_id"),
-                                    string(&slot.identity, "principal_id"),
-                                )
-                            })
-                        }) {
-                            if let Err(error) =
-                                detaches.retire(self, &name, string(&row, "listener_id"), "user")
-                            {
-                                detach_errors.push(format!("{name}: {error}"));
-                            }
-                        }
-                    }
-                }
-                if action["harness"] == "human" && action["session_id"] == "default" {
-                    // Fence automatic enrollment that has not committed a local row yet.
-                    for name in self.session_hubs("human", "default")? {
-                        if !action["hub"].is_null() && name != hub {
-                            continue;
-                        }
-                        let id = self.session_node_id(&name, "human", "default")?;
-                        if let Err(error) = detaches.retire(self, &name, &id, "user") {
-                            detach_errors.push(format!("{name}: {error}"));
-                        }
-                    }
-                }
-                if !detach_errors.is_empty() {
-                    return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
-                }
-                return Ok(detaches.settle(json!({"ok":true}), true));
-            }
             "set_user" => {
                 let user = string(action, "user");
                 if !crate::plugins::validate_user(user) {
@@ -1543,327 +1500,6 @@ impl DaemonService {
                     Ok(())
                 })?;
             }
-            "setup_remove_app" => {
-                let id = action["harness"]
-                    .as_str()
-                    .or_else(|| action["app"].as_str())
-                    .ok_or("INVALID_INPUT: harness required")?;
-                let p = self
-                    .plugins
-                    .find_by_id(id)
-                    .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
-                let result = remove_plugin_setup(p);
-                let notice = p
-                    .post_disconnect_hint
-                    .clone()
-                    .unwrap_or("Disconnected · Active listeners stopped".into());
-                self.invalidate_setup(id);
-                result?;
-                let mut detach_errors = Vec::new();
-                for row in self
-                    .state
-                    .active()?
-                    .into_iter()
-                    .filter(|r| r["harness"] == id)
-                {
-                    if let Err(error) = detaches.retire(
-                        self,
-                        string(&row, "hub"),
-                        string(&row, "listener_id"),
-                        "disconnected",
-                    ) {
-                        detach_errors.push(error);
-                    }
-                }
-                self.caller_cache
-                    .lock()
-                    .map_err(|_| "Caller cache lock poisoned")?
-                    .retain(|_, v| v["harness"] != id);
-                self.last_app_action
-                    .insert(id.to_owned(), "disconnect".into());
-                if let Some(activity) = self.session_activity.as_mut() {
-                    activity.remove_candidates(id);
-                }
-                let mut result = json!({"ok":true,"notice":notice,"detach_status":if detach_errors.is_empty(){"complete"}else{"pending"},"warnings":detach_errors});
-                if !detach_errors.is_empty() {
-                    result["warning"] = json!(detach_errors.join("; "));
-                }
-                return Ok(detaches.settle(result, false));
-            }
-            "setup_save_hub" | "save_hub" => {
-                let requested_name = string(action, "name").trim();
-                if !requested_name.is_empty()
-                    && !requested_name.chars().any(|c| c.is_ascii_alphanumeric())
-                {
-                    return Err("INVALID_INPUT: Invalid hub name".into());
-                }
-                let mut cfg = action["config"]
-                    .as_object()
-                    .cloned()
-                    .map(Value::Object)
-                    .unwrap_or_else(|| action.clone());
-                let editing = action["edit"] == true;
-                let original = edited_hub(action).unwrap_or_default();
-                if editing && original.is_empty() {
-                    return Err("INVALID_INPUT: Unknown hub to edit".into());
-                }
-                let mut rename_before = Value::Null;
-                let mut renamed_config = Value::Null;
-                self.mutate_config(|v| {
-                    if precondition.is_some_and(|before| before != v) {
-                        return Err(
-                            "INVALID_INPUT: Configuration changed during discovery; retry".into(),
-                        );
-                    }
-                    rename_before = v.clone();
-                    // Materialize the implicit local Hub before saving/editing a
-                    // first explicit Hub, so first-run edits cannot discard it.
-                    if v["hubs"].is_null() {
-                        v["hubs"] = json!({"local":{"url":"local://"}});
-                    }
-                    if !v["hubs"].is_object() {
-                        return Err("INVALID_INPUT: Hubs must be an object".into());
-                    }
-                    if editing {
-                        let mut base = v["hubs"][&original].clone();
-                        if !base.is_object() {
-                            return Err("INVALID_INPUT: Unknown hub to edit".into());
-                        }
-                        if precondition.is_none() {
-                            base = crate::core::config::merge_hub_config(&base, &cfg);
-                            cfg = base;
-                        }
-                    }
-                    cfg = crate::core::config::merge_hub_config(&Value::Null, &cfg);
-                    cfg["url"] = json!(crate::plugins::validate_nats_url(
-                        string(&cfg, "url").trim()
-                    )
-                    .map_err(|error| format!("INVALID_INPUT: {error}"))?);
-                    let base_name = if requested_name.is_empty() {
-                        hub_name_from_url(string(&cfg, "url"))
-                    } else {
-                        normalize_slug(requested_name)
-                    };
-                    let name = if requested_name.is_empty() {
-                        available_hub_name(
-                            base_name,
-                            &v["hubs"],
-                            &cfg["url"],
-                            editing.then_some(original.as_str()),
-                        )
-                    } else {
-                        base_name
-                    };
-                    *resolved_hub = Some(name.clone());
-                    if !crate::plugins::validate_hub_name(&name) {
-                        return Err("INVALID_INPUT: Invalid hub name".into());
-                    }
-                    if name == "local" && cfg["url"] != "local://" {
-                        return Err("INVALID_INPUT: The local hub must use local://".into());
-                    }
-                    if editing && original == "local" && name != "local" {
-                        return Err("INVALID_INPUT: Cannot rename the local hub".into());
-                    }
-                    if !editing
-                        && (name == "local"
-                            || v["hubs"]
-                                .get(&name)
-                                .is_some_and(|existing| existing["url"] != cfg["url"]))
-                    {
-                        return Err("INVALID_INPUT: Hub name already exists".into());
-                    }
-                    let auth = cfg
-                        .get("authMode")
-                        .and_then(Value::as_str)
-                        .unwrap_or_else(|| {
-                            if !string(&cfg, "token").is_empty() {
-                                "token"
-                            } else if !string(&cfg, "issuer").is_empty()
-                                || !string(&cfg, "clientId").is_empty()
-                            {
-                                "oidc"
-                            } else {
-                                "none"
-                            }
-                        })
-                        .to_ascii_lowercase();
-                    if !matches!(auth.as_str(), "none" | "token" | "oidc") {
-                        return Err("INVALID_INPUT: Invalid authMode".into());
-                    }
-                    cfg["authMode"] = json!(auth);
-                    if auth == "token"
-                        && cfg["token"]
-                            .as_str()
-                            .is_none_or(|token| token.trim().is_empty())
-                    {
-                        return Err("INVALID_INPUT: Hub token is required in token mode".into());
-                    }
-                    if auth == "oidc" {
-                        crate::core::login::Settings::new(&cfg)?;
-                    }
-                    if cfg["user"].is_null() {
-                        if let Some(m) = cfg.as_object_mut() {
-                            m.remove("user");
-                        }
-                    }
-                    let set_default = action["set_default"]
-                        .as_bool()
-                        .or_else(|| cfg["set_default"].as_bool())
-                        .unwrap_or(false);
-                    if let Some(m) = cfg.as_object_mut() {
-                        if let Some(disabled) = m.remove("disabled") {
-                            let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
-                                && disabled.as_bool() != Some(true);
-                            m.insert("enabled".to_string(), json!(enabled));
-                        }
-                        for k in [
-                            "op",
-                            "name",
-                            "hub",
-                            "set_default",
-                            "edit",
-                            "original_name",
-                            "request_id",
-                        ] {
-                            m.remove(k);
-                        }
-                    }
-                    if editing && original != name {
-                        if self
-                            .config
-                            .state_dir
-                            .join(format!("oidc-token-{name}.json"))
-                            .exists()
-                        {
-                            return Err(
-                                "INVALID_INPUT: Destination Hub credentials already exist".into()
-                            );
-                        }
-                        if !v["hubs"][&name].is_null() {
-                            return Err("INVALID_INPUT: Hub name already exists".into());
-                        }
-                        for table in [
-                            "local_listeners",
-                            "local_signals",
-                            "pending_hub_acks",
-                            "pending_hub_detaches",
-                            "local_sent_idempotency",
-                            "wake_retries",
-                        ] {
-                            if !self
-                                .state
-                                .db
-                                .query(
-                                    &format!("SELECT 1 FROM {table} WHERE hub=? LIMIT 1"),
-                                    &[json!(name)],
-                                )?
-                                .is_empty()
-                            {
-                                return Err(
-                                    "INVALID_INPUT: Destination Hub name has retained local data"
-                                        .into(),
-                                );
-                            }
-                        }
-                        if let Some(h) = v["hubs"].as_object_mut() {
-                            h.remove(&original);
-                        }
-                        let default = v
-                            .get("default_hub")
-                            .or_else(|| v.get("defaultHub"))
-                            .and_then(Value::as_str);
-                        if default == Some(original.as_str()) {
-                            v["default_hub"] = json!(name);
-                            if let Some(m) = v.as_object_mut() {
-                                m.remove("defaultHub");
-                            }
-                        }
-                    }
-                    renamed_config = cfg.clone();
-                    v["hubs"][&name] = cfg;
-                    if set_default {
-                        v["default_hub"] = json!(name);
-                        if let Some(m) = v.as_object_mut() {
-                            m.remove("defaultHub");
-                        }
-                    }
-                    Ok(())
-                })?;
-                if let Some(name) = resolved_hub.as_deref() {
-                    self.cancel_hub_interaction(name);
-                }
-                if let Some(name) = resolved_hub
-                    .as_ref()
-                    .filter(|name| editing && **name != original)
-                {
-                    self.cancel_hub_interaction(&original);
-                    if let Some(old) = self.slots.remove(&original) {
-                        old.close_for_state(&self.state)?;
-                    }
-                    let keys: Vec<_> = self
-                        .receivers
-                        .keys()
-                        .filter(|key| {
-                            key.starts_with(&format!("{original}:"))
-                                || **key == format!("auto:{original}")
-                        })
-                        .cloned()
-                        .collect();
-                    for key in keys {
-                        if let Some(worker) = self.receivers.remove(&key) {
-                            self.events.push(worker);
-                        }
-                    }
-                    if let Some(pending) = self.oidc_recoveries.remove(&original) {
-                        pending.cancelled.store(true, Ordering::SeqCst);
-                        let _ = pending.worker.join();
-                    }
-                    for pending in self.retired_auth.drain(..) {
-                        pending.cancelled.store(true, Ordering::SeqCst);
-                        let _ = pending.worker.join();
-                    }
-                    let old_token = self
-                        .config
-                        .state_dir
-                        .join(format!("oidc-token-{original}.json"));
-                    let new_token = self
-                        .config
-                        .state_dir
-                        .join(format!("oidc-token-{name}.json"));
-                    let migration = self.state.db.transaction(|db| {
-                        for table in [
-                            "local_listeners",
-                            "local_signals",
-                            "pending_hub_acks",
-                            "pending_hub_detaches",
-                            "local_sent_idempotency",
-                            "wake_retries",
-                        ] {
-                            db.execute(
-                                &format!("UPDATE {table} SET hub=? WHERE hub=?"),
-                                &[json!(name), json!(original)],
-                            )?;
-                        }
-                        if old_token.exists() {
-                            fs::rename(&old_token, &new_token).map_err(|e| e.to_string())?;
-                        }
-                        Ok(())
-                    });
-                    if let Err(error) = migration {
-                        if !old_token.exists() && new_token.exists() {
-                            fs::rename(&new_token,&old_token).map_err(|recovery|format!("Hub rename failed: {error}; credential rollback failed: {recovery}"))?;
-                        }
-                        self.mutate_config(|v| {
-                            if v["hubs"][name] != renamed_config { return Err("Hub rename rollback conflicts with a newer configuration".into()); }
-                            if let Some(hubs) = v["hubs"].as_object_mut() { hubs.remove(name); if !rename_before["hubs"][&original].is_null() { hubs.insert(original.clone(),rename_before["hubs"][&original].clone()); } }
-                            if v["default_hub"] == *name { v["default_hub"] = rename_before.get("default_hub").or_else(||rename_before.get("defaultHub")).cloned().unwrap_or(json!("local")); }
-                            Ok(())
-                        }).map_err(|recovery|format!("Hub rename failed: {error}; configuration rollback failed: {recovery}"))?;
-                        return Err(error);
-                    }
-                    self.channel_inventories.remove(&original);
-                }
-            }
             "setup_toggle_hub" | "hub_action" => {
                 let enabled = if op == "setup_toggle_hub" {
                     action["enabled"] == true
@@ -1872,7 +1508,7 @@ impl DaemonService {
                 };
                 if op == "hub_action" && action["action"] == "reconnect" {
                     if let Some(old) = self.slots.remove(&hub) {
-                        old.close_for_state(&self.state)?;
+                        old.close_and_drain()?;
                     }
                 }
                 self.mutate_config(|v| {
@@ -1899,7 +1535,7 @@ impl DaemonService {
                     Ok(())
                 })?;
             }
-            "setup_remove_hub" | "remove_hub" => {
+            "setup_remove_hub" => {
                 if hub == "local" {
                     return Err("INVALID_INPUT: Cannot remove the local hub".into());
                 }
@@ -1928,18 +1564,8 @@ impl DaemonService {
                 self.emit(json!({"op":"hub_invite","source_op":"paste_hub_invite","request_id":action["request_id"],"config":invite}));
                 return Ok(ToolCall::Ready(json!({"ok":true})));
             }
-            "generate_hub_invite" => {
-                let mut invite = self.slot(&hub)?.config.clone();
-                invite["name"] = json!(hub);
-                return Ok(ToolCall::Ready(json!({"ok":true,"invite":invite})));
-            }
-            "send_signal" | "send_reply_from_human" => {
-                return self
-                    .send_human(&hub, &human_send_args(action)?, action)
-                    .map(ToolCall::Ready);
-            }
-            "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
-                let bulk = op == "mark_all_activity_read" || action["ack_all"] == true;
+            "ack_signals" => {
+                let bulk = action["ack_all"] == true;
                 self.state.acknowledge_activity(
                     action,
                     &self.activity_filter,
@@ -2036,108 +1662,8 @@ impl DaemonService {
                 }
                 return Ok(ToolCall::Listen { hub, args, caller });
             }
-            "unlisten" => {
-                if !action["hub"].is_null() {
-                    self.validate_configured_hub(&hub)?;
-                }
-                let id = string(action, "listener_id");
-                let agent = self
-                    .state
-                    .listener(&hub, id)?
-                    .filter(|row| row["harness"] != "human")
-                    .or_else(|| {
-                        action["harness"]
-                            .as_str()
-                            .is_some_and(|h| h != "human")
-                            .then(|| action.clone())
-                    });
-                return self.prepare_retire(hub, id.into(), agent);
-            }
-            "unlisten_all" => {
-                if !action["hub"].is_null() {
-                    self.validate_configured_hub(&hub)?;
-                }
-                // Bulk stop owns Hub policy even when no listener is active.
-                let raw = self.raw_config()?;
-                let (_, configured, _) =
-                    crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
-                let selected_hub = action.get("hub").filter(|hub| !hub.is_null());
-                let targets: Vec<String> = configured
-                    .keys()
-                    .filter(|name| selected_hub.is_none_or(|hub| *hub == name.as_str()))
-                    .cloned()
-                    .collect();
-                if targets.is_empty() && action["hub"].is_string() {
-                    return Err("INVALID_INPUT: Unknown hub".into());
-                }
-                let mut removed = 0;
-                let mut detach_errors = Vec::new();
-                for row in self.state.active()?.into_iter().filter(|row| {
-                    row["harness"] != "human" && selected_hub.is_none_or(|hub| row["hub"] == *hub)
-                }) {
-                    match detaches.retire(
-                        self,
-                        string(&row, "hub"),
-                        string(&row, "listener_id"),
-                        "user",
-                    ) {
-                        Ok(true) => removed += 1,
-                        Ok(false) => {}
-                        Err(error) => {
-                            detach_errors.push(format!("{}: {error}", string(&row, "hub")))
-                        }
-                    }
-                }
-                for name in targets {
-                    self.state.db.execute("UPDATE local_listeners SET user_stopped=1,retirement_reason=NULL WHERE hub=? AND harness!='human' AND status!='FENCED_INACTIVE'", &[json!(name)])?;
-                    // Bulk stop reports incomplete detaches across all targets.
-                    if let Err(error) = self
-                        .set_auto_listen_locked(&name, false, &mut detaches)
-                        .and_then(|projection| projection)
-                    {
-                        detach_errors.push(format!("{name}: {error}"));
-                    }
-                }
-                if !detach_errors.is_empty() {
-                    return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
-                }
-                return Ok(detaches.settle(json!({"ok":true,"removed":removed}), true));
-            }
-            "set_listen_mode" => {
-                let mode = string(action, "listen_mode");
-                if !matches!(mode, "auto" | "manual") {
-                    return Err("INVALID_INPUT: listen_mode must be auto or manual".into());
-                }
-                let slot = self.slot(&hub)?;
-                if mode == "auto" && slot.config["autoListen"] != true {
-                    return Err(
-                        "INVALID_INPUT: Enable Auto-Listen before unpinning a session".into(),
-                    );
-                }
-                let row = self
-                    .state
-                    .listener(&hub, string(action, "listener_id"))?
-                    .filter(|r| r["harness"] != "human" && r["status"] == "ACTIVE")
-                    .ok_or("LISTENER_NOT_FOUND: Session is not active")?;
-                let activity = self
-                    .session_activity
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|a| a.candidates())
-                    .find(|c| {
-                        c["harness"] == row["harness"] && c["session_id"] == row["session_id"]
-                    })
-                    .and_then(|c| super::super::state::qualifying_activity(&c));
-                let at = activity.map(|(_, at)| at).unwrap_or_else(now_ms);
-                self.state.db.execute("UPDATE local_listeners SET listen_mode=?,user_stopped=0,retirement_reason=NULL,retired_activity_revision=NULL,last_activity_at_ms=CASE WHEN listen_mode='manual' AND ?='auto' THEN MAX(COALESCE(last_activity_at_ms,0),?) ELSE last_activity_at_ms END WHERE hub=? AND listener_id=?", &[json!(mode),json!(mode),json!(at),json!(hub),row["listener_id"].clone()])?;
-                return Ok(ToolCall::Ready(json!({"ok":true,"committed":true})));
-            }
             "open_directory" | "query_directory" => {
-                let work = self.prepare_directory(action, &hub)?;
-                let result = work.execute(&self.access)?;
-                return self
-                    .directory_result(action, &hub, &result)
-                    .map(ToolCall::Ready);
+                return self.prepare_directory(action, &hub);
             }
             "switch_hub" => {
                 let from = action["from_hub"].as_str().unwrap_or(&hub);
@@ -2226,7 +1752,6 @@ impl DaemonService {
                 self.applied_host_config =
                     self.raw_config().ok().map(|raw| raw["host_hub"].clone());
                 self.host_hub_error = None;
-                self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
             "set_launch_at_login" => {
                 set_launch_at_login(
@@ -2236,36 +1761,7 @@ impl DaemonService {
                     &self.plugins,
                 )?;
             }
-            "setup_disconnect_all" | "setup_uninstall_all" => {
-                let uninstall = op == "setup_uninstall_all";
-                for row in self.state.active()?.into_iter().filter(|row| {
-                    uninstall || action["purge_data"] == true || row["harness"] != "human"
-                }) {
-                    let result = detaches.retire(
-                        self,
-                        string(&row, "hub"),
-                        string(&row, "listener_id"),
-                        "disconnected",
-                    );
-                    if !uninstall {
-                        result?;
-                    }
-                }
-                return Ok(detaches.settle(json!({"ok":true}), !uninstall));
-            }
             "quit" => request_shutdown(),
-            "set_auto_listen" => {
-                if !self.slots.contains_key(&hub) {
-                    return Err("INVALID_INPUT: Enabled hub required".into());
-                }
-                let enabled = action["enabled"]
-                    .as_bool()
-                    .ok_or("INVALID_INPUT: enabled must be a boolean")?;
-                let projection = self.set_auto_listen_locked(&hub, enabled, &mut detaches)?;
-                return Ok(
-                    detaches.settle(committed_projection(json!({"ok":true}), projection), false)
-                );
-            }
             "refresh_available" => {
                 self.refresh_available()?;
                 self.poll()?;
@@ -2286,6 +1782,244 @@ impl DaemonService {
             self.push_ui_result(Some(action));
         }
         Ok(ToolCall::Ready(json!({"ok":true})))
+    }
+
+    pub(super) fn registration_targets(&self, action: &Value) -> Result<Vec<String>, String> {
+        if let Some(hub) = action["hub"]
+            .as_str()
+            .filter(|_| !string(action, "op").starts_with("setup_"))
+        {
+            // Reject unknown input before allocating a persistent lock registry entry.
+            if matches!(string(action, "op"), "set_auto_listen" | "set_listen_mode") {
+                self.slot(hub)?;
+            } else {
+                self.validate_configured_hub(hub)?;
+            }
+            return Ok(vec![hub.into()]);
+        }
+        if matches!(string(action, "op"), "set_auto_listen" | "set_listen_mode") {
+            return Ok(vec![self.config.default_hub.clone()]);
+        }
+        let mut hubs: std::collections::HashSet<_> = self.hub_controls.keys().cloned().collect();
+        hubs.extend(self.slots.keys().cloned());
+        hubs.extend(
+            self.state
+                .db
+                .query("SELECT DISTINCT hub FROM local_listeners", &[])?
+                .iter()
+                .map(|r| string(r, "hub").to_owned()),
+        );
+        let mut hubs: Vec<_> = hubs.into_iter().collect();
+        hubs.sort();
+        Ok(hubs)
+    }
+
+    pub(super) fn apply_registration_edit(
+        &mut self,
+        action: &Value,
+        hub: String,
+    ) -> Result<ToolCall, String> {
+        let op = string(action, "op");
+        let mut detaches = Detaches::default();
+        match op {
+            "unlisten_session" => {
+                let mut detach_errors = Vec::new();
+                if action["harness"] != "human" {
+                    let targets: Vec<String> = self
+                        .session_hubs(string(action, "harness"), string(action, "session_id"))?
+                        .into_iter()
+                        .filter(|name| action["hub"].is_null() || *name == hub)
+                        .collect();
+                    for name in targets {
+                        self.ensure_agent_stop_row_locked(
+                            &name,
+                            string(action, "harness"),
+                            string(action, "session_id"),
+                        )?;
+                        let slot = self.slots.get(&name);
+                        let rows=self.state.db.query("SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE'",&[json!(name),action["harness"].clone(),action["session_id"].clone()])?;
+                        for row in rows.into_iter().filter(|row| {
+                            slot.is_none_or(|slot| {
+                                crate::core::auth::principal_ids_equal(
+                                    string(row, "principal_id"),
+                                    string(&slot.identity, "principal_id"),
+                                )
+                            })
+                        }) {
+                            if let Err(error) =
+                                detaches.retire(self, &name, string(&row, "listener_id"), "user")
+                            {
+                                detach_errors.push(format!("{name}: {error}"));
+                            }
+                        }
+                    }
+                }
+                if action["harness"] == "human" && action["session_id"] == "default" {
+                    // Fence automatic enrollment that has not committed a local row yet.
+                    for name in self.session_hubs("human", "default")? {
+                        if !action["hub"].is_null() && name != hub {
+                            continue;
+                        }
+                        let id = self.session_node_id(&name, "human", "default")?;
+                        if let Err(error) = detaches.retire(self, &name, &id, "user") {
+                            detach_errors.push(format!("{name}: {error}"));
+                        }
+                    }
+                }
+                if !detach_errors.is_empty() {
+                    return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
+                }
+                Ok(detaches.settle(json!({"ok":true}), true))
+            }
+            "setup_remove_app" => {
+                let id = action["harness"]
+                    .as_str()
+                    .ok_or("INVALID_INPUT: harness required")?;
+                let p = self
+                    .plugins
+                    .find_by_id(id)
+                    .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
+                let result = remove_plugin_setup(p);
+                let notice = p
+                    .post_disconnect_hint
+                    .clone()
+                    .unwrap_or("Disconnected · Active listeners stopped".into());
+                self.invalidate_setup(id);
+                result?;
+                let mut detach_errors = Vec::new();
+                for row in self
+                    .state
+                    .active()?
+                    .into_iter()
+                    .filter(|r| r["harness"] == id)
+                {
+                    if let Err(error) = detaches.retire(
+                        self,
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    ) {
+                        detach_errors.push(error);
+                    }
+                }
+                self.caller_cache
+                    .lock()
+                    .map_err(|_| "Caller cache lock poisoned")?
+                    .retain(|_, v| v["harness"] != id);
+                if let Some(activity) = self.session_activity.as_mut() {
+                    activity.remove_candidates(id);
+                }
+                let mut result = json!({"ok":true,"notice":notice,"detach_status":if detach_errors.is_empty(){"complete"}else{"pending"},"warnings":detach_errors});
+                if !detach_errors.is_empty() {
+                    result["warning"] = json!(detach_errors.join("; "));
+                }
+                Ok(detaches.settle(result, false))
+            }
+            "unlisten_all" => {
+                // Bulk stop owns Hub policy even when no listener is active.
+                let raw = self.raw_config()?;
+                let (_, configured, _) =
+                    crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+                let selected_hub = action.get("hub").filter(|hub| !hub.is_null());
+                let targets: Vec<String> = configured
+                    .keys()
+                    .filter(|name| selected_hub.is_none_or(|hub| *hub == name.as_str()))
+                    .cloned()
+                    .collect();
+                if targets.is_empty() && action["hub"].is_string() {
+                    return Err("INVALID_INPUT: Unknown hub".into());
+                }
+                let mut removed = 0;
+                let mut detach_errors = Vec::new();
+                for row in self.state.active()?.into_iter().filter(|row| {
+                    row["harness"] != "human" && selected_hub.is_none_or(|hub| row["hub"] == *hub)
+                }) {
+                    match detaches.retire(
+                        self,
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "user",
+                    ) {
+                        Ok(true) => removed += 1,
+                        Ok(false) => {}
+                        Err(error) => {
+                            detach_errors.push(format!("{}: {error}", string(&row, "hub")))
+                        }
+                    }
+                }
+                for name in targets {
+                    self.state.db.execute("UPDATE local_listeners SET user_stopped=1,retirement_reason=NULL WHERE hub=? AND harness!='human' AND status!='FENCED_INACTIVE'", &[json!(name)])?;
+                    // Bulk stop reports incomplete detaches across all targets.
+                    if let Err(error) = self
+                        .set_auto_listen_locked(&name, false, &mut detaches)
+                        .and_then(|projection| projection)
+                    {
+                        detach_errors.push(format!("{name}: {error}"));
+                    }
+                }
+                if !detach_errors.is_empty() {
+                    return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
+                }
+                Ok(detaches.settle(json!({"ok":true,"removed":removed}), true))
+            }
+            "set_listen_mode" => {
+                let mode = string(action, "listen_mode");
+                if !matches!(mode, "auto" | "manual") {
+                    return Err("INVALID_INPUT: listen_mode must be auto or manual".into());
+                }
+                let slot = self.slot(&hub)?;
+                if mode == "auto" && slot.config["autoListen"] != true {
+                    return Err(
+                        "INVALID_INPUT: Enable Auto-Listen before unpinning a session".into(),
+                    );
+                }
+                let row = self
+                    .state
+                    .listener(&hub, string(action, "listener_id"))?
+                    .filter(|r| r["harness"] != "human" && r["status"] == "ACTIVE")
+                    .ok_or("LISTENER_NOT_FOUND: Session is not active")?;
+                let activity = self
+                    .session_activity
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|a| a.candidates())
+                    .find(|c| {
+                        c["harness"] == row["harness"] && c["session_id"] == row["session_id"]
+                    })
+                    .and_then(|c| super::super::state::qualifying_activity(&c));
+                let at = activity.map(|(_, at)| at).unwrap_or_else(now_ms);
+                self.state.db.execute("UPDATE local_listeners SET listen_mode=?,user_stopped=0,retirement_reason=NULL,retired_activity_revision=NULL,last_activity_at_ms=CASE WHEN listen_mode='manual' AND ?='auto' THEN MAX(COALESCE(last_activity_at_ms,0),?) ELSE last_activity_at_ms END WHERE hub=? AND listener_id=?", &[json!(mode),json!(mode),json!(at),json!(hub),row["listener_id"].clone()])?;
+                Ok(ToolCall::Ready(json!({"ok":true,"committed":true})))
+            }
+            "setup_disconnect_all" | "setup_uninstall_all" => {
+                let uninstall = op == "setup_uninstall_all";
+                for row in self.state.active()?.into_iter().filter(|row| {
+                    uninstall || action["purge_data"] == true || row["harness"] != "human"
+                }) {
+                    let result = detaches.retire(
+                        self,
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    );
+                    if !uninstall {
+                        result?;
+                    }
+                }
+                Ok(detaches.settle(json!({"ok":true}), !uninstall))
+            }
+            "set_auto_listen" => {
+                if !self.slots.contains_key(&hub) {
+                    return Err("INVALID_INPUT: Enabled hub required".into());
+                }
+                let enabled = action["enabled"]
+                    .as_bool()
+                    .ok_or("INVALID_INPUT: enabled must be a boolean")?;
+                let projection = self.set_auto_listen_locked(&hub, enabled, &mut detaches)?;
+                Ok(detaches.settle(committed_projection(json!({"ok":true}), projection), false))
+            }
+            _ => Err(format!("INVALID_INPUT: Unknown registration edit: {op}")),
+        }
     }
 
     fn begin_disconnect(
@@ -2309,8 +2043,6 @@ impl DaemonService {
         {
             remove_plugin_setup(&p)?;
             self.invalidate_setup(&p.id);
-            self.last_app_action
-                .insert(p.id.clone(), "disconnect".into());
         }
         self.caller_cache
             .lock()
@@ -2348,9 +2080,9 @@ impl DaemonService {
                 Ok(())
             })?;
             let logins = self
-                .logins
-                .drain()
-                .map(|(_, attempt)| attempt)
+                .hub_controls
+                .values_mut()
+                .filter_map(|control| control.login.take())
                 .collect::<Vec<_>>();
             for attempt in &logins {
                 attempt.cancelled.store(true, Ordering::SeqCst);
@@ -2359,7 +2091,7 @@ impl DaemonService {
                 drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
             }
             for slot in self.slots.values() {
-                slot.close_for_state(&self.state)?;
+                slot.close_and_drain()?;
             }
             self.events
                 .extend(self.receivers.drain().map(|(_, worker)| worker));
@@ -2394,21 +2126,8 @@ impl DaemonService {
         {
             activity.shutdown()?;
         }
-        for pending in self
-            .oidc_recoveries
-            .values()
-            .chain(self.retired_auth.iter())
-        {
-            pending.cancelled.store(true, Ordering::SeqCst);
-        }
-        for pending in self
-            .oidc_recoveries
-            .drain()
-            .map(|(_, p)| p)
-            .chain(self.retired_auth.drain(..))
-        {
-            let _ = pending.worker.join();
-        }
+        self.cancel_logins();
+        self.join_recoveries();
         for entry in fs::read_dir(&self.config.state_dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             if entry

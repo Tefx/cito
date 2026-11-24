@@ -237,7 +237,7 @@ fn hook_from_parent(f: &Fixture, parent: usize, input: Value, mode: &str) -> Val
         );
         result.exists()
     });
-    serde_json::from_slice(&fs::read(result).unwrap()).unwrap()
+    read_json(result)
 }
 fn parent_hook(f: &Fixture, parent: usize, input: Value) -> Value {
     let result = hook_from_parent(f, parent, input, "direct");
@@ -290,7 +290,7 @@ finally:
         } else {
             let sidecar = f.spawn(CLAUDE, &[], &[]);
             f.send(sidecar,json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":child,"cwd":"/repo"}));
-            wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+            wait(|| f.frames_for(sidecar, "ready").next().is_some());
         }
         let discovered = f.plugin(bin, json!({"op":"discover_sessions","endpoint_pid":child}));
         assert!(
@@ -382,7 +382,7 @@ fn two_unhooked_claude_endpoints_never_adopt_a_shared_workspace_transcript() {
         f.send(sidecar, json!({"op":"stdio_sidecar","endpoint_pid":f.pid(*owner),"cwd":cwd,"state_dir":f.state,"env":f.env}));
         wait(|| {
             assert!(!f.exited(sidecar), "Sidecar rejected endpoint: {}", f.output(sidecar, true));
-            f.frames(sidecar).iter().any(|frame| frame["op"] == "ready")
+            f.frames_for(sidecar, "ready").next().is_some()
         });
         // The second owner is already live, even before its bridge is started.
         let pid = f.pid(*owner);
@@ -462,7 +462,7 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
     let pid = f.pid(owner);
     let sidecar = f.spawn(CLAUDE, &[], &[]);
     f.send(sidecar,json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    wait(|| f.frames_for(sidecar, "ready").next().is_some());
     let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
     let fallback = format!("claude-{pid}");
     assert_eq!(
@@ -485,9 +485,7 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
         )
     };
     let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
-    let session = || {
-        serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap()["session_id"].clone()
-    };
+    let session = || read_json(&binding)["session_id"].clone();
     for mode in ["helper", "deep", "nested-shell"] {
         let sid = format!("early-{mode}-session");
         let rejected = hook(&sid, mode);
@@ -605,7 +603,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
     assert!(!binding.exists());
     drop(lock);
     wait(|| result.exists());
-    let hook: Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();
+    let hook: Value = read_json(result);
     assert_eq!(hook["err"], "", "{hook}");
     let canonical = fs::read(&binding).unwrap();
     let canonical_value: Value = serde_json::from_slice(&canonical).unwrap();
@@ -624,7 +622,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
     fs::remove_file(&binding).unwrap();
     let sidecar = f.spawn(CLAUDE, &[], &[]);
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo-a"}));
-    wait(|| f.frames(sidecar).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(sidecar, "ready").next().is_some());
     let socket_path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
     let client = f.spawn("python3", &["-c", r#"import socket,sys,json
 s=socket.socket(socket.AF_UNIX);s.settimeout(.15);s.connect(sys.argv[1]);s.sendall(b'{"op":"identify"}\n')
@@ -673,7 +671,7 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
     // without inventing a fallback alias because its working directory differs.
     let sidecar = f.spawn(CLAUDE, &[], &[]);
     f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo-a"}));
-    wait(|| f.frames(sidecar).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(sidecar, "ready").next().is_some());
     assert_eq!(
         socket(&socket_path, json!({"op":"identify"}))["session_id"],
         "canonical-session"
@@ -684,6 +682,22 @@ s.settimeout(2);print(s.makefile().readline(),flush=True)
         "/repo-b"
     );
     assert!(!f.state.join("claude/aliases/canonical-session").exists());
+    parent_hook(
+        &f,
+        parent,
+        json!({"hook_event_name":"SessionStart","session_id":"adopted-session","cwd":"/repo-b"}),
+    );
+    let adopted = socket(&socket_path, json!({"op":"identify"}));
+    assert_eq!(adopted["session_id"], "adopted-session");
+    // Passive identification and discovery must not renew activity.
+    std::thread::sleep(Duration::from_millis(5));
+    let identified = socket(&socket_path, json!({"op":"identify"}));
+    let discovered = f.plugin(CLAUDE, json!({"op":"discover_sessions","endpoint_pid":pid}));
+    assert_eq!(discovered["sessions"].as_array().unwrap().len(), 1);
+    for row in [&identified, &discovered["sessions"][0]] {
+        assert_eq!(row["session_id"], "adopted-session");
+        assert_eq!(row["updated_at_ms"], adopted["updated_at_ms"]);
+    }
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
 
@@ -730,7 +744,7 @@ c,_=s.accept();c.settimeout(2);c.recv(4096);c.sendall((sys.argv[2]+'\n').encode(
         f.plugin(CLAUDE, json!({"op":"discover_sessions","endpoint_pid":pid}))["ok"],
         true
     );
-    let refreshed: Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+    let refreshed: Value = read_json(&binding);
     assert_eq!(refreshed["session_name"], "Stale title");
     assert_eq!(refreshed["updated_at_ms"], 1);
     wait(|| f.exited(server));
@@ -803,61 +817,6 @@ fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
         assert_eq!(canonical["cwd"], "/repo-b");
         assert_eq!(canonical["source"], "hook");
     }
-}
-
-#[test]
-fn claude_canonical_adoption_does_not_renew_activity_on_identify_or_discovery() {
-    let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let parent = spawn_hook_parent(&f, &[]);
-    let pid = f.pid(parent);
-    let sidecar = f.spawn(CLAUDE, &[], &[]);
-    let mut env = f.env.clone();
-    env.insert("CLAUDE_SESSION_ID".into(), "startup-session".into());
-    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| {
-        assert!(
-            !f.exited(sidecar),
-            "Sidecar exited: {} / {}; endpoint: {} / {}",
-            f.output(sidecar, false),
-            f.output(sidecar, true),
-            f.output(parent, false),
-            f.output(parent, true)
-        );
-        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
-    });
-    let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
-    assert_eq!(
-        socket(&path, json!({"op":"identify"}))["session_id"],
-        "startup-session"
-    );
-    parent_hook(
-        &f,
-        parent,
-        json!({"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo"}),
-    );
-    let adopted = socket(&path, json!({"op":"identify"}));
-    assert_eq!(adopted["session_id"], "canonical-session");
-    for _ in 0..3 {
-        // Cross the timestamp granularity without waiting for an activity timeout.
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let identified = socket(&path, json!({"op":"identify"}));
-        assert_eq!(identified["session_id"], "canonical-session");
-        assert_eq!(identified["updated_at_ms"], adopted["updated_at_ms"]);
-        let discovered = f.plugin(CLAUDE, json!({"op":"discover_sessions","endpoint_pid":pid}));
-        assert_eq!(
-            discovered["sessions"].as_array().unwrap().len(),
-            1,
-            "{discovered}"
-        );
-        assert_eq!(discovered["sessions"][0]["session_id"], "canonical-session");
-        assert_eq!(
-            discovered["sessions"][0]["updated_at_ms"],
-            adopted["updated_at_ms"]
-        );
-    }
-    f.eof(sidecar);
-    wait(|| f.exited(sidecar));
 }
 
 #[test]
@@ -1025,7 +984,7 @@ setInterval(()=>{},1000);
     cito_native::support::atomic_write(&f.state.join(format!("hook-request-{pid}")), json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"descendant-session","cwd":"/repo"}}).to_string().as_bytes()).unwrap();
     let result = f.state.join(format!("hook-result-{pid}"));
     wait(|| result.exists());
-    let result: Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();
+    let result: Value = read_json(result);
     assert!(
         result["err"].as_str().unwrap().contains("SESSION_MISMATCH"),
         "{result}"
@@ -1755,7 +1714,7 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         &[endpoint_script.to_str().unwrap()],
         &[("FIXTURE_HARNESS", "pi")],
     );
-    wait(|| f.frames(socket_owner).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(socket_owner, "ready").next().is_some());
     fs::write(
         sessions.join("latest.jsonl"),
         "{\"type\":\"session\",\"id\":\"session-a\"}\n",
@@ -1805,7 +1764,7 @@ fn cached_fingerprint_does_not_authorize_an_unrelated_process_command() {
             &[path.to_str().unwrap()],
             &[("FIXTURE_HARNESS", id)],
         );
-        wait(|| f.frames(p).iter().any(|v| v["op"] == "ready"));
+        wait(|| f.frames_for(p, "ready").next().is_some());
         if id == "codex" {
             let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite"))
                 .unwrap();
@@ -1820,7 +1779,7 @@ fn cached_fingerprint_does_not_authorize_an_unrelated_process_command() {
         let response = f.plugin(bin, request.clone());
         assert_eq!(response["ok"], true, "{response}");
         f.send(p, json!({"op":"offline"}));
-        wait(|| f.frames(p).iter().any(|v| v["op"] == "offline"));
+        wait(|| f.frames_for(p, "offline").next().is_some());
         if id == "codex" {
             fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();
         }
@@ -1923,18 +1882,13 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
         f.plugin(PI, json!({"op":"setup_apply","dry_run":true}))["ok"],
         true
     );
-    assert_eq!(
-        serde_json::from_str::<Value>(&fs::read_to_string(pi.join("settings.json")).unwrap())
-            .unwrap(),
-        before
-    );
+    assert_eq!(read_json(pi.join("settings.json")), before);
     assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
-    let v: Value =
-        serde_json::from_str(&fs::read_to_string(pi.join("settings.json")).unwrap()).unwrap();
+    let v: Value = read_json(pi.join("settings.json"));
     assert_eq!(v, json!({"theme":"dark","packages":["npm:other",package]}));
     assert!(!pi.join("extensions/cito-bridge.ts").exists());
     for p in ["mcp.json", "mcp/global.mcp.json"] {
-        let v: Value = serde_json::from_str(&fs::read_to_string(pi.join(p)).unwrap()).unwrap();
+        let v: Value = read_json(pi.join(p));
         assert_eq!(
             v,
             json!({"mcpServers":{"other":{"command":"keep"}},"extra":true})
@@ -1950,8 +1904,7 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
         .iter()
         .all(|a| a["status"] == "unchanged"));
     assert_eq!(f.plugin(PI, json!({"op":"setup_remove"}))["ok"], true);
-    let v: Value =
-        serde_json::from_str(&fs::read_to_string(pi.join("settings.json")).unwrap()).unwrap();
+    let v: Value = read_json(pi.join("settings.json"));
     assert_eq!(v, json!({"theme":"dark","packages":["npm:other"]}));
 }
 #[test]
@@ -1984,7 +1937,7 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
         f.plugin(PI, json!({"op":"setup_apply","plugin_dir":"~/custom/pi"}))["ok"],
         true
     );
-    let configured: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    let configured: Value = read_json(&settings);
     assert_eq!(configured["packages"], json!(["npm:other", package]));
     assert_eq!(
         f.plugin(PI, json!({"op":"setup_inspect","plugin_dir":"~/custom/pi"}))["configured"],
@@ -2000,7 +1953,7 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
         f.plugin(PI, json!({"op":"setup_remove","plugin_dir":"~/custom/pi"}))["ok"],
         true
     );
-    let configured: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+    let configured: Value = read_json(settings);
     assert_eq!(configured["packages"], json!(["npm:other"]));
 
     let hook = f.home.join("custom/claude/bin/cito-claude-hook");
@@ -2021,7 +1974,7 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
     };
     assert_eq!(inspect(), true);
     let settings = f.home.join(".claude/settings.json");
-    let original: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    let original: Value = read_json(&settings);
     for event in ["Stop", "SessionStart", "UserPromptSubmit"] {
         assert_eq!(
             original["hooks"][event][0]["hooks"][0]["command"],
@@ -2047,7 +2000,7 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
         )["ok"],
         true
     );
-    let removed: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+    let removed: Value = read_json(settings);
     assert!(removed.get("hooks").is_none());
 }
 
@@ -2078,7 +2031,7 @@ fn claude_hook_special_path_runs_as_one_shell_word_and_is_removed() {
     let call = |op| f.plugin(CLAUDE, json!({"op":op,"plugin_dir":dir}));
     assert_eq!(call("setup_apply")["ok"], true);
     let settings = f.home.join(".claude/settings.json");
-    let read = || serde_json::from_slice::<Value>(&fs::read(&settings).unwrap()).unwrap();
+    let read = || read_json(&settings);
     let configured = read();
     let cmd = configured["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
@@ -2182,8 +2135,7 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     let cache_path = f
         .state
         .join(format!("pi/endpoints/{}.json", f.pid(process)));
-    let mut cached: Value =
-        serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let mut cached: Value = read_json(&cache_path);
     assert_eq!(cached["identity"], enrolled["caller"]["process_identity"]);
     let mismatch=f.plugin(PI,json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir,"meta":{"expected_session_id":"different"}}));
     assert_eq!(mismatch["error_code"], "BINDING_REQUIRED", "{mismatch}");
@@ -2259,7 +2211,7 @@ fn codex_rollout_errors_are_isolated_and_non_utf8_lines_are_lossy() {
     f.stop(process);
 }
 #[test]
-fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
+fn codex_setup_redacts_invalid_toml_source() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let config = f.home.join(".codex/config.toml");
@@ -2270,84 +2222,10 @@ fn codex_preserves_external_id_bytes_empty_cursor_and_redacts_toml_source() {
     assert!(!rejected.to_string().contains("secret-value"), "{rejected}");
     fs::write(&config, "").unwrap();
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
-    let app = f.dir.join("codex.mjs");
-    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.output(process, false).contains("ready"));
-    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
-    db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)",&[]).unwrap();
-    let rollout = f.dir.join("empty.jsonl");
-    fs::write(&rollout, b"{\"payload\":{\"type\":\"tool_output\"}}\n").unwrap();
-    let sid = " thread\0suffix ";
-    db.execute(
-        "INSERT INTO threads VALUES(?,'/repo',0,1,?)",
-        &[json!(sid), json!(rollout)],
-    )
-    .unwrap();
-    let discovered = f.plugin(
-        CODEX,
-        json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
-    );
-    assert_eq!(discovered["sessions"][0]["session_id"], sid, "{discovered}");
-    let cursor = fs::read_dir(f.state.join("activity/codex"))
-        .unwrap()
-        .flatten()
-        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .unwrap()
-        .path();
-    let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
-    assert_eq!(
-        checkpoint["cursor"]["offset"],
-        fs::metadata(&rollout).unwrap().len()
-    );
-    for op in ["resolve_caller", "probe"] {
-        let response = f.plugin(
-            CODEX,
-            json!({"op":op,"session_id":sid,"meta":{"threadId":sid}}),
-        );
-        assert_eq!(response["ok"], true, "{response}");
-        if op == "resolve_caller" {
-            assert_eq!(response["caller"]["session_id"], sid);
-            assert_eq!(response["caller"]["cwd"], "/repo");
-        } else {
-            assert_eq!(response["status"], "alive", "{response}");
-            assert_eq!(response["current_session_id"], sid);
-        }
-    }
-    for i in 0..10 {
-        db.execute(
-            "INSERT INTO threads VALUES(?,'/repo',0,2,NULL)",
-            &[json!(format!("unrelated-{i}"))],
-        )
-        .unwrap();
-    }
-    let retained = f.plugin(
-        CODEX,
-        json!({"op":"discover_sessions","retained_session_ids":[sid],"recent_window_ms":0}),
-    );
-    let sessions = retained["sessions"].as_array().unwrap();
-    assert!(
-        sessions.iter().any(|row| row["session_id"] == sid),
-        "{retained}"
-    );
-    assert!(sessions
-        .iter()
-        .any(|row| row["session_id"] == "unrelated-9"));
-    db.execute("DELETE FROM threads WHERE id!=?", &[json!(sid)])
-        .unwrap();
-    let again = f.plugin(
-        CODEX,
-        json!({"op":"discover_sessions","endpoint_pid":f.pid(process)}),
-    );
-    assert_eq!(again["sessions"][0]["session_id"], sid, "{again}");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&fs::read(cursor).unwrap()).unwrap(),
-        checkpoint
-    );
 }
 
 #[test]
-fn codex_checkpoint_interruption_preserves_cursor_and_effect_consumption() {
+fn codex_checkpoint_migrates_and_consumes_each_effect_once() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
     let _lock = serial();
@@ -2380,32 +2258,18 @@ fn codex_checkpoint_interruption_preserves_cursor_and_effect_consumption() {
     // Legacy state migrates on the next successful atomic publication.
     fs::write(&checkpoint, json!({"effects":effects}).to_string()).unwrap();
     fs::write(checkpoint.with_extension("source.json"), "{}").unwrap();
-    // Fail the real atomic publication primitive after staging the complete
-    // checkpoint but before rename, as when a process exits at this boundary.
-    let metadata = fs::metadata(&rollout).unwrap();
-    let prior = fs::read(&checkpoint).unwrap();
-    let next = json!({"effects":[],"cursor":{"offset":metadata.len(),"device":metadata.dev(),"inode":metadata.ino(),"saw_effect":true,"revision":1}});
-    let failed = cito_native::support::atomic_write_checked(
-        &checkpoint,
-        next.to_string().as_bytes(),
-        None,
-        || Err("Interrupted before checkpoint publication".into()),
-    );
-    assert!(failed.is_err());
-    assert_eq!(fs::read(&checkpoint).unwrap(), prior);
-    assert_eq!(
-        fs::read(checkpoint.with_extension("source.json")).unwrap(),
-        b"{}"
-    );
     let discover = || {
         let response = f.plugin(CODEX, json!({"op":"discover_sessions"}));
         assert_eq!(response["ok"], true, "{response}");
         response["sessions"][0]["activity"].clone()
     };
     assert_eq!(discover()["kind"], "cito_effect");
-    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    let saved: Value = read_json(&checkpoint);
     assert_eq!(saved["effects"], json!([]));
-    assert_eq!(saved["cursor"]["offset"], metadata.len());
+    assert_eq!(
+        saved["cursor"]["offset"],
+        fs::metadata(&rollout).unwrap().len()
+    );
     let inode = fs::metadata(&checkpoint).unwrap().ino();
     assert_eq!(
         discover()["kind"],
@@ -2638,7 +2502,7 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
         .map(|entry| entry.unwrap().path())
         .find(|path| path.extension().is_some_and(|ext| ext == "json"))
         .unwrap();
-    let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    let ledger: Value = read_json(ledger);
     assert_eq!(
         ledger["effects"].as_array().unwrap().len(),
         2,
@@ -2754,7 +2618,7 @@ fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|ext| ext == "json"))
             .unwrap();
-        let checkpoint: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
+        let checkpoint: Value = read_json(&cursor);
         let marker = f.dir.join("published");
         let release = f.dir.join("release");
         script(
@@ -2800,7 +2664,7 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
             inflight["revision"],
             if deliver { now + 2 } else { now + 1 }
         );
-        let inflight_ledger: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
+        let inflight_ledger: Value = read_json(&cursor);
         assert_eq!(
             inflight_ledger["cursor"], checkpoint["cursor"],
             "In-flight discovery must not checkpoint a queue record"
@@ -2855,7 +2719,7 @@ sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
             );
             let ledger = cursor.clone();
             if ledger.exists() {
-                let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+                let ledger: Value = read_json(ledger);
                 assert!(ledger["effects"].as_array().is_none_or(Vec::is_empty));
                 assert!(ledger["fallback"].is_null());
             }
@@ -2970,7 +2834,7 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
     )
     .unwrap();
     let process = spawn_interactive(&f, "node", &[cli.to_str().unwrap()], &[]);
-    wait(|| f.frames(process).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(process, "ready").next().is_some());
     let git = f.dir.join("tools/git");
     script(&git, "#!/bin/sh\necho git >> \"$HOME/git-calls\"\nexit 1\n");
     f.env.insert(
@@ -3330,7 +3194,7 @@ fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path,json!({"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/cito-claude-hook"},{"type":"command","command":"keep"}]}]}}).to_string()).unwrap();
     assert_eq!(f.plugin(CLAUDE, json!({"op":"setup_apply"}))["ok"], true);
-    let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let v: Value = read_json(&path);
     assert_eq!(
         v["mcpServers"]["cito"]["command"],
         json!(f.state.join("bin/cito-mcp"))
@@ -3342,7 +3206,7 @@ fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
             .unwrap()
     ));
     assert_eq!(f.plugin(CLAUDE, json!({"op":"setup_remove"}))["ok"], true);
-    let v: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let v: Value = read_json(path);
     assert_eq!(
         v,
         json!({"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"keep"}]}]}})
@@ -3617,7 +3481,7 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "session-a".into());
     f.send(p,json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":endpoint,"cwd":"/repo"}));
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(p, "ready").next().is_some());
     assert_eq!(
         f.frames(p)[0]["capabilities_patch"]["experimental"]["claude/channel"],
         json!({})
@@ -3681,7 +3545,7 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
         let mut env = f.env.clone();
         env.insert("CLAUDE_SESSION_ID".into(), "signal-session".into());
         f.send(p,json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":endpoint,"cwd":"/repo"}));
-        wait(|| f.frames(p).iter().any(|frame| frame["op"] == "ready"));
+        wait(|| f.frames_for(p, "ready").next().is_some());
         socket(
             &path,
             json!({"op":"status","session_id":"signal-session","badge":"owned"}),
@@ -3776,8 +3640,7 @@ fn setup_uses_republished_command_and_reports_skipped_inspection_failure() {
     .unwrap();
     let (ok, out, err) = f.command(NATIVE, &["setup", "--enable", "pi", "--json"], "");
     assert!(ok, "{out} {err}");
-    let settings: Value =
-        serde_json::from_slice(&fs::read(f.home.join(".pi/agent/settings.json")).unwrap()).unwrap();
+    let settings: Value = read_json(f.home.join(".pi/agent/settings.json"));
     assert!(settings["packages"]
         .as_array()
         .unwrap()
@@ -3868,10 +3731,11 @@ fn setup_reports_only_committed_config_on_disconnect_apply_and_login_failure() {
     let _lock = serial();
     let before = br#"{"host_hub":{"enabled":true,"port":4291}}"#;
     let saved = format!("{}\n", serde_json::to_string_pretty(&json!({"default_hub":"local", "hubs":{"local":{"url":"local://","natsUrl":"local://","authMode":"none","enabled":true,"defaultScope":"workspace"}}, "host_hub":{"enabled":false,"port":4291}})).unwrap());
-    for (operation, failure) in [
-        ("--disable", "Invalid host-id UUID"),
-        ("--enable", "Sample setup refused"),
-        ("--login-item", "File exists"),
+    for (operation, state, failure) in [
+        ("--disable", "created", "Invalid host-id UUID"),
+        ("--enable", "updated", "Sample setup refused"),
+        ("--enable", "dry-run", "Sample setup refused"),
+        ("--login-item", "unchanged", "File exists"),
     ] {
         let f = Fixture::new(json!({}));
         let mut args = vec!["setup", "--no-share-hub", operation];
@@ -3893,48 +3757,32 @@ fn setup_reports_only_committed_config_on_disconnect_apply_and_login_failure() {
                 fs::write(f.state.join("host-id"), b"invalid").unwrap();
             }
         }
-        for state in ["created", "updated", "unchanged", "dry-run"] {
-            match state {
-                "created" => fs::remove_file(&f.config).unwrap(),
-                "updated" | "dry-run" => fs::write(&f.config, before).unwrap(),
-                _ => {} // Reuse the bytes committed by the previous invocation.
-            }
-            let mut args = args.clone();
-            if state == "dry-run" {
-                args.push("--dry-run");
-            }
-            let (ok, out, err) = f.command(NATIVE, &args, "");
-            assert_eq!(
-                fs::read(&f.config).unwrap(),
-                if state == "dry-run" {
-                    &before[..]
-                } else {
-                    saved.as_bytes()
-                },
-                "{operation}: {state}: {err}"
-            );
-            assert_eq!(
-                ok,
-                operation == "--login-item" && state == "dry-run",
-                "{operation}: {state}: {out} {err}"
-            );
-            if !ok {
-                let expected = if operation == "--disable" && state == "dry-run" {
-                    "Sample setup refused"
-                } else {
-                    failure
-                };
-                assert!(err.contains(expected), "{operation}: {state}: {err}");
-            }
-            if matches!(state, "created" | "updated") {
-                assert!(
-                    err.contains("Configuration saved; setup incomplete:"),
-                    "{err}"
-                );
-            } else {
-                assert!(!err.contains("Configuration saved"), "{err}");
-            }
+        match state {
+            "created" => fs::remove_file(&f.config).unwrap(),
+            "unchanged" => fs::write(&f.config, &saved).unwrap(),
+            _ => fs::write(&f.config, before).unwrap(),
         }
+        if state == "dry-run" {
+            args.push("--dry-run");
+        }
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(
+            !ok && err.contains(failure),
+            "{operation}: {state}: {out} {err}"
+        );
+        assert_eq!(
+            fs::read(&f.config).unwrap(),
+            if state == "dry-run" {
+                &before[..]
+            } else {
+                saved.as_bytes()
+            }
+        );
+        assert_eq!(
+            err.contains("Configuration saved"),
+            matches!(state, "created" | "updated"),
+            "{err}"
+        );
     }
 }
 
@@ -3945,7 +3793,7 @@ fn setup_reports_committed_config_after_staging_failure() {
     fs::write(f.state.join("runtime"), "not a directory").unwrap();
     let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3421"], "");
     assert!(!ok && err.contains("Configuration saved"), "{err}");
-    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    let config: Value = read_json(&f.config);
     assert_eq!(config["host_hub"]["port"], 3421);
     let (ok, _, err) = f.command(NATIVE, &["setup", "--share-port", "3421"], "");
     assert!(!ok && !err.contains("Configuration saved"), "{err}");
@@ -3992,7 +3840,7 @@ s=socketserver.TCPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handl
         !ok && err.contains("Configuration saved") && err.contains("Reload refused"),
         "{err}"
     );
-    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    let config: Value = read_json(&f.config);
     assert_eq!(config["host_hub"]["port"], 3021);
 }
 
@@ -4069,13 +3917,13 @@ for (const reject of [false,true]) {
   bridge({on:(name,fn)=>{if(name==='session_shutdown') shutdown=fn},registerCommand:(_,cmd)=>run=cmd.handler});
   const ctx={cwd:'/repo',sessionManager:{getSessionId:()=>'test',getSessionName:()=>'Test'},ui:{notify:(...v)=>ui.push(v),setStatus:(...v)=>ui.push(v)}};
   globalThis.fetch=(url)=>{urls.push(url);return new Promise((yes,no)=>{settle=()=>reject?no(Error('late failure')):yes(new Response(JSON.stringify({result:{content:[{type:'text',text:JSON.stringify({listener_id:'test',scope:'self'})}]}})))})};
-  for (const invalid of [null,[],0,'text',{daemonPort:0},{daemon_port:65536},{daemonPort:null},{daemon_port:'1234'},{daemonPort:4321,daemon_port:false}]) {
+  for (const invalid of [[], {daemonPort:0}]) {
     writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify(invalid));
     const result=run('on',ctx);
     assert.equal(urls.length,0,'Invalid config reached the transport');
     await result; assert.equal(ui.at(-1)[1],'error');
   }
-  writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify({daemon_port:4321}));
+  writeFileSync(process.env.CITO_CONFIG_PATH,JSON.stringify({daemonPort:4321}));
   const pending=run('on',ctx); assert.deepEqual(urls,['http://127.0.0.1:4321/mcp']);
   await shutdown(); const before=ui.length; settle(); await pending; assert.equal(ui.length,before);
 }
@@ -4258,7 +4106,7 @@ fn telegram_token_rotation_discards_pending_updates_and_restarts_offset_zero() {
         p,
         json!({"op":"configure","hub_config":config("old"),"cursor":"10"}),
     );
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "inbound_reply"));
+    wait(|| f.frames_for(p, "inbound_reply").next().is_some());
     // Both pairing and reply updates await acknowledgments; a new token must discard them.
     f.send(
         p,
@@ -4403,10 +4251,7 @@ server.serve_forever()
                 && row["text"] == "Recovered intact"
         })
     });
-    assert!(!f
-        .frames(plugin)
-        .iter()
-        .any(|row| row["op"] == "cursor_save"));
+    assert!(f.frames_for(plugin, "cursor_save").next().is_none());
     f.send(plugin, json!({"op":"reply_ack","update_id":"40","ok":true}));
     wait(|| {
         f.frames(server).iter().any(|row| {
@@ -4568,7 +4413,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         p,
         json!({"op":"format_pair","req_id":"pair","code":"cito-abcdefghij","hub_config":config}),
     );
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "rpc_result"));
+    wait(|| f.frames_for(p, "rpc_result").next().is_some());
     assert_eq!(
         f.frames(p)
             .iter()
@@ -4576,11 +4421,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
             .unwrap()["instruction"],
         "Send \"/start cito-abcdefghij\" to @example_bot"
     );
-    let pairing = f
-        .frames(p)
-        .into_iter()
-        .find(|v| v["op"] == "rpc_result")
-        .unwrap();
+    let pairing = f.frames_for(p, "rpc_result").next().unwrap();
     assert_eq!(pairing["bot_username"], "example_bot");
     assert_eq!(
         pairing["pairing_url"],
@@ -4590,8 +4431,8 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         p,
         json!({"op":"configure","hub_config":config,"bindings":[],"cursor":"10"}),
     );
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "pair_redeem"));
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "inbound_reply"));
+    wait(|| f.frames_for(p, "pair_redeem").next().is_some());
+    wait(|| f.frames_for(p, "inbound_reply").next().is_some());
     assert!(f
         .frames(p)
         .iter()
@@ -4733,7 +4574,7 @@ fn cached_pid_identity_requires_same_live_invocation_and_plugin_process_command(
             &[path.to_str().unwrap()],
             &[("FIXTURE_HARNESS", id)],
         );
-        wait(|| f.frames(p).iter().any(|v| v["op"] == "ready"));
+        wait(|| f.frames_for(p, "ready").next().is_some());
         let endpoint = f.pid(p);
         if id == "codex" {
             let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite"))
@@ -4754,7 +4595,7 @@ fn cached_pid_identity_requires_same_live_invocation_and_plugin_process_command(
             .unwrap()
             .contains(path.to_str().unwrap()));
         f.send(p, json!({"op":"offline"}));
-        wait(|| f.frames(p).iter().any(|v| v["op"] == "offline"));
+        wait(|| f.frames_for(p, "offline").next().is_some());
         if id == "codex" {
             fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();
         }

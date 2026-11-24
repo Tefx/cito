@@ -127,17 +127,16 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
                 receipt_only = true;
                 frame = json!({"op":frame["op"],"ok":true,"committed":true,
                     "request_id":frame["request_id"],"hub":frame["hub"],
-                    "channel":frame["channel"],"channel_id":frame["channel_id"],
+                    "channel_id":frame["channel_id"],
                     "action":frame["action"],"source_op":frame["source_op"],
                     "authority_changed":frame["authority_changed"],
-                    "receipt_authority":frame["receipt_authority"],
                     "warning":frame["warning"].as_str().unwrap_or("Saved successfully; canonical settings exceed the UI frame budget")});
                 continue;
             }
             if frame["op"] == "error" {
                 return Err("UI receipt exceeds frame budget".into());
             }
-            frame = json!({"op":"error","ok":false,"request_id":frame["request_id"],"hub":frame["hub"],"channel":frame["channel"],"channel_id":frame["channel_id"],"action":frame["action"],"source_op":frame.get("source_op").unwrap_or(&frame["op"]),"error":"Response exceeds the UI frame budget; retry with a smaller selection"});
+            frame = json!({"op":"error","ok":false,"request_id":frame["request_id"],"hub":frame["hub"],"channel_id":frame["channel_id"],"action":frame["action"],"source_op":frame.get("source_op").unwrap_or(&frame["op"]),"error":"Response exceeds the UI frame budget; retry with a smaller selection"});
             continue;
         }
         let removed = [

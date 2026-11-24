@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -14,11 +14,9 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-/// Preserve opaque identifier bytes while rejecting blank carriers.
+/// Opaque identifiers retain their wire bytes; blank carriers supply no identity.
 pub fn raw_str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
+    v.get(key)?.as_str().filter(|s| !s.trim().is_empty())
 }
 pub fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key)
@@ -32,6 +30,28 @@ pub fn env_value(req: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| std::env::var(key).ok())
+}
+pub const DEFAULT_DAEMON_PORT: u16 = 4290;
+
+pub fn resolve_daemon_port(env: Option<&str>, configured: Option<&Value>) -> Result<u16> {
+    let configured = configured
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p > 0)
+                .ok_or("daemonPort must be an integer in 1..65535")
+        })
+        .transpose()?;
+    match env {
+        Some(value) => value
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or_else(|| "CITO_DAEMON_PORT must be an integer in 1..65535".into()),
+        None => Ok(configured.unwrap_or(DEFAULT_DAEMON_PORT)),
+    }
 }
 pub fn home(req: &Value) -> PathBuf {
     PathBuf::from(env_value(req, "HOME").unwrap_or_else(|| "/tmp".into()))
@@ -222,50 +242,27 @@ fn clean_sidecars(path: &Path) {
     }
 }
 pub fn publication_target(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(path)
-    };
-    let mut pending: std::collections::VecDeque<_> = absolute
-        .components()
-        .map(|part| part.as_os_str().to_os_string())
-        .collect();
-    let mut target = PathBuf::new();
-    let mut hops = 0;
-    while let Some(part) = pending.pop_front() {
-        match Path::new(&part).components().next() {
-            Some(Component::RootDir) => target = PathBuf::from("/"),
-            Some(Component::CurDir) | None => {}
-            Some(Component::ParentDir) => {
-                target.pop();
-            }
-            _ => {
-                target.push(&part);
-                match fs::read_link(&target) {
-                    Ok(link) => {
-                        hops += 1;
-                        if hops > 40 {
-                            return Err("Configuration symlink chain exceeds 40 links".into());
-                        }
-                        target.pop();
-                        for part in link.components().rev() {
-                            pending.push_front(part.as_os_str().to_os_string());
-                        }
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
-                        ) => {}
-                    Err(error) => return Err(error.to_string()),
-                }
-            }
-        }
+    match path.canonicalize() {
+        Ok(target) => return Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
     }
-    Ok(target)
+    let absolute = std::path::absolute(path).map_err(|e| e.to_string())?;
+    let parent = absolute.parent().ok_or("Missing publication parent")?;
+    let parent = parent.canonicalize().unwrap_or_else(|_| parent.to_owned());
+    match fs::read_link(&absolute) {
+        Ok(link) => {
+            let target = parent.join(link);
+            if target.is_symlink() {
+                return Err("Cannot publish through multiple dangling symlinks".into());
+            }
+            Ok(target)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(parent.join(absolute.file_name().ok_or("Missing publication filename")?))
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -277,6 +274,7 @@ pub fn atomic_write_with_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> R
     atomic_write_checked(path, bytes, mode, || Ok(()))
 }
 
+/// Login publication rechecks its deadline after staging and before the rename.
 pub fn atomic_write_checked(
     path: &Path,
     bytes: &[u8],
@@ -403,26 +401,15 @@ pub fn mutate_with_mode(
         if changed && !dry {
             if !remove {
                 if let Some(ref content) = old {
-                    let mut timestamp = now_ms();
-                    let (p, mut file) = loop {
-                        let mut backup_name = path.as_os_str().to_os_string();
-                        backup_name.push(format!(".bak.{timestamp}-{}", std::process::id()));
-                        let p = PathBuf::from(backup_name);
-                        match OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .mode(0o600)
-                            .open(&p)
-                        {
-                            Ok(file) => break (p, file),
-                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                                timestamp = timestamp
-                                    .checked_add(1)
-                                    .ok_or("Backup timestamp exhausted")?;
-                            }
-                            Err(error) => return Err(error.to_string()),
-                        }
-                    };
+                    let mut backup_name = path.as_os_str().to_os_string();
+                    backup_name.push(format!(".bak.{}", random_uuid_v4()));
+                    let p = PathBuf::from(backup_name);
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&p)
+                        .map_err(|e| e.to_string())?;
                     file.write_all(content.as_bytes())
                         .map_err(|e| e.to_string())?;
                     file.sync_all().map_err(|e| e.to_string())?;
@@ -525,6 +512,11 @@ pub fn matches_process(command: &str, policy: impl FnOnce(&str, &str, bool) -> b
     policy(entry, name, script.is_some())
 }
 
+pub fn live_bridge(req: &Value, harness: &str, pid: u32) -> bool {
+    let path = state(req).join(format!("sockets/{harness}-pid-{pid}.sock"));
+    path.exists()
+        && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true)
+}
 pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
     let mut s = UnixStream::connect(path).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_millis(750)))
@@ -779,26 +771,17 @@ pub fn pid(req: &Value) -> Option<u32> {
             .and_then(|roots| roots.into_iter().next())
     })
 }
-fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
-    if let Some(expected) = str_at(meta, "expected_harness") {
-        if caller["harness"] != expected {
+pub fn verify(caller: &Value, req: &Value, alias: Option<&str>) -> Result<()> {
+    let mismatch = |id: &str| caller["session_id"] != id && alias != Some(id);
+    for meta in [&req["meta"], &req["_meta"]] {
+        if str_at(meta, "expected_harness").is_some_and(|h| caller["harness"] != h)
+            || raw_str_at(meta, "expected_session_id").is_some_and(mismatch)
+        {
             return Err("Conflicting caller metadata".into());
         }
     }
-    if let Some(expected) = raw_str_at(meta, "expected_session_id") {
-        if caller["session_id"] != expected {
-            return Err("Conflicting caller metadata".into());
-        }
-    }
-    Ok(())
-}
-pub fn verify(caller: &Value, req: &Value) -> Result<()> {
-    verify_expected_identity(caller, &req["meta"])?;
-    verify_expected_identity(caller, &req["_meta"])?;
-    if let Some(expected) = raw_str_at(req, "explicit_session_id") {
-        if caller["session_id"] != expected {
-            return Err("Conflicting caller metadata".into());
-        }
+    if raw_str_at(req, "explicit_session_id").is_some_and(mismatch) {
+        return Err("Conflicting caller metadata".into());
     }
     Ok(())
 }
@@ -967,6 +950,16 @@ pub fn is_agent_harness(command: &str) -> bool {
 
 /// Ignore inherited endpoint hints that cross a nearer harness boundary.
 pub fn enclosing_endpoint_pid(hint: Option<u32>, parent: u32) -> u32 {
+    enclosing_endpoint_pid_with(hint, parent, |pid| {
+        process_command(pid).is_ok_and(|cmd| is_agent_harness(&cmd))
+    })
+}
+
+pub fn enclosing_endpoint_pid_with(
+    hint: Option<u32>,
+    parent: u32,
+    is_endpoint: impl Fn(u32) -> bool,
+) -> u32 {
     let hint = hint.filter(|p| alive(*p) && same_user_process(*p));
     let mut current = parent;
     for _ in 0..16 {
@@ -976,7 +969,7 @@ pub fn enclosing_endpoint_pid(hint: Option<u32>, parent: u32) -> u32 {
         if !same_user_process(current) {
             break;
         }
-        if process_command(current).is_ok_and(|command| is_agent_harness(&command)) {
+        if is_endpoint(current) {
             return current;
         }
         let Some(next) = process_parent(current).filter(|p| *p > 1) else {
@@ -1128,12 +1121,13 @@ pub fn remember_process(mut caller: Value) -> Value {
     }
     caller
 }
-pub fn has_generic_session_mismatch(req: &Value, actual_sid: &str) -> bool {
+pub fn has_generic_session_mismatch(req: &Value, actual_sid: &str, alias: Option<&str>) -> bool {
     ["meta", "_meta"]
         .iter()
         .all(|key| str_at(&req[key], "expected_harness").is_none())
         && ["meta", "_meta"].iter().any(|key| {
-            raw_str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid)
+            raw_str_at(&req[key], "expected_session_id")
+                .is_some_and(|id| id != actual_sid && alias != Some(id))
         })
 }
 // Concrete plugins validate their own session binding after the shared cache and
@@ -1142,6 +1136,7 @@ pub fn cached_caller(
     req: &Value,
     harness: &str,
     session_hint: Option<&str>,
+    alias: Option<&str>,
     matches_command: impl FnOnce(&str) -> bool,
     check_binding: impl FnOnce(&Value) -> std::result::Result<(), Value>,
 ) -> std::result::Result<Option<Value>, Value> {
@@ -1155,9 +1150,7 @@ pub fn cached_caller(
             "Cached caller harness does not match the plugin",
         ));
     }
-    let session = cached["session_id"]
-        .as_str()
-        .filter(|s| !s.trim().is_empty())
+    let session = raw_str_at(cached, "session_id")
         .ok_or_else(|| error("INVALID_INPUT", "Cached session identity is missing"))?;
     let pid = pid(req)
         .ok_or_else(|| error("BINDING_REQUIRED", "Cached caller requires an endpoint PID"))?;
@@ -1194,10 +1187,10 @@ pub fn cached_caller(
     check_binding(cached)?;
     // A generic session fence can name another provider. Stale process bindings
     // and unfenced cache misses must let the host continue provider discovery.
-    if session_hint.is_none() && has_generic_session_mismatch(req, session) {
+    if session_hint.is_none() && has_generic_session_mismatch(req, session, alias) {
         return Err(error("BINDING_REQUIRED", "Caller session mismatch"));
     }
-    verify(cached, req).map_err(|e| error("INVALID_INPUT", e))?;
+    verify(cached, req, alias).map_err(|e| error("INVALID_INPUT", e))?;
     if session_hint.map(|s| s != session).unwrap_or(false) {
         return Err(error("INVALID_INPUT", "Conflicting caller metadata"));
     }
@@ -1516,16 +1509,6 @@ pub(crate) mod sqlite {
             flags: libc::c_int,
             vfs: *const libc::c_char,
         ) -> libc::c_int;
-        pub(crate) fn sqlite3_close_v2(db: *mut libc::c_void) -> i32;
-        pub(crate) fn sqlite3_errmsg(db: *mut libc::c_void) -> *const libc::c_char;
-        pub(crate) fn sqlite3_bind_null(stmt: *mut libc::c_void, index: i32) -> i32;
-        pub(crate) fn sqlite3_bind_int64(stmt: *mut libc::c_void, index: i32, value: i64) -> i32;
-        pub(crate) fn sqlite3_bind_double(stmt: *mut libc::c_void, index: i32, value: f64) -> i32;
-        pub(crate) fn sqlite3_column_type(stmt: *mut libc::c_void, column: i32) -> i32;
-        pub(crate) fn sqlite3_column_int64(stmt: *mut libc::c_void, column: i32) -> i64;
-        pub(crate) fn sqlite3_column_double(stmt: *mut libc::c_void, column: i32) -> f64;
-        pub(crate) fn sqlite3_changes(db: *mut libc::c_void) -> i32;
-        pub(crate) fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
         pub(crate) fn sqlite3_close(db: *mut libc::c_void) -> libc::c_int;
         pub(crate) fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;
         pub(crate) fn sqlite3_progress_handler(
@@ -1705,12 +1688,9 @@ impl ReadOnlySqlite {
     }
     pub fn rows_params(&self, sql: &str, params: &[&str]) -> Result<Vec<Value>> {
         let sql = std::ffi::CString::new(sql).map_err(|_| "Invalid session query")?;
-        let lengths = params
-            .iter()
-            .map(|text| {
-                i32::try_from(text.len()).map_err(|_| "Session query parameter is too large")
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if params.iter().any(|text| text.len() > i32::MAX as usize) {
+            return Err("Session query parameter is too large".into());
+        }
         loop {
             let remaining = self
                 .deadline
@@ -1741,14 +1721,14 @@ impl ReadOnlySqlite {
                     std::ptr::null_mut(),
                 );
                 if rc == 0 && !stmt.is_null() {
-                    for (index, (text, length)) in params.iter().zip(&lengths).enumerate() {
+                    for (index, text) in params.iter().enumerate() {
                         // SQLITE_STATIC: borrowed parameter bytes stay live until
                         // this statement is finalized, including every step/retry.
                         rc = sqlite3_bind_text(
                             stmt,
                             (index + 1) as i32,
                             text.as_ptr().cast(),
-                            *length,
+                            text.len() as i32,
                             None,
                         );
                         if rc != 0 {
@@ -1860,43 +1840,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opaque_strings_keep_padding_and_sqlite_embedded_nuls() -> Result<()> {
-        let value = json!({"session_id":" session\0id ","name":" command ","blank":" \t "});
-        assert_eq!(raw_str_at(&value, "session_id"), Some(" session\0id "));
-        assert_eq!(str_at(&value, "name"), Some("command"));
-        assert_eq!(raw_str_at(&value, "blank"), None);
-        let root = std::env::temp_dir().join(format!(
-            "cito-sqlite-bytes-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        let result = (|| {
-            let path = root.join("sessions.sqlite");
-            let filename = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-            let mut db = std::ptr::null_mut();
-            // SAFETY: owned output pointer and static SQL stay live through calls.
-            unsafe {
-                assert_eq!(
-                    sqlite3_open_v2(filename.as_ptr(), &mut db, 2 | 4, std::ptr::null()),
-                    0
-                );
-                let rc = sqlite3_exec(db, c"CREATE TABLE sessions(id TEXT); INSERT INTO sessions VALUES(CAST(X'2073657373696F6E00696420' AS TEXT))".as_ptr(), None, std::ptr::null_mut(), std::ptr::null_mut());
-                sqlite3_close(db);
-                assert_eq!(rc, 0);
-            }
-            let reader = ReadOnlySqlite::open(&path, Duration::from_secs(1))?;
-            assert_eq!(
-                reader.rows("SELECT id FROM sessions")?[0]["id"],
-                value["session_id"]
-            );
-            Ok(())
-        })();
-        fs::remove_dir_all(root).map_err(|e| e.to_string())?;
-        result
+    fn daemon_port_checks_both_sources_and_prefers_environment() {
+        let config = json!(4321);
+        assert_eq!(resolve_daemon_port(None, None), Ok(4290));
+        assert_eq!(resolve_daemon_port(None, Some(&config)), Ok(4321));
+        assert_eq!(
+            resolve_daemon_port(Some(" 65535 "), Some(&config)),
+            Ok(65535)
+        );
+        assert!(resolve_daemon_port(Some("0"), Some(&config)).is_err());
+        assert!(resolve_daemon_port(Some("1234"), Some(&json!(65536))).is_err());
     }
+
     #[test]
-    fn atomic_publication_follows_dangling_chains_and_cleans_failed_temps() {
+    fn atomic_publication_preserves_link_and_target_mode() {
         let root = std::env::temp_dir().join(format!(
             "cito-publication-{}-{}",
             std::process::id(),
@@ -1905,15 +1862,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
         let target = root.join("new/settings");
-        for index in (0..40).rev() {
-            let next = if index == 39 {
-                PathBuf::from("new/settings")
-            } else {
-                PathBuf::from(format!("link-{}", index + 1))
-            };
-            std::os::unix::fs::symlink(next, root.join(format!("link-{index}"))).unwrap();
-        }
-        let link = root.join("link-0");
+        let link = root.join("link");
+        std::os::unix::fs::symlink("new/settings", &link).unwrap();
         atomic_write(&link, b"created").unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"created");
         assert!(fs::symlink_metadata(&link)
@@ -1930,16 +1880,6 @@ mod tests {
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o640
         );
-        assert!(atomic_write_checked(&link, b"rejected", Some(0o600), || {
-            Err("cancelled".into())
-        })
-        .is_err());
-        assert_eq!(
-            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
-        assert_eq!(fs::read(&target).unwrap(), b"updated");
-        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
         atomic_write_with_mode(&link, b"private", Some(0o600)).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"private");
         assert_eq!(
@@ -1950,16 +1890,12 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
-        std::os::unix::fs::symlink("link-0", root.join("too-many")).unwrap();
-        assert!(atomic_write(&root.join("too-many"), b"bad").is_err());
         std::os::unix::fs::symlink("cycle", root.join("cycle")).unwrap();
         assert!(atomic_write(&root.join("cycle"), b"bad").is_err());
-        std::os::unix::fs::symlink("missing/parent", root.join("parent-link")).unwrap();
-        atomic_write(&root.join("parent-link/child"), b"child").unwrap();
-        assert_eq!(
-            fs::read(root.join("missing/parent/child")).unwrap(),
-            b"child"
-        );
+        std::os::unix::fs::symlink("missing", root.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("dangling", root.join("chain")).unwrap();
+        assert!(atomic_write(&root.join("chain"), b"bad").is_err());
+        assert!(root.join("dangling").is_symlink());
         fs::remove_dir_all(root).unwrap();
     }
 

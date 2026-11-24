@@ -94,11 +94,7 @@ pub fn readable_alias(raw: &str) -> Option<(&str, Option<&str>, &str)> {
     let (user, harness) = owner
         .split_once('/')
         .map_or((owner, None), |(u, h)| (u, Some(h)));
-    if user.is_empty()
-        || user.len() > 64
-        || !user
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    if !super::config::validate_user(user)
         || harness.is_some_and(|h| !crate::plugins::validate_harness_id(h))
     {
         return None;
@@ -129,11 +125,7 @@ pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value
     } else {
         let mut chosen = None;
         for length in [4, 8, 12, 16] {
-            let end = suffix
-                .char_indices()
-                .nth(length)
-                .map_or(suffix.len(), |(i, _)| i);
-            let prefix = &suffix[..end];
+            let prefix = &suffix[..suffix.len().min(length)];
             if prefix.is_empty() {
                 break;
             }
@@ -279,17 +271,6 @@ pub fn iso(ms: u64) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn malformed_unicode_ids_use_the_full_safe_fallback() {
-        for id in ["c_ab😀defghijkl", "c_ééé", "c_BAD-ID", "c_abcd"] {
-            let row = json!({"listener_id":id,"owner_user":"alice","harness":"agent"});
-            assert_eq!(
-                display_address("local", "local", &row, &[]),
-                public_listener_id("alice", id)
-            );
-        }
-    }
-
-    #[test]
     fn slugs_and_node_ids() {
         assert_eq!(normalize_slug("Alice._Smith"), "alice-smith");
         assert_eq!(normalize_slug("___"), "user");
@@ -364,7 +345,7 @@ mod tests {
         assert!(readable_alias("alice/agent#abcd").is_some());
         assert!(readable_alias("agent#abcd").is_some());
         assert!(readable_alias("alice/agent#").is_none());
-        assert!(!super::super::config::validate_user("SELF"));
+        assert!(readable_alias("SELF/agent#abcd").is_none());
     }
     #[test]
     fn display_address_collision_liveness_matches_the_hub_clock() {

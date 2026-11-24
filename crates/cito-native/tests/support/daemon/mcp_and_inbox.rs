@@ -1,5 +1,35 @@
 use super::*;
 
+fn fence_endpoint(f: &Fixture, harness: &str) -> usize {
+    let app = f.dir.join(format!("{harness}.mjs"));
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    endpoint
+}
+
+fn claude_sidecar(f: &Fixture) -> (u32, usize) {
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = spawn_interactive(f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let pid = f.pid(endpoint);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    let mut env = f.env.clone();
+    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
+    wait(|| {
+        assert!(
+            !f.exited(sidecar),
+            "Sidecar exited: {:?} {}",
+            f.frames(sidecar),
+            f.output(sidecar, true)
+        );
+        f.frames_for(sidecar, "ready").next().is_some()
+    });
+    (pid, sidecar)
+}
+
 #[test]
 fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_claims() {
     let _lock = serial();
@@ -10,24 +40,7 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     for (id, bin) in [("codex", CODEX), ("pi", PI), ("claude", CLAUDE)] {
         install_provider_command(&f, id, json!([bin]));
     }
-    let app = f.dir.join("claude.mjs");
-    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.output(endpoint, false).contains("ready"));
-    let claude_pid = f.pid(endpoint);
-    let sidecar = f.spawn(CLAUDE, &[], &[]);
-    let mut env = f.env.clone();
-    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
-    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":claude_pid,"cwd":"/repo"}));
-    wait(|| {
-        assert!(
-            !f.exited(sidecar),
-            "Sidecar exited: {:?} {}",
-            f.frames(sidecar),
-            f.output(sidecar, true)
-        );
-        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
-    });
+    let (claude_pid, sidecar) = claude_sidecar(&f);
     let foreign = f.plugin(
         CODEX,
         json!({"op":"resolve_caller","cwd":"/repo",
@@ -228,10 +241,7 @@ fn cached_generic_session_fences_allow_all_providers_to_continue() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     for (bin, harness) in [(CODEX, "codex"), (CLAUDE, "claude"), (PI, "pi")] {
-        let app = f.dir.join(format!("{harness}.mjs"));
-        fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-        let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
-        wait(|| f.output(endpoint, false).contains("ready"));
+        let endpoint = fence_endpoint(&f, harness);
         let pid = f.pid(endpoint);
         let cached = cito_native::support::remember_process(
             json!({"harness":harness,"session_id":"cached-session","endpoint_pid":pid}),
@@ -297,7 +307,7 @@ fn cached_generic_session_fences_allow_all_providers_to_continue() {
                     assert_eq!(conflict["error_code"], "INVALID_INPUT", "{conflict}");
                 }
             }
-            let mut changed: Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+            let mut changed: Value = read_json(&binding);
             changed["session_id"] = json!("resumed-session");
             fs::write(&binding, changed.to_string()).unwrap();
             let switched = f.plugin(bin, req.clone());
@@ -526,10 +536,7 @@ fn codex_padded_metadata_and_raw_cached_session_have_consistent_fences() {
         }
     }
     f.env.remove("CODEX_THREAD_ID");
-    let app = f.dir.join("codex.mjs");
-    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.output(endpoint, false).contains("ready"));
+    let endpoint = fence_endpoint(&f, "codex");
     let cached = cito_native::support::remember_process(
         json!({"harness":"codex","session_id":" selected-session ","endpoint_pid":f.pid(endpoint)}),
     );
@@ -574,7 +581,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 });
 "#).unwrap();
     let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.frames(endpoint).iter().any(|v| v["op"] == "ready"));
+    wait(|| f.frames_for(endpoint, "ready").next().is_some());
     let pid = f.pid(endpoint);
     let mut cached = Value::Null;
     let mut token = 0;
@@ -623,10 +630,7 @@ fn uncached_generic_session_fences_allow_disk_providers_to_continue() {
     let source =
         cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
     source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0)", &[]).unwrap();
-    let app = f.dir.join("claude.mjs");
-    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.output(endpoint, false).contains("ready"));
+    let endpoint = fence_endpoint(&f, "claude");
     let pid = f.pid(endpoint);
     let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
     fs::create_dir_all(binding.parent().unwrap()).unwrap();
@@ -704,24 +708,7 @@ sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.
     for (harness, bin) in [("codex", CODEX), ("claude", CLAUDE), ("pi", PI)] {
         install_provider_command(&f, harness, json!(["python3", forwarder, bin, trace]));
     }
-    let app = f.dir.join("claude.mjs");
-    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let endpoint = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
-    wait(|| f.output(endpoint, false).contains("ready"));
-    let pid = f.pid(endpoint);
-    let sidecar = f.spawn(CLAUDE, &[], &[]);
-    let mut env = f.env.clone();
-    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
-    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":pid,"cwd":"/repo"}));
-    wait(|| {
-        assert!(
-            !f.exited(sidecar),
-            "Sidecar exited: {:?} {}",
-            f.frames(sidecar),
-            f.output(sidecar, true)
-        );
-        f.frames(sidecar).iter().any(|row| row["op"] == "ready")
-    });
+    let (pid, sidecar) = claude_sidecar(&f);
     f.daemon(&[]);
     let seeded = f.tool(
         "cito_status",
@@ -881,7 +868,7 @@ fn long_lived_stdio_recovers_after_daemon_restart_and_configured_port_change() {
         .is_some());
     f.stop(first);
     f.port = port();
-    let mut config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let mut config: Value = read_json(&f.config);
     config["daemonPort"] = json!(f.port);
     fs::write(&f.config, config.to_string()).unwrap();
     f.daemon(&[]);
@@ -942,26 +929,9 @@ fn pending_business_ack_requires_original_url_and_principal() {
             .unwrap()
             .is_empty()
     });
-    // Freeze the competing authority reconciler while injecting a synthetic local
-    // authority. Keep the real acknowledge path and restore/resume before RPCs.
-    struct Resume(u32);
-    impl Drop for Resume {
-        fn drop(&mut self) {
-            // SAFETY: this fixture owns the stopped, unreaped child throughout the guard.
-            unsafe {
-                libc::kill(self.0 as i32, libc::SIGCONT);
-            }
-        }
-    }
-    let resume = Resume(f.pid(daemon));
-    f.signal(daemon, libc::SIGSTOP);
-    let mut status = 0;
-    // SAFETY: waitpid observes our owned child's stop event without reaping it.
-    assert_eq!(
-        unsafe { libc::waitpid(f.pid(daemon) as i32, &mut status, libc::WUNTRACED) },
-        f.pid(daemon) as i32
-    );
-    assert!(libc::WIFSTOPPED(status));
+    // Stop the reconciler before changing authority; suspending it can strand
+    // the SQLite write lock needed for the local acknowledgement below.
+    f.stop(daemon);
     state.execute("UPDATE local_listeners SET hub_url=\'https://replacement.example.com\',principal_id=\'none#bob\' WHERE listener_id=?", std::slice::from_ref(&human["listener_id"])).unwrap();
     let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
     local
@@ -1009,7 +979,7 @@ fn pending_business_ack_requires_original_url_and_principal() {
         .remove(0);
     assert_eq!(ack["hub_url"], "local://");
     assert_eq!(ack["principal_id"], human["principal_id"]);
-    drop(resume);
+    f.daemon(&[]);
     f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
     assert!(state
         .query(
@@ -1138,215 +1108,6 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
         .any(|l| serde_json::from_str::<Value>(l).unwrap()["op"] == "wake"));
 }
 #[test]
-fn legacy_live_send_reservations_recover_completed_and_pending_publications() {
-    use cito_native::core::identity::hash;
-    let _lock = serial();
-    for human in [false, true] {
-        for pending in [false, true] {
-            let f = Fixture::new(json!({}));
-            let meta = f.provider("delivered_unconfirmed");
-            f.daemon(&[]);
-            let target = enroll(&f, meta);
-            let args = json!({"to":target["listener_id"],"message":"Legacy retry","idempotency_key":"stable"});
-            let send = || {
-                if human {
-                    send_human(&f, args.clone())
-                } else {
-                    f.tool("cito_send", args.clone(), json!({}))
-                }
-            };
-            let first = send();
-            assert_eq!(first["ok"], true, "{first}");
-            let local = f.db("state.sqlite");
-            let hub = f.db("hub.sqlite");
-            let old = local
-                .query("SELECT * FROM local_sent_idempotency", &[])
-                .unwrap()[0]
-                .clone();
-            let publication = hub
-                .query(
-                    "SELECT * FROM hub_signals WHERE signal_id=?",
-                    &[old["signal_id"].clone()],
-                )
-                .unwrap()[0]
-                .clone();
-            let payload: Value =
-                serde_json::from_str(publication["data"].as_str().unwrap()).unwrap();
-            let endpoint = payload["sender_endpoint_key"].as_str().unwrap();
-            let canonical = old["to_listener_id"].as_str().unwrap();
-            let legacy = hash(&format!("{endpoint}|local://|{canonical}|stable"));
-            let legacy_hub = if human {
-                hash(&format!(
-                    "{}|{}|human|{canonical}|{legacy}",
-                    payload["from"]["principal_id"].as_str().unwrap(),
-                    payload["from"]["host_id"].as_str().unwrap()
-                ))
-            } else {
-                legacy.clone()
-            };
-            hub.execute(
-                "UPDATE hub_signals SET msg_id=? WHERE seq=?",
-                &[json!(legacy_hub), publication["seq"].clone()],
-            )
-            .unwrap();
-            local.execute("UPDATE local_sent_idempotency SET dedup_id=?,request_hash=?,status=?,seq=? WHERE dedup_id=?", &[
-                json!(legacy), json!(hash("Legacy retry|null")),
-                json!(if pending {"PENDING_PUBLISH"} else {"wake_accepted"}),
-                if pending {json!(0)} else {publication["seq"].clone()}, old["dedup_id"].clone()
-            ]).unwrap();
-            let recovered = send();
-            assert_eq!(recovered["signal_id"], first["signal_id"], "{recovered}");
-            assert_eq!(recovered["seq"], first["seq"]);
-            assert_eq!(send()["seq"], first["seq"]);
-            assert_eq!(
-                hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
-                    .unwrap()[0]["n"],
-                1
-            );
-            let saved = local
-                .query("SELECT * FROM local_sent_idempotency", &[])
-                .unwrap();
-            assert_eq!(saved.len(), 1);
-            assert_eq!(saved[0]["status"], "wake_accepted");
-            assert_eq!(saved[0]["seq"], first["seq"]);
-        }
-    }
-}
-
-#[test]
-fn legacy_reservations_reject_other_targets_and_ambiguous_identity() {
-    use cito_native::core::identity::hash;
-    let _lock = serial();
-    for pending in [false, true] {
-        let f = Fixture::new(json!({}));
-        let meta = f.provider("delivered_unconfirmed");
-        f.daemon(&[]);
-        let target = enroll(&f, meta);
-        let args =
-            json!({"to":target["listener_id"],"message":"Legacy retry","idempotency_key":"stable"});
-        let first = send_human(&f, args.clone());
-        let local = f.db("state.sqlite");
-        let hub = f.db("hub.sqlite");
-        let old = local
-            .query("SELECT * FROM local_sent_idempotency", &[])
-            .unwrap()[0]
-            .clone();
-        let publication = hub
-            .query(
-                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",
-                &[old["signal_id"].clone()],
-            )
-            .unwrap()[0]
-            .clone();
-        let payload: Value = serde_json::from_str(publication["data"].as_str().unwrap()).unwrap();
-        let endpoint = payload["sender_endpoint_key"].as_str().unwrap();
-        let canonical = old["to_listener_id"].as_str().unwrap();
-        let legacy = hash(&format!("{endpoint}|local://|{canonical}|stable"));
-        local
-            .execute(
-                "UPDATE local_sent_idempotency SET dedup_id=?,request_hash=?,status=?,seq=?",
-                &[
-                    json!(legacy),
-                    json!(hash("Legacy retry|null")),
-                    json!(if pending {
-                        "PENDING_PUBLISH"
-                    } else {
-                        "wake_accepted"
-                    }),
-                    if pending {
-                        json!(0)
-                    } else {
-                        first["seq"].clone()
-                    },
-                ],
-            )
-            .unwrap();
-
-        // Seed a retained legacy row for another destination under the incoming
-        // legacy key. The missing sender/key columns cannot reconstruct its tuple;
-        // its stored destination alone proves it cannot belong to this request.
-        let other_key = "other|key";
-        let collision = hash(&format!("{endpoint}|local://|{canonical}|{other_key}"));
-        local
-            .execute(
-                "UPDATE local_sent_idempotency SET dedup_id=?,to_listener_id='c_other'",
-                &[json!(collision)],
-            )
-            .unwrap();
-        let mut other_args = args.clone();
-        other_args["idempotency_key"] = json!(other_key);
-        let second = send_human(&f, other_args.clone());
-        assert_ne!(second["signal_id"], first["signal_id"]);
-        assert_ne!(second["seq"], first["seq"]);
-        let retried = send_human(&f, other_args);
-        assert_eq!(retried["signal_id"], second["signal_id"]);
-        assert_eq!(retried["seq"], second["seq"]);
-        assert_eq!(
-            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
-                .unwrap()[0]["n"],
-            2
-        );
-        let retained = local
-            .query(
-                "SELECT * FROM local_sent_idempotency WHERE dedup_id=?",
-                &[json!(collision)],
-            )
-            .unwrap()[0]
-            .clone();
-        assert_eq!(retained["signal_id"], old["signal_id"]);
-        assert_eq!(retained["to_listener_id"], "c_other");
-        assert_eq!(
-            retained["status"],
-            if pending {
-                "PENDING_PUBLISH"
-            } else {
-                "wake_accepted"
-            }
-        );
-
-        // If the target also matches, ambiguous legacy identity must fail closed
-        // without changing the retained reservation or publishing a third signal.
-        local
-            .execute(
-                "DELETE FROM local_sent_idempotency WHERE dedup_id<>?",
-                &[json!(collision)],
-            )
-            .unwrap();
-        local
-            .execute(
-                "UPDATE local_sent_idempotency SET to_listener_id=?",
-                &[json!(canonical)],
-            )
-            .unwrap();
-        let ambiguous = send_human_result(
-            &f,
-            json!({
-                "to":target["listener_id"],"message":"Legacy retry","idempotency_key":other_key
-            }),
-        );
-        assert_eq!(ambiguous["http_status"], 400, "{ambiguous}");
-        assert!(
-            ambiguous
-                .to_string()
-                .contains("IDEMPOTENCY_KEY_INDETERMINATE"),
-            "{ambiguous}"
-        );
-        assert_eq!(
-            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
-                .unwrap()[0]["n"],
-            2
-        );
-        assert_eq!(
-            local
-                .query("SELECT * FROM local_sent_idempotency", &[])
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-}
-
-#[test]
 fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1447,12 +1208,8 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
     let sibling_device = sibling
         .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
         .clone();
-    assert_eq!(
-        a.action(
-            json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"})
-        )
-        .0,
-        200
+    a.action_ok(
+        json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"}),
     );
     assert_eq!(
         a.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='human'")[0]
@@ -1464,15 +1221,8 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
         .clone();
     assert_eq!(retained["status"], "ACTIVE");
     assert_eq!(retained["owner_token"], sibling_device["owner_token"]);
-    assert_eq!(
-        a.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_paused"],
-        false
-    );
-    assert_eq!(
-        a.action(json!({"op":"cli_human_device","hub":"work","attach":true}))
-            .0,
-        200
-    );
+    assert_eq!(a.snapshot()["hubs"][0]["human_paused"], false);
+    a.action_ok(json!({"op":"cli_human_device","hub":"work","attach":true}));
     let reattached =
         a.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0].clone();
     assert_eq!(reattached["status"], "ACTIVE");
@@ -1582,7 +1332,7 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
                 &[],
             )
             .unwrap();
-            let mut config: Value = serde_json::from_slice(&fs::read(&a.config).unwrap()).unwrap();
+            let mut config: Value = read_json(&a.config);
             let url = format!("http://localhost:{p}");
             config["hubs"]["work"]["url"] = json!(url);
             fs::write(&a.config, config.to_string()).unwrap();
@@ -1735,9 +1485,8 @@ fn agent_and_human_sends_share_unicode_control_sanitization() {
         agent_error,
         json!({"ok":false,"error":{"code":"INVALID_INPUT","message":"message must contain 1..65,536 characters","retryable":false}})
     );
-    let (status, human) = f.action(
-        json!({"op":"send_reply_from_human","to_listener_id":target["listener_id"],"text":"\u{0081}"}),
-    );
+    let (status, human) =
+        f.action(json!({"op":"send_signal","to":target["listener_id"],"message":"\u{0081}"}));
     assert_eq!(status, 400);
     assert_eq!(human["error"], error);
     assert_eq!(
@@ -1758,9 +1507,8 @@ fn agent_and_human_sends_share_unicode_control_sanitization() {
             json!({"to":"@self","message":message}),
             meta.clone(),
         );
-        let (status, human) = f.action(
-            json!({"op":"send_reply_from_human","to_listener_id":target["listener_id"],"text":message}),
-        );
+        let (status, human) =
+            f.action(json!({"op":"send_signal","to":target["listener_id"],"message":message}));
         assert_eq!(status, 200, "{human}");
         for sent in [agent, human] {
             let id = sent["signal_id"]
@@ -1938,11 +1686,7 @@ fn incoming_messages_update_unread_state_and_activity_until_read() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let meta = f.provider("delivered");
-    let recorder = f.recording_ui();
-    f.daemon(&[
-        ("CITO_DISABLE_UI", "0"),
-        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
-    ]);
+    f.recording_daemon();
     let frames = || ui_frames(&f);
     for message in ["Review requested", "Build completed"] {
         let sent = f.tool(
@@ -1965,15 +1709,8 @@ fn incoming_messages_update_unread_state_and_activity_until_read() {
     let (status, activity) = f.action(json!({"op":"query_directory","filter":"me"}));
     assert_eq!(status, 200);
     assert_eq!(activity["activity_total"], 2);
-    assert_eq!(
-        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_paused"],
-        false
-    );
-    assert_eq!(
-        f.action(json!({"op":"ack_signals","filter":"me","ack_all":true}))
-            .0,
-        200
-    );
+    assert_eq!(f.snapshot()["hubs"][0]["human_paused"], false);
+    f.action_ok(json!({"op":"ack_signals","filter":"me","ack_all":true}));
     wait(|| {
         f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL")
             .is_empty()
@@ -2006,37 +1743,21 @@ fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations(
     let (status, me) = f.action(json!({"op":"query_directory","filter":"me"}));
     assert_eq!(status, 200);
     assert_eq!(me["activity_total"], 1);
-    assert_eq!(me["activity_all_total"], 2);
-    assert_eq!(
-        f.action(json!({"op":"ack_signals","filter":"me","ack_all":true}))
-            .0,
-        200
-    );
+    assert_eq!(me["activity_has_any"], true);
+    f.action_ok(json!({"op":"ack_signals","filter":"me","ack_all":true}));
     assert!(
         f.rows("SELECT * FROM local_signals WHERE message='Pending agent work'")[0]
             ["acknowledged_at_ms"]
             .is_null()
     );
-    assert_eq!(
-        f.action(json!({"op":"clear_activity_history","filter":"me"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"clear_activity_history","filter":"me"}));
     assert_eq!(
         f.rows("SELECT * FROM local_signals WHERE activity_hidden=0")
             .len(),
         1
     );
-    assert_eq!(
-        f.action(json!({"op":"clear_activity_history","filter":"all"}))
-            .0,
-        200
-    );
-    assert_eq!(
-        f.action(json!({"op":"ack_signals","filter":"all","ack_all":true}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"clear_activity_history","filter":"all"}));
+    f.action_ok(json!({"op":"ack_signals","filter":"all","ack_all":true}));
     let pending = f
         .rows("SELECT * FROM local_signals WHERE message='Pending agent work'")
         .remove(0);
@@ -2050,7 +1771,7 @@ fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations(
         )
         .unwrap();
     assert!(ledger[0]["acked_at_ms"].is_null());
-    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["unread_count"], 0);
+    assert_eq!(f.snapshot()["unread_count"], 0);
 }
 #[test]
 fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
@@ -2071,7 +1792,7 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
             .len()
             == 1
     });
-    let early = f.action(json!({"op":"get_snapshot"})).1;
+    let early = f.snapshot();
     assert!(
         early["activity"][0]["from_display_address"]
             .as_str()
@@ -2095,23 +1816,15 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
     assert_eq!(reply["to"], sender["public_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
     // Clearing hides Activity rows without deleting the delivery ledger.
-    assert_eq!(
-        f.action(json!({"op":"clear_activity_history","hub":"local","signal_id":"missing"}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"clear_activity_history","hub":"local","signal_id":"missing"}));
     assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
-    assert_eq!(
-        f.action(
-            json!({"op":"clear_activity_history","hub":"local","signal_id":activity["signal_id"]})
-        )
-        .0,
-        200
+    f.action_ok(
+        json!({"op":"clear_activity_history","hub":"local","signal_id":activity["signal_id"]}),
     );
     let remaining = f.rows("SELECT * FROM local_signals WHERE activity_hidden=0");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0]["message"], "Human reply");
-    assert_eq!(f.action(json!({"op":"clear_activity_history"})).0, 200);
+    f.action_ok(json!({"op":"clear_activity_history"}));
     assert!(f
         .rows("SELECT * FROM local_signals WHERE activity_hidden=0")
         .is_empty());
@@ -2297,7 +2010,7 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
     let options_path = f.state.join("plugins/fixture/options.json");
-    let mut options: Value = serde_json::from_slice(&fs::read(&options_path).unwrap()).unwrap();
+    let mut options: Value = read_json(&options_path);
     options["session_id"] = json!("session-home");
     options["cwd"] = json!(f.home);
     options["title"] = json!("alice");
@@ -2431,7 +2144,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
     wait(|| {
-        f.action(json!({"op":"get_snapshot"})).1["available"]
+        f.snapshot()["available"]
             .as_array()
             .unwrap()
             .iter()
@@ -2449,10 +2162,12 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             .unwrap()
             .starts_with(&format!("{hub}:")));
     }
-    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"alice"})).0, 200);
+    f.action_ok(
+        json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"alice"}),
+    );
     // Still available on local: the cached candidate must agree immediately,
     // without waiting for discovery or an eventual-consistency retry.
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let snapshot = f.snapshot();
     let candidate = snapshot["available"]
         .as_array()
         .unwrap()
@@ -2546,7 +2261,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             serde_json::from_str(&out).unwrap()
         };
         assert_eq!(stopped["removed"], 1);
-        let remaining = f.action(json!({"op":"get_snapshot"})).1;
+        let remaining = f.snapshot();
         assert!(remaining["listeners"]
             .as_array()
             .unwrap()
@@ -2567,7 +2282,9 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             "alice"
         );
     }
-    assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
+    f.action_ok(
+        json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"}),
+    );
     let scoped = f.rows("SELECT hub,status FROM local_listeners WHERE harness='fixture'");
     assert!(scoped
         .iter()

@@ -101,27 +101,20 @@ extension Companion {
             channelUiStates[key, default: ChannelUiState()].drafts.removeValue(forKey: field.key)
         }
     }
-    var hubFormNamingHubs: [HubConfigItem] {
-        var inventory = settings?.hubs ?? []
-        if let committed = hubForm.awaitingSettings {
-            // Reserve the committed identity until the canonical projection arrives.
-            inventory.removeAll { $0.name == committed.name }
-            inventory.append(HubConfigItem(name: committed.name, url: committed.url, auth_mode: "none",
-                enabled: true, auto_listen: nil, is_default: false, status: "connected", user: nil,
-                error: nil, issuer: nil, client_id: nil))
-        }
-        return inventory
-    }
-    func finishHubSave(_ pending: PendingHubSave) {
+    func finishHubSave(_ pending: PendingHubSave, projected: HubConfigItem? = nil) {
         hubForm.pendingSave = nil
         if hubForm.generation == pending.generation {
             hubForm = HubFormState()
         } else {
-            hubForm.awaitingSettings = pending
-            if hubForm.isEditing || proposedHubName(hubForm.name,url:hubForm.url,existing:hubFormNamingHubs,creating:true) == pending.name {
-                // Same-destination drafts edit the commit; distinct Add drafts keep
-                // their create intent, including before its projection is available.
-                hubForm.mode = .edit(name: pending.name, initial: hubForm.initialHub)
+            var profile = pending.profile
+            if let projected { profile.name = projected.name }
+            let name = proposedHubName(hubForm.name, url: hubForm.url, existing: settings?.hubs ?? [], creating: true)
+            let sameDestination = !hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || normalizedHubURL(hubForm.url) == profile.url
+            if hubForm.isEditing || (name == profile.name && sameDestination) {
+                hubForm.mode = .edit(profile)
+            } else if projected == nil {
+                // The daemon can still allocate an automatic name against its full inventory.
+                hubForm.mode = .addWithIncompleteInventory
             }
         }
     }
@@ -145,30 +138,33 @@ extension Companion {
             if saved { hostPort.draft = nil; rebuildFeedbackAfter(1.2) }
         }
         if confirmHubSave, let pending = hubForm.pendingSave, savedRequest == pending.requestId {
-            let saved = value.hubs.first(where: { $0.name == pending.name })
+            let profile = pending.profile
+            let name = profile.name.isEmpty ? proposedHubName("", url: profile.url, existing: value.hubs, creating: true) : profile.name
+            let saved = value.hubs.first(where: { $0.name == name })
             hubForm.pendingSave = nil
             hubForm.error = saved?.error
-            if saved?.error == nil { finishHubSave(pending) }
+            if saved?.error == nil {
+                finishHubSave(pending, projected: saved.flatMap { normalizedHubURL($0.url) == profile.url ? $0 : nil })
+            }
         }
         var reconciledHub = false
-        if hubForm.pendingSave == nil, let committed = hubForm.awaitingSettings,
-           let saved = value.hubs.first(where: { $0.name == committed.name && normalizedHubURL($0.url) == committed.url }) {
+        if hubForm.pendingSave == nil, let initial = hubForm.initialHub,
+           let saved = value.hubs.first(where: { $0.name == initial.name && normalizedHubURL($0.url) == initial.url })?.formProfile, saved != initial {
             // A passive canonical refresh also completes a payload-free receipt.
             // Compare each field with the submitted draft to preserve newer edits.
-            if hubForm.isEditing, hubForm.issuer == committed.issuer {
-                hubForm.issuer = saved.issuer ?? ""
+            if hubForm.issuer == initial.issuer, initial.issuer != saved.issuer {
+                hubForm.issuer = saved.issuer
                 settingsFieldControls["settings_hub_issuer"]?.stringValue = hubForm.issuer
             }
-            if hubForm.isEditing, hubForm.clientId == committed.clientId {
-                hubForm.clientId = saved.client_id ?? ""
+            if hubForm.clientId == initial.clientId, initial.clientId != saved.clientId {
+                hubForm.clientId = saved.clientId
                 settingsFieldControls["settings_hub_client_id"]?.stringValue = hubForm.clientId
             }
-            if hubForm.isEditing, hubForm.redirectPort == committed.redirectPort {
-                hubForm.redirectPort = saved.redirect_port.map(String.init) ?? ""
+            if hubForm.redirectPort == initial.redirectPort, initial.redirectPort != saved.redirectPort {
+                hubForm.redirectPort = saved.redirectPort
                 settingsFieldControls["settings_hub_redirect_port"]?.stringValue = hubForm.redirectPort
             }
-            if hubForm.isEditing { hubForm.mode = .edit(name: saved.name, initial: saved) }
-            hubForm.awaitingSettings = nil
+            hubForm.mode = .edit(saved)
             reconciledHub = true
         }
         let previousChannels = channelSettingsByHub[target]
@@ -185,7 +181,7 @@ extension Companion {
             }
             if !preservePairing && channel.configured && channel.status != "pairing_pending" &&
                 (previous?.configured == false || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) {
-                ui.resetPersonal(preservePendingPair: true)
+                ui.resetPersonal(preservePendingPair: ui.waitingForPairCode)
             }
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
@@ -200,7 +196,7 @@ extension Companion {
                 acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
                 if unchanged {
                     // Settings results retire save UI, not a newer pairing intent.
-                    if entry.scope == "user" && channel.configured && channel.status != "pairing_pending" { ui.resetPersonal(preservePendingPair: true) }
+                    if entry.scope == "user" && channel.configured && channel.status != "pairing_pending" { ui.resetPersonal(preservePendingPair: ui.waitingForPairCode) }
                     ui.savedUntil[entry.scope] = Date().addingTimeInterval(1.5)
                 } else { ui.savedUntil.removeValue(forKey: entry.scope) }
                 rebuildFeedbackAfter(1.5)
@@ -219,10 +215,9 @@ extension Companion {
                 ui.pairingInstruction = instruction
                 ui.pairingCommand = channel.pairing_command ?? channel.pairing_code
                 ui.pairingURL = channel.pairing_url
-            } else if !preservePairing && channel.status != "pairing_pending" && ui.pendingPairRequest == nil {
-                ui.pairingInstruction = ""
-                ui.pairingCommand = nil
-                ui.pairingURL = nil
+            } else if !preservePairing && channel.status != "pairing_pending" && !ui.waitingForPairCode {
+                ui.pairing = nil
+                ui.clearPairingInstructions()
             }
             channelUiStates[key] = ui
         }
@@ -891,7 +886,7 @@ extension Companion {
                 clear.style = .destructiveHover
                 clear.identifier=NSUserInterfaceItemIdentifier("clear_channel_service:\(ch.id)")
                 clear.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"disconnect_human_channel","hub":renderedHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
-                pendingLabel(clear,isPending("disconnect_human_channel",hub:renderedHub,target:ch.id) || isPending("clear_channel_service",hub:renderedHub,target:ch.id),"Clearing…")
+                pendingLabel(clear,isPending("disconnect_human_channel",hub:renderedHub,target:ch.id),"Clearing…")
                 hubStratum.addSubview(clear)
                 if hubGatewayExpanded { gatewayLeading.append(clear) } else { gatewayTop.append(clear) }
             }
@@ -986,7 +981,7 @@ extension Companion {
                     guard let self = self else { return }
                     self.emit(["op": "channel_pair", "hub": renderedHub, "channel_id": chId, "values": collectValues("user")])
                 }
-                gate(pairBtn); pendingLabel(pairBtn,channelUi.pendingPairRequest != nil,"Pairing…"); pairBtn.style = ch.configured ? .neutral : .prominent; userStratum.addSubview(pairBtn); personalActions.append(pairBtn)
+                gate(pairBtn); pendingLabel(pairBtn,channelUi.waitingForPairCode,"Pairing…"); pairBtn.style = ch.configured ? .neutral : .prominent; userStratum.addSubview(pairBtn); personalActions.append(pairBtn)
             }
 
             if !instruction.isEmpty {
@@ -994,7 +989,10 @@ extension Companion {
                 copy.label.font = .systemFont(ofSize:10.5)
                 copy.identifier=NSUserInterfaceItemIdentifier("copy_pair_command:\(ch.id)")
                 copy.pressed={ [weak self, weak copy] in
-                    self?.copyText(channelUi.pairingCommand ?? instruction, control: copy)
+                    guard let self = self else { return }
+                    self.copyText(channelUi.pairingCommand ?? instruction, control: copy)
+                    self.channelUiStates[channelKey, default: ChannelUiState()].pairCopiedUntil = Date().addingTimeInterval(1.2)
+                    self.rebuildFeedbackAfter(1.2)
                 }
                 if Date() < channelUi.pairCopiedUntil { copy.copied(for: max(0.01, channelUi.pairCopiedUntil.timeIntervalSinceNow)) }
                 if let raw=channelUi.pairingURL, let url=URL(string:raw) {
@@ -1348,7 +1346,7 @@ extension Companion {
                 guard let self = self else { return }
                 self.syncAddHubFieldsFromControls()
                 let url = normalizedHubURL(self.hubForm.url)
-                let knownHubs = self.hubFormNamingHubs
+                let knownHubs = self.settings?.hubs ?? []
                 let name = proposedHubName(self.hubForm.name,url:url,existing:knownHubs,creating:!self.hubForm.isEditing,original:self.hubForm.originalName)
                 let validation: String?
                 if name.isEmpty { validation="Hub name must contain a letter or number." }
@@ -1380,17 +1378,20 @@ extension Companion {
                     else if self.hubForm.isEditing { action["redirect_port"] = NSNull() }
                     // A URL-only edit must discover the destination's metadata,
                     // while deliberate overrides and explicit clears retain priority.
-                    let committed = self.hubForm.isEditing ? self.hubForm.awaitingSettings : nil
-                    let initial = self.hubForm.initialHub
-                    let initialURL = committed?.url ?? initial.map { normalizedHubURL($0.url) }
-                    if committed != nil || (initialURL != nil && url != initialURL) {
-                        if iss == (committed?.issuer ?? initial?.issuer ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"issuer") }
-                        if cid == (committed?.clientId ?? initial?.client_id ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"client_id") }
-                        if self.hubForm.redirectPort.trimmingCharacters(in: .whitespacesAndNewlines) == (committed?.redirectPort ?? initial?.redirect_port.map(String.init) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"redirect_port") }
+                    if let initial = self.hubForm.initialHub, url != initial.url || !knownHubs.contains(where: { $0.formProfile == initial }) {
+                        if iss == initial.issuer.trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"issuer") }
+                        if cid == initial.clientId.trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"client_id") }
+                        if self.hubForm.redirectPort.trimmingCharacters(in: .whitespacesAndNewlines) == initial.redirectPort.trimmingCharacters(in: .whitespacesAndNewlines) { action.removeValue(forKey:"redirect_port") }
                     }
                 }
-                let pending = PendingHubSave(name:name, url:url, requestId:UUID().uuidString, generation:self.hubForm.generation,
-                    issuer:self.hubForm.issuer, clientId:self.hubForm.clientId, redirectPort:self.hubForm.redirectPort)
+                var submittedName = name
+                if case .addWithIncompleteInventory = self.hubForm.mode, self.hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    submittedName = ""
+                    action.removeValue(forKey: "name")
+                }
+                let profile = HubFormProfile(name: submittedName, url: url, issuer: self.hubForm.issuer,
+                    clientId: self.hubForm.clientId, redirectPort: self.hubForm.redirectPort)
+                let pending = PendingHubSave(profile: profile, requestId: UUID().uuidString, generation: self.hubForm.generation)
                 self.hubForm.pendingSave=pending; self.hubForm.error=nil
                 action["request_id"]=pending.requestId
                 self.emit(action)
@@ -1525,6 +1526,7 @@ extension Companion {
     }
 
     var hubNamePlaceholder: String {
-        hubForm.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "e.g. studio or work" : "Default: " + proposedHubName("", url:hubForm.url, existing:hubFormNamingHubs, creating:!hubForm.isEditing, original:hubForm.originalName)
+        if case .addWithIncompleteInventory = hubForm.mode { return "Assigned automatically" }
+        return hubForm.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "e.g. studio or work" : "Default: " + proposedHubName("", url:hubForm.url, existing:settings?.hubs ?? [], creating:!hubForm.isEditing, original:hubForm.originalName)
     }
 }

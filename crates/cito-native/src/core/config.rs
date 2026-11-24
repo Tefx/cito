@@ -159,6 +159,20 @@ pub fn canonicalize_hub_aliases(config: &mut Value) {
     }
 }
 
+pub(super) fn redirect_port(config: &Value) -> Result<Option<u16>, String> {
+    config
+        .get("redirectPort")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .ok_or_else(|| {
+                    "INVALID_INPUT: redirectPort must be an integer from 0 to 65535".into()
+                })
+        })
+        .transpose()
+}
+
 pub type NormalizedConfig = (String, Map<String, Value>, Map<String, Value>);
 
 pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConfig, String> {
@@ -220,11 +234,7 @@ pub fn merge_hub_config(base: &Value, patch: &Value) -> Value {
         .get("url")
         .is_some_and(|url| base.get("url") != Some(url));
     if changed_url {
-        merged.remove("authMode");
-        merged.remove("natsUrl");
-    }
-    if changed_url {
-        for key in ["issuer", "clientId", "redirectPort"] {
+        for key in ["authMode", "natsUrl", "issuer", "clientId", "redirectPort"] {
             merged.remove(key);
         }
     }
@@ -314,13 +324,10 @@ pub fn discover_hub_config(mut config: Value) -> Result<Value, String> {
     if mode == "token" && config["token"].as_str().is_none_or(|s| s.trim().is_empty()) {
         return Err("INVALID_INPUT: Hub token is required in token mode".into());
     }
-    if let Some(port) = config.get("redirectPort") {
-        if port.as_u64().is_none_or(|port| port > u16::MAX as u64) {
-            return Err("INVALID_INPUT: redirectPort must be an integer from 0 to 65535".into());
-        }
-    }
     if mode == "oidc" {
         super::login::Settings::new(&config)?;
+    } else {
+        redirect_port(&config)?;
     }
     Ok(config)
 }

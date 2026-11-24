@@ -105,7 +105,10 @@ pub(super) enum ToolCall {
     Retire {
         hub: String,
         id: String,
-        agent: Option<Value>,
+    },
+    HubControl {
+        hub: String,
+        action: Value,
     },
     Rename {
         caller: Value,
@@ -182,14 +185,13 @@ impl ToolCall {
                 string(caller, "session_id"),
                 title,
             ),
-            Self::Retire { hub, id, agent } => {
-                if let Some(agent) = agent {
-                    snapshot.ensure_agent_stop_row(
-                        hub,
-                        string(agent, "harness"),
-                        string(agent, "session_id"),
-                    )?;
-                }
+            Self::HubControl { hub, action } => super::http_actions::hub_control(
+                snapshot.slot(hub)?,
+                &snapshot.state,
+                &snapshot.host_id,
+                action,
+            ),
+            Self::Retire { hub, id } => {
                 let removed = snapshot.retire_captured(hub, id, "user")?;
                 Ok(json!({"ok":true,"removed":u8::from(removed)}))
             }
@@ -205,12 +207,15 @@ impl ToolCall {
             }
         }
     }
-    fn degraded(&self, result: Result<Value, String>, reason: &str) -> Result<Value, String> {
+    pub(super) fn degraded(
+        &self,
+        result: Result<Value, String>,
+        reason: &str,
+    ) -> Result<Value, String> {
         match result {
             Ok(mut value) if !matches!(self, Self::Find { .. } | Self::Ready(_)) => {
                 value["committed"] = json!(true);
                 let warning = if matches!(self, Self::Send { .. }) {
-                    value["receipt_status"] = json!("unknown");
                     "maintenance_warning"
                 } else {
                     "warning"
@@ -247,7 +252,9 @@ impl ToolCall {
             Self::RegistrationEdit { hubs, .. } => hubs.iter().any(|hub| hub == name),
             Self::Drain { batch, .. } => batch.0.contains(name),
             Self::Find { args, .. } => args["hub"].as_str().is_none_or(|hub| hub == name),
-            Self::Listen { hub, .. } | Self::Retire { hub, .. } => hub == name,
+            Self::Listen { hub, .. } | Self::Retire { hub, .. } | Self::HubControl { hub, .. } => {
+                hub == name
+            }
             Self::Rename { .. } => true,
             Self::Switch { from, to, .. } => from == name || to == name,
             Self::Send { hub, args, .. } => {
@@ -335,7 +342,11 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
             if !work.current(s, &access) || s.registration_targets(action)? != *hubs {
                 return Err(STALE_HUB.into());
             }
-            break s.apply_action(action, &mut None, None)?;
+            let hub = action["hub"]
+                .as_str()
+                .unwrap_or(&s.config.default_hub)
+                .to_owned();
+            break s.apply_registration_edit(action, hub)?;
         };
         let result = drain.execute(&access);
         let mut guard = match service.lock() {
@@ -401,27 +412,11 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
             continue;
         }
         let mut value = result?;
-        if let ToolCall::Send { hub, args, .. } = work {
+        if matches!(work, ToolCall::Send { .. }) {
             if let Err(error) = s.poll() {
                 add_warning(&mut value, "maintenance_warning", &error);
             }
             if !same(s) {
-                return stale(Ok(value));
-            }
-            drop(guard);
-            let target = string(args, "to")
-                .split_once(':')
-                .map_or(hub.as_str(), |(prefix, _)| prefix);
-            let slot = access.slot(target)?;
-            wait_send_receipt(slot, &mut value);
-            let mut guard = match service.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return work
-                        .degraded(Ok(value), "Daemon lock poisoned during receipt settlement")
-                }
-            };
-            if !same((*guard).borrow_mut()) {
                 return stale(Ok(value));
             }
         }
@@ -570,52 +565,6 @@ pub(super) fn tools_list() -> Value {
         }
     }
     tools
-}
-
-pub(super) fn wait_send_receipt(slot: &crate::core::transport::HubClient, payload: &mut Value) {
-    if let Err(error) = read_send_receipt(slot, payload) {
-        payload["receipt_status"] = json!("unknown");
-        payload["receipt_warning"] = json!(error);
-    }
-}
-
-fn read_send_receipt(
-    slot: &crate::core::transport::HubClient,
-    payload: &mut Value,
-) -> Result<(), String> {
-    if payload["status"] == "PENDING_PUBLISH" {
-        return Ok(());
-    }
-    let raw = string(payload, "signal_id");
-    let signal = raw.rsplit(':').next().unwrap_or(raw);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        if shutdown_requested() || slot.closed.load(Ordering::SeqCst) {
-            return Err("Send interrupted".into());
-        }
-        let revision = slot.event_revision();
-        let remote = slot.rpc(
-            "stream_get_message",
-            &json!({"stream":"CITO_SIGNALS","seq":payload["seq"]}),
-        )?;
-        let wire = STANDARD
-            .decode(string(&remote, "data_b64"))
-            .map_err(|e| e.to_string())?;
-        let observed: Value = serde_json::from_slice(&wire).map_err(|e| e.to_string())?;
-        if observed["signal_id"] != signal {
-            return Err("Send receipt authority changed".into());
-        }
-        if remote["received"] == true {
-            payload["receipt_status"] = json!("received");
-            break;
-        }
-        if Instant::now() >= deadline {
-            payload["receipt_status"] = json!("pending");
-            break;
-        }
-        slot.wait_for_event(revision, deadline);
-    }
-    Ok(())
 }
 
 impl DaemonService {
@@ -1669,56 +1618,15 @@ impl HubAccess {
             ])
             .to_string(),
         );
-        let endpoint_dedup =
-            hash(&json!([endpoint, string(&slot.config, "url"), canonical, key]).to_string());
         let request_hash = hash(&json!([message, reply_to]).to_string());
-        let legacy_dedup = hash(&format!(
-            "{endpoint}|{}|{canonical}|{key}",
-            string(&slot.config, "url")
-        ));
-        let legacy_request_hash = hash(&format!("{message}|{reply_to}"));
-        // Unlike Hub publications, legacy reservations do not retain structured
-        // sender/key metadata. Do not guess their identity when delimiters can
-        // move tuple boundaries (or message/reply boundaries in the old hash).
-        let ambiguous_endpoint = fields.iter().any(|field| field.contains('|'));
-        let ambiguous_legacy = ambiguous_endpoint
-            || [
-                string(&slot.config, "url"),
-                canonical,
-                &key,
-                &message,
-                reply_to.as_str().unwrap_or(""),
-            ]
-            .iter()
-            .any(|part| part.contains('|'));
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
             if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
             c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
             if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
-            if !ambiguous_endpoint {
-                if let Some(old) = c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?", &[json!(hub), json!(endpoint_dedup)])?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
-                    if old["request_hash"] != request_hash { return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into()); }
-                    return Ok(old);
-                }
-            }
-            if let Some(old) = c.query(
-                "SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",
-                &[json!(hub), json!(legacy_dedup)],
-            )?.into_iter().next().filter(|old| old["to_listener_id"] == canonical) {
-                if ambiguous_legacy {
-                    return Err("IDEMPOTENCY_KEY_INDETERMINATE: Legacy reservation lacks tuple identity".into());
-                }
-                if old["request_hash"] != legacy_request_hash {
-                    return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());
-                }
-                return Ok(old);
-            }
             let id=format!("sig_{}",random_uuid_v4().replace('-',""));c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?)",&[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(now+1_800_000)),json!(now+1_800_000)])?;
             c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next().ok_or("Sent reservation missing".into())
         })?;
-        // Pending legacy reservations must retry their original Hub publication key.
-        let dedup = string(&reservation, "dedup_id");
         let mut signal_id = string(&reservation, "signal_id").to_owned();
         let mut seq = reservation["seq"].as_u64().unwrap_or(0);
         let mut maintenance_warning = None;
@@ -1894,7 +1802,7 @@ impl DaemonService {
             }
             // Identity filtering precedes the page limit: retained rows for an
             // unavailable/replaced profile must not starve this profile's ACKs.
-            let Ok(rows) = self.state.db.query("SELECT * FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?,?) ORDER BY acked_at_ms LIMIT 256",&[json!(hub),slot.config["url"].clone(),slot.identity["principal_id"].clone(),slot.identity["legacy_principal_id"].clone(),slot.identity["canonical_principal_id"].clone()]) else { continue; };
+            let Ok(rows) = self.state.db.query("SELECT * FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?) ORDER BY acked_at_ms LIMIT 256",&[json!(hub),slot.config["url"].clone(),slot.identity["principal_id"].clone(),slot.identity["legacy_principal_id"].clone()]) else { continue; };
             if rows.is_empty() {
                 continue;
             }

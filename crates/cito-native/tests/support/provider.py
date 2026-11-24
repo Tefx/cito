@@ -41,7 +41,12 @@ elif op == "setup_inspect":
     delay_ms = options.get("setup_delay_ms", 0)
     if delay_ms:
         time.sleep(delay_ms / 1000)
-    result.update(installed=True, configured=options.get('configured', True), paths=[])
+    result.update(installed=True, configured=options.get('configured', not (root / 'disconnected').exists()), paths=[])
 elif op in ["setup_apply", "setup_remove"]:
+    if not request.get("dry_run", False):
+        if op == "setup_remove":
+            (root / 'disconnected').touch()
+        else:
+            (root / 'disconnected').unlink(missing_ok=True)
     result["actions"] = []
 print(json.dumps(result), flush=True)

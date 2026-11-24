@@ -27,15 +27,10 @@ pub fn principal_ids_equal(a: &str, b: &str) -> bool {
 }
 /// `principal` must come from verified authentication or the trusted local boundary.
 pub fn principal_matches(stored: &str, principal: &Value) -> bool {
-    !stored.is_empty()
-        && [
-            "principal_id",
-            "legacy_principal_id",
-            "canonical_principal_id",
-        ]
-        .iter()
+    ["principal_id", "legacy_principal_id"]
+        .into_iter()
         .any(|key| {
-            principal[*key]
+            principal[key]
                 .as_str()
                 .is_some_and(|id| principal_ids_equal(stored, id))
         })
@@ -94,8 +89,6 @@ struct KeyCache {
     loaded_at: Option<Instant>,
     refreshing: bool,
     unavailable: bool,
-    #[cfg(test)]
-    signature_miss_wait: Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
 }
 
 fn validate_token_times(claims: &Value, now: u64) -> Result<(), String> {
@@ -252,14 +245,6 @@ impl OidcVerifier {
                 }
             }
             if cache.refreshing {
-                #[cfg(test)]
-                if let Some(observer) = cache
-                    .signature_miss_wait
-                    .as_ref()
-                    .filter(|_| refresh_after.is_some())
-                {
-                    let _ = observer.send(std::thread::current().id());
-                }
                 cache = if let Some(at) = deadline {
                     let remaining = at
                         .checked_duration_since(Instant::now())
@@ -506,12 +491,7 @@ impl HubAuth {
     pub fn authenticate(&self, headers: &HashMap<String, String>) -> Result<Value, String> {
         let user = headers
             .get("x-cito-user")
-            .filter(|s| {
-                !s.is_empty()
-                    && s.len() <= 64
-                    && s.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            })
+            .filter(|s| super::config::validate_user(s))
             .map(String::as_str)
             .unwrap_or("local")
             .to_lowercase();

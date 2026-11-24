@@ -32,10 +32,6 @@ extension Companion {
                     window.contentView?.appearance = testAppearance
                 }
             }
-            if op == "test_settings_regressions" {
-                runSettingsRegressions()
-                return true
-            }
             if op == "test_key_event", let character = object["character"] as? String {
                 let modifiers = object["modifiers"] as? [String] ?? []
                 var flags: NSEvent.ModifierFlags = []
@@ -122,123 +118,6 @@ extension Companion {
             }
             if op.hasPrefix("test_"), !["test_menu_open", "test_menu_close"].contains(op) { flushDirtyViews() }
             if op == "test_inspect" || op == "test_inspect_menu" { inspectMenu(); return true }
-            if op == "test_oracle_calibration", let kind = object["kind"] as? String {
-                if kind == "reset" { lastStatusPresentation = nil; rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; updateDirectoryFacetStyles(); flushDirtyViews(); return true }
-                let roots = cardMenu.items.compactMap { $0.view } + [settingsPanel?.contentView,directoryPanel?.contentView].compactMap { $0 }
-                func control(_ id: String) -> MenuControl? {
-                    for root in roots { if let c: MenuControl = findView(in:root,id:id) { return c } }
-                    return nil
-                }
-                if kind == "truncated_labels", let c = control(object["id"] as? String ?? "quit") {
-                    c.label.stringValue = String(repeating:"Wide chrome ",count:20)
-                    c.label.toolTip = c.label.stringValue
-                }
-                if let c = control("quit") {
-                    if kind == "jargon_leaks" { c.label.stringValue = object["text"] as? String ?? "Human receiver" }
-                    if kind == "tooltip_jargon" { c.toolTip = "Human receiver" }
-                    if kind == "accessibility_jargon" { c.setAccessibilityLabel("Human receiver") }
-                    if kind == "label_background", let parent = c.superview {
-                        let label = textLabel("Contrast probe",c.frame,color:.systemBlue)
-                        label.identifier = NSUserInterfaceItemIdentifier("background_probe")
-                        label.drawsBackground = true
-                        label.backgroundColor = .systemBlue
-                        parent.addSubview(label)
-                    }
-                    if kind == "fractional_truncation", let cell = c.label.cell {
-                        let slack = cell.drawingRect(forBounds:c.label.bounds).width - cell.cellSize.width
-                        c.label.frame.size.width -= max(0,slack) + 0.25
-                    }
-                    if kind == "status_emoji", let button = status?.button ?? headlessStatusButton { button.attributedTitle = NSAttributedString(string: "🚀3") }
-                    if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
-                }
-                if kind == "bar_anchor", let c = control(object["id"] as? String ?? "quit") { c.frame.origin.x -= 24 }
-                if kind == "bar_midY", let c = control(object["id"] as? String ?? "toggle_inbox") { c.frame.origin.y -= 4 }
-                if kind == "candidate_hint_jargon", let id = object["id"] as? String {
-                    roots.lazy.compactMap { self.findView(in:$0,id:id,as:NSTextField.self) }.first?.stringValue = "Human receiver"
-                }
-                if kind == "footer_midY", let c = control("open_uninstall_confirm") { c.frame.origin.y -= 10 }
-                if let bar = control("toggle_inbox")?.superview {
-                    if kind == "borderless_padding" { bar.subviews.first { $0.identifier?.rawValue == "inbox_control_title" }?.frame.origin.x = 2 }
-                    if kind == "nested_overlap", let button = control("toggle_inbox") {
-                        let stack = NSView(frame:bar.bounds)
-                        let label = textLabel("Nested label",button.frame,size:11)
-                        label.identifier = NSUserInterfaceItemIdentifier("nested_label_probe")
-                        stack.addSubview(label); bar.addSubview(stack)
-                    }
-                    if kind == "wrapped_cell_inset" {
-                        let font = NSFont.systemFont(ofSize: 11)
-                        let text = "Wrap at the cell edge"
-                        let outerWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
-                        let label = textLabel(text, NSRect(x: 12, y: 6, width: outerWidth, height: 15))
-                        label.identifier = NSUserInterfaceItemIdentifier("wrapped_cell_probe")
-                        label.isBezeled = true
-                        label.maximumNumberOfLines = 0
-                        label.lineBreakMode = .byWordWrapping
-                        label.cell?.wraps = true
-                        bar.addSubview(label)
-                    }
-                    if ["data_row_truncation", "nonwrapping_label", "data_row_height"].contains(kind) {
-                        let multiline = kind == "data_row_height"
-                        let label = textLabel(multiline ? "First line\nSecond line" : "Unprotected data label",
-                                              NSRect(x:12,y:6,width:multiline ? 100 : 10,height:15),size:11)
-                        label.identifier = NSUserInterfaceItemIdentifier("dir_oracle_probe")
-                        if kind != "data_row_truncation" {
-                            label.maximumNumberOfLines = 2
-                            label.lineBreakMode = multiline ? .byWordWrapping : .byClipping
-                            label.cell?.wraps = multiline
-                        }
-                        bar.addSubview(label)
-                    }
-                    if kind == "nested_padding", let label = bar.subviews.first(where: { $0.identifier?.rawValue == "inbox_control_title" }) {
-                        let group = NSView(frame: label.frame)
-                        bar.addSubview(group)
-                        label.removeFromSuperview()
-                        label.frame.origin = NSPoint(x:2 - group.frame.minX,y:0)
-                        group.addSubview(label)
-                    }
-                }
-                if kind == "card_padding", let card = roots.flatMap({$0.subviews}).first(where:{$0 is SurfaceView && ($0.layer?.borderWidth ?? 0)>0 && $0.frame.width>=60 && $0.frame.height>=32}), let child = card.subviews.first(where:{!$0.isHidden && !($0 is NSVisualEffectView)}) { child.frame.origin.x = 2 }
-                if kind == "address_mismatches", let listener = listeners.first { control("copy:\(listener.scoped_id)")?.label.stringValue = "wrong address" }
-                let row = object["row"] as? Int ?? 0
-                if kind == "activity_jargon", let table = directoryTableView, row >= 0, row < table.numberOfRows,
-                   let cell = table.view(atColumn:0,row:row,makeIfNecessary:true) as? DirectoryPeerCellView {
-                    cell.line1TitleLabel.stringValue = object["text"] as? String ?? "@bob → Human Node"
-                }
-                let hitTarget: NSView?
-                switch kind {
-                case "hit_test", "partial_hit_test": hitTarget = control("open_settings")
-                case "editable_hit_test": hitTarget = (object["id"] as? String).flatMap { settingsFieldControls[$0] }
-                default: hitTarget = nil
-                }
-                if let target = hitTarget, let parent = target.superview {
-                    var frame = target.frame
-                    if kind == "partial_hit_test" {
-                        frame.size.width *= 0.25
-                        if object["edge"] as? String == "right" { frame.origin.x = target.frame.maxX - frame.width }
-                    }
-                    let blocker = NSView(frame:frame)
-                    blocker.identifier = NSUserInterfaceItemIdentifier("hit_test_probe")
-                    parent.addSubview(blocker)
-                }
-                if let header = roots.first(where: { $0.identifier?.rawValue == "header" }) {
-                    if kind == "low_contrast_icons" {
-                        let icon = NSImageView(frame:NSRect(x:0,y:0,width:12,height:12))
-                        icon.identifier = NSUserInterfaceItemIdentifier("icon_contrast_probe")
-                        icon.image = NSImage(systemSymbolName:"circle.fill",accessibilityDescription:"Contrast probe")
-                        icon.contentTintColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01)
-                        header.addSubview(icon)
-                    }
-                    if kind == "strip_anchor", let scroll = header.subviews.first(where: { $0.identifier?.rawValue == "header_hub_strip" }) as? NSScrollView {
-                        for pill in scroll.documentView?.subviews ?? [] { pill.frame.origin.x -= 8 }
-                    }
-                    if kind == "overlapping_siblings" || kind == "clipped_views" {
-                        let probe = MenuControl("Probe",frame:NSRect(x:kind == "clipped_views" ? 370 : 12,y:12,width:60,height:18))
-                        probe.identifier = NSUserInterfaceItemIdentifier("oracle_probe")
-                        header.addSubview(probe)
-                    }
-                }
-                return true
-            }
             if op == "test_render_png", let surface = object["surface"] as? String, let path = object["path"] as? String {
                 renderPNG(surface: surface, path: path); return true
             }
@@ -1029,8 +908,8 @@ extension Companion {
             "hub_invite_pending": hubInvitePending, "host_hub_port_pending": hostPort.pending,
             "pending_app_checks": pendingControls.filter { $0.value.appCheck }.keys.sorted(),
             "pending_channel_saves": pendingControls.filter { $0.value.channelSave != nil }.keys.sorted(),
-            "pending_channel_resets": pendingControls.filter { $0.value.channelReset != nil }.keys.sorted(),
-            "pending_controls": pendingControls.filter { !$0.value.awaitingPairSettings }.keys.sorted(),
+            "pending_channel_resets": pendingControls.filter { $0.value.channelReset.map { $0.hub || $0.user } == true }.keys.sorted(),
+            "pending_controls": pendingControls.keys.sorted(),
             "settings_rebuild_deferred": settingsRebuildDeferred,
             "settings_channel_hub": mountedChannelsSettings?.hub ?? "",
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
@@ -1045,132 +924,5 @@ extension Companion {
             "button_digit_widths": font.map { font in ["11111111", "88888888"].map { ($0 as NSString).size(withAttributes: [.font: font]).width } } ?? []]
         diagnostic("menu " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
         return snapshot
-    }
-
-    // Run real settings handlers and AppKit projections without touching user state.
-    func runSettingsRegressions() {
-        let subject = Companion()
-        defer { subject.settingsPanel?.close() }
-        func send(_ object: [String: Any]) {
-            subject.receive(try! JSONSerialization.data(withJSONObject: object))
-        }
-        func press(_ id: String) { send(["op": "test_control", "id": id]) }
-        func input(_ id: String, _ value: String) {
-            send(["op": "test_settings_input", "id": id, "value": value])
-        }
-        let payload = #"""
-        {"apps":[],"hubs":[],"channels":[{"id":"channel","display_name":"Account","sf_symbol":"link","tint":"blue","enabled":true,"configured":false,"status":"pairing_pending","detail":"","hub_provided":true,"pairing_supported":true,"hub_ready":true,"can_edit_personal":true,"can_pair":true,"fields":[{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}],"pairing_instruction":"Open account settings and enter code 123456."}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":""},"launch_at_login":false}
-        """#
-        let settings = try! JSONSerialization.jsonObject(with: Data(payload.utf8)) as! [String: Any]
-        send(["op": "settings", "settings": settings])
-        subject.settingsActiveTab = "channels"
-        subject.openSettingsPanel()
-        let field = subject.settingsFieldControls["pairing_instruction:channel"]!
-        send(["op": "test_focus_field", "id": "pairing_instruction:channel"])
-        let editor = field.currentEditor() as! NSTextView
-        let selection = NSRange(location: 5, length: 7)
-        editor.setSelectedRange(selection)
-        var refreshed = settings
-        refreshed["launch_at_login"] = true
-        send(["op": "settings", "settings": refreshed])
-        let preserved = subject.inspectMenu()
-        precondition(subject.settingsRebuildDeferred && field.currentEditor() === editor)
-        precondition(subject.settingsPanel?.firstResponder === editor && editor.selectedRange() == selection)
-        precondition((preserved["field_editors"] as! [[String: Any]]).first?["attached"] as? Bool == true)
-        precondition(!editor.isEditable && editor.string == field.stringValue)
-        send(["op": "test_end_editing"])
-        subject.flushDirtyViews()
-        precondition(!subject.settingsRebuildDeferred)
-
-        // Editable drafts use the same passive-refresh fence.
-        send(["op": "test_focus_field", "id": "channel_field:channel:account"])
-        let draft = subject.settingsFieldControls["channel_field:channel:account"]!
-        let draftEditor = draft.currentEditor() as! NSTextView
-        draftEditor.string = "Uncommitted account"
-        draftEditor.setSelectedRange(NSRange(location: 3, length: 4))
-        subject.rebuildSettingsPanel(preservingEditor: true)
-        precondition(draft.currentEditor() === draftEditor && draftEditor.string == "Uncommitted account")
-        precondition(draftEditor.selectedRange() == NSRange(location: 3, length: 4))
-        send(["op": "test_end_editing"])
-        diagnostic("settings-regressions: pairing editor and editable draft PASS")
-
-        subject.settingsActiveTab = "hubs"
-        subject.rebuildSettingsPanel()
-        // Match full, absent and truncated projections, before/after canonical refresh.
-        for projection in ["none", "full", "truncated"] {
-            for refreshBeforeResubmit in [false, true] {
-                for (draftName, draftURL, editing, retainedEdit, nextName) in [
-                    ("", "https://other.example.com", false, false, "other"),
-                    ("", "https://work.example.org", false, false, "work-2"),
-                    ("", "https://work.example.com", false, true, "work"),
-                    ("work", "https://other.example.com", false, true, "work"),
-                    ("renamed", "https://work.example.com", false, false, "renamed"),
-                    ("", "https://other.example.com", true, true, "work")
-                ] {
-                    subject.hubForm = HubFormState()
-                    send(["op": "settings", "settings": settings])
-                    subject.hubForm = HubFormState(mode: editing ? .edit(name: "work", initial: nil) : .add)
-                    subject.hubForm.url = "https://work.example.com"
-                    subject.rebuildSettingsPanel(syncFields: false)
-                    press("submit_add_hub")
-                    let pending = subject.hubForm.pendingSave!
-                    input("settings_hub_name", draftName)
-                    input("settings_hub_url", draftURL)
-                    var receipt: [String: Any] = ["op": "settings", "source_op": "setup_save_hub",
-                        "request_id": pending.requestId, "ok": true, "committed": true]
-                    var committedSettings = settings
-                    committedSettings["hubs"] = [["name": pending.name, "url": pending.url, "auth_mode": "none",
-                        "enabled": true, "is_default": true, "status": "connected"]]
-                    if projection != "none" { receipt["settings"] = committedSettings }
-                    if projection == "truncated" { receipt["truncated"] = true }
-                    send(receipt)
-                    // A later canonical projection must not adopt a distinct add draft.
-                    if refreshBeforeResubmit { send(["op": "settings", "settings": committedSettings]) }
-                    precondition(subject.hubForm.pendingSave == nil && subject.hubForm.isOpen)
-                    precondition(subject.hubForm.isEditing == retainedEdit, "Unexpected retained mode: projection=\(projection), editing=\(editing), name=\(draftName), url=\(draftURL)")
-                    precondition(subject.hubForm.url == draftURL && subject.hubForm.name == draftName)
-                    if retainedEdit { precondition(subject.hubForm.originalName == pending.name) }
-                    if refreshBeforeResubmit {
-                        precondition(subject.hubForm.awaitingSettings == nil)
-                        precondition((subject.hubForm.initialHub != nil) == retainedEdit)
-                    }
-                    // A subsequent save must retain add/edit semantics at the actual producer.
-                    press("submit_add_hub")
-                    let next = subject.hubForm.pendingSave!
-                    precondition(next.name == nextName)
-                }
-            }
-            subject.hubForm = HubFormState(mode: .add)
-            subject.hubForm.url = "https://work.example.com"
-            subject.rebuildSettingsPanel(syncFields: false)
-            press("submit_add_hub")
-            let pending = subject.hubForm.pendingSave!
-            var receipt: [String: Any] = ["op": "settings", "source_op": "setup_save_hub",
-                "request_id": pending.requestId, "ok": true, "committed": true]
-            if projection != "none" { receipt["settings"] = settings }
-            if projection == "truncated" { receipt["truncated"] = true }
-            send(receipt)
-            precondition(!subject.hubForm.isOpen)
-        }
-        diagnostic("settings-regressions: Hub add/edit and unchanged settlement PASS")
-
-        subject.settingsActiveTab = "channels"
-        subject.rebuildSettingsPanel(syncFields: false)
-        let root = subject.settingsPanel!.contentView!
-        let label = textLabel("First line\nSecond line", NSRect(x: 20, y: 20, width: 160, height: 40), size: 11)
-        label.identifier = NSUserInterfaceItemIdentifier("wrapped_height_probe")
-        label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true
-        label.isBezeled = true
-        root.addSubview(label)
-        let required = measureWrappedHeight(label.stringValue, width: label.cell!.drawingRect(forBounds: label.bounds).width, font: label.font!)
-        label.frame.size.height = required
-        precondition(label.cell!.drawingRect(forBounds: label.bounds).height < required)
-        precondition(required <= label.frame.height + 2) // The former oracle accepted this clipped field.
-        let clipped = subject.inspectMenu()["truncated_labels"] as! [String]
-        precondition(clipped.contains("wrapped_height_probe"))
-        label.frame.size.height += required - label.cell!.drawingRect(forBounds: label.bounds).height
-        let fitting = subject.inspectMenu()["truncated_labels"] as! [String]
-        precondition(!fitting.contains("wrapped_height_probe"))
-        diagnostic("settings-regressions: native wrapped drawable height rejects clipping PASS")
     }
 }

@@ -1,10 +1,10 @@
+use super::settlement::{input, latest, open_settings};
 use super::*;
 
 #[test]
 fn deferred_channel_editor_keeps_its_rendered_hub_across_passive_reselection() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let field = "channel_field:channel:account";
     let mut personal = settings();
     personal["channels"][0]["fields"][1]["value"] = json!("Personal account");
@@ -33,8 +33,8 @@ fn deferred_channel_editor_keeps_its_rendered_hub_across_passive_reselection() {
     assert_eq!(deferred["settings_rebuild_deferred"], true);
     assert_eq!(deferred["settings_channel_hub"], "personal");
     assert_eq!(
-        node(&deferred, "settings_items", field)["instance"],
-        node(&before, "settings_items", field)["instance"]
+        deferred.settings(field)["instance"],
+        before.settings(field)["instance"]
     );
     assert!(f
         .frames(p)
@@ -48,11 +48,7 @@ fn deferred_channel_editor_keeps_its_rendered_hub_across_passive_reselection() {
         json!({"op":"test_settings_key","key":"return","via":"field"}),
     );
     inspect(&f, p);
-    let saves: Vec<_> = f
-        .frames(p)
-        .into_iter()
-        .filter(|a| a["op"] == "channel_save")
-        .collect();
+    let saves: Vec<_> = f.frames_for(p, "channel_save").collect();
     assert_eq!(saves.len(), 1);
     assert_eq!(saves[0]["hub"], "personal");
     assert_eq!(
@@ -64,11 +60,8 @@ fn deferred_channel_editor_keeps_its_rendered_hub_across_passive_reselection() {
     let work = inspect(&f, p);
     assert_eq!(work["settings_rebuild_deferred"], false);
     assert_eq!(work["settings_channel_hub"], "work");
-    assert_eq!(node(&work, "settings_items", field)["text"], "Work account");
-    assert_eq!(
-        node(&work, "settings_items", "save_channel:channel")["enabled"],
-        true
-    );
+    assert_eq!(work.settings(field)["text"], "Work account");
+    assert_eq!(work.settings("save_channel:channel")["enabled"], true);
 }
 
 #[test]
@@ -87,20 +80,19 @@ fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner(
         ]
     }).to_string()).unwrap();
     let mut cycle = ClosedLoop::new(&f);
-    cycle.until(|s| node(s, "items", "header").is_object());
+    cycle.until(|s| s.menu("header").is_object());
     cycle.control("open_settings");
     cycle.control("settings_tab:channels");
-    cycle.until(|s| !node(s, "settings_items", "save_hub_service:channel").is_null());
+    cycle.until(|s| !s.settings("save_hub_service:channel").is_null());
     cycle.input("channel_field:channel:credential", "valid");
     cycle.control("save_hub_service:channel");
-    cycle.until(|s| !node(s, "settings_items", "channel_field:channel:address").is_null());
+    cycle.until(|s| !s.settings("channel_field:channel:address").is_null());
     cycle.input("channel_field:channel:address", "personal-room");
     cycle.control("save_channel:channel");
-    cycle.until(|s| !node(s, "settings_items", "channel_summary:channel").is_null());
+    cycle.until(|s| !s.settings("channel_summary:channel").is_null());
     cycle.control("test_channel:channel");
     cycle.until(|s| {
-        node(s, "settings_items", "settings_channel_detail:channel")["text"]
-            == "Fixture test succeeded"
+        s.settings("settings_channel_detail:channel")["text"] == "Fixture test succeeded"
     });
     let old_result = cycle
         .frames
@@ -112,12 +104,11 @@ fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner(
     cycle.control("edit_hub_service:channel");
     cycle.input("channel_field:channel:credential", "invalid");
     cycle.control("save_hub_service:channel");
-    cycle.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    cycle.until(|s| s.settings("stratum_hub:channel")["height"] == 36);
     cycle.control("test_channel:channel");
-    let failed = cycle.until(|s| {
-        node(s, "settings_items", "settings_channel_detail:channel")["text"] == "Invalid token"
-    });
-    assert!(node(&failed, "settings_items", "settings_error_banner").is_null());
+    let failed =
+        cycle.until(|s| s.settings("settings_channel_detail:channel")["text"] == "Invalid token");
+    assert!(failed.settings("settings_error_banner").is_null());
     assert_eq!(failed["pending_controls"], json!([]));
     let action = &cycle
         .results
@@ -154,30 +145,24 @@ fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner(
     f.send(fresh_ui, fresh_state);
     control(&f, fresh_ui, "open_settings");
     control(&f, fresh_ui, "settings_tab:channels");
-    let baseline = node(
-        &inspect(&f, fresh_ui),
-        "settings_items",
-        "settings_channel_detail:channel",
-    );
+    let baseline = inspect(&f, fresh_ui).settings("settings_channel_detail:channel");
     f.send(fresh_ui, old_result);
     let stale = inspect(&f, fresh_ui);
     assert_eq!(
-        node(&stale, "settings_items", "settings_channel_detail:channel")["text"],
+        stale.settings("settings_channel_detail:channel")["text"],
         baseline["text"]
     );
     assert_ne!(
-        node(&stale, "settings_items", "settings_channel_detail:channel")["text"],
+        stale.settings("settings_channel_detail:channel")["text"],
         "Fixture test succeeded"
     );
-    assert_eq!(f.action(json!({"op":"setup_save_hub","name":"work","url":format!("http://127.0.0.1:{}",port()),"set_default":false})).0, 200);
-    assert_eq!(
-        f.action(json!({"op":"setup_toggle_hub","hub":"local","enabled":false}))
-            .0,
-        200
-    );
+    f.action_ok(json!({"op":"setup_save_hub","name":"work","url":format!("http://127.0.0.1:{}",port()),"set_default":false}));
+    f.action_ok(json!({"op":"setup_toggle_hub","hub":"local","enabled":false}));
     // Dispatch from the still-mounted old generation before pumping its refresh.
     cycle.control("unpair_channel:channel");
-    let removed = cycle.until(|s| node(s, "settings_items", "settings_channel:channel").is_null());
+    let removed = cycle.until(|s| {
+        s.settings("settings_channel:channel").is_null() && s["pending_controls"] == json!([])
+    });
     assert_eq!(removed["pending_controls"], json!([]));
     let action = &cycle
         .results
@@ -198,48 +183,41 @@ fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner(
 #[test]
 fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     control(&f, p, "pair_channel:channel");
-    inspect(&f, p);
-    let pair = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "channel_pair")
-        .unwrap();
+    let pair = latest(&f, p, "channel_pair");
     f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":pair["request_id"],"instruction":"Send the pairing command","pairing_command":"/start example-code","pairing_url":"https://example.com/pair"}));
     let first = inspect(&f, p);
-    let copy = node(&first, "settings_items", "copy_pair_command:channel");
+    let copy = first.settings("copy_pair_command:channel");
     assert_eq!(copy["text"], "✓ Copied");
     let mut warning = json!({"op":"settings","source_op":"channel_pair","hub":"work","channel_id":"channel","request_id":pair["request_id"],"ok":true,"committed":true,"warning":"Pairing started. Refresh is temporarily unavailable."});
     f.send(p, warning.clone());
-    assert!(node(&inspect(&f, p), "settings_items", "settings_error_banner").is_null());
+    assert!(inspect(&f, p).settings("settings_error_banner").is_null());
     warning["hub"] = json!("personal");
     f.send(p, warning.clone());
     let settled = inspect(&f, p);
     assert_eq!(
-        node(&settled, "settings_items", "settings_error_label")["text"],
+        settled.settings("settings_error_label")["text"],
         warning["warning"]
     );
     assert_eq!(
-        node(&settled, "settings_items", "pairing_instruction:channel")["text"],
+        settled.settings("pairing_instruction:channel")["text"],
         "Send the pairing command"
     );
     assert_eq!(settled["pending_controls"], json!([]));
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     warning["warning"] = json!("Duplicate pairing receipt");
     f.send(p, warning);
-    assert!(node(&inspect(&f, p), "items", "menu_error_row").is_null());
+    assert!(inspect(&f, p).menu("menu_error_row").is_null());
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:apps");
     control(&f, p, "settings_tab:channels");
+    control(&f, p, "copy_pair_command:channel");
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("ready");
     cfg["channels"][0]["fields"][1]["value"] = json!("account");
@@ -252,11 +230,11 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
         f.send(p, json!({"op":"settings","source_op":if degraded { "open_settings" } else { "channel_pair" },"request_id":pair["request_id"],"settings":cfg,"ok":true}));
         let second = inspect(&f, p);
         assert_eq!(
-            node(&second, "settings_items", "pairing_instruction:channel")["text"],
+            second.settings("pairing_instruction:channel")["text"],
             "Send the pairing command"
         );
         assert_eq!(
-            node(&second, "settings_items", "copy_pair_command:channel")["text"],
+            second.settings("copy_pair_command:channel")["text"],
             "✓ Copied"
         );
         control(&f, p, "copy_pair_command:channel");
@@ -264,13 +242,7 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
     }
     cfg["channel_inventory_error"] = Value::Null;
     control(&f, p, "test_channel:channel");
-    inspect(&f, p);
-    let test = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "channel_test")
-        .unwrap();
+    let test = latest(&f, p, "channel_test");
     f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","request_id":test["request_id"],"ok":false,"detail":"Current test failed"}));
     cfg["channels"][0]["status"] = json!("error");
     cfg["channels"][0]["detail"] = json!("Older health observation");
@@ -279,14 +251,14 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
     let second = inspect(&f, p);
     assert_eq!(second["settings_launch_at_login"], true);
     assert_eq!(
-        node(&second, "settings_items", "settings_channel_detail:channel")["text"],
+        second.settings("settings_channel_detail:channel")["text"],
         "Current test failed"
     );
-    assert!(node(&second, "settings_items", "settings_error_banner").is_null());
+    assert!(second.settings("settings_error_banner").is_null());
     f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","request_id":"previous-ui-generation","ok":true,"detail":"Stale test succeeded"}));
     let stale = inspect(&f, p);
     assert_eq!(
-        node(&stale, "settings_items", "settings_channel_detail:channel")["text"],
+        stale.settings("settings_channel_detail:channel")["text"],
         "Current test failed"
     );
     assert_eq!(stale["pending_controls"], json!([]));
@@ -295,8 +267,7 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
 #[test]
 fn oversized_channel_submission_preserves_drafts_without_pending_or_transport_effects() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     let mut second = cfg["channels"][0]["fields"][1].clone();
     second["key"] = json!("second");
@@ -305,8 +276,7 @@ fn oversized_channel_submission_preserves_drafts_without_pending_or_transport_ef
         .as_array_mut()
         .unwrap()
         .push(second);
-    let mut frame = state();
-    frame["settings"] = cfg;
+    let frame = state_with_settings(cfg);
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
@@ -324,15 +294,9 @@ fn oversized_channel_submission_preserves_drafts_without_pending_or_transport_ef
         .any(|a| a["op"] == "channel_save"));
     assert_eq!(s["pending_controls"], json!([]));
     assert_eq!(s["pending_channel_saves"], json!([]));
-    assert_eq!(
-        node(&s, "settings_items", "channel_field:channel:account")["text"],
-        draft
-    );
-    assert_eq!(
-        node(&s, "settings_items", "channel_field:channel:second")["text"],
-        draft
-    );
-    assert!(node(&s, "settings_items", "settings_error_label")["text"]
+    assert_eq!(s.settings("channel_field:channel:account")["text"], draft);
+    assert_eq!(s.settings("channel_field:channel:second")["text"], draft);
+    assert!(s.settings("settings_error_label")["text"]
         .as_str()
         .unwrap()
         .contains("too large"));
@@ -341,8 +305,7 @@ fn oversized_channel_submission_preserves_drafts_without_pending_or_transport_ef
 #[test]
 fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut frame = state();
     let mut cfg = settings();
     cfg["settings_hub"] = json!("personal");
@@ -396,14 +359,11 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
             control(&f, p, "settings_tab:channels");
             for appearance in ["light", "dark"] {
                 let s = inspect_as(&f, p, Some(appearance));
-                assert!(node(&s, "items", "human_inbox_card").is_null());
-                assert!(node(&s, "items", "inbox_header").is_null());
-                assert_eq!(node(&s, "items", "inbox_paused_notice").is_null(), !paused);
-                assert_eq!(
-                    node(&s, "settings_items", "inbox_control_bar")["height"],
-                    48
-                );
-                let scroll = node(&s, "settings_items", "settings_channels_tab");
+                assert!(s.menu("human_inbox_card").is_null());
+                assert!(s.menu("inbox_header").is_null());
+                assert_eq!(s.menu("inbox_paused_notice").is_null(), !paused);
+                assert_eq!(s.settings("inbox_control_bar")["height"], 48);
+                let scroll = s.settings("settings_channels_tab");
                 assert_eq!(scroll["height"], 368);
                 assert_eq!(
                     s["clipped_views"],
@@ -411,7 +371,7 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                     "Every resting active/paused default must fit without scrolling"
                 );
                 assert_eq!(s["overlapping_siblings"], json!([]));
-                let summary = node(&s, "settings_items", "inbox_control_summary");
+                let summary = s.settings("inbox_control_summary");
                 assert_eq!(
                     summary["text"],
                     if paused {
@@ -436,14 +396,14 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                     assert!(!tip.contains(excluded));
                 }
                 assert_eq!(
-                    node(&s, "settings_items", "toggle_inbox")["text"],
+                    s.settings("toggle_inbox")["text"],
                     if paused {
                         "Resume Inbox"
                     } else {
                         "Pause Inbox"
                     }
                 );
-                assert_eq!(node(&s, "settings_items", "scope:inbox")["text"], "Self");
+                assert_eq!(s.settings("scope:inbox")["text"], "Self");
                 render_png_as(
                     &f,
                     p,
@@ -456,93 +416,57 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     }
     control(&f, p, "toggle_inbox");
     let pending = inspect(&f, p);
-    assert_eq!(
-        node(&pending, "settings_items", "toggle_inbox")["enabled"],
-        false
-    );
-    let action = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "human_inbox_update")
-        .unwrap();
+    assert_eq!(pending.settings("toggle_inbox")["enabled"], false);
+    let action = f.frames_for(p, "human_inbox_update").next_back().unwrap();
     frame["source_op"] = json!("human_inbox_update");
     frame["request_id"] = json!("older-request");
     f.send(p, frame.clone());
-    assert_eq!(
-        node(&inspect(&f, p), "settings_items", "toggle_inbox")["enabled"],
-        false
-    );
+    assert_eq!(inspect(&f, p).settings("toggle_inbox")["enabled"], false);
     frame["request_id"] = action["request_id"].clone();
     f.send(p, frame);
-    assert_eq!(
-        node(&inspect(&f, p), "settings_items", "toggle_inbox")["enabled"],
-        true
-    );
+    assert_eq!(inspect(&f, p).settings("toggle_inbox")["enabled"], true);
 }
 
 #[test]
 fn v41_new_test_receipts_override_health_until_the_next_changed_health_frame() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     cfg["channels"][0]["status"] = json!("error");
     cfg["channels"][0]["detail"] = json!("Credentials rejected. Update your token.");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     f.send(p,json!({"op":"channel_test_result","channel_id":"channel","ok":true,"detail":"Test accepted"}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         "Test accepted"
     );
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         "Test accepted",
         "An unchanged health tick cannot displace the newer test receipt"
     );
     cfg["launch_at_login"] = json!(true);
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         "Test accepted",
         "An unrelated settings change cannot displace the newer test receipt"
     );
     cfg["channels"][0]["warning"] = json!(true);
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         "Credentials rejected. Update your token."
     );
     cfg["channels"][0]["warning"] = json!(false);
     cfg["channels"][0]["status"] = json!("ready");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         "Test accepted"
     );
     control(&f, p, "settings_tab:hubs");
@@ -550,7 +474,7 @@ fn v41_new_test_receipts_override_health_until_the_next_changed_health_frame() {
     control(&f, p, "settings_tab:channels");
     f.send(p, json!({"op":"test_settings_key","key":"return"}));
     inspect(&f, p);
-    assert!(!f.frames(p).iter().any(|a| a["op"] == "setup_save_hub"));
+    assert!(f.frames_for(p, "setup_save_hub").next().is_none());
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["settings_open"], false);
 }
@@ -558,35 +482,27 @@ fn v41_new_test_receipts_override_health_until_the_next_changed_health_frame() {
 #[test]
 fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
     cfg["channels"][0]["pairing_open_url_label"] = json!("Open Pairing Link ↗");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
-    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
-    assert!(node(&s, "settings_items", "save_channel:channel").is_null());
-    assert_eq!(
-        node(&s, "settings_items", "test_channel:channel")["hidden"],
-        true
-    );
+    assert!(s.settings("channel_field:channel:account").is_null());
+    assert!(s.settings("save_channel:channel").is_null());
+    assert_eq!(s.settings("test_channel:channel")["hidden"], true);
     control(&f, p, "manual_channel:channel");
     let s = inspect(&f, p);
-    assert_eq!(
-        node(&s, "settings_items", "test_channel:channel")["enabled"],
-        false
-    );
+    assert_eq!(s.settings("test_channel:channel")["enabled"], false);
     f.send(
         p,
         json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"42"}),
     );
     assert_eq!(
-        node(&inspect(&f, p), "settings_items", "test_channel:channel")["enabled"],
+        inspect(&f, p).settings("test_channel:channel")["enabled"],
         true
     );
     f.send(
@@ -594,18 +510,12 @@ fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh(
         json!({"op":"test_settings_input","id":"channel_field:channel:account","value":""}),
     );
     assert_eq!(
-        node(&inspect(&f, p), "settings_items", "test_channel:channel")["enabled"],
+        inspect(&f, p).settings("test_channel:channel")["enabled"],
         false
     );
     control(&f, p, "manual_channel:channel");
     control(&f, p, "pair_channel:channel");
-    inspect(&f, p);
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|v| v["op"] == "channel_pair")
-        .unwrap();
+    let request = latest(&f, p, "channel_pair");
     let mut pair = json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":"unrelated","code":"cito-example","instruction":"Send /start cito-example","pairing_command":"/start cito-example","pairing_url":"https://example.com/pair"});
     f.send(p, pair.clone());
     assert_ne!(inspect(&f, p)["clipboard"], "/start cito-example");
@@ -613,33 +523,25 @@ fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh(
     f.send(p, pair);
     let s = inspect(&f, p);
     assert_eq!(s["clipboard"], "/start cito-example");
+    assert_eq!(s.settings("copy_pair_command:channel")["text"], "✓ Copied");
     assert_eq!(
-        node(&s, "settings_items", "copy_pair_command:channel")["text"],
-        "✓ Copied"
-    );
-    assert_eq!(
-        node(&s, "settings_items", "open_pair_url:channel")["text"],
+        s.settings("open_pair_url:channel")["text"],
         "Open Pairing Link ↗"
     );
-    assert!(node(&s, "settings_items", "pair_channel:channel").is_null());
+    assert!(s.settings("pair_channel:channel").is_null());
     cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-example");
     cfg["channels"][0]["pairing_command"] = json!("/start cito-example");
     cfg["channels"][0]["pairing_url"] = json!("https://example.com/pair");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "copy_pair_command:channel"
-        )["text"],
+        inspect(&f, p).settings("copy_pair_command:channel")["text"],
         "✓ Copied"
     );
 }
 #[test]
 fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     f.send(p, state());
     control(&f, p, "open_settings");
@@ -685,30 +587,15 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
                 .any(|n| n["text"] == summary),
             "{summary}"
         );
-        assert_eq!(node(&snapshot, "items", "stop_all")["text"], "Stop All");
-        assert_eq!(
-            node(&snapshot, "settings_items", "toggle_inbox")["enabled"],
-            true
-        );
+        assert_eq!(snapshot.menu("stop_all")["text"], "Stop All");
+        assert_eq!(snapshot.settings("toggle_inbox")["enabled"], true);
     }
     control(&f, p, "toggle_inbox");
-    inspect(&f, p);
-    let update = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|v| v["op"] == "human_inbox_update")
-        .unwrap();
+    let update = latest(&f, p, "human_inbox_update");
     assert_eq!(update["expected_control_revision"], 7);
     assert_eq!(update["paused"], true);
     control(&f, p, "stop_all");
-    inspect(&f, p);
-    let stop = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|v| v["op"] == "unlisten_all")
-        .unwrap();
+    let stop = latest(&f, p, "unlisten_all");
     assert_eq!(stop["hub"], "personal");
     cfg["channels"][0]["status"] = json!("error");
     cfg["channels"][0]["fields"] = json!([]);
@@ -718,67 +605,27 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
-    let detail = node(&s, "settings_items", "settings_channel_detail:channel");
-    let card = node(&s, "settings_items", "settings_channel:channel");
+    let detail = s.settings("settings_channel_detail:channel");
+    let card = s.settings("settings_channel:channel");
     assert!(detail["height"].as_f64().unwrap() > 28.0);
     assert!(card["height"].as_f64().unwrap() >= detail["height"].as_f64().unwrap() + 46.0);
     assert!(detail["y"].as_f64().unwrap() >= 8.0);
     for appearance in ["light", "dark"] {
         inspect_as(&f, p, Some(appearance));
     }
-    let recovery = node(&s, "settings_items", "channel_recovery_bar:channel");
-    let rightmost = nodes(&recovery["children"])
-        .into_iter()
-        .filter(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("recover_channel:"))
-        })
-        .max_by(|a, b| {
-            a["x"]
-                .as_f64()
-                .unwrap()
-                .total_cmp(&b["x"].as_f64().unwrap())
-        })
-        .unwrap();
-    for (kind, issue) in [
-        (
-            "bar_anchor",
-            "settings_channel:channel: recovery row is not edge anchored",
-        ),
-        (
-            "bar_midY",
-            "settings_channel:channel: recovery row controls are not vertically centered",
-        ),
-    ] {
-        f.send(
-            p,
-            json!({"op":"test_oracle_calibration","kind":kind,"id":rightmost["id"]}),
-        );
-        let snapshot = inspect_unchecked(&f, p, None);
-        assert_eq!(
-            snapshot["non_anchored_action_bars"],
-            json!([issue]),
-            "{kind}"
-        );
-        f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
-        inspect(&f, p);
-    }
 }
 
 #[test]
 fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("ready");
     cfg["channels"][0]["fields"][1]["configured"] = json!(true);
     cfg["channels"][0]["fields"][1]["value"] = json!("42");
     cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
@@ -791,14 +638,10 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
             control(&f, p, cancel);
         }
         let s = inspect(&f, p);
-        assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
+        assert!(!s.settings("channel_summary:channel").is_null());
         control(&f, p, "edit_user_channel:channel");
         assert_eq!(
-            node(
-                &inspect(&f, p),
-                "settings_items",
-                "channel_field:channel:account"
-            )["text"],
+            inspect(&f, p).settings("channel_field:channel:account")["text"],
             "42"
         );
         control(&f, p, "cancel_edit_user_channel:channel");
@@ -812,8 +655,8 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     cfg["channels"][0]["fields"][1]["value"] = json!("");
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
-    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
-    let manual = node(&s, "settings_items", "manual_channel:channel");
+    assert!(s.settings("channel_field:channel:account").is_null());
+    let manual = s.settings("manual_channel:channel");
     assert_eq!(manual["x"], 12);
     assert_eq!(manual["children"][0]["x"], 0);
     let width = manual["width"].as_f64().unwrap();
@@ -824,20 +667,10 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     );
     for round in 0..2 {
         control(&f, p, "pair_channel:channel");
-        inspect(&f, p);
-        let request = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == "channel_pair")
-            .unwrap();
+        let request = latest(&f, p, "channel_pair");
         f.send(p,json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-example","pairing_command":"/start cito-example"}));
         assert_eq!(
-            node(
-                &inspect(&f, p),
-                "settings_items",
-                "copy_pair_command:channel"
-            )["text"],
+            inspect(&f, p).settings("copy_pair_command:channel")["text"],
             "✓ Copied"
         );
         if round == 0 {
@@ -845,7 +678,7 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
             confirm_channel_action(&f, p, "channel_cancel_pair");
             f.send(p, json!({"op":"settings","settings":cfg}));
             let s = inspect(&f, p);
-            assert!(node(&s, "settings_items", "copy_pair_command:channel").is_null());
+            assert!(s.settings("copy_pair_command:channel").is_null());
         }
     }
     cfg["channels"][0]["configured"] = json!(true);
@@ -854,250 +687,67 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     cfg["channels"][0]["fields"][1]["value"] = json!("42");
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
-    assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
-    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+    assert!(!s.settings("channel_summary:channel").is_null());
+    assert!(s.settings("channel_field:channel:account").is_null());
     control(&f, p, "edit_user_channel:channel");
     control(&f, p, "pair_channel:channel");
-    inspect(&f, p);
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|v| v["op"] == "channel_pair")
-        .unwrap();
+    let request = latest(&f, p, "channel_pair");
     f.send(p,json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-again","pairing_command":"/start cito-again"}));
-    assert!(!node(
-        &inspect(&f, p),
-        "settings_items",
-        "copy_pair_command:channel"
-    )
-    .is_null());
+    assert!(!inspect(&f, p)
+        .settings("copy_pair_command:channel")
+        .is_null());
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
-    assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
-    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+    assert!(!s.settings("channel_summary:channel").is_null());
+    assert!(s.settings("channel_field:channel:account").is_null());
 }
 
 #[test]
-fn v39_settings_resets_preserve_newer_pairing_request_and_auto_copy() {
+fn a_pending_pair_survives_a_refresh_and_a_committed_cancel_rejects_late_codes() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
-    let mut frame = state();
-    frame["settings"] = settings();
-    f.send(p, frame);
-    control(&f, p, "open_settings");
-    control(&f, p, "settings_tab:channels");
-    for transition in ["save_ack", "configured", "instruction_removed"] {
-        let mut cfg = settings();
-        let paired = transition != "configured";
-        cfg["channels"][0]["configured"] = json!(paired);
-        cfg["channels"][0]["status"] = json!(if paired { "ready" } else { "hub_ready" });
-        cfg["channels"][0]["fields"][1]["configured"] = json!(paired);
-        cfg["channels"][0]["fields"][1]["value"] = json!(if paired { "42" } else { "" });
-        f.send(p, json!({"op":"settings","settings":cfg}));
-        if paired {
-            control(&f, p, "edit_user_channel:channel");
-        }
-        // Save S is unchanged and remains pending when Re-pair P is submitted.
-        let save = if transition == "save_ack" {
-            control(&f, p, "save_channel:channel");
-            inspect(&f, p);
-            Some(
-                f.frames(p)
-                    .into_iter()
-                    .rev()
-                    .find(|v| v["op"] == "channel_save")
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
-        control(&f, p, "pair_channel:channel");
-        inspect(&f, p);
-        let request = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == "channel_pair")
-            .unwrap();
-        f.send(p, json!({"op":"test_clipboard","text":"keep clipboard"}));
-        if let Some(save) = save {
-            assert_eq!(save["values"]["account"], "42");
-            assert_ne!(save["request_id"], request["request_id"]);
-            f.send(p, json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
-            assert_eq!(
-                node(&inspect(&f, p), "settings_items", "channel_summary:channel")["text"],
-                "✓ Saved"
-            );
-        } else {
-            // Both a configured transition and disappearing instructions can
-            // reset the view before P's correlated receipt reaches the UI.
-            if transition == "instruction_removed" {
-                cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-pending");
-                cfg["channels"][0]["pairing_command"] = json!("/start cito-pending");
-                f.send(p, json!({"op":"settings","settings":cfg}));
-                inspect(&f, p);
-            }
-            cfg["channels"][0]["configured"] = json!(true);
-            cfg["channels"][0]["status"] = json!("ready");
-            cfg["channels"][0]["fields"][1]["configured"] = json!(true);
-            cfg["channels"][0]["fields"][1]["value"] = json!("42");
-            cfg["channels"][0]["pairing_instruction"] = Value::Null;
-            cfg["channels"][0]["pairing_command"] = Value::Null;
-            f.send(p, json!({"op":"settings","settings":cfg}));
-        }
-        assert_eq!(
-            inspect(&f, p)["clipboard"],
-            "keep clipboard",
-            "{transition}"
-        );
-        f.send(p, json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-new","pairing_command":"/start cito-new"}));
-        let s = inspect(&f, p);
-        assert_eq!(s["clipboard"], "/start cito-new", "{transition}");
-        assert_eq!(
-            node(&s, "settings_items", "copy_pair_command:channel")["text"],
-            "✓ Copied",
-            "{transition}"
-        );
-    }
-}
-
-#[test]
-fn v39_pairing_invalidation_rejects_late_receipts_without_clipboard_or_instruction_effects() {
-    let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
-    let mut frame = state();
-    frame["settings"] = settings();
-    f.send(p, frame);
-    control(&f, p, "open_settings");
-    control(&f, p, "settings_tab:channels");
-    for transition in [
-        "cancel_pair_channel",
-        "unpair_channel",
-        "clear_channel_service",
-    ] {
-        let mut cfg = settings();
-        cfg["channels"][0]["configured"] = json!(true);
-        cfg["channels"][0]["status"] = json!("ready");
-        cfg["channels"][0]["fields"][1]["configured"] = json!(true);
-        cfg["channels"][0]["fields"][1]["value"] = json!("42");
-        f.send(p, json!({"op":"settings","settings":cfg}));
-        control(&f, p, "edit_user_channel:channel");
-        control(&f, p, "save_channel:channel");
-        inspect(&f, p);
-        let save = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == "channel_save")
-            .unwrap();
-        f.send(p,json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
-        assert_eq!(
-            node(&inspect(&f, p), "settings_items", "channel_summary:channel")["text"],
-            "✓ Saved"
-        );
-        control(&f, p, "edit_user_channel:channel");
-        control(&f, p, "pair_channel:channel");
-        inspect(&f, p);
-        let request = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == "channel_pair")
-            .unwrap();
-        // A live inventory can expose the pending code before the action receipt arrives.
-        cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-pending");
-        cfg["channels"][0]["pairing_command"] = json!("/start cito-pending");
-        f.send(p, json!({"op":"settings","settings":cfg}));
-        assert!(!node(
-            &inspect(&f, p),
-            "settings_items",
-            "pairing_instruction:channel"
-        )
-        .is_null());
-        f.send(p, json!({"op":"test_clipboard","text":"keep clipboard"}));
-        control(&f, p, &format!("{transition}:channel"));
-        // Destructive UI retirement belongs to the correlated committed receipt.
-        let pending = inspect(&f, p);
-        assert!(!node(&pending, "settings_items", "pairing_instruction:channel").is_null());
-        confirm_channel_action(
-            &f,
-            p,
-            match transition {
-                "cancel_pair_channel" => "channel_cancel_pair",
-                "unpair_channel" => "channel_unpair",
-                _ => "disconnect_human_channel",
-            },
-        );
-        let s = inspect(&f, p);
-        assert!(
-            node(&s, "settings_items", "pairing_instruction:channel").is_null(),
-            "{transition}"
-        );
-        assert!(
-            node(&s, "settings_items", "copy_pair_command:channel").is_null(),
-            "{transition}"
-        );
-        assert_ne!(
-            node(&s, "settings_items", "channel_summary:channel")["text"],
-            "✓ Saved",
-            "{transition}"
-        );
-        let late = json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-late","pairing_command":"/start cito-late","pairing_url":"https://example.com/late"});
-        f.send(p, late.clone());
-        let s = inspect(&f, p);
-        assert_eq!(s["clipboard"], "keep clipboard", "{transition}");
-        assert!(
-            node(&s, "settings_items", "pairing_instruction:channel").is_null(),
-            "{transition}"
-        );
-        assert!(
-            node(&s, "settings_items", "copy_pair_command:channel").is_null(),
-            "{transition}"
-        );
-        cfg["channels"][0]["pairing_instruction"] = Value::Null;
-        cfg["channels"][0]["pairing_command"] = Value::Null;
-        f.send(p, json!({"op":"settings","settings":cfg}));
-        f.send(p, late);
-        assert_eq!(
-            inspect(&f, p)["clipboard"],
-            "keep clipboard",
-            "{transition}"
-        );
-    }
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    open_settings(&f, p, &cfg, "channels");
+    control(&f, p, "pair_channel:channel");
+    let pair = latest(&f, p, "channel_pair");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let code = json!({"op":"pair_code","hub":pair["hub"],"channel_id":"channel","request_id":pair["request_id"],"instruction":"Link your account","pairing_command":"/link example"});
+    f.send(p, code.clone());
+    assert_eq!(inspect(&f, p)["clipboard"], "/link example");
+    control(&f, p, "cancel_pair_channel:channel");
+    confirm_channel_action(&f, p, "channel_cancel_pair");
+    f.send(p, json!({"op":"test_clipboard","text":"Keep this"}));
+    f.send(p, code);
+    let settled = inspect(&f, p);
+    assert_eq!(settled["clipboard"], "Keep this");
+    assert!(settled.settings("pairing_instruction:channel").is_null());
 }
 
 #[test]
 fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("ready");
     cfg["channels"][0]["fields"][1]["configured"] = json!(true);
     cfg["channels"][0]["fields"][1]["value"] = json!("42");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     control(&f, p, "test_channel:channel");
     inspect(&f, p);
-    assert!(f.frames(p).iter().any(|v| v["op"] == "channel_test"));
+    assert!(f.frames_for(p, "channel_test").next().is_some());
     let tested = "Test message accepted by the channel";
     f.send(
         p,
         json!({"op":"channel_test_result","channel_id":"channel","ok":true,"detail":tested}),
     );
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         tested
     );
     for (status, warning, detail, presented) in [
@@ -1126,15 +776,15 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
         f.send(p, json!({"op":"settings","settings":cfg}));
         let s = inspect(&f, p);
         assert_eq!(
-            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+            s.settings("settings_channel_detail:channel")["text"],
             presented
         );
         assert_eq!(
-            node(&s, "settings_items", "settings_channel_detail:channel")["tooltip"],
+            s.settings("settings_channel_detail:channel")["tooltip"],
             presented
         );
         assert_eq!(
-            node(&s, "settings_items", "settings_channel_status:channel")["text"],
+            s.settings("settings_channel_status:channel")["text"],
             if status == "error" {
                 "⚠ Error"
             } else {
@@ -1147,243 +797,69 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
         f.send(p, json!({"op":"settings","settings":cfg}));
         let s = inspect(&f, p);
         assert_eq!(
-            node(&s, "settings_items", "settings_channel_status:channel")["text"],
+            s.settings("settings_channel_status:channel")["text"],
             "Connected"
         );
         // The last test receipt remains useful after health recovers, until the next mutation.
         assert_eq!(
-            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+            s.settings("settings_channel_detail:channel")["text"],
             tested
         );
     }
 }
 
 #[test]
-fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer_drafts() {
+fn overlapping_channel_receipts_acknowledge_only_the_matching_scope_and_draft() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
-    cfg["settings_hub"] = json!("personal");
     cfg["channels"][0]["fields"][0]["value"] = json!("");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
-    f.send(p, frame);
-    control(&f, p, "open_settings");
-    control(&f, p, "settings_tab:channels");
+    cfg["channels"][0]["fields"][1]["type"] = json!("secret");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    open_settings(&f, p, &cfg, "channels");
     control(&f, p, "edit_hub_service:channel");
-    let save = |value: &str| {
-        f.send(
-            p,
-            json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":value}),
-        );
-        control(&f, p, "save_hub_service:channel");
-        inspect(&f, p);
-        f.frames(p)
-            .into_iter()
-            .rev()
-            .find(|a| a["op"] == "save_hub_service")
-            .unwrap()
+    let save = |field: &str, value: &str, button: &str, op: &str| {
+        input(&f, p, &format!("channel_field:channel:{field}"), value);
+        control(&f, p, button);
+        latest(&f, p, op)
     };
-    let first = save("one");
-    let second = save("two");
-    assert_ne!(first["request_id"], second["request_id"]);
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":first["request_id"],"settings":cfg}));
-    assert!(
-        !node(
-            &inspect(&f, p),
-            "settings_items",
-            "channel_field:channel:secret"
-        )
-        .is_null(),
-        "An older save cannot close the current edit"
+    let gateway = |v| save("secret", v, "save_hub_service:channel", "save_hub_service");
+    let old = gateway("first");
+    let newer = gateway("second");
+    let personal = save(
+        "account",
+        "personal-token",
+        "save_channel:channel",
+        "channel_save",
     );
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_test","channel_id":"channel","settings":cfg}));
-    assert!(
-        !node(
-            &inspect(&f, p),
-            "settings_items",
-            "channel_field:channel:secret"
-        )
-        .is_null(),
-        "A test is not a save acknowledgement"
-    );
-    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"newer-draft"}));
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":second["request_id"],"settings":cfg}));
-    let newer = inspect(&f, p);
-    assert!(
-        !node(&newer, "settings_items", "channel_field:channel:secret").is_null(),
-        "A matching acknowledgement must keep a newer draft editable"
-    );
-    assert_ne!(
-        node(&newer, "settings_items", "channel_summary:channel")["text"],
-        "✓ Saved"
-    );
-    control(&f, p, "save_hub_service:channel");
-    inspect(&f, p);
-    let third = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "save_hub_service")
-        .unwrap();
-    assert_eq!(third["values"], json!({"secret":"newer-draft"}));
-    f.send(p,json!({"op":"settings","ok":false,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
-    assert!(!node(
-        &inspect(&f, p),
-        "settings_items",
-        "channel_field:channel:secret"
-    )
-    .is_null());
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
-    assert!(
-        !node(
-            &inspect(&f, p),
-            "settings_items",
-            "channel_field:channel:secret"
-        )
-        .is_null(),
-        "A late success cannot acknowledge an already failed submission"
-    );
-    control(&f, p, "save_hub_service:channel");
-    inspect(&f, p);
-    let retry = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "save_hub_service")
-        .unwrap();
-    assert_ne!(retry["request_id"], third["request_id"]);
-    assert_eq!(retry["values"], json!({"secret":"newer-draft"}));
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":retry["request_id"],"settings":cfg}));
+    let ack = |action: &Value| {
+        f.send(p, json!({"op":"settings","ok":true,"source_op":action["op"],"channel_id":"channel","request_id":action["request_id"],"settings":cfg}))
+    };
+    ack(&personal);
+    ack(&old);
+    let partial = inspect(&f, p);
+    assert!(!partial.settings("channel_field:channel:secret").is_null());
     assert_eq!(
-        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
-        36
+        partial["pending_channel_saves"],
+        json!([newer["request_id"]])
     );
+    control(&f, p, "save_channel:channel");
+    assert_eq!(latest(&f, p, "channel_save")["values"], json!({}));
+    input(&f, p, "channel_field:channel:secret", "edited-after-submit");
+    ack(&newer);
+    control(&f, p, "save_hub_service:channel");
+    let retry = latest(&f, p, "save_hub_service");
+    assert_eq!(retry["values"], json!({"secret":"edited-after-submit"}));
+    ack(&retry);
     control(&f, p, "edit_hub_service:channel");
     control(&f, p, "save_hub_service:channel");
-    inspect(&f, p);
-    assert_eq!(
-        f.frames(p)
-            .into_iter()
-            .rev()
-            .find(|a| a["op"] == "save_hub_service")
-            .unwrap()["values"],
-        json!({})
-    );
-    cfg["channels"][0]["configured"] = json!(true);
-    cfg["channels"][0]["paired"] = json!(true);
-    f.send(p, json!({"op":"settings","settings":cfg}));
-    control(&f, p, "edit_user_channel:channel");
-    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"submitted"}));
-    control(&f, p, "save_channel:channel");
-    inspect(&f, p);
-    let request = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "channel_save")
-        .unwrap();
-    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"newer-account"}));
-    cfg["channels"][0]["fields"][1]["value"] = json!("submitted");
-    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_save","channel_id":"channel","request_id":request["request_id"],"settings":cfg}));
-    let newer = inspect(&f, p);
-    assert_eq!(
-        node(&newer, "settings_items", "channel_field:channel:account")["text"],
-        "newer-account"
-    );
-    assert_eq!(
-        node(&newer, "settings_items", "save_channel:channel")["text"],
-        "Save"
-    );
-    control(&f, p, "save_channel:channel");
-    inspect(&f, p);
-    assert_eq!(
-        f.frames(p)
-            .into_iter()
-            .rev()
-            .find(|a| a["op"] == "channel_save")
-            .unwrap()["values"]["account"],
-        "newer-account"
-    );
-}
-
-#[test]
-fn r1_overlapping_channel_scopes_acknowledge_secrets_and_gateway_edits_independently() {
-    let _lock = serial();
-    for hub_first in [false, true] {
-        let f = Fixture::new(json!({}));
-        let p = start(&f);
-        let mut cfg = settings();
-        cfg["settings_hub"] = json!("personal");
-        cfg["channels"][0]["fields"][0]["value"] = json!("");
-        cfg["channels"][0]["fields"][1]["type"] = json!("secret");
-        cfg["channels"][0]["fields"][1]["configured"] = json!(true);
-        let mut frame = state();
-        frame["settings"] = cfg.clone();
-        f.send(p, frame);
-        control(&f, p, "open_settings");
-        control(&f, p, "settings_tab:channels");
-        control(&f, p, "edit_hub_service:channel");
-        for (field, value, control_id) in [
-            ("secret", "gateway-token", "save_hub_service:channel"),
-            ("account", "personal-token", "save_channel:channel"),
-        ] {
-            f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
-            control(&f, p, control_id);
-        }
-        inspect(&f, p);
-        let latest = |op: &str| {
-            f.frames(p)
-                .into_iter()
-                .rev()
-                .find(|a| a["op"] == op)
-                .unwrap()
-        };
-        let gateway = latest("save_hub_service");
-        let personal = latest("channel_save");
-        assert_eq!(gateway["values"], json!({"secret":"gateway-token"}));
-        assert_eq!(personal["values"], json!({"account":"personal-token"}));
-        assert_ne!(gateway["request_id"], personal["request_id"]);
-        let ordered = if hub_first {
-            [&gateway, &personal]
-        } else {
-            [&personal, &gateway]
-        };
-        for (index, action) in ordered.into_iter().enumerate() {
-            f.send(p, json!({"op":"settings","ok":true,"source_op":action["op"],"channel_id":"channel","request_id":action["request_id"],"settings":cfg}));
-            let s = inspect(&f, p);
-            assert_eq!(
-                node(&s, "settings_items", "stratum_hub:channel")["height"] == 36,
-                hub_first || index == 1,
-                "Only a gateway acknowledgement may collapse the gateway editor"
-            );
-            if !hub_first && index == 0 {
-                control(&f, p, "save_channel:channel");
-                inspect(&f, p);
-                assert_eq!(latest("channel_save")["values"], json!({}));
-                assert!(!node(&s, "settings_items", "channel_field:channel:secret").is_null());
-            }
-        }
-        control(&f, p, "edit_hub_service:channel");
-        control(&f, p, "save_hub_service:channel");
-        control(&f, p, "save_channel:channel");
-        inspect(&f, p);
-        for op in ["save_hub_service", "channel_save"] {
-            assert_eq!(
-                latest(op)["values"],
-                json!({}),
-                "Acknowledged secrets must not be resubmitted: {op}"
-            );
-        }
-    }
+    assert_eq!(latest(&f, p, "save_hub_service")["values"], json!({}));
 }
 
 #[test]
 fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut frame = state();
     frame["listeners"] = json!([]);
     frame["settings"] = settings();
@@ -1401,20 +877,17 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
         json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
     let active = inspect(&f, p);
-    assert!(node(&active, "items", "human_inbox_card").is_null());
-    assert!(node(&active, "items", "inbox_paused_notice").is_null());
+    assert!(active.menu("human_inbox_card").is_null());
+    assert!(active.menu("inbox_paused_notice").is_null());
     control(&f, p, "target_hub:work");
     let remote = inspect(&f, p);
+    assert_eq!(remote.menu("header_subtitle")["text"], "Inbox paused");
     assert_eq!(
-        node(&remote, "items", "header_subtitle")["text"],
-        "Inbox paused"
-    );
-    assert_eq!(
-        node(&remote, "items", "inbox_paused_notice")["text"],
+        remote.menu("inbox_paused_notice")["text"],
         "Inbox paused · Resume in Settings…"
     );
     assert_eq!(remote["count"], 0);
-    assert!(node(&remote, "items", "stop_all").is_null());
+    assert!(remote.menu("stop_all").is_null());
     control(&f, p, "inbox_paused_notice");
     let selected = inspect(&f, p);
     assert_eq!(selected["settings_tab"], "channels");
@@ -1422,55 +895,25 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
         .frames(p)
         .iter()
         .any(|a| a["op"] == "open_settings" && a["hub"] == "work"));
-    assert_eq!(
-        node(&selected, "settings_items", "toggle_inbox")["text"],
-        "Resume Inbox"
-    );
+    assert_eq!(selected.settings("toggle_inbox")["text"], "Resume Inbox");
     frame["hubs"][1]["status"] = json!("disconnected");
     frame["settings"]["hubs"][1]["status"] = json!("disconnected");
     f.send(p, frame.clone());
     let offline = inspect(&f, p);
-    assert_eq!(
-        node(&offline, "settings_items", "toggle_inbox")["enabled"],
-        false
-    );
-    assert_eq!(
-        node(&offline, "items", "header_subtitle")["text"],
-        "Hub unavailable"
-    );
-    let before = f
-        .frames(p)
-        .iter()
-        .filter(|a| a["op"] == "human_inbox_update")
-        .count();
+    assert_eq!(offline.settings("toggle_inbox")["enabled"], false);
+    assert_eq!(offline.menu("header_subtitle")["text"], "Hub unavailable");
+    let before = f.frames_for(p, "human_inbox_update").count();
     control(&f, p, "toggle_inbox");
     inspect(&f, p);
-    assert_eq!(
-        f.frames(p)
-            .iter()
-            .filter(|a| a["op"] == "human_inbox_update")
-            .count(),
-        before
-    );
+    assert_eq!(f.frames_for(p, "human_inbox_update").count(), before);
     frame["hubs"][1]["status"] = json!("connected");
     frame["settings"]["hubs"][1]["status"] = json!("connected");
     f.send(p, frame);
     control(&f, p, "toggle_inbox");
     let pending = inspect(&f, p);
-    assert_eq!(
-        node(&pending, "settings_items", "toggle_inbox")["text"],
-        "Resuming…"
-    );
-    assert_eq!(
-        node(&pending, "settings_items", "toggle_inbox")["enabled"],
-        false
-    );
-    let update = f
-        .frames(p)
-        .into_iter()
-        .rev()
-        .find(|a| a["op"] == "human_inbox_update")
-        .unwrap();
+    assert_eq!(pending.settings("toggle_inbox")["text"], "Resuming…");
+    assert_eq!(pending.settings("toggle_inbox")["enabled"], false);
+    let update = f.frames_for(p, "human_inbox_update").next_back().unwrap();
     assert_eq!(update["hub"], "work");
     assert_eq!(update["paused"], false);
     assert_eq!(update["expected_control_revision"], 3);
@@ -1478,159 +921,32 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
 }
 
 #[test]
-fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
+fn a_channel_mutation_retires_test_feedback_that_survived_a_passive_refresh() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
-    cfg["settings_hub"] = json!("personal");
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("ready");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
-    f.send(p, frame);
-    control(&f, p, "open_settings");
-    control(&f, p, "settings_tab:channels");
-
-    for action in [
-        "save_channel",
-        "pair_channel",
-        "toggle_channel",
-        "unpair_channel",
-        "clear_channel_service",
-    ] {
-        let configured = action != "clear_channel_service";
-        cfg["channels"][0]["configured"] = json!(configured);
-        cfg["channels"][0]["status"] = json!(if configured { "ready" } else { "hub_ready" });
-        f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":false,"error":"Invalid token"}));
-        f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
-        let mut frame = state();
-        frame["settings"] = cfg.clone();
-        f.send(p, frame);
-        control(&f, p, "test_channel:channel");
-        let s = inspect(&f, p);
-        assert_eq!(
-            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
-            "Invalid token",
-            "{action}"
-        );
-        assert_eq!(
-            node(&s, "settings_items", "settings_channel_status:channel")["text"],
-            "⚠ Error",
-            "{action}"
-        );
-        if ["save_channel", "pair_channel"].contains(&action) {
-            control(&f, p, "edit_user_channel:channel");
-        }
-        control(&f, p, &format!("{action}:channel"));
-        let s = inspect(&f, p);
-        assert!(
-            node(&s, "settings_items", "settings_channel_detail:channel").is_null(),
-            "{action} must clear the previous result"
-        );
-        assert_eq!(
-            node(&s, "settings_items", "settings_channel_status:channel")["text"],
-            if configured {
-                "Connected"
-            } else {
-                "Account Not Paired"
-            }
-        );
-        let request = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|a| a["request_id"].is_string() && a["channel_id"] == "channel")
-            .unwrap();
-        f.send(p, json!({"op":"settings","source_op":request["op"],"request_id":request["request_id"],"hub":"personal","channel_id":"channel","committed":true}));
-        inspect(&f, p);
-    }
-
-    cfg["channels"][0]["configured"] = json!(true);
-    cfg["channels"][0]["status"] = json!("ready");
-    f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":true,"detail":"Test sent"}));
+    open_settings(&f, p, &cfg, "channels");
+    control(&f, p, "edit_user_channel:channel");
+    control(&f, p, "test_channel:channel");
+    let test = latest(&f, p, "channel_test");
+    f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","request_id":test["request_id"],"ok":false,"detail":"Invalid token"}));
     f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "settings_channel_detail:channel"
-        )["text"],
-        "Test sent"
+        inspect(&f, p).settings("settings_channel_detail:channel")["text"],
+        "Invalid token"
     );
-    for action in ["save_hub_service", "clear_channel_service"] {
-        for ok in [false, true] {
-            cfg["channels"][0]["configured"] = json!(false);
-            cfg["channels"][0]["status"] = json!("not_configured");
-            cfg["channels"][0]["hub_ready"] = json!(false);
-            cfg["channels"][0]["fields"][0]["configured"] = json!(false);
-            cfg["channels"][0]["fields"][0]["value"] = json!("");
-            f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
-            control(&f, p, "test_channel:channel");
-            let detail = if ok { "Test sent" } else { "Invalid token" };
-            f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":ok,"detail":detail}));
-            f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
-            let mut frame = state();
-            frame["settings"] = cfg.clone();
-            f.send(p, frame);
-            let s = inspect(&f, p);
-            assert_eq!(
-                node(&s, "settings_items", "settings_channel_detail:channel")["text"],
-                detail,
-                "{action}, ok={ok}"
-            );
-            assert_eq!(
-                node(&s, "settings_items", "settings_channel_status:channel")["text"],
-                if ok { "Not Set Up" } else { "⚠ Error" }
-            );
-            if action == "clear_channel_service" {
-                // Clear Token becomes available once the hub service is configured.
-                cfg["channels"][0]["status"] = json!("hub_ready");
-                cfg["channels"][0]["hub_ready"] = json!(true);
-                cfg["channels"][0]["fields"][0]["configured"] = json!(true);
-                f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
-                assert_eq!(
-                    node(
-                        &inspect(&f, p),
-                        "settings_items",
-                        "settings_channel_detail:channel"
-                    )["text"],
-                    detail
-                );
-            }
-            control(&f, p, &format!("{action}:channel"));
-            let s = inspect(&f, p);
-            assert!(
-                node(&s, "settings_items", "settings_channel_detail:channel").is_null(),
-                "{action} must clear the candidate test result, ok={ok}"
-            );
-            assert_eq!(
-                node(&s, "settings_items", "settings_channel_status:channel")["text"],
-                if action == "clear_channel_service" {
-                    "Account Not Paired"
-                } else {
-                    "Not Set Up"
-                }
-            );
-            // Finish this mutation before the next loop iteration submits the
-            // same values; pending controls intentionally reject duplicate clicks.
-            let request = f
-                .frames(p)
-                .into_iter()
-                .rev()
-                .find(|a| a["op"] == "save_hub_service" || a["op"] == "disconnect_human_channel")
-                .unwrap();
-            f.send(p, json!({"op":"settings","source_op":request["op"],"request_id":request["request_id"],"hub":"personal","channel_id":"channel","committed":true}));
-            inspect(&f, p);
-        }
-    }
+    control(&f, p, "save_channel:channel");
+    assert!(inspect(&f, p)
+        .settings("settings_channel_detail:channel")
+        .is_null());
 }
 
 #[test]
 fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     cfg["settings_hub"] = json!("personal");
     let ch = &mut cfg["channels"][0];
@@ -1641,28 +957,21 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     ch["fields"][0]["hidden"] = json!(false);
     ch["fields"][0]["redacted"] = json!(true);
     ch["fields"][0]["configured_placeholder"] = json!("Saved — enter replacement");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
-    assert_eq!(
-        node(&s, "settings_items", "stratum_hub:channel")["height"],
-        36
-    );
-    assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
+    assert_eq!(s.settings("stratum_hub:channel")["height"], 36);
+    assert!(s.settings("channel_field:channel:secret").is_null());
     control(&f, p, "edit_hub_service:channel");
     let s = inspect(&f, p);
+    assert_eq!(s.settings("channel_field:channel:secret")["secure"], true);
     assert_eq!(
-        node(&s, "settings_items", "channel_field:channel:secret")["secure"],
-        true
-    );
-    assert_eq!(
-        node(&s, "settings_items", "channel_field:channel:secret")["placeholder"],
+        s.settings("channel_field:channel:secret")["placeholder"],
         "Saved — enter replacement"
     );
-    assert!(node(&s, "settings_items", "channel_setup_guide:channel").is_null());
+    assert!(s.settings("channel_setup_guide:channel").is_null());
     f.send(
         p,
         json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"42"}),
@@ -1673,13 +982,8 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
         ("pair_channel:channel", "channel_pair"),
     ] {
         control(&f, p, button);
-        wait(|| f.frames(p).iter().any(|v| v["op"] == op));
-        let action = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == op)
-            .unwrap();
+        wait(|| f.frames_for(p, op).next().is_some());
+        let action = f.frames_for(p, op).next_back().unwrap();
         assert!(action["values"].get("secret").is_none(), "{action}");
     }
     cfg["channels"][0]["pairing_code"] = json!("cito-ABCDEFGHIJ");
@@ -1690,14 +994,14 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
     assert_eq!(
-        node(&s, "settings_items", "settings_channel_status:channel")["text"],
+        s.settings("settings_channel_status:channel")["text"],
         "◌ Pairing…"
     );
-    assert!(!node(&s, "settings_items", "pairing_instruction:channel").is_null());
+    assert!(!s.settings("pairing_instruction:channel").is_null());
     control(&f, p, "copy_pair_command:channel");
     assert_eq!(inspect(&f, p)["clipboard"], "/start cito-ABCDEFGHIJ");
     control(&f, p, "cancel_pair_channel:channel");
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "channel_cancel_pair"));
+    wait(|| f.frames_for(p, "channel_cancel_pair").next().is_some());
     cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["status"] = json!("paused");
     cfg["channels"][0]["pairing_instruction"] = Value::Null;
@@ -1705,11 +1009,11 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
     assert_eq!(
-        node(&s, "settings_items", "settings_channel_status:channel")["text"],
+        s.settings("settings_channel_status:channel")["text"],
         "Paused"
     );
     assert_eq!(
-        node(&s, "settings_items", "toggle_channel:channel")["text"],
+        s.settings("toggle_channel:channel")["text"],
         "Resume Human Channel"
     );
     control(&f, p, "toggle_channel:channel");
@@ -1728,8 +1032,7 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
 #[test]
 fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let (f, p) = ui_fixture();
     let mut cfg = settings();
     cfg["settings_hub"] = json!("personal");
     cfg["channels"][0]["configured"] = json!(true);
@@ -1737,8 +1040,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     cfg["channels"][0]["fields"][1]["configured"] = json!(true);
     cfg["channels"][0]["fields"][1]["value"] = json!("saved-account");
     cfg["channels"][0]["fields"][0]["value"] = json!("");
-    let mut frame = state();
-    frame["settings"] = cfg.clone();
+    let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
@@ -1750,13 +1052,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     control(&f, p, "edit_hub_service:channel");
     control(&f, p, "save_hub_service:channel");
     inspect(&f, p);
-    let latest = |op: &str| {
-        f.frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == op)
-            .unwrap()
-    };
+    let latest = |op: &str| f.frames_for(p, op).next_back().unwrap();
     assert_eq!(latest("save_hub_service")["values"], json!({}));
     f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"escape-discard"}));
     let mut remote = cfg.clone();
@@ -1798,19 +1094,12 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     control(&f, p, "unpair_channel:channel");
     confirm_channel_action(&f, p, "channel_unpair");
     f.send(p, json!({"op":"settings","settings":cfg}));
-    assert!(node(
-        &inspect(&f, p),
-        "settings_items",
-        "channel_field:channel:account"
-    )
-    .is_null());
+    assert!(inspect(&f, p)
+        .settings("channel_field:channel:account")
+        .is_null());
     control(&f, p, "edit_user_channel:channel");
     assert_eq!(
-        node(
-            &inspect(&f, p),
-            "settings_items",
-            "channel_field:channel:account"
-        )["text"],
+        inspect(&f, p).settings("channel_field:channel:account")["text"],
         cfg["channels"][0]["fields"][1]["value"]
     );
     for (field, value) in [("secret", "discard-token"), ("account", "discard-account")] {
@@ -1827,10 +1116,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     }
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
-    assert_eq!(
-        node(&s, "settings_items", "channel_field:channel:account"),
-        Value::Null
-    );
+    assert_eq!(s.settings("channel_field:channel:account"), Value::Null);
     control(&f, p, "save_hub_service:channel");
     inspect(&f, p);
     assert_eq!(
@@ -1843,7 +1129,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     cfg["channels"][0]["status"] = json!("hub_ready");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
-        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        inspect(&f, p).settings("stratum_hub:channel")["height"],
         36,
         "Clearing a gateway also leaves its old edit mode"
     );
