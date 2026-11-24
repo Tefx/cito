@@ -638,7 +638,10 @@ impl HubAccess {
 }
 impl DaemonService {
     pub fn get_effective_user(&self) -> Result<String, String> {
-        let raw = self.raw_config()?;
+        self.global_user(&self.raw_config()?)
+    }
+
+    fn global_user(&self, raw: &Value) -> Result<String, String> {
         let user = std::env::var("CITO_USER")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -676,7 +679,7 @@ impl DaemonService {
         self.retired_auth
             .retain(|recovery| !recovery.worker.is_finished());
         let mut raw = self.raw_config()?;
-        self.config.user = self.get_effective_user()?;
+        self.config.user = self.global_user(&raw)?;
         repair_default_hub(&mut raw);
         let (default, hubs, rest) =
             crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
@@ -731,7 +734,13 @@ impl DaemonService {
                 continue;
             }
             let auth = string(&hub, "authMode");
-            let user = access.config.effective_user(&name)?.to_ascii_lowercase();
+            let user = match &hub["user"] {
+                Value::Null => access.config.user.clone(),
+                Value::String(user) if crate::plugins::validate_user(user) => {
+                    user.to_ascii_lowercase()
+                }
+                _ => return Err(format!("Invalid user for hub {name}")),
+            };
             keep.insert(name.clone());
             let old_slot = access.slots.get(&name);
             let rejected_hash = old_slot.filter(|old| old.config == hub).and_then(|old| {
@@ -1205,6 +1214,7 @@ impl HubAccess {
         if self.slots.len() == 1
             && hub == self.config.default_hub
             && matches!(hub, "local" | "default")
+            && !id.contains(':')
         {
             id.into()
         } else {

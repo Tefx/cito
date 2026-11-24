@@ -227,18 +227,6 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         markReadBtn.isHidden = true
         markReadBtn.pressed = { [weak self] in
             guard let self = self else { return }
-            let matched = Set(self.activityFilteredItems.map { "\($0.hub):\($0.signal_id)" })
-            let matchedUnread = self.serverActivityFilter == self.activityFilter && self.serverActivityQuery == self.directoryQuery
-                ? self.activityUnreadCount : self.activityFilteredItems.filter { $0.unread }.count
-            self.unreadCount = max(0,self.unreadCount-matchedUnread)
-            self.activityUnreadCount = 0
-            self.serverActivityFilter = nil
-            for index in self.activityAllItems.indices {
-                let item = self.activityAllItems[index]
-                if matched.contains("\(item.hub):\(item.signal_id)") { self.activityAllItems[index].unread = false }
-            }
-            self.updateDirectoryModePills()
-            self.applyActivityFilter()
             self.emit(["op": "ack_signals", "ack_all": true,"filter":self.activityFilter,"query":self.directoryQuery])
             self.queryDirectory()
         }
@@ -604,7 +592,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         } else if activityFilter=="unread" {
             title="All caught up"; subtitle="You have no unread messages."
             id="act_empty_show_all"; label="Show All Activity"
-            action={ [weak self] in self?.activityFilter="all"; self?.activityUnreadCount=0; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter(); self?.queryDirectory() }
+            action={ [weak self] in self?.activityFilter="all"; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter(); self?.queryDirectory() }
         } else {
             title="No recent message activity"; subtitle="Messages sent between your sessions and channels will appear here."
             id="act_empty_open_channels"; label="Configure Human Channels…"
@@ -695,6 +683,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func refreshDirectoryViews(revealSelection: Bool = false) {
+        pruneCopyFeedback()
         updateDirectoryWarnings()
         updateDirectoryModePills()
         rebuildDirectoryFacetBar()
@@ -820,12 +809,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             }
             guard directoryFilteredPeers.indices.contains(directorySelectedIndex) else { return }
             let peer = directoryFilteredPeers[directorySelectedIndex]
-            directoryCopiedUntil[peer.scoped_id] = Date().addingTimeInterval(1.2)
-            copyText(peer.display_address)
-            if let table = directoryTableView,
-               let cell = table.view(atColumn: 0, row: directorySelectedIndex, makeIfNecessary: true) as? DirectoryPeerCellView {
-                cell.copyControl.copied()
-            }
+            let cell = directoryTableView?.view(atColumn: 0, row: directorySelectedIndex, makeIfNecessary: true) as? DirectoryPeerCellView
+            copyPeer(peer, control: cell?.copyControl)
         case "shift-return":
             guard directoryMode == "directory", directoryComposerBar?.isHidden != false, directoryFilteredPeers.indices.contains(directorySelectedIndex) else{return}
             let peer=directoryFilteredPeers[directorySelectedIndex]
@@ -848,7 +833,19 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
+    func pruneCopyFeedback(at now: Date = Date()) {
+        directoryCopiedUntil = directoryCopiedUntil.filter { $0.value > now }
+        activityCopiedUntil = activityCopiedUntil.filter { $0.value > now }
+    }
+
+    func copyPeer(_ peer: RemotePeer, control: MenuControl?) {
+        pruneCopyFeedback()
+        directoryCopiedUntil[peer.scoped_id] = Date().addingTimeInterval(1.2)
+        copyText(peer.display_address, control: control)
+    }
+
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
+        pruneCopyFeedback()
         if item.message_truncated != true {
             activityCopiedUntil["\(item.hub)|\(item.signal_id)"] = Date().addingTimeInterval(1.2)
             latestDirectoryActionRequestId = nil; clearDirectoryActionError(); copyText(item.message,control:control); return
@@ -882,9 +879,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
         guard directoryFilteredPeers.indices.contains(row) else { return nil }
         let peer = directoryFilteredPeers[row]
-        cell.configure(with: peer, selected: row == directorySelectedIndex, harnesses: harnessMap, onCopy: { [weak self] text, control in
-            self?.directoryCopiedUntil[peer.scoped_id] = Date().addingTimeInterval(1.2)
-            self?.copyText(text,control:control)
+        cell.configure(with: peer, selected: row == directorySelectedIndex, harnesses: harnessMap, onCopy: { [weak self] _, control in
+            self?.copyPeer(peer, control: control)
         }) { [weak self] in
             guard let self = self else { return }
             self.openComposer(target: peer.display_address, hub: peer.hub ?? "", replySignalId: nil)

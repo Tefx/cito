@@ -1,7 +1,7 @@
 use super::DaemonService;
 use crate::core::{
     auth::HubAuth,
-    hub::{HubEngine, HubServer},
+    hub::{HubServer, PreparedHubServer},
     identity::{local_host_name, normalize_slug, string},
 };
 use serde_json::{json, Value};
@@ -10,48 +10,15 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub(super) fn replace_host_hub_server(
-    local: &HubEngine,
-    current: &mut Option<HubServer>,
+pub(super) fn prepare_host_hub_server(
+    current: Option<&HubServer>,
     settings: Option<(IpAddr, u16, Arc<HubAuth>)>,
-) -> Result<(), String> {
-    let Some((bind, port, auth)) = settings else {
-        current.take();
-        return Ok(());
-    };
-    // Validation has already resolved the IP. Port zero always requests a new socket.
-    let same_socket = current.as_ref().is_some_and(|server| {
-        port != 0 && server.address.port() == port && server.address.ip() == bind
-    });
-    let previous = if same_socket {
-        let previous = current
-            .as_ref()
-            .map(|server| (server.address, server.auth.clone()));
-        current.take();
-        previous
-    } else {
-        None
-    };
-    match local.start_server(&bind.to_string(), port, auth) {
-        Ok(server) => {
-            *current = Some(server);
-            Ok(())
-        }
-        Err(error) => {
-            if let Some((address, auth)) = previous {
-                *current = Some(
-                    local
-                        .start_server(&address.ip().to_string(), address.port(), auth)
-                        .map_err(|rollback| {
-                            format!("{error}; failed to restore host hub listener: {rollback}")
-                        })?,
-                );
-            }
-            Err(format!(
-                "INVALID_INPUT: Cannot bind host hub listener: {error}"
-            ))
-        }
-    }
+) -> Result<Option<PreparedHubServer>, String> {
+    settings
+        .map(|(ip, port, auth)| {
+            PreparedHubServer::prepare(SocketAddr::new(ip, port), auth, current)
+        })
+        .transpose()
 }
 
 pub(super) fn host_hub_server_config(
@@ -495,6 +462,12 @@ pub(super) fn parse_hub_invite(raw: &str) -> Result<Value, String> {
 }
 
 impl DaemonService {
+    pub(super) fn install_host_server(&mut self, prepared: Option<PreparedHubServer>) {
+        // Finish all workers using old credentials before accepting on the new generation.
+        self.host_server.take();
+        self.host_server = prepared.map(|server| server.start(&self.local));
+    }
+
     pub(super) fn sync_host_hub(&mut self, host: &Value) -> Result<(), String> {
         if self.closing {
             return Ok(());
@@ -522,10 +495,11 @@ impl DaemonService {
                 }
             }
         }
-        match host_hub_server_config(host).and_then(|settings| {
-            replace_host_hub_server(&self.local, &mut self.host_server, settings)
-        }) {
-            Ok(()) => {
+        match host_hub_server_config(host)
+            .and_then(|settings| prepare_host_hub_server(self.host_server.as_ref(), settings))
+        {
+            Ok(prepared) => {
+                self.install_host_server(prepared);
                 self.applied_host_config = Some(host.clone());
                 self.host_hub_error = None;
                 Ok(())

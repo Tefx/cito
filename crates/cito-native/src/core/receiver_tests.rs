@@ -1,7 +1,7 @@
 use super::super::{
     database::Database,
     hub::{HubEngine, TestDirectory, TestEngine},
-    registration::register_listener,
+    registration::register_endpoint,
 };
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -60,7 +60,7 @@ impl Fixture {
             "alice",
             Some(Arc::new(engine.clone())),
         );
-        let registration = register_listener(
+        let registration = register_endpoint(
             &state,
             &client,
             "host",
@@ -136,6 +136,10 @@ impl Fixture {
             post_setup_hint: None,
             post_disconnect_hint: None,
         }
+    }
+    fn probe_result(&self, plugin: &PluginDescriptor, row: &Value) -> Value {
+        plugin_request(plugin, &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"process_identity":row["process_identity"],"cwd":row["cwd"],"state_dir":self.dir.as_path()}), None, Some((&self.state, row)))
+            .unwrap_or_else(|error| json!({"ok":false,"error":error}))
     }
     fn dispatch(&self, plugin: &PluginDescriptor) -> Result<(), String> {
         dispatch_listener(
@@ -243,7 +247,7 @@ fn local_registration_failure_compensates_only_new_remote_attachments() -> Resul
         ("fixture", "other", "UNLISTENED"),
         ("human", "default", "UNLISTENED"),
     ] {
-        let error = register_listener(
+        let error = register_endpoint(
             &f.state,
             &f.client,
             "host",
@@ -263,6 +267,36 @@ fn local_registration_failure_compensates_only_new_remote_attachments() -> Resul
             expected
         );
     }
+    Ok(())
+}
+
+#[test]
+fn poll_settles_over_budget_delivery_and_admits_the_following_signal() -> Result<(), String> {
+    let f = Fixture::new()?;
+    for (id, message) in [
+        ("oversize", "\"".repeat(1_900_000)),
+        ("healthy", "Hello".into()),
+    ] {
+        let signal = json!({"signal_id":id,"to":f.listener_id(),"target_generation":f.row["binding_generation"],"from":{"user":"bob","host_name":"desktop"},"message":message});
+        f.client.rpc(
+            "js_publish",
+            &json!({"subject":format!("cito.signal.{}", f.listener_id()),"data":signal}),
+        )?;
+    }
+    let mut admitted = Vec::new();
+    // The oversized item fills one Hub backlog page; the next poll must progress.
+    for _ in 0..2 {
+        poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |s| {
+            admitted.push(s["signal_id"].clone())
+        })?;
+    }
+    assert_eq!(admitted, [json!("healthy")]);
+    assert_eq!(f.state.unread_count("local", f.listener_id(), false)?, 1);
+    let backlog = f.client.rpc(
+        "consumer_backlog",
+        &json!({"name":format!("host_{}", f.listener_id())}),
+    )?;
+    assert_eq!(backlog["backlog"], json!([]));
     Ok(())
 }
 
@@ -397,7 +431,7 @@ fn probe_transport_and_negative_responses_count_toward_retirement() -> Result<()
         assert_eq!(f.retries()?.len(), 1);
         for failures in 1..=3 {
             let row = f.listener()?;
-            probe_listener(&f.state, &f.client, &row, &plugin, &f.dir)?;
+            apply_probe(&f.state, &f.client, &row, &f.probe_result(&plugin, &row))?;
             let current = f.listener()?;
             assert_eq!(current["consecutive_probe_failures"], failures);
             assert_eq!(
@@ -445,7 +479,7 @@ fn hard_exit_rebind_restores_only_unread_current_authority_work() -> Result<(), 
                 .db
                 .execute("UPDATE local_listeners SET user_stopped=1", &[])?;
         }
-        register_listener(
+        register_endpoint(
             &f.state,
             &f.client,
             "host",
@@ -515,7 +549,7 @@ fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Resu
         );
         if !remote.is_object() {
             assert_eq!(
-                register_listener(
+                register_endpoint(
                     &f.state,
                     &f.client,
                     "host",
@@ -861,7 +895,12 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         std::thread::scope(|scope| -> Result<(), String> {
             let terminal = scope.spawn(|| {
                 if probe {
-                    probe_listener(&f.state, &f.client, &f.row, &plugin, &f.dir)
+                    apply_probe(
+                        &f.state,
+                        &f.client,
+                        &f.row,
+                        &f.probe_result(&plugin, &f.row),
+                    )
                 } else {
                     f.dispatch(&plugin)
                 }
@@ -874,7 +913,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                 wait_until(||f.state.listener("local",id).ok().flatten().is_some_and(|row|row["status"]=="UNLISTENED"),Duration::from_secs(3))?;
                 assert!(matches!(registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"Terminal revocation must hold registration authority through remote detach; probe={probe}");
                 Ok(scope.spawn(|| {
-                    register_listener(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}))
+                    register_endpoint(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir.as_path(),"endpoint_pid":null,"repo":null,"branch":null}))
                 }))
             })?;
             terminal.join().map_err(|_| "Terminal worker panicked")??;
@@ -917,7 +956,12 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
             };
             let plugin=f.plugin(&format!("with open(os.path.join(root,'entered'),'w') as f: f.write(str(os.getpid()))\n{fault}{response}"));
             let result = if probe {
-                probe_listener(&f.state, &f.client, &f.row, &plugin, &f.dir)
+                apply_probe(
+                    &f.state,
+                    &f.client,
+                    &f.row,
+                    &f.probe_result(&plugin, &f.row),
+                )
             } else {
                 f.dispatch(&plugin)
             };
@@ -972,7 +1016,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                     // A genuine replacement can exist remotely while this state handle
                     // still retains the old UNLISTENED owner and retry intent.
                     let replacement = LocalState::open(&f.dir.join("replacement"))?;
-                    register_listener(
+                    register_endpoint(
                         &replacement,
                         &f.client,
                         "host",
@@ -1029,7 +1073,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         f.binding()?.0["channels"]["host:fixture"]["state"],
         "UNLISTENED"
     );
-    let replacement = register_listener(
+    let replacement = register_endpoint(
         &f.state,
         &f.client,
         "host",
@@ -1268,7 +1312,7 @@ fn concurrent_intent_survives_the_registration_commit() -> Result<(), String> {
         let writer = Database::open(&f.dir.join("state.sqlite"))?;
         let outcome = thread::scope(|scope| -> Result<_, String> {
             let job = writer.transaction(|db| {
-                let job = scope.spawn(|| register_listener(&f.state,&f.client,"host",&json!({"about":"Concurrent registration","title":"Registration title","discovered_at":now_ms()}),&f.row));
+                let job = scope.spawn(|| register_endpoint(&f.state,&f.client,"host",&json!({"about":"Concurrent registration","title":"Registration title","discovered_at":now_ms()}),&f.row));
                 wait_until(|| f.binding().is_ok_and(|(r,_)| r["about"] == "Concurrent registration"),Duration::from_secs(3))?;
                 LocalState::write_custom_title(db,"fixture","session","Newer title")?;
                 if stale { db.execute("UPDATE local_listeners SET status='UNLISTENED', retirement_reason='idle', retired_activity_revision='123',user_stopped=1,updated_at=?", &[json!(now_ms())])?; }
@@ -1326,18 +1370,23 @@ fn process_identity_round_trips_through_probe_and_fences_reused_pid() -> Result<
     let mut caller = f.row.clone();
     caller["endpoint_pid"] = json!(42);
     caller["process_identity"] = json!({"pid":42,"started_at":"first"});
-    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    register_endpoint(&f.state, &f.client, "host", &args, &caller)?;
     let first = f.listener()?;
     let plugin = f.plugin("print(json.dumps({'ok':False}))");
-    probe_listener(&f.state, &f.client, &first, &plugin, &f.dir)?;
+    apply_probe(
+        &f.state,
+        &f.client,
+        &first,
+        &f.probe_result(&plugin, &first),
+    )?;
     assert_eq!(
         f.requests()?[0]["process_identity"],
         caller["process_identity"]
     );
-    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    register_endpoint(&f.state, &f.client, "host", &args, &caller)?;
     assert_eq!(f.listener()?["consecutive_probe_failures"], 1);
     caller["process_identity"]["started_at"] = json!("second");
-    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    register_endpoint(&f.state, &f.client, "host", &args, &caller)?;
     apply_probe(
         &f.state,
         &f.client,
@@ -1358,13 +1407,13 @@ fn same_channel_refresh_retains_owner_and_replacement_fences_without_siblings() 
 {
     let f = Fixture::new()?;
     let args = json!({"about":"Refreshed receiver"});
-    register_listener(&f.state, &f.client, "host", &args, &f.row)?;
+    register_endpoint(&f.state, &f.client, "host", &args, &f.row)?;
     let refreshed = f.listener()?;
     assert_eq!(refreshed["binding_generation"], f.row["binding_generation"]);
     assert_eq!(refreshed["owner_token"], f.row["owner_token"]);
     let mut caller = f.row.clone();
     caller["endpoint_pid"] = json!(42);
-    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    register_endpoint(&f.state, &f.client, "host", &args, &caller)?;
     let replacement = f.listener()?;
     assert_eq!(
         replacement["binding_generation"].as_u64(),
@@ -1432,6 +1481,30 @@ fn reply_addresses_qualify_non_default_or_named_hubs() {
     assert!(qualify_on_hub("work", config, Some("work")));
     assert!(qualify_on_hub("local", config, Some("default")));
     assert!(!qualify_on_hub("default", config, Some("default")));
+}
+
+#[test]
+fn colon_bearing_wake_references_round_trip_without_changing_hub_ack_keys() -> Result<(), String> {
+    let f = Fixture::seeded(&["local:part:two"])?;
+    f.state.db.execute(
+        "UPDATE local_signals SET in_reply_to='other:one',from_listener_id='sender:node'",
+        &[],
+    )?;
+    f.dispatch(&f.plugin(DELIVER))?;
+    let request = &f.requests()?[0];
+    assert!(string(request, "text").contains("[↩ local:sender:node]"));
+    let signal = &request["signals"][0];
+    assert_eq!(
+        string(signal, "signal_id").split_once(':'),
+        Some(("local", "local:part:two"))
+    );
+    assert_eq!(signal["in_reply_to"], "local:other:one");
+    let acks = f
+        .hub_db()?
+        .query("SELECT signal_id,acked_at_ms FROM hub_signals", &[])?;
+    assert_eq!(acks[0]["signal_id"], "local:part:two");
+    assert!(acks[0]["acked_at_ms"].is_number());
+    Ok(())
 }
 
 #[test]

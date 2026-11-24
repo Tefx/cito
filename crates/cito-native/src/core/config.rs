@@ -205,7 +205,8 @@ pub fn validate_user(user: &str) -> bool {
 }
 
 pub(super) fn valid_hub_token(token: &str) -> bool {
-    !token.is_empty() && !token.chars().any(|c| c.is_whitespace() || c.is_control())
+    (1..=32 * 1024).contains(&token.len())
+        && !token.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
@@ -357,9 +358,7 @@ pub(crate) fn apply_host_hub_patch(base: &Value, patch: &Value) -> Result<Value,
         },
     };
     if !token.is_empty() && !valid_hub_token(token) {
-        return Err(
-            "INVALID_INPUT: Host hub token cannot contain whitespace or control characters".into(),
-        );
+        return Err("INVALID_INPUT: Invalid host hub token (maximum 32 KiB; no whitespace or control characters)".into());
     }
     if (enabled || mode == "token") && token.is_empty() {
         host.insert("token".into(), json!(crate::support::try_random_hex(32)?));
@@ -604,6 +603,22 @@ mod tests {
             {
                 assert_eq!(cleared[preserved], base[preserved]);
             }
+        }
+    }
+
+    #[test]
+    fn hub_tokens_are_limited_by_encoded_bytes() {
+        let mut token = "é".repeat(16 * 1024);
+        for admitted in [true, false] {
+            let config = json!({"authMode":"token","token":token,"url":"local://"});
+            let raw = json!({"hubs":{"work":config}}).to_string();
+            assert_eq!(try_normalize_existing_config(Some(&raw)).is_ok(), admitted);
+            assert_eq!(discover_hub_config(config).is_ok(), admitted);
+            assert_eq!(
+                super::super::auth::HubAuth::new("token", Some(token.clone()), None, None).is_ok(),
+                admitted
+            );
+            token.push('x');
         }
     }
 

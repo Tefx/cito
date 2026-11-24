@@ -1,7 +1,7 @@
 use super::{
     channels::{channel_action_kind, dispatch_channel_action},
     host_hub::{
-        host_hub_server_config, hub_name_from_url, parse_hub_invite, replace_host_hub_server,
+        host_hub_server_config, hub_name_from_url, parse_hub_invite, prepare_host_hub_server,
         validate_hub_endpoints,
     },
     mcp::{run_captured, validate_tool_input, Detaches, ToolCall},
@@ -1438,6 +1438,12 @@ impl DaemonService {
             {
                 return Err("INVALID_INPUT: hub must be a string".into());
             }
+            if op == "unlisten_session" && action["harness"] != "human" {
+                super::mcp::validate_agent_session(
+                    string(action, "harness"),
+                    string(action, "session_id"),
+                )?;
+            }
             if action["harness"] == "human" && action["session_id"] != "default" {
                 return Err("INVALID_INPUT: Human session must be default".into());
             }
@@ -1750,11 +1756,8 @@ impl DaemonService {
                 }
             }
             "set_host_hub" => {
-                let mut server = self.host_server.take();
-                let previous = server
-                    .as_ref()
-                    .map(|server| (server.address.ip(), server.port(), server.auth.clone()));
-                let mut applied = false;
+                let mut prepared = None;
+                let mut applied = None;
                 let result = self.mutate_config(|v| {
                     let (_, _, rest) =
                         crate::plugins::try_normalize_existing_config(Some(&v.to_string()))?;
@@ -1772,36 +1775,25 @@ impl DaemonService {
                         )?;
                     }
                     if !self.closing {
-                        replace_host_hub_server(&self.local, &mut server, settings)?;
-                        applied = true;
+                        prepared = prepare_host_hub_server(self.host_server.as_ref(), settings)?;
+                        applied = Some(v["host_hub"].clone());
                     }
                     if let Some(m) = v.as_object_mut() {
                         m.remove("hostHub");
                     }
                     if ephemeral {
-                        validate_hub_endpoints(v, server.as_ref().map(|s| s.address), None)?;
+                        validate_hub_endpoints(v, prepared.as_ref().map(|s| s.address), None)?;
                     }
                     Ok(())
                 });
-                // A failed config write must also undo a successful listener change.
-                let rollback = if result.is_err() && applied {
-                    replace_host_hub_server(&self.local, &mut server, previous)
-                } else {
-                    Ok(())
-                };
-                self.host_server = server;
                 if let Err(error) = result {
-                    let error = match rollback {
-                        Ok(()) => error,
-                        Err(rollback) => {
-                            format!("{error}; failed to restore host hub listener: {rollback}")
-                        }
-                    };
                     self.host_hub_error = Some(super::HostHubError::Action(error.clone()));
                     return Err(error);
                 }
-                self.applied_host_config =
-                    self.raw_config().ok().map(|raw| raw["host_hub"].clone());
+                if applied.is_some() {
+                    self.install_host_server(prepared);
+                }
+                self.applied_host_config = applied;
                 self.host_hub_error = None;
             }
             "set_launch_at_login" => {

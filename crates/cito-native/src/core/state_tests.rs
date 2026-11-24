@@ -97,58 +97,24 @@ fn partially_read_batch_stops_before_new_effect_and_releases_unread_survivor() -
 }
 
 #[test]
-fn unread_metadata_is_bounded_ordered_payload_free_and_authority_scoped() -> Result<(), String> {
+fn unread_counts_exclude_foreign_expired_and_fenced_work() -> Result<(), String> {
     let f = Fixture::new()?;
     for index in 0..140 {
         f.seed(&format!("signal-{index:03}"), index / 2)?;
     }
     f.state.db.execute(
-        "UPDATE local_signals SET message=?,batch_card=?,batch_id='batch'",
-        &[json!("x".repeat(100_000)), json!("y".repeat(100_000))],
-    )?;
-    f.state.db.execute(
         "UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='signal-001'",
         &[],
     )?;
-    let rows = f
-        .state
-        .current_signal_metadata("local", "c_1", 0, 128, None)?;
-    assert_eq!(rows.len(), 128);
-    assert_eq!(rows[0]["signal_id"], "signal-000");
-    assert_eq!(rows[1]["signal_id"], "signal-002");
-    for row in &rows {
-        assert_eq!(row.as_object().unwrap().len(), 9);
-        assert!(row.get("message").is_none() && row.get("batch_card").is_none());
-    }
-    let remaining = f
-        .state
-        .current_signal_metadata("local", "c_1", 64, 128, None)?;
-    assert_eq!(remaining.len(), 10);
     assert_eq!(f.state.unread_count("local", "c_1", false)?, 139);
     f.state.db.execute(
         "UPDATE local_signals SET expires_at_ms=0 WHERE signal_id='signal-002'",
         &[],
     )?;
     assert_eq!(f.state.unread_count("local", "c_1", true)?, 138);
-    assert_eq!(
-        f.state
-            .current_signal_metadata("local", "c_1", 0, 128, Some("signal-139"))?
-            .len(),
-        1
-    );
-    assert_eq!(
-        f.state
-            .current_signal_metadata("local", "c_1", 0, usize::MAX, Some("batch"))?
-            .len(),
-        139
-    );
     f.state
         .db
         .execute("UPDATE local_listeners SET status='FENCED_INACTIVE'", &[])?;
-    assert!(f
-        .state
-        .current_signal_metadata("local", "c_1", 0, 128, None)?
-        .is_empty());
     assert_eq!(f.state.unread_count("local", "c_1", false)?, 0);
     Ok(())
 }
@@ -173,7 +139,6 @@ fn signal_reads_and_acknowledgments_isolate_origin_and_accept_principal_aliases(
     f.state.db.execute("UPDATE local_signals SET principal_id='oidc:https://id.example.com|alice'; UPDATE local_signals SET principal_id='https://id.example.com#alice' WHERE signal_id='legacy-principal'; UPDATE local_signals SET principal_id='none#other' WHERE signal_id='other-principal'; UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='other-url'; UPDATE local_signals SET hub_url=NULL,principal_id=NULL WHERE signal_id='unbound'",&[])?;
     let (rows, total, unread) = f.state.query_activity("all", "")?;
     assert_eq!((rows.len(), total, unread), (2, 2, 2));
-    assert_eq!(f.state.current_signals("local", "c_1", 1)?.len(), 1);
     f.state.schedule_wake_retry_for(&f.listener()?, 5000)?;
     f.state.restore_passive("local", &f.listener()?)?;
     for row in f.rows()? {
@@ -253,15 +218,7 @@ fn streaming_state_reads_see_committed_rows_while_another_connection_writes() ->
     f.state.db.execute("PRAGMA busy_timeout=0", &[])?;
     writer.transaction(|connection| {
         connection.execute("UPDATE local_signals SET acknowledged_at_ms=1", &[])?;
-        let metadata = f
-            .state
-            .current_signal_metadata("local", "c_1", 0, 1, None)?;
-        assert_eq!(metadata[0]["signal_id"], "visible");
         assert_eq!(f.state.unread_count("local", "c_1", false)?, 1);
-        assert_eq!(
-            f.state.current_signals("local", "c_1", 1)?[0]["signal_id"],
-            "visible"
-        );
         let (page, total, unread) = f.state.query_activity("unread", "")?;
         assert_eq!((total, unread), (1, 1));
         assert_eq!(page[0]["signal_id"], "visible");
@@ -488,6 +445,113 @@ fn signal_origin_upgrade_leaves_legacy_rows_unbound_and_new_admissions_immutable
         .all(|signal| signal["acknowledged_at_ms"].is_null()));
     Ok(())
 }
+#[test]
+fn inbox_admission_bounds_the_double_escaped_wire_signal_including_metadata() -> Result<(), String>
+{
+    let f = Fixture::new()?;
+    let mut s = signal("local:s", "none#alice", 1);
+    s["in_reply_to"] = json!("reply:parent");
+    // Quotes need four bytes inside MCP's JSON-encoded text. Include sender
+    // metadata and both fully qualified references in the single-signal limit.
+    s["from"]["about"] = json!("\"".repeat(1_000));
+    let mut wire = json!({"hub":"local","signal_id":"local:local:s","seq":1,"from":s["from"],"in_reply_to":"local:reply:parent","message":"","created_at":"2026-01-01T00:00:00.000Z","held_reason":"unlistened_before_dispatch"});
+    wire["from"].as_object_mut().unwrap().remove("principal_id");
+    let remaining = 7_339_008 - serde_json::to_vec(&wire.to_string()).unwrap().len();
+    let mut message = "\"".repeat(remaining / 4) + &"x".repeat(remaining % 4);
+    message.push('x');
+    s["message"] = json!(message);
+    assert!(!admit(&f, &s, 1)?);
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 0);
+    message.pop();
+    s["message"] = json!(message);
+    assert!(admit(&f, &s, 1)?);
+    assert_eq!(f.state.unread_count("local", "c_1", false)?, 1);
+    Ok(())
+}
+
+#[test]
+fn oversized_single_card_stays_readable_without_retrying_or_blocking_its_peer() -> Result<(), String>
+{
+    let f = Fixture::new()?;
+    let mut large = signal("large", "none#alice", 1);
+    large["message"] = json!("<".repeat(131_072));
+    assert!(admit(&f, &large, 1)?);
+    assert!(admit(&f, &signal("healthy", "none#alice", 1), 2)?);
+    let batch = f.claim_wake_batch()?;
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0]["signal_id"], "healthy");
+    f.state.finish_wake_batch(
+        &f.listener()?,
+        &batch[0],
+        "DISPATCHED",
+        None,
+        true,
+        true,
+        true,
+        false,
+    )?;
+    f.state.restore_passive("local", &f.listener()?)?;
+    f.state.schedule_wake_retry_for(&f.listener()?, 0)?;
+    assert!(f.claim_wake_batch()?.is_empty());
+    assert!(f
+        .state
+        .db
+        .query("SELECT 1 FROM wake_retries", &[])?
+        .is_empty());
+    let (page, _, unread) = f.state.query_activity("unread", "")?;
+    assert_eq!(unread, 1);
+    assert_eq!(page[0]["message"], large["message"]);
+    assert_eq!(page[0]["state"], "STORED_PASSIVE");
+    assert_eq!(page[0]["held_reason"], "card_oversize");
+    assert!(page[0]["dispatcher_token"].is_null() && page[0]["batch_id"].is_null());
+    Ok(())
+}
+
+#[test]
+fn oversized_only_candidate_releases_an_expired_predecessor_lease() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.seed("predecessor", 1)?;
+    assert_eq!(f.claim_wake_batch()?.len(), 1);
+    f.state.db.execute("UPDATE local_listeners SET lease_until_ms=1; UPDATE local_signals SET batch_expires_at_ms=1", &[])?;
+    let mut large = signal("large", "none#alice", 1);
+    large["message"] = json!("\"".repeat(262_144));
+    assert!(admit(&f, &large, 2)?);
+    assert!(f.claim_wake_batch()?.is_empty());
+    assert_eq!(f.rows()?[1]["held_reason"], "card_oversize");
+    let listener = f.listener()?;
+    assert!(listener["dispatcher_token"].is_null());
+    assert_eq!(listener["lease_until_ms"], 0);
+    Ok(())
+}
+
+#[test]
+fn wake_retry_stops_stepping_at_the_first_current_signal() -> Result<(), String> {
+    let f = Fixture::new()?;
+    for (seq, id) in ["foreign", "current", "unvisited"].iter().enumerate() {
+        f.seed(id, seq)?;
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET hub_url='other' WHERE seq=0;
+        CREATE TEMP VIEW local_signals AS SELECT * FROM main.local_signals WHERE seq=0
+        UNION ALL SELECT * FROM main.local_signals WHERE seq=1
+        UNION ALL SELECT * FROM main.local_signals WHERE seq=2 AND abs(-9223372036854775808)",
+        &[],
+    )?;
+    let retry = || {
+        f.state
+            .db
+            .transaction(|db| reconcile_wake_retry(db, "local", "c_1"))
+    };
+    assert!(retry()?);
+    // Without a match SQLite must step the last arm, exposing its sentinel error.
+    f.state.db.execute(
+        "UPDATE main.local_signals SET acknowledged_at_ms=1 WHERE seq=1",
+        &[],
+    )?;
+    assert!(retry().unwrap_err().contains("integer overflow"));
+    Ok(())
+}
+
 #[test]
 fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() -> Result<(), String>
 {

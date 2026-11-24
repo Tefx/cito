@@ -17,6 +17,34 @@ use std::{
 
 mod activity;
 
+pub(super) const INBOX_SIGNAL_BYTES: usize = 7 * 1024 * 1024 - 1024;
+const MAX_WAKE_CARD_BYTES: usize = 512 * 1024;
+
+/// The inbox embeds serialized JSON inside an MCP text string. Budget for both
+/// escapes, fully qualified IDs and the longest subsequent wake disposition.
+fn fits_inbox(hub: &str, signal: &Value, seq: u64, created: &str) -> Result<bool, String> {
+    let from = &signal["from"];
+    if [
+        &signal["in_reply_to"],
+        &from["harness"],
+        &from["listener_id"],
+        &from["about"],
+    ]
+    .iter()
+    .any(|v| !v.is_null() && !v.is_string())
+    {
+        return Ok(false);
+    }
+    let wire = json!({"hub":hub, "signal_id":format!("{hub}:{}",string(signal,"signal_id")), "seq":seq,
+        "from":{"user":from["user"],"host_name":from["host_name"],"harness":from["harness"],"listener_id":from["listener_id"],"title":string(from,"title"),"about":from["about"]},
+        "message":signal["message"], "in_reply_to":signal["in_reply_to"].as_str().map(|id|format!("{hub}:{id}")),
+        "created_at":created,"held_reason":"unlistened_before_dispatch"});
+    Ok(serde_json::to_vec(&wire.to_string())
+        .map_err(|e| e.to_string())?
+        .len()
+        <= INBOX_SIGNAL_BYTES)
+}
+
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod tests;
@@ -285,10 +313,11 @@ impl LocalState {
         self.db.transaction(|c| {
             let current = current_listener(c, hub, string(listener, "listener_id"))?;
             check_listener(&current, listener)?;
-            let previous = c.query("SELECT * FROM local_signals WHERE hub=? AND signal_id=?", &[json!(hub), signal["signal_id"].clone()])?;
-            if previous.is_empty() && current["scope"] != "workspace"
-                && !principal_ids_equal(string(&signal["from"], "principal_id"), string(&current, "principal_id")) {
-                // Privacy drops still advance the durable transport cursor.
+            let previous = c.query("SELECT 1 FROM local_signals WHERE hub=? AND signal_id=?", &[json!(hub), signal["signal_id"].clone()])?;
+            if previous.is_empty() && ((current["scope"] != "workspace"
+                && !principal_ids_equal(string(&signal["from"], "principal_id"), string(&current, "principal_id")))
+                || !fits_inbox(hub, signal, seq, created)?) {
+                // Settle invalid and private deliveries without blocking the transport cursor.
                 return Ok(false);
             }
             // Human device generations fence attachment ownership, not the shared inbox.
@@ -360,26 +389,32 @@ impl LocalState {
                 let expires = old["batch_expires_at_ms"].as_u64().unwrap_or_else(|| earliest_expiry(&rows));
                 (rows, old["batch_id"].clone(), expires, card)
             } else {
-                let mut rows = c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND state='RECEIVED' AND batch_id IS NULL AND acknowledged_at_ms IS NULL AND held_reason IS NULL AND expires_at_ms>? ORDER BY seq LIMIT 50", &[json!(hub), json!(id), listener["binding_generation"].clone(), json!(now)])?;
-                // Plugins receive batch-wide queue flags, so re-batched survivors
-                // must never share a request with a different insertion checkpoint.
-                if let Some(first) = rows.first() {
-                    let checkpoint = (first["queue_written"].clone(), first["queue_confirmed"].clone());
-                    rows.retain(|row| row["queue_written"] == checkpoint.0 && row["queue_confirmed"] == checkpoint.1);
-                }
-                while !rows.is_empty() {
-                    let card = format_wake_card(&listener,&rows,hub,qualify_ids);
-                    if serde_json::to_vec(&card).map_err(|e| e.to_string())?.len() <= 524_288 { break; }
-                    if rows.len() == 1 {
-                        c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='driver_unavailable' WHERE hub=? AND signal_id=?", &[json!(hub),rows[0]["signal_id"].clone()])?;
+                let mut rows: Vec<Value> = Vec::new();
+                let mut oversized = Vec::new();
+                let mut card = String::new();
+                c.query_while("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND state='RECEIVED' AND batch_id IS NULL AND acknowledged_at_ms IS NULL AND held_reason IS NULL AND expires_at_ms>? ORDER BY seq LIMIT 50", &[json!(hub), json!(id), listener["binding_generation"].clone(), json!(now)], |row| {
+                    // A plugin request has one insertion checkpoint for the whole batch.
+                    if rows.first().is_some_and(|r| r["queue_written"] != row["queue_written"] || r["queue_confirmed"] != row["queue_confirmed"]) { return Ok(true); }
+                    rows.push(row);
+                    let candidate = format_wake_card(&listener, &rows, hub, qualify_ids);
+                    if candidate.len() <= MAX_WAKE_CARD_BYTES && serde_json::to_vec(&candidate).map_err(|e|e.to_string())?.len() <= MAX_WAKE_CARD_BYTES {
+                        card = candidate;
+                        return Ok(true);
                     }
+                    if rows.len() == 1 { oversized.push(rows[0]["signal_id"].clone()); }
                     rows.pop();
+                    Ok(rows.is_empty())
+                })?;
+                for signal_id in oversized {
+                    c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='card_oversize' WHERE hub=? AND signal_id=?", &[json!(hub),signal_id])?;
                 }
                 let Some(first) = rows.first() else {
+                    if !listener["dispatcher_token"].is_null() {
+                        c.execute("UPDATE local_listeners SET dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+                    }
                     reconcile_wake_retry(c, hub, id)?;
                     return Ok(Vec::new());
                 };
-                let card = format_wake_card(&listener, &rows, hub, qualify_ids);
                 // A middle-member acknowledgment can leave first/last seq intact.
                 // Include all members and the card so that re-batching cannot reuse
                 // an identity for a different immutable payload.
@@ -553,30 +588,6 @@ impl LocalState {
         reconcile_wake_retry(c, hub, node)?;
         Ok(()) })
     }
-    /// Unread identity and dispatch metadata; payloads stay in paginated inbox reads.
-    pub fn current_signal_metadata(
-        &self,
-        hub: &str,
-        node: &str,
-        after_seq: u64,
-        limit: usize,
-        match_id: Option<&str>,
-    ) -> Result<Vec<Value>, String> {
-        let Some(listener) = self.listener(hub, node)? else {
-            return Ok(Vec::new());
-        };
-        let mut rows = Vec::new();
-        self.db.read(|db| db.query_while(
-            "SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND (?=0 OR seq>?) AND (? IS NULL OR signal_id=? OR batch_id=?) ORDER BY seq,signal_id",
-            &[json!(hub),json!(node),json!(after_seq),json!(after_seq),json!(match_id),json!(match_id),json!(match_id)],
-            |row| {
-                if signal_matches_listener(&row, &listener) { rows.push(row); }
-                Ok(rows.len() < limit)
-            },
-        ))?;
-        Ok(rows)
-    }
-
     pub fn unread_count(&self, hub: &str, node: &str, live_only: bool) -> Result<u64, String> {
         let Some(listener) = self.listener(hub, node)? else {
             return Ok(0);
@@ -590,23 +601,6 @@ impl LocalState {
         Ok(count)
     }
 
-    pub fn current_signals(
-        &self,
-        hub: &str,
-        node: &str,
-        limit: usize,
-    ) -> Result<Vec<Value>, String> {
-        let Some(listener) = self.listener(hub, node)? else {
-            return Ok(Vec::new());
-        };
-        let limit = limit.clamp(1, 1000);
-        let mut rows = Vec::new();
-        self.db.read(|db| db.query_while("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY created_at,seq", &[json!(hub),json!(node)], |row| {
-            if signal_matches_listener(&row, &listener) { rows.push(row); }
-            Ok(rows.len() < limit)
-        }))?;
-        Ok(rows)
-    }
     /// Count visible current history without loading message payloads.
     pub fn activity_counts(&self) -> Result<(u64, u64), String> {
         let rows = self.db.query("SELECT s.principal_id AS source,l.principal_id AS target,count(*) AS total,sum(s.acknowledged_at_ms IS NULL) AS unread FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND l.status!='FENCED_INACTIVE' AND l.hub_url!='' AND s.hub_url=l.hub_url GROUP BY s.principal_id,l.principal_id", &[])?;
@@ -661,15 +655,17 @@ pub(super) fn reconcile_wake_retry(c: &Connection, hub: &str, id: &str) -> Resul
         )?
         .into_iter()
         .next();
-    let retryable = if let Some(listener) =
+    let mut retryable = false;
+    if let Some(listener) =
         listener.filter(|row| row["status"] == "ACTIVE" && row["harness"] != "human")
     {
-        c.query("SELECT hub,signal_id,listener_id,seq,state,held_reason,batch_id,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE') AND COALESCE(held_reason,'') IN ('','driver_unavailable') AND expires_at_ms>? AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?)",
-            &[json!(hub), json!(id), listener["binding_generation"].clone(), json!(now_ms()), json!(now_ms())])?
-            .iter().any(|signal| signal_matches_listener(signal, &listener))
-    } else {
-        false
-    };
+        let now = json!(now_ms());
+        c.query_while("SELECT hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE') AND COALESCE(held_reason,'') IN ('','driver_unavailable') AND expires_at_ms>?4 AND (batch_expires_at_ms IS NULL OR batch_expires_at_ms>?4)",
+            &[json!(hub), json!(id), listener["binding_generation"].clone(), now], |signal| {
+                retryable = signal_matches_listener(&signal, &listener);
+                Ok(!retryable)
+            })?;
+    }
     if !retryable {
         c.execute(
             "DELETE FROM wake_retries WHERE hub=? AND listener_id=?",
@@ -802,6 +798,13 @@ fn earliest_expiry(rows: &[Value]) -> u64 {
 fn escape_card(raw: &str) -> String {
     raw.replace('<', "&lt;").replace('>', "&gt;")
 }
+pub(super) fn scoped_reply_id(hub: &str, id: &str, qualify: bool) -> String {
+    if !id.is_empty() && (qualify || id.contains(':')) {
+        format!("{hub}:{id}")
+    } else {
+        id.into()
+    }
+}
 fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
     let raw_host = string(signal, "from_host_name");
     let host = if raw_host.to_ascii_lowercase().ends_with(".local") && raw_host.len() > 6 {
@@ -810,11 +813,7 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
         raw_host
     };
     let raw_id = string(signal, "from_listener_id");
-    let scoped = if qualify_ids && !raw_id.is_empty() {
-        format!("{hub}:{raw_id}")
-    } else {
-        raw_id.into()
-    };
+    let scoped = scoped_reply_id(hub, raw_id, qualify_ids);
     let title = string(signal, "from_title").trim();
     // Match the baseline public-ID title suppression, including legacy base32 IDs.
     let id = raw_id.rsplit(':').next().unwrap_or(raw_id);

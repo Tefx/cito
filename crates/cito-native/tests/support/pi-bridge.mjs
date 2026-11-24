@@ -1,9 +1,10 @@
 // purpose: verify the real Pi extension with the structural public host API and no npm packages.
-// usage: node --experimental-strip-types pi-bridge.mjs (invoked by Rust cleanroom tests).
+// usage: node --test pi-bridge.mjs (also invoked by Rust cleanroom tests).
 // effects: temporary Unix sockets and loopback HTTP only; all resources close in finally.
-// requires: Node.js with type stripping and isolated HOME/CITO_STATE_DIR.
+// requires: Node.js with type stripping and python3.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import test from 'node:test';
 import {syncBuiltinESMExports} from 'node:module';
 import {createConnection} from 'node:net';
 import {createServer} from 'node:http';
@@ -11,8 +12,15 @@ import {mkdirSync, writeFileSync, readFileSync, existsSync, statSync, unlinkSync
 import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
 import bridge from '../../../../plugins/pi/cito-bridge.ts';
-const state=process.env.CITO_STATE_DIR, path=join(state,'sockets',`pi-pid-${process.pid}.sock`);
-let observedDirectoryEvent;
+test('real Pi host, socket repair, and shutdown', async t => {
+const root=fs.mkdtempSync('/tmp/ct-pi-');
+t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+const state=join(root,'state'), path=join(state,'sockets',`pi-pid-${process.pid}.sock`);
+process.env.HOME=root;
+process.env.CITO_STATE_DIR=state;
+process.env.CITO_PI_HOME=join(root,'.pi','agent');
+process.env.CITO_CONFIG_PATH=join(state,'config.json');
+process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='1';
 const handlers=new Map(), messages=[], badges=[], notices=[], registrations=[], calls=[];
 let session='session-a', renderer, command, attempts=0, failSend=false, stallHttp=false, holdHttp=false, heldArrival;
 const held=[];
@@ -27,10 +35,7 @@ try {
   assert.notEqual(delay,2000,'A healthy owned socket must not install periodic stat polling');
   return interval(callback,delay,...args);
  };
- const watchDirectory=fs.watch;
- fs.watch=(dir,options,listener)=>watchDirectory(dir,options,(...event)=>{listener(...event);observedDirectoryEvent?.();});
- syncBuiltinESMExports();
- try { bridge(api); } finally { globalThis.setInterval=interval; fs.watch=watchDirectory;syncBuiltinESMExports(); }
+ try { bridge(api); } finally { globalThis.setInterval=interval; }
  // Startup must recover an F58 stale socket, even before session_start.
  for(let i=0;i<100;i++){try{if((await request({op:'ping'})).ok)break;}catch{}await new Promise(r=>setTimeout(r,10));}
  const fallback=await request({op:'identify'});assert.equal(fallback.ok,true);assert.equal(fallback.session_id,`pid-${process.pid}`);assert.equal(fallback.cwd,process.cwd());
@@ -151,19 +156,27 @@ try {
  const home=join(process.env.HOME,'.pi','agent');mkdirSync(home,{recursive:true});
  const custom=join(process.env.HOME,'custom-pi');mkdirSync(custom,{recursive:true});
  writeFileSync(join(custom,'cito-bridge.ts'),readFileSync(new URL('../../../../plugins/pi/cito-bridge.ts',import.meta.url)));
- // FSEvents can batch the kernel notification for longer than the repair deadline.
- // Start the repair deadline once the real directory event has been delivered.
- async function unlinkAndObserve() {
-  await new Promise((resolve,reject)=>{
-   const finish=error=>{clearTimeout(timer);observedDirectoryEvent=undefined;error?reject(error):resolve();};
-   const timer=setTimeout(()=>finish(Error('No socket directory notification')),10000);
-   observedDirectoryEvent=()=>finish();
-   try{unlinkSync(path);}catch(error){finish(error);}
-  });
+ // Exercise the idle directory watcher without a host callback. Directory events
+ // may coalesce; the observable result is a new socket serving the same session.
+ writeFileSync(join(home,'settings.json'),JSON.stringify({packages:['~/custom-pi']}));
+ unlinkSync(path);
+ // On Darwin, a socket-only unlink need not generate its own FSEvents frame.
+ // Make distinct sibling directory entries until a real watcher wake is delivered;
+ // no callback is injected and only the bridge can recreate the missing socket.
+ for(let i=0;i<100 && !existsSync(path);i++) {
+  writeFileSync(join(state,'sockets',`sibling-${i}`),'');
+  await new Promise(r=>setTimeout(r,100));
+ }
+ assert.equal((await request({op:'identify'})).session_id,session);
+ // Remaining cases exercise repair policy. A real session_start is a repair
+ // opportunity even if FSEvents batched two successive unlinks into one event.
+ async function unlinkAndResume() {
+  unlinkSync(path);
+  await handlers.get('session_start')({},context);
  }
  for(const entry of [join(state,'runtime','plugins','pi'),join(state,'plugins','pi'),'~/custom-pi']) {
   writeFileSync(join(home,'settings.json'),JSON.stringify({packages:[entry]}));
-  await unlinkAndObserve();
+  await unlinkAndResume();
   for(let i=0;i<100&&!existsSync(path);i++)await new Promise(r=>setTimeout(r,10));
   assert(existsSync(path),`Missing repaired socket for ${entry}`);
   assert.equal((await request({op:'identify'})).session_id,session,entry);
@@ -173,7 +186,7 @@ try {
  fs.chmodSync=(file,mode)=>{chmod(file,mode);if(file===path && interrupted++===0)unlinkSync(path);};
  syncBuiltinESMExports();
  try {
-  await unlinkAndObserve();
+  await unlinkAndResume();
   for(let i=0;i<100 && interrupted<2;i++)await new Promise(r=>setTimeout(r,10));
   assert(interrupted>=2,'A second unlink during repair must start another bind');
   assert.equal((await request({op:'identify'})).session_id,session);
@@ -187,13 +200,12 @@ try {
  };
  syncBuiltinESMExports();
  globalThis.setTimeout=(callback,ms,...args)=>{
-  if(ms===10000)return schedule(callback,ms,...args); // Directory-event watchdog.
   delays.push(ms);return schedule(callback,1,...args);
  };
  try {
   for(const expected of [[50,100,200,400,800,1600,3200,5000,5000],[50]]) {
    failures=expected.length;delays.length=0;
-   await unlinkAndObserve();
+   await unlinkAndResume();
    for(let i=0;i<100&&!existsSync(path);i++)await new Promise(r=>schedule(r,5));
    assert.equal((await request({op:'identify'})).session_id,session);
    assert.deepEqual(delays,expected,'Retry delays must grow, cap, and reset after a healthy bind');
@@ -201,7 +213,7 @@ try {
  } finally {globalThis.setTimeout=schedule;fs.chmodSync=chmod;syncBuiltinESMExports();}
  for(const packages of [[],[join(process.env.HOME,'unrelated-package')]]) {
   writeFileSync(join(home,'settings.json'),JSON.stringify({packages}));
-  if(existsSync(path))await unlinkAndObserve();
+  if(existsSync(path))await unlinkAndResume();
   await new Promise(r=>setTimeout(r,50));assert.equal(existsSync(path),false);
  }
 } finally {await handlers.get('session_shutdown')?.({},context);server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}
@@ -217,4 +229,9 @@ try {
  await headless.get('session_shutdown')?.({},context);fs.watch=originalWatch;syncBuiltinESMExports();process.argv.splice(0,process.argv.length,...savedArgs);
  if(savedHeadless===undefined)delete process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY;else process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY=savedHeadless;
 }
-const broken=new Map();bridge({...api,on:(n,f)=>broken.set(n,f),registerMcpServer:()=>{throw Error('Registry failed')}});await assert.rejects(()=>broken.get('session_start')({},context),/Registry failed/);await broken.get('session_shutdown')({},context);
+const broken=new Map();
+try {
+ bridge({...api,on:(n,f)=>broken.set(n,f),registerMcpServer:()=>{throw Error('Registry failed')}});
+ await assert.rejects(()=>broken.get('session_start')({},context),/Registry failed/);
+} finally {await broken.get('session_shutdown')?.({},context);}
+});

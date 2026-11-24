@@ -385,22 +385,6 @@ pub fn poll_listener(
     )
 }
 
-pub fn probe_listener(
-    local: &LocalState,
-    client: &HubClient,
-    row: &Value,
-    plugin: &PluginDescriptor,
-    state_dir: &std::path::Path,
-) -> Result<(), String> {
-    let result = plugin_request(
-        plugin,
-        &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"process_identity":row["process_identity"],"cwd":row["cwd"],"state_dir":state_dir}),
-        None,
-        Some((local, row)),
-    ).unwrap_or_else(|error| json!({"ok":false,"error":error}));
-    apply_probe(local, client, row, &result)
-}
-
 pub(super) fn settle_hard_exit(
     c: &super::database::Connection,
     row: &Value,
@@ -539,6 +523,12 @@ fn dispatch_listener(
         .iter()
         .map(|row| {
             let mut row = row.clone();
+            // Only the plugin-facing references are scoped. Hub claim/ack keys stay raw.
+            for field in ["signal_id", "in_reply_to"] {
+                if let Some(id) = row[field].as_str() {
+                    row[field] = json!(super::state::scoped_reply_id(hub, id, qualify));
+                }
+            }
             if let Some(row) = row.as_object_mut() {
                 for key in [
                     "state",

@@ -1136,6 +1136,26 @@ fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
         seqs.extend(signals.iter().map(|signal| signal["seq"].as_u64().unwrap()));
     }
     assert_eq!(seqs, (1..=55).collect::<Vec<_>>());
+    // A legacy row can predate the write-side size check. A rejected page must not ACK it.
+    db.execute("UPDATE local_signals SET signal_id='nested:id', in_reply_to='nested:parent',message=?,acknowledged_at_ms=NULL WHERE seq=1", &[json!("\"".repeat(2*1024*1024))]).unwrap();
+    let rejected = f.tool_result("cito_inbox", json!({}), meta.clone());
+    assert_eq!(rejected["isError"], true);
+    assert!(rejected["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Signal exceeds inbox transport limit"));
+    db.execute(
+        "UPDATE local_signals SET message='readable' WHERE seq=1",
+        &[],
+    )
+    .unwrap();
+    let page = f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
+    assert_eq!(page["signals"][0]["signal_id"], "local:nested:id");
+    assert_eq!(page["signals"][0]["in_reply_to"], "local:nested:parent");
+    assert_eq!(
+        f.tool("cito_inbox", json!({"ack_ids":["local:nested:id"]}), meta)["acknowledged_count"],
+        1
+    );
     let calls = fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl")).unwrap();
     assert!(!calls
         .lines()
@@ -1403,15 +1423,8 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
             .collect();
         assert_eq!(wakes.len(), expected);
         for (wake, sent) in wakes.iter().zip(&sent_signals) {
-            assert_eq!(
-                wake["signals"][0]["signal_id"],
-                sent["signal_id"]
-                    .as_str()
-                    .unwrap()
-                    .rsplit(':')
-                    .next()
-                    .unwrap()
-            );
+            assert!(sent["signal_id"].as_str().unwrap().starts_with("work:"));
+            assert_eq!(wake["signals"][0]["signal_id"], sent["signal_id"]);
         }
     }
 }
@@ -1587,7 +1600,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .as_array()
         .unwrap()
         .iter()
-        .all(|v| v["message"].as_str().unwrap().chars().count() <= 512));
+        .all(|v| v["message"].as_str().unwrap().len() <= 512));
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
         7
@@ -1664,6 +1677,23 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         assert_eq!(result["listeners"], expected_listeners, "{result}");
     }
     assert_eq!(f.mcp("ping", json!({})), json!({}));
+    assert_eq!(
+        http(
+            f.port,
+            "/mcp",
+            Some(&json!({"jsonrpc":"2.0","method":"ping"}))
+        )
+        .0,
+        202
+    );
+    assert_eq!(
+        http(
+            f.port,
+            "/mcp",
+            Some(&json!({"jsonrpc":"2.0","method":"ping","id":null}))
+        ),
+        (200, json!({"jsonrpc":"2.0","id":null,"result":{}}))
+    );
 }
 #[test]
 fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() {

@@ -165,7 +165,7 @@ pub(in crate::core::daemon) fn handle_http(
         return;
     }
     let method = string(&parsed, "method").to_string();
-    if id.is_null() || method.starts_with("notifications/") {
+    if parsed.get("id").is_none() {
         respond(&mut stream, 202, &Value::Null);
         return;
     }

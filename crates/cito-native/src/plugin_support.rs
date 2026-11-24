@@ -119,15 +119,44 @@ pub fn state(req: &Value) -> PathBuf {
         .or_else(|| env_value(req, "CITO_STATE_DIR").map(|s| expand(req, &s)))
         .unwrap_or_else(|| home(req).join(".cito"))
 }
-/// Paths that keep a profile addressable when removing its containing runtime tree.
-pub fn profile_keep(config: &Path, root: &Path) -> Result<Vec<PathBuf>> {
-    let target = publication_target(config)?;
-    let mut keep = Vec::new();
-    for part in config.ancestors().filter(|p| p.is_symlink()) {
-        if let (Some(parent), Some(name)) = (part.parent(), part.file_name()) {
-            keep.push(publication_target(parent)?.join(name));
+/// Resolve even an absent leaf, retaining links and directories needed by `..`.
+pub(crate) fn profile_target(path: &Path, mut preserve: impl FnMut(&Path)) -> Result<PathBuf> {
+    use std::path::Component;
+    let mut remaining = std::path::absolute(path).map_err(|e| e.to_string())?;
+    let mut resolved = PathBuf::new();
+    for _ in 0..=40 {
+        let mut components = remaining.components();
+        let mut next = None;
+        while let Some(part) = components.next() {
+            if part == Component::ParentDir {
+                preserve(&resolved);
+                resolved.pop();
+                continue;
+            }
+            resolved.push(part);
+            match fs::read_link(&resolved) {
+                Ok(link) => {
+                    preserve(&resolved);
+                    resolved.pop();
+                    next = Some(link.join(components.as_path()));
+                    break;
+                }
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        match next {
+            Some(path) => remaining = path,
+            None => return Ok(resolved),
         }
     }
+    Err("Too many symlinks in profile path".into())
+}
+
+/// Paths that keep a profile addressable when removing its containing runtime tree.
+pub fn profile_keep(config: &Path, root: &Path) -> Result<Vec<PathBuf>> {
+    let mut keep = Vec::new();
+    let target = profile_target(config, |p| keep.push(p.to_owned()))?;
     if target.starts_with(root) {
         let name = target
             .file_name()

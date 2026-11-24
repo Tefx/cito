@@ -93,12 +93,23 @@ fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader(
         .parse::<i32>()
         .unwrap();
     let cleanup = Descendant(pid);
-    assert!(process.child.lock().unwrap().try_wait().unwrap().is_some());
+    let exited = crate::support::child_exit_fd(pid as u32).unwrap();
+    // NOTE_EXIT (or ESRCH at registration) can precede waitpid(WNOHANG)
+    // reporting the final status. Reap the observed exit before testing shutdown.
+    process.child.lock().unwrap().wait().unwrap();
     let started = Instant::now();
     process.shutdown();
     assert!(started.elapsed() < Duration::from_millis(200));
     // A post-reap group SIGKILL would kill this still-live descendant.
-    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    assert!(!crate::support::poll_until(
+        &mut [libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }],
+        Some(Instant::now() + Duration::from_millis(100)),
+    )
+    .unwrap());
     drop(cleanup);
 }
 #[test]

@@ -396,13 +396,29 @@ export default function citoBridge(pi: BridgeAPI): void {
       }
     });
   }
-  const repairWatcher = discoveryAllowed ? watch(directory, { persistent: false }, repairMissingSocket) : undefined;
-  repairWatcher?.on("error", repairMissingSocket);
+  let repairWatcher: ReturnType<typeof watch> | undefined;
+  function watchForRepair(): void {
+    if (!discoveryAllowed || repairWatcher) return;
+    try {
+      repairWatcher = watch(directory, { persistent: false }, repairMissingSocket).on("error", () => {
+        repairWatcher?.close();
+        repairWatcher = undefined;
+        repairMissingSocket();
+      });
+    } catch {} // Retry acquisition on the next session start.
+  }
+  watchForRepair();
   pi.on("session_start", async (_event, ctx) => {
     registerMcpServer();
     lastActiveMs = Date.now();
     update(ctx);
     await ensureServer();
+    if (!shuttingDown && discoveryAllowed) {
+      watchForRepair();
+      // A filesystem watcher can coalesce or miss an unlink. A host lifecycle
+      // event is also a repair opportunity; never poll a healthy, idle session.
+      repairMissingSocket();
+    }
   });
   pi.registerCommand?.("cito", {
     description: "Toggle or configure Cito session listening",

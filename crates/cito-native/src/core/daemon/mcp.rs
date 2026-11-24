@@ -511,6 +511,7 @@ pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String
         "cito_inbox" => &["hub", "ack_ids", "ack_all", "limit"],
         _ => return Err("INVALID_INPUT: Unknown tool".into()),
     };
+    let scoped_id = |v: &Value| v.as_str().is_some_and(|s| (1..=161).contains(&s.len()));
     for (key, value) in map {
         if !allowed.contains(&key.as_str()) {
             return Err(format!("INVALID_INPUT: Unknown argument: {key}"));
@@ -520,11 +521,10 @@ pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String
                 .as_u64()
                 .is_some_and(|n| n > 0 && n <= if name == "cito_find" { 50 } else { 1000 }),
             "ack_all" => value.is_boolean(),
-            "ack_ids" => value.as_array().is_some_and(|a| {
-                a.len() <= 1000
-                    && a.iter()
-                        .all(|v| v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 161))
-            }),
+            "ack_ids" => value
+                .as_array()
+                .is_some_and(|a| a.len() <= 1000 && a.iter().all(scoped_id)),
+            "in_reply_to" => scoped_id(value),
             _ => value.is_string(),
         };
         if !valid {
@@ -586,17 +586,25 @@ pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String
         ("user", 64),
         ("host", 128),
         ("repo", 200),
-        ("in_reply_to", 161),
         ("idempotency_key", 128),
     ] {
         if let Some(value) = args[key].as_str() {
             if value.chars().count() > cap
-                || matches!(key, "tag" | "in_reply_to" | "idempotency_key")
-                    && value.trim().is_empty()
+                || matches!(key, "tag" | "idempotency_key") && value.trim().is_empty()
             {
                 return Err(format!("INVALID_INPUT: Invalid {key} length"));
             }
         }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_agent_session(harness: &str, session: &str) -> Result<(), String> {
+    if !crate::plugins::validate_harness_id(harness)
+        || harness == "human"
+        || session.trim().is_empty()
+    {
+        return Err("INVALID_INPUT: An agent session is required".into());
     }
     Ok(())
 }
@@ -905,9 +913,7 @@ impl HubAccess {
         harness: &str,
         session: &str,
     ) -> Result<String, String> {
-        if harness.is_empty() || harness == "human" || session.is_empty() {
-            return Err("INVALID_INPUT: An agent session is required".into());
-        }
+        validate_agent_session(harness, session)?;
         match self.slot(hub) {
             Err(_) => return self.session_node_id(hub, harness, session),
             Ok(slot) if slot.closed.load(Ordering::Acquire) => return Err(STALE_HUB.into()),
@@ -925,9 +931,7 @@ impl HubAccess {
         harness: &str,
         session: &str,
     ) -> Result<String, String> {
-        if harness.is_empty() || harness == "human" || session.is_empty() {
-            return Err("INVALID_INPUT: An agent session is required".into());
-        }
+        validate_agent_session(harness, session)?;
         let Ok(slot) = self.slot(hub) else {
             return self.session_node_id(hub, harness, session);
         };
@@ -1680,7 +1684,7 @@ impl HubAccess {
             let published = if human {
                 // The Hub owns reply publication and source acknowledgment in one
                 // transaction. Human sends without a source use the same publication path.
-                slot.rpc("send_reply_from_human", &json!({"to":canonical,"message":message,"in_reply_to":reply_to,"reply_signal_id":signal_id,"msg_id":dedup,"host_id":self.host_id,"host_name":local_host_name()}))?
+                slot.rpc("send_reply_from_human", &json!({"to":canonical,"message":message,"in_reply_to":reply_to,"in_reply_to_is_raw":true,"reply_signal_id":signal_id,"msg_id":dedup,"host_id":self.host_id,"host_name":local_host_name()}))?
             } else {
                 let local_sender = match from_id.as_deref() {
                     Some(id) => self.state.listener(hub, id)?,
@@ -1788,23 +1792,36 @@ impl DaemonService {
         };
         // MCP embeds the JSON payload as a string. Count the escaped wire bytes;
         // reserve 1 MiB for the request ID and headroom for framing and metadata.
-        let mut remaining = 7 * 1024 * 1024 - 1024;
+        struct TextBudget(usize);
+        impl std::fmt::Write for TextBudget {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                // The inner JSON serializer already escaped control characters.
+                let escapes = s.bytes().filter(|b| matches!(b, b'"' | b'\\')).count();
+                self.0 = self
+                    .0
+                    .checked_sub(s.len() + escapes)
+                    .ok_or(std::fmt::Error)?;
+                Ok(())
+            }
+        }
+        use std::fmt::Write;
+        let mut remaining = super::super::state::INBOX_SIGNAL_BYTES;
         let mut signals = Vec::new();
         db.query_while(&format!("{unread} ORDER BY s.created_at,s.hub,s.seq,s.signal_id"), std::slice::from_ref(bindings), |key| {
             if !super::super::state::joined_signal_is_current(&key) { return Ok(true); }
             let row = db.query("SELECT * FROM local_signals WHERE hub=? AND signal_id=?", &[key["hub"].clone(),key["signal_id"].clone()])?.pop().ok_or("STATE_ERROR: Inbox row missing")?;
             let hub = string(&row, "hub");
             let signal = json!({"hub":hub,"signal_id":self.scoped(hub,string(&row,"signal_id")),"seq":row["seq"],"from":{"user":row["from_user"],"host_name":row["from_host_name"],"harness":row["from_harness"],"listener_id":row["from_listener_id"],"title":row["from_title"],"about":row["from_about"]},"message":row["message"],"in_reply_to":row["in_reply_to"].as_str().map(|id|self.scoped(hub,id)),"created_at":row["created_at"],"held_reason":row["held_reason"]});
-            let bytes = serde_json::to_vec(&signal.to_string())
-                .map_err(|e| e.to_string())?
-                .len();
-            if bytes > remaining {
+            // Reserve the two outer quotes counted by single-row admission.
+            // This also covers the comma between consecutive rows in a page.
+            let mut budget = TextBudget(remaining.saturating_sub(2));
+            if write!(budget, "{signal}").is_err() {
                 if signals.is_empty() {
                     return Err("INVALID_INPUT: Signal exceeds inbox transport limit".into());
                 }
                 return Ok(false);
             }
-            remaining -= bytes;
+            remaining = budget.0;
             if ack_all { select(&key); }
             signals.push(signal);
             Ok(signals.len() < limit)

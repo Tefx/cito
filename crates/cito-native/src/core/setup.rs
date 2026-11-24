@@ -129,22 +129,59 @@ fn valid_plugin_command(dir: &Path, cmd: &str) -> bool {
 }
 
 fn contains_plugin_files(source: &Path, target: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(source) else {
+    fn equal_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+        use std::io::Read;
+        let (mut a, mut b) = (fs::File::open(a)?, fs::File::open(b)?);
+        let (source, staged) = (a.metadata()?, b.metadata()?);
+        if source.len() != staged.len()
+            || (source.permissions().mode() & 0o111 != 0
+                && staged.permissions().mode() & 0o111 == 0)
+        {
+            return Ok(false);
+        }
+        let (mut left, mut right) = ([0; 16 * 1024], [0; 16 * 1024]);
+        loop {
+            let n = a.read(&mut left)?;
+            if n == 0 {
+                return Ok(b.read(&mut right)? == 0);
+            }
+            b.read_exact(&mut right[..n])?;
+            if left[..n] != right[..n] {
+                return Ok(false);
+            }
+        }
+    }
+    if super::plugins::same_plugin_root(source, target) {
+        return true;
+    }
+    let (Ok(entries), Ok(staged_entries)) = (fs::read_dir(source), fs::read_dir(target)) else {
         return false;
     };
+    let mut count = 0;
     for entry in entries {
+        count += 1;
         let Ok(entry) = entry else { return false };
         let staged = target.join(entry.file_name());
         let (Ok(kind), Ok(meta)) = (entry.file_type(), fs::symlink_metadata(&staged)) else {
             return false;
         };
-        if kind != meta.file_type()
-            || (kind.is_dir() && !contains_plugin_files(&entry.path(), &staged))
-        {
+        let path = entry.path();
+        if kind != meta.file_type() {
+            return false;
+        }
+        let equal = if kind.is_dir() {
+            contains_plugin_files(&path, &staged)
+        } else if kind.is_symlink() {
+            fs::read_link(path)
+                .is_ok_and(|link| fs::read_link(staged).is_ok_and(|other| link == other))
+        } else {
+            kind.is_file() && equal_bytes(&path, &staged).unwrap_or(false)
+        };
+        if !equal {
             return false;
         }
     }
-    true
+    staged_entries.count() == count
 }
 
 pub fn resolve_state_and_config_paths() -> Result<(PathBuf, PathBuf, PathBuf), String> {
@@ -156,6 +193,23 @@ pub fn resolve_state_and_config_paths() -> Result<(PathBuf, PathBuf, PathBuf), S
         Ok(p) => expand_home_dir(&p, "CITO_CONFIG_PATH", home_env.as_deref())?,
         Err(_) => state_dir.join("config.json"),
     };
+    let resolve = |p: &Path| crate::support::profile_target(p, |_| {});
+    let target = resolve(&config_path)?;
+    let mut writer = target.as_os_str().to_owned();
+    writer.push(".lock");
+    let writer = resolve(Path::new(&writer))?;
+    let state = resolve(&state_dir)?;
+    let overlaps = |lock: &Path| {
+        [&target, &writer]
+            .iter()
+            .any(|p| p.starts_with(lock) || lock.starts_with(p))
+    };
+    for name in ["daemon.lock", "runtime/staging.lock"] {
+        let lock = state.join(name);
+        if overlaps(&lock) || resolve(&lock).is_ok_and(|p| overlaps(&p)) {
+            return Err("Config path conflicts with an ownership lock".into());
+        }
+    }
     Ok((state_dir, config_path, home_dir))
 }
 
@@ -718,10 +772,13 @@ fn daemon_control_config(
     // Setup can repair a profile with an invalid saved port using an explicit control endpoint.
     let endpoint = env::var("CITO_DAEMON_PORT").ok();
     let endpoint = endpoint.as_deref().filter(|s| !s.trim().is_empty());
-    let daemon_port = crate::support::resolve_daemon_port(
+    let daemon_port = match crate::support::resolve_daemon_port(
         endpoint,
         rest.get("daemonPort").filter(|_| endpoint.is_none()),
-    )?;
+    ) {
+        Err(_) if recovery.is_some() && endpoint.is_none() => crate::support::DEFAULT_DAEMON_PORT,
+        port => port?,
+    };
     Ok(crate::plugins::NativeConfig {
         state_dir: state_dir.to_path_buf(),
         config_path: config_path.to_path_buf(),
@@ -909,11 +966,20 @@ pub(crate) fn uninstall_setup_with_owner(
         let mut keep = keep;
         if !purge_data {
             keep.extend(crate::support::profile_keep(config_path, &state)?);
+            keep.push(resolved_config.clone());
         }
         let mut actions = remove_integrations(plugins)?;
 
         let plist_path = launch_agent_plist_path(home_dir);
-        if plist_path.exists() {
+        // Keep paths use physical parent directories, but retain symlink leaves.
+        let physical_leaf = |p: &Path| -> Result<PathBuf, String> {
+            Ok(
+                fs::canonicalize(p.parent().ok_or("Missing parent directory")?)
+                    .map_err(|e| e.to_string())?
+                    .join(p.file_name().ok_or("Missing filename")?),
+            )
+        };
+        if plist_path.exists() && !keep.contains(&physical_leaf(&plist_path)?) {
             fs::remove_file(&plist_path).map_err(|e| e.to_string())?;
             actions.push(SetupAction {
                 target: "cito".to_string(),
@@ -968,6 +1034,9 @@ pub(crate) fn uninstall_setup_with_owner(
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false);
             if is_symlink {
+                if keep.contains(&physical_leaf(app_target)?) {
+                    continue;
+                }
                 fs::remove_file(app_target).map_err(|e| e.to_string())?;
                 actions.push(SetupAction {
                     target: "cito".to_string(),
@@ -977,10 +1046,7 @@ pub(crate) fn uninstall_setup_with_owner(
                     detail: format!("Removed {} symlink", app_target.display()),
                 });
             } else if purge_data && app_target.exists() {
-                let parent = app_target.parent().ok_or("Missing application directory")?;
-                let path = fs::canonicalize(parent)
-                    .map_err(|e| e.to_string())?
-                    .join(app_target.file_name().ok_or("Missing application name")?);
+                let path = physical_leaf(app_target)?;
                 if !remove_except(&path, &keep).map_err(|e| e.to_string())? {
                     continue;
                 }
@@ -1314,7 +1380,18 @@ pub fn run_setup_cli(args: &[String]) {
                 }
                 Err(error) if disconnect_all => {
                     let before = ConfigSnapshot::read(&config_path)?;
-                    if !purge_data && before.normalized().is_ok() {
+                    if !purge_data
+                        && before
+                            .normalized()
+                            .and_then(|(_, hubs, rest)| {
+                                crate::plugins::validate_saved_profile(
+                                    &hubs,
+                                    &before.recovery_object(),
+                                )?;
+                                crate::support::resolve_daemon_port(None, rest.get("daemonPort"))
+                            })
+                            .is_ok()
+                    {
                         return Err(error);
                     }
                     let config =

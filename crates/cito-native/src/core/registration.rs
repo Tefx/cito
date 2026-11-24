@@ -105,20 +105,6 @@ pub(super) fn remote_matches_listener(remote: &Value, row: &Value, channel: &str
             .is_some_and(|owner| row["owner_token"] == owner)
 }
 
-pub fn register_listener(
-    state: &LocalState,
-    client: &HubClient,
-    host_id: &str,
-    args: &Value,
-    caller: &Value,
-) -> Result<Value, String> {
-    let registration = state.registration_lock(&client.name)?;
-    let _registration = registration
-        .lock()
-        .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-    register_locked(state, client, host_id, args, caller)
-}
-
 /// Endpoint switch settlement shares the enrollment lock with registration.
 /// A failed secondary retirement must preserve the already committed binding.
 /// Only token-fenced remote detaches can outlive this exclusion interval.
@@ -760,7 +746,7 @@ mod tests {
                 ("fixture", json!(""), ""),
                 ("fixture", json!("Agent title"), "Agent title"),
             ] {
-                let response = register_listener(
+                let response = register_endpoint(
                     &state,
                     &client,
                     "host",
@@ -780,7 +766,7 @@ mod tests {
             }
             let caller =
                 json!({"harness":"fixture","session_id":"default","title":"Discovered title"});
-            register_listener(
+            register_endpoint(
                 &state,
                 &client,
                 "host",
@@ -788,7 +774,7 @@ mod tests {
                 &caller,
             )?;
             let reopened = LocalState::open(&root.join("state"))?;
-            let response = register_listener(
+            let response = register_endpoint(
                 &reopened,
                 &client,
                 "host",
@@ -808,7 +794,7 @@ mod tests {
             assert_eq!(remote["custom_title"], true);
             let id = string(&response, "canonical_listener_id").to_string();
             reopened.db.execute("UPDATE local_listeners SET consecutive_probe_failures=2 WHERE hub=? AND listener_id=?", &[json!("work"),json!(id)])?;
-            register_listener(
+            register_endpoint(
                 &reopened,
                 &client,
                 "host",
@@ -822,36 +808,14 @@ mod tests {
                 row["consecutive_probe_failures"], 2,
                 "Idempotent registration retains the current budget"
             );
-            let plugin = crate::plugins::PluginDescriptor {
-                id: "fixture".into(),
-                kind: "agent-harness".into(),
-                display_name: "Fixture".into(),
-                tier: "experimental".into(),
-                order: 0,
-                sf_symbol: "terminal".into(),
-                tint: "blue".into(),
-                cli_flag: false,
-                pid_bound: true,
-                auto_listen: Default::default(),
-                plugin_dir: root.clone(),
-                is_builtin: false,
-                command: vec![
-                    "python3".into(),
-                    "-c".into(),
-                    "print(\'{\"ok\":true,\"status\":\"transient_error\"}\')".into(),
-                ],
-                channel_env: None,
-                fields: vec![],
-                post_setup_hint: None,
-                post_disconnect_hint: None,
-            };
-            super::super::receiver::probe_listener(&reopened, &client, &row, &plugin, &root)?;
+            let transient = json!({"ok":true,"status":"transient_error"});
+            super::super::receiver::apply_probe(&reopened, &client, &row, &transient)?;
             let revoked = reopened
                 .listener("work", &id)?
                 .ok_or("Missing revoked binding")?;
             assert_eq!(revoked["consecutive_probe_failures"], 3);
             assert_eq!(revoked["status"], "UNLISTENED");
-            register_listener(
+            register_endpoint(
                 &reopened,
                 &client,
                 "host",
@@ -862,7 +826,7 @@ mod tests {
                 .listener("work", &id)?
                 .ok_or("Missing replacement binding")?;
             assert_eq!(fresh["consecutive_probe_failures"], 0);
-            super::super::receiver::probe_listener(&reopened, &client, &fresh, &plugin, &root)?;
+            super::super::receiver::apply_probe(&reopened, &client, &fresh, &transient)?;
             let probed = reopened
                 .listener("work", &id)?
                 .ok_or("Missing probed replacement")?;
@@ -873,7 +837,7 @@ mod tests {
             let writer = super::super::database::Database::open(&root.join("state/state.sqlite"))?;
             let replacement = std::thread::scope(|scope| -> Result<Value, String> {
                 let pending=writer.transaction(|connection| {
-                    let pending=scope.spawn(||register_listener(&reopened,&client,"host",&json!({"about":"Concurrent refresh"}),&caller));
+                    let pending=scope.spawn(||register_endpoint(&reopened,&client,"host",&json!({"about":"Concurrent refresh"}),&caller));
                     let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
                     loop {
                         if client.kv_get(&id)?.is_some_and(|(remote,_)|remote["about"]=="Concurrent refresh") { break; }
@@ -977,7 +941,7 @@ mod tests {
                 Some(engine.clone()),
             );
             let caller = json!({"harness":"human","session_id":"default","title":"Human"});
-            let initial = register_listener(
+            let initial = register_endpoint(
                 &first,
                 &client,
                 "first-host",
@@ -1028,7 +992,7 @@ mod tests {
                 .as_u64()
                 .is_some());
             assert_eq!(resumed["channels"]["second-host:human"]["state"], "ACTIVE");
-            register_listener(
+            register_endpoint(
                 &first,
                 &client,
                 "first-host",

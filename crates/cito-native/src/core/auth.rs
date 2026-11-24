@@ -331,6 +331,9 @@ impl OidcVerifier {
     }
 
     fn verify_inner(&self, token: &str, deadline: Option<Instant>) -> Result<Value, String> {
+        if !super::config::valid_hub_token(token) {
+            return Err("AUTHORIZATION_VIOLATION: invalid bearer token".into());
+        }
         let header =
             decode_header(token).map_err(|_| "AUTHORIZATION_VIOLATION: invalid JWT header")?;
         if !matches!(

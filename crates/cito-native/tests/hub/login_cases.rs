@@ -2,7 +2,8 @@ use super::*;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Output};
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -184,7 +185,7 @@ impl Provider {
         }
     }
     fn config(&self) -> Value {
-        json!({"issuer":self.issuer,"clientId":"client"})
+        json!({"issuer":self.issuer,"clientId":"client","redirectPort":0})
     }
     fn seed(&self, dir: &Path, expires: u64) -> String {
         let token = sign(&self.issuer, "subject", "", false);
@@ -218,13 +219,27 @@ fn refresh(dir: &Path, config: &Value, rejected: Option<&str>) -> Result<LoginRe
 fn read(dir: &Path) -> Value {
     serde_json::from_slice(&fs::read(cache_path(dir, "work").unwrap()).unwrap()).unwrap()
 }
-fn worker(dir: &Path, config: &Value, rejected: Option<&str>, timeout: u64) -> Child {
+struct Worker {
+    child: Option<Child>,
+    deadline: Instant,
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = crate::support::teardown_child_group(child);
+        }
+    }
+}
+fn worker(dir: &Path, config: &Value, rejected: Option<&str>, timeout: u64) -> Worker {
     fs::write(dir.join("config.json"), config.to_string()).unwrap();
     let opener = dir.join("browser.py");
     fs::write(&opener,"#!/usr/bin/env python3\n# purpose: Follow the fixture's real HTTP PKCE callback.\n# usage: browser.py AUTHORIZATION_URL\n# effects: Loopback HTTP only.\n# requires: python3 standard library.\nimport os, sys, time, urllib.request\nwith open(__file__+'.pid','w') as record: record.write(str(os.getpid()))\nif os.environ.get('CITO_LOGIN_TEST_BROWSER_WAIT') == '1': time.sleep(60)\nwith urllib.request.urlopen(sys.argv[-1], timeout=5) as response: response.read()\n").unwrap();
     fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
+        .process_group(0)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
         .args([
             "--exact",
             "core::login::tests::login_worker",
@@ -245,39 +260,39 @@ fn worker(dir: &Path, config: &Value, rejected: Option<&str>, timeout: u64) -> C
         )
         .env("CITO_LOGIN_TEST_DIR", dir)
         .env("CITO_LOGIN_TEST_TIMEOUT_MS", timeout.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
     if let Some(rejected) = rejected {
         command.env("CITO_LOGIN_TEST_REJECTED", rejected);
-    } else {
-        command.env_remove("CITO_LOGIN_TEST_REJECTED");
     }
     let _ = fs::remove_file(dir.join("cancel.sock"));
     let _ = fs::remove_file(dir.join("result.json"));
     let _ = fs::remove_file(dir.join("cancel.ready"));
-    let process = command.spawn().unwrap();
     let until = Instant::now() + Duration::from_secs(2);
+    let process = Worker {
+        child: Some(command.spawn().unwrap()),
+        deadline: until + Duration::from_millis(timeout),
+    };
     while !dir.join("cancel.ready").exists() {
         assert!(
             Instant::now() < until,
             "Worker cancellation endpoint missing"
         );
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(2));
     }
     process
 }
-fn result(dir: &Path, process: Child) -> Value {
-    let Output {
-        status,
-        stdout,
-        stderr,
-    } = process.wait_with_output().unwrap();
+fn result(dir: &Path, mut process: Worker) -> Value {
     assert!(
-        status.success(),
-        "worker failed: {} {}",
-        String::from_utf8_lossy(&stdout),
-        String::from_utf8_lossy(&stderr)
+        crate::support::wait_child_exit(
+            process.child.as_ref().unwrap(),
+            process.deadline.saturating_duration_since(Instant::now()),
+        )
+        .unwrap(),
+        "Login worker exceeded its deadline"
     );
+    let status = crate::support::teardown_child_group(&mut process.child.take().unwrap()).unwrap();
+    assert!(status.success(), "Login worker failed: {status}");
     serde_json::from_slice(&fs::read(dir.join("result.json")).unwrap()).unwrap()
 }
 #[test]
@@ -416,6 +431,30 @@ fn interactive_login_replaces_unreadable_cache() {
         offline_identity(&dir.0, "work", &config).unwrap()["owner_user"],
         "alice"
     );
+}
+#[test]
+fn oversized_id_token_cannot_replace_a_usable_cache() {
+    let dir = Temp::new();
+    let provider = Provider::new();
+    provider.seed(&dir.0, 0);
+    let path = cache_path(&dir.0, "work").unwrap();
+    let mut cache = read(&dir.0);
+    let deadline = Deadline {
+        cancellation_fd: None,
+        at: Instant::now() + LOGIN_TIMEOUT,
+        cancelled: &|| false,
+    };
+    let mut token = "x".repeat(32 * 1024);
+    for admitted in [true, false] {
+        cache["id_token"] = json!(token);
+        cache["token_sha256"] = json!(hash(&token));
+        assert_eq!(publish(&path, &cache, &deadline).is_ok(), admitted);
+        assert_eq!(read(&dir.0)["id_token"].as_str().unwrap().len(), 32 * 1024);
+        token.push('x');
+    }
+    // A legacy cache can predate the publication limit.
+    fs::write(path, cache.to_string()).unwrap();
+    assert!(offline_identity(&dir.0, "work", &provider.config()).is_none());
 }
 #[test]
 fn cache_publication_obeys_the_readers_byte_limit() {

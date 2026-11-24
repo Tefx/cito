@@ -589,7 +589,7 @@ fn luminance(hex: &str) -> f64 {
 #[test]
 fn brand_svg_self_backing_and_foreground_contrast_on_both_readme_themes() {
     let _lock = serial();
-    let _f = Fixture::new(json!({}));
+    let f = Fixture::new(json!({}));
     let r = root();
     for path in [
         "site/assets/brand/cito-mark.svg",
@@ -598,11 +598,40 @@ fn brand_svg_self_backing_and_foreground_contrast_on_both_readme_themes() {
         "site/favicon.svg",
     ] {
         let svg = fs::read_to_string(r.join(path)).unwrap();
-        let backing = "0057BF";
-        assert!(svg.contains(&format!("fill=\"#{backing}\"")), "{path}");
-        for fg in ["FFFFFF", "E0F2FE"] {
-            assert!(svg.contains(fg));
-            assert!((luminance(fg) + 0.05) / (luminance(backing) + 0.05) > 4.5);
+        let (ok, out, err) = f.command(
+            "python3",
+            &[
+                "-c",
+                r#"
+import sys, xml.etree.ElementTree as ET
+svg = ET.parse(sys.stdin).getroot()
+for tag, attr in [('rect', 'fill'), ('circle', 'fill'), ('path', 'stroke')]:
+    for element in svg.iter('{http://www.w3.org/2000/svg}' + tag):
+        print(element.attrib[attr])
+"#,
+            ],
+            &svg,
+        );
+        assert!(ok, "{path}: {err}");
+        let colors: Vec<_> = out
+            .lines()
+            .map(|color| {
+                let hex = color.strip_prefix('#').unwrap();
+                assert_eq!(hex.len(), 6, "{path}: {color}");
+                luminance(hex)
+            })
+            .collect();
+        assert_eq!(
+            colors.len(),
+            4,
+            "{path}: expected backing, dot and two arcs"
+        );
+        let backing = colors[0];
+        for &fg in &colors[1..] {
+            assert!(
+                (fg.max(backing) + 0.05) / (fg.min(backing) + 0.05) > 4.5,
+                "{path}: {out}"
+            );
         }
         assert!(svg.contains("cx=\"8\" cy=\"9\" r=\"1.65\""));
         assert!(svg.contains("M 12.09 5.32 A 5.50 5.50 0 1 0 12.09 12.68"));

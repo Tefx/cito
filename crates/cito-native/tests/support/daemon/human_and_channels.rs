@@ -3,7 +3,10 @@ use super::*;
 #[test]
 fn listen_preflight_preserves_sibling_titles_and_blank_descriptions_use_defaults() {
     let _lock = serial();
-    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}));
+    let f = Fixture::new(json!({}));
+    // Two names for local:// share one device-generation fence, not two Hubs.
+    let (_, port) = f.hub();
+    fs::write(&f.config, json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}}}).to_string()).unwrap();
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
     for hub in ["local", "work"] {
@@ -389,21 +392,23 @@ fn disabled_hub_retirement_reaches_durable_agent_and_human_bindings() {
 fn oversized_committed_channel_values_get_payload_free_success_receipts() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    channel_provider(
-        &f,
-        "channel",
-        json!([{"key":"credential","scope":"hub","type":"string","required":true},{"key":"address","scope":"user","type":"string","required":true}]),
-    );
+    let mut fields = vec![json!({"key":"address","scope":"user","type":"string","required":true})];
+    let mut values = json!({"address":"room"});
+    // The saved config fits the 256 KiB hub limit, but its settings frame
+    // (including the field schemas) does not. Each field must fit 64 KiB.
+    for key in ["first", "second", "third", "fourth"] {
+        fields.push(json!({"key":key,"scope":"hub","type":"string","required":true}));
+        values[key] = json!(key.repeat((64 * 1024 - 32) / key.len()));
+    }
+    channel_provider(&f, "channel", json!(fields));
     f.recording_daemon();
-    let large = "canonical-value".repeat(21_000);
-    assert!(large.len() > 260 * 1024);
     for (op, request) in [
         ("channel_save", "large-save"),
         ("save_hub_service", "large-service"),
         ("channel_toggle", "large-toggle"),
     ] {
         let action = json!({"op":op,"hub":"local","channel_id":"channel","enabled":true,
-            "request_id":request,"values":{"credential":large,"address":"room"}});
+            "request_id":request,"values":values});
         let (status, response) = f.action(action);
         assert_eq!(status, 200, "{response}");
         wait(|| {
@@ -431,7 +436,9 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
             )
             .unwrap();
         let saved: Value = serde_json::from_str(rows[0]["config_json"].as_str().unwrap()).unwrap();
-        assert_eq!(saved["credential"], large);
+        for key in ["first", "second", "third", "fourth"] {
+            assert_eq!(saved[key], values[key]);
+        }
     }
 }
 

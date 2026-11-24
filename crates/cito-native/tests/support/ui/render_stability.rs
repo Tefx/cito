@@ -372,6 +372,8 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
         "Peer without a timestamp"
     );
     assert_eq!(cleared.directory("directory_warning_label")["hidden"], true);
+    // Start a fresh feedback window for the cell-replacement check.
+    control(&f, p, "copy_dir:personal:stable");
     send_fixture(
         &f,
         p,
@@ -438,18 +440,30 @@ fn v45_activity_copy_survives_cell_replacement_and_confirmation_stays_mounted() 
             > 0.0
     );
     // Switching away forces a peer cell to replace the activity row before it returns.
+    control(&f, p, "copy_activity_msg:stable");
     control(&f, p, "dir_mode:directory");
     send_fixture(
         &f,
         p,
         json!({"op":"directory","peers":[peer("replacement")]}),
     );
+    f.send(p, json!({"op":"test_directory_key","key":"return"}));
     control(&f, p, "dir_mode:activity");
     send_fixture(&f, p, frame);
+    let copied = inspect(&f, p);
     assert_eq!(
-        inspect(&f, p).directory("copy_activity_msg:stable")["text"],
+        copied.directory("copy_activity_msg:stable")["text"],
         "✓ Copied"
     );
+    let remaining = copied["directory_copy_remaining"]["personal:replacement"]
+        .as_f64()
+        .unwrap();
+    assert!(remaining > 0.0);
+    // The peer was copied last. After its deadline both caches should release their IDs.
+    std::thread::sleep(std::time::Duration::from_secs_f64(remaining));
+    let expired = inspect(&f, p);
+    assert_eq!(expired["directory_copy_remaining"], json!({}));
+    assert_eq!(expired["activity_copy_remaining"], json!({}));
 }
 
 #[test]

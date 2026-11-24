@@ -131,7 +131,7 @@ fn bounded_receipts_and_key_pages_handle_legacy_rows_and_escaped_ids() {
     let dir = temp();
     let e = test_engine(&dir);
     e.pause_worker();
-    let id = "\u{0001}".repeat(1024);
+    let id = "\u{0001}".repeat(128);
     let publish = |subject, id: &str, text| {
         e.rpc(
             "js_publish",
@@ -205,6 +205,38 @@ fn bounded_receipts_and_key_pages_handle_legacy_rows_and_escaped_ids() {
     for page in [first, last] {
         assert!(json!({"ok":true,"result":page}).to_string().len() <= 8 * 1024 * 1024);
     }
+}
+
+#[test]
+fn signal_references_share_a_raw_utf8_byte_budget() {
+    let dir = temp();
+    let e = test_engine(&dir);
+    let id = "é".repeat(64);
+    let publish = |data: Value| {
+        e.rpc(
+            "js_publish",
+            &json!({"subject":"cito.signal.target","data":data}),
+            None,
+        )
+    };
+    for field in ["signal_id", "in_reply_to"] {
+        for invalid in [json!(""), json!(format!("{id}x")), json!(42)] {
+            assert!(publish(json!({field:invalid}))
+                .unwrap_err()
+                .starts_with("INVALID_INPUT:"));
+        }
+    }
+    let added = publish(json!({"signal_id":id,"in_reply_to":id})).unwrap();
+    assert_eq!(added["seq"], 1);
+    let read = e
+        .rpc(
+            "stream_get_message",
+            &json!({"stream":SIGNALS,"seq":1}),
+            None,
+        )
+        .unwrap();
+    let data: Value = serde_json::from_slice(&B64.decode(s(&read, "data_b64")).unwrap()).unwrap();
+    assert_eq!(data, json!({"signal_id":id,"in_reply_to":id}));
 }
 
 #[test]
@@ -311,6 +343,56 @@ fn current_reply_keys_reject_conflicting_payloads() {
         e.rpc("send_reply_from_human", &req, Some(&owner)).unwrap()["seq"],
         first["seq"]
     );
+}
+
+#[test]
+fn human_replies_resolve_stored_ids_before_hub_qualifiers() {
+    let dir = temp();
+    let e = test_engine(&dir);
+    let owner = principal("alice");
+    let human = listener_id("none#alice", "human", "default");
+    put(&e, "target", "none#bob", "workspace");
+    for id in ["1", "event:1", "thread:source"] {
+        send(&e, &human, id);
+    }
+    for (field, supplied, expected) in [
+        ("in_reply_to", "work:thread:source", "thread:source"),
+        ("in_reply_to", "event:1", "event:1"),
+        ("in_reply_to", "work:thread:missing", "thread:missing"),
+        ("in_reply_to", "plain-missing", "plain-missing"),
+        ("signal_id", "work:thread:missing", "thread:missing"),
+        ("signal_id", "event:1", "event:1"),
+        ("signal_id", "Not-a-hub:1", "Not-a-hub:1"),
+    ] {
+        let reply = e
+            .rpc(
+                "send_reply_from_human",
+                &json!({"to":"target","message":"Approved",field:supplied}),
+                Some(&owner),
+            )
+            .unwrap();
+        let row = e
+            .rpc(
+                "stream_get_message",
+                &json!({"stream":SIGNALS,"seq":reply["seq"]}),
+                None,
+            )
+            .unwrap();
+        let data: Value =
+            serde_json::from_slice(&B64.decode(s(&row, "data_b64")).unwrap()).unwrap();
+        assert_eq!(data["in_reply_to"], expected);
+    }
+    let receipts = e
+        .rpc(
+            "stream_get_message",
+            &json!({"stream":SIGNALS,"seqs":[1,2,3]}),
+            None,
+        )
+        .unwrap();
+    assert!(receipts["messages"][0]["acked_at_ms"].is_null());
+    for row in &receipts["messages"].as_array().unwrap()[1..] {
+        assert!(row["acked_at_ms"].is_number());
+    }
 }
 
 #[test]
@@ -743,7 +825,7 @@ fn fresh_device_adopts_retained_human_identity_and_verified_alias() {
                     &local, &client, "fresh", &args, &caller,
                 )
             } else {
-                super::super::registration::register_listener(
+                super::super::registration::register_endpoint(
                     &local, &client, "fresh", &args, &caller,
                 )
             }
@@ -1416,47 +1498,42 @@ for line in sys.stdin:
     }));
     // Always release the child before joining, including a failed gate assertion.
     std::fs::write(plugin_dir.join("release"), "").unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let paired = pairing.join().unwrap();
-        let gate = gate_result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        assert_eq!(gate["credential"], "A");
-        assert_eq!(gate["following"]["op"], "shutdown");
-        let paired = paired.unwrap();
-        assert_eq!(paired["committed"], true);
-        assert!(paired["code"].is_string());
-        // Synchronize with the restarted process after it has received B.
-        assert_eq!(
-            e.rpc(
-                "human_channels_test",
-                &json!({"plugin_id":"fixture"}),
-                Some(&caller)
-            )
-            .unwrap()["ok"],
-            true
-        );
-        e.inner
-            .db
-            .transaction(|c| {
-                let (cfg, state) = service(c, "fixture")?;
-                assert_eq!(cfg["credential"], "B");
-                assert!(state.get("cursor").is_none(), "{state}");
-                assert!(state.get("reply_floor").is_none(), "{state}");
-                assert!(state.get("poll_error").is_none(), "{state}");
-                assert_eq!(
-                    c.query(
-                        "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
-                        &[]
-                    )?
-                    .len(),
-                    1
-                );
-                Ok(())
-            })
-            .unwrap();
-    }));
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    let paired = pairing.join().unwrap();
+    let gate = gate_result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    assert_eq!(gate["credential"], "A");
+    assert_eq!(gate["following"]["op"], "shutdown");
+    let paired = paired.unwrap();
+    assert_eq!(paired["committed"], true);
+    assert!(paired["code"].is_string());
+    // Synchronize with the restarted process after it has received B.
+    assert_eq!(
+        e.rpc(
+            "human_channels_test",
+            &json!({"plugin_id":"fixture"}),
+            Some(&caller)
+        )
+        .unwrap()["ok"],
+        true
+    );
+    e.inner
+        .db
+        .transaction(|c| {
+            let (cfg, state) = service(c, "fixture")?;
+            assert_eq!(cfg["credential"], "B");
+            assert!(state.get("cursor").is_none(), "{state}");
+            assert!(state.get("reply_floor").is_none(), "{state}");
+            assert!(state.get("poll_error").is_none(), "{state}");
+            assert_eq!(
+                c.query(
+                    "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+                    &[]
+                )?
+                .len(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1844,6 +1921,52 @@ fn occupied_human_keys_require_the_owner_and_the_complete_human_tuple() {
 }
 
 #[test]
+fn stream_and_consumer_configs_fit_their_read_responses() {
+    let dir = temp();
+    let e = test_engine(&dir);
+    let name = "é".repeat(128);
+    let long = format!("{name}x");
+    let subject = format!("cito.signal.{}", "a".repeat(256 - "cito.signal.".len()));
+    let add = |config: Value| e.rpc("stream_add", &json!({"config":config}), None);
+    let update = |stream: &str, patch: Value| {
+        e.rpc(
+            "stream_update",
+            &json!({"stream":stream,"patch":patch}),
+            None,
+        )
+    };
+    let consumer = |config: Value| e.rpc("consumer_add", &json!({"config":config}), None);
+    for result in [
+        add(json!({"name":long})),
+        update(&long, json!({})),
+        add(json!({"name":name,"subjects":[subject,long]})),
+        update(&name, json!({"subjects":[long]})),
+        add(json!({"name":name,"extra":"x".repeat(64*1024)})),
+        consumer(json!({"name":long})),
+        consumer(json!({"durable_name":long})),
+        consumer(json!({"filter_subject":format!("{subject}a")})),
+    ] {
+        assert!(result.unwrap_err().starts_with("INVALID_INPUT:"));
+    }
+    let cfg = add(json!({"name":name,"subjects":[subject],"pad":""})).unwrap()["config"].clone();
+    let pad = "a".repeat(64 * 1024 - cfg.to_string().len());
+    let stored = update(&name, json!({"pad":pad})).unwrap()["config"].clone();
+    assert_eq!(stored.to_string().len(), 64 * 1024);
+    assert!(update(&name, json!({"pad":format!("{pad}a")}))
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    assert_eq!(
+        e.rpc("stream_info", &json!({"stream":name}), None).unwrap()["config"],
+        stored
+    );
+    let mut cfg = json!({"durable_name":name,"filter_subject":subject,"pad":""});
+    cfg["pad"] = json!("x".repeat(64 * 1024 - cfg.to_string().len()));
+    assert_eq!(consumer(cfg.clone()).unwrap()["config"], cfg);
+    cfg["pad"] = json!(format!("{}x", s(&cfg, "pad")));
+    assert!(consumer(cfg).unwrap_err().starts_with("INVALID_INPUT:"));
+}
+
+#[test]
 fn consumer_operations_validate_requested_and_persisted_streams_and_limit_id_batches() {
     let dir = temp();
     let hub = test_engine(&dir);
@@ -1901,6 +2024,35 @@ fn consumer_operations_validate_requested_and_persisted_streams_and_limit_id_bat
             .unwrap_err()
             .starts_with("INVALID_INPUT:"));
     }
+}
+
+#[test]
+fn consumer_add_defers_a_large_first_signal_when_config_uses_its_headroom() {
+    let dir = temp();
+    let e = test_engine(&dir);
+    put(&e, "target", "p", "workspace");
+    let data = encoded(&json!({"message":"x".repeat(6 * 1024 * 1024 - 8192)}));
+    let seq = e
+        .rpc(
+            "js_publish",
+            &json!({"subject":"cito.signal.target", "data_b64":data}),
+            None,
+        )
+        .unwrap()["seq"]
+        .clone();
+    let config =
+        json!({"name":"wide","filter_subject":"cito.signal.target","note":"x".repeat(60 * 1024)});
+    let added = e
+        .rpc("consumer_add", &json!({"config":config}), None)
+        .unwrap();
+    assert_eq!(added["config"], config);
+    assert_eq!(added["backlog"], json!([]));
+    let next = e
+        .rpc("consumer_next", &json!({"name":"wide"}), None)
+        .unwrap();
+    assert_eq!(next["seq"], seq);
+    assert_eq!(next["data_b64"], data);
+    assert!(json!({"ok":true,"result":next}).to_string().len() < MAX_RPC_BYTES);
 }
 
 #[test]
@@ -2217,6 +2369,106 @@ fn fixture(dir: &Path) -> PathBuf {
     std::fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
     root
 }
+#[test]
+fn channel_config_limits_apply_to_fields_and_merged_serialized_values() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let path = root.join("fixture/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for scope in ["hub", "user"] {
+        for suffix in ["first", "second"] {
+            manifest["fields"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"key":format!("{scope}_{suffix}"),"scope":scope,"type":"string"}));
+        }
+    }
+    std::fs::write(path, manifest.to_string()).unwrap();
+    let e = test_engine(&dir);
+    e.pause_worker();
+    e.set_plugin_roots(&[root]).unwrap();
+    for scope in ["hub", "user"] {
+        let first = format!("{scope}_first");
+        let second = format!("{scope}_second");
+        let configure = |key: &str, value: &str| {
+            e.rpc(
+                "human_channels_configure",
+                &json!({"plugin_id":"fixture",format!("{scope}_config"):{key:value}}),
+                None,
+            )
+        };
+        let field_max = "é".repeat(32 * 1024);
+        configure(&first, &field_max).unwrap();
+        assert!(configure(&first, &format!("{field_max}x"))
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+        let remaining = 256 * 1024 - json!({&first:field_max,&second:""}).to_string().len();
+        let last = "\u{0001}".repeat(remaining / 6) + &"x".repeat(remaining % 6);
+        configure(&second, &last).unwrap();
+        assert!(configure(&second, &format!("{last}x"))
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+        if scope == "user" {
+            let process = e.ensure_process(&e.plugin("fixture").unwrap()).unwrap();
+            e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms) VALUES('fixture','p','pending',1,'in_flight',?)", &[json!(now_ms())]).unwrap();
+            let err = e.rpc("human_channels_configure", &json!({"plugin_id":"fixture","reset_hub":true,"reset_user":false,"user_config":{&second:format!("{last}x")}}), None).unwrap_err();
+            assert!(err.contains("256 KiB"), "{err}");
+            assert!(process.alive());
+            assert_eq!(
+                e.inner
+                    .db
+                    .query(
+                        "SELECT status FROM hub_channel_deliveries WHERE signal_id='pending'",
+                        &[]
+                    )
+                    .unwrap()[0]["status"],
+                "in_flight"
+            );
+        }
+        let list = e.rpc("human_channels_list", &json!({}), None).unwrap();
+        let fields = list["channels"][0]["fields"].as_array().unwrap();
+        for (key, val) in [(&first, &field_max), (&second, &last)] {
+            assert_eq!(
+                fields.iter().find(|f| s(f, "key") == key).unwrap()["value"].as_str(),
+                Some(val.as_str())
+            );
+        }
+    }
+}
+
+#[test]
+fn channel_inventory_bounds_the_complete_serialized_response() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(root.join("fixture/plugin.json")).unwrap()).unwrap();
+    let e = test_engine(&dir);
+    e.pause_worker();
+    let caller = principal("alice");
+    let cfg = channel_config_json(&json!({"address":"\u{0001}".repeat(43000)})).unwrap();
+    for i in 0..33 {
+        let id = format!("channel-{i}");
+        manifest["id"] = json!(id);
+        let path = root.join(&id);
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("plugin.json"), manifest.to_string()).unwrap();
+        e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,?,'alice',?)", &[caller["principal_id"].clone(), json!(id), json!(cfg)]).unwrap();
+    }
+    e.set_plugin_roots(&[root]).unwrap();
+    let list = || e.rpc("human_channels_list", &json!({}), Some(&caller));
+    assert!(list().unwrap_err().contains("response frame budget"));
+    e.inner
+        .db
+        .execute(
+            "DELETE FROM hub_human_channels WHERE plugin_id='channel-0'",
+            &[],
+        )
+        .unwrap();
+    let result = list().unwrap();
+    assert_eq!(result["channels"].as_array().unwrap().len(), 34);
+    assert!(json!({"ok":true,"result":result}).to_string().len() < MAX_RPC_BYTES);
+}
+
 fn wait_for(mut f: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(4);
     while !f() {
@@ -2232,35 +2484,34 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
     let dir = temp();
     let root = fixture(&dir);
     let e = test_engine(&dir);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Drive exactly one tick; a background retry must not satisfy this test.
-        e.pause_worker();
+    // Drive exactly one tick; a background retry must not satisfy this test.
+    e.pause_worker();
 
-        let healthy = root.join("b");
-        std::fs::rename(root.join("fixture"), &healthy).unwrap();
-        let mut manifest: Value =
-            serde_json::from_str(&std::fs::read_to_string(healthy.join("plugin.json")).unwrap())
-                .unwrap();
-        manifest["id"] = json!("b");
-        std::fs::write(healthy.join("plugin.json"), manifest.to_string()).unwrap();
-        let broken = root.join("a");
-        std::fs::create_dir_all(&broken).unwrap();
-        manifest["id"] = json!("a");
-        manifest["command"] = json!([dir.join("missing-executable")]);
-        std::fs::write(broken.join("plugin.json"), manifest.to_string()).unwrap();
-        e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
-        assert_eq!(
-            e.inner
-                .plugins
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a", "b"]
-        );
-        let pid = "none#alice";
-        e.inner.db.transaction(|c| {
+    let healthy = root.join("b");
+    std::fs::rename(root.join("fixture"), &healthy).unwrap();
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(healthy.join("plugin.json")).unwrap())
+            .unwrap();
+    manifest["id"] = json!("b");
+    std::fs::write(healthy.join("plugin.json"), manifest.to_string()).unwrap();
+    let broken = root.join("a");
+    std::fs::create_dir_all(&broken).unwrap();
+    manifest["id"] = json!("a");
+    manifest["command"] = json!([dir.join("missing-executable")]);
+    std::fs::write(broken.join("plugin.json"), manifest.to_string()).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(
+        e.inner
+            .plugins
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    let pid = "none#alice";
+    e.inner.db.transaction(|c| {
             for id in ["a", "b"] {
                 save_service(c, id, &json!({"credential":"test-only"}))?;
                 c.execute(
@@ -2270,38 +2521,34 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
             }
             Ok(())
         }).unwrap();
-        let human = listener_id(pid, "human", "default");
-        send(&e, &human, "sibling-notification");
-        assert!(e.inner.processes.lock().unwrap().is_empty());
-        assert!(e.tick().unwrap_err().starts_with("PLUGIN_EXEC_FAILED: a:"));
-        wait_for(|| {
-            !e.inner.db.query(
+    let human = listener_id(pid, "human", "default");
+    send(&e, &human, "sibling-notification");
+    assert!(e.inner.processes.lock().unwrap().is_empty());
+    assert!(e.tick().unwrap_err().starts_with("PLUGIN_EXEC_FAILED: a:"));
+    wait_for(|| {
+        !e.inner.db.query(
                 "SELECT 1 AS n FROM hub_channel_deliveries WHERE plugin_id='b' AND signal_id='sibling-notification' AND status='delivered'",
                 &[],
             ).unwrap().is_empty()
-        });
-        let frames: Vec<Value> = std::fs::read_to_string(healthy.join("frames.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(
-            frames.iter().map(|f| s(f, "op")).collect::<Vec<_>>(),
-            vec!["configure", "deliver"]
-        );
-        assert_eq!(frames[0]["hub_config"]["credential"], "test-only");
-        assert_eq!(
-            frames[0]["bindings"],
-            json!([{"principal_id":pid,"user":"alice","config":{"address":"room"}}])
-        );
-        assert_eq!(frames[1]["signal"]["signal_id"], "sibling-notification");
-        assert_eq!(frames[1]["signal"]["to"]["listener_id"], human);
-        assert_eq!(frames[1]["signal"]["message"], "hello");
-        assert_eq!(frames[1]["config"]["address"], "room");
-    }));
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    });
+    let frames: Vec<Value> = std::fs::read_to_string(healthy.join("frames.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        frames.iter().map(|f| s(f, "op")).collect::<Vec<_>>(),
+        vec!["configure", "deliver"]
+    );
+    assert_eq!(frames[0]["hub_config"]["credential"], "test-only");
+    assert_eq!(
+        frames[0]["bindings"],
+        json!([{"principal_id":pid,"user":"alice","config":{"address":"room"}}])
+    );
+    assert_eq!(frames[1]["signal"]["signal_id"], "sibling-notification");
+    assert_eq!(frames[1]["signal"]["to"]["listener_id"], human);
+    assert_eq!(frames[1]["signal"]["message"], "hello");
+    assert_eq!(frames[1]["config"]["address"], "room");
 }
 
 #[test]
@@ -2709,74 +2956,69 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
     let dir = temp();
     let root = fixture(&dir);
     let e = test_engine(&dir);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
-        e.rpc(
-            "human_channels_configure",
-            &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"}}),
-            None,
-        )
-        .unwrap();
-        let owner = principal("alice");
-        e.rpc(
-            "human_channels_configure",
-            &json!({"plugin_id":"fixture","enabled":true,"user_config":{"address":"reply-test"}}),
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    e.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"}}),
+        None,
+    )
+    .unwrap();
+    let owner = principal("alice");
+    e.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","enabled":true,"user_config":{"address":"reply-test"}}),
+        Some(&owner),
+    )
+    .unwrap();
+    let human = listener_id("none#alice", "human", "default");
+    put(&e, "target", "none#bob", "workspace");
+    send(&e, &human, "source");
+    wait_for(|| {
+        !e.inner.db.query("SELECT 1 AS n FROM hub_channel_deliveries WHERE signal_id='source' AND status='delivered'", &[]).unwrap().is_empty()
+    });
+    let reply = e
+        .rpc(
+            "send_reply_from_human",
+            &json!({"to":"target","message":"Approved","signal_id":"work:source"}),
             Some(&owner),
         )
         .unwrap();
-        let human = listener_id("none#alice", "human", "default");
-        put(&e, "target", "none#bob", "workspace");
-        send(&e, &human, "source");
-        wait_for(|| {
-            !e.inner.db.query("SELECT 1 AS n FROM hub_channel_deliveries WHERE signal_id='source' AND status='delivered'", &[]).unwrap().is_empty()
-        });
-        let reply = e
-            .rpc(
-                "send_reply_from_human",
-                &json!({"to":"target","message":"Approved","signal_id":"work:source"}),
-                Some(&owner),
-            )
-            .unwrap();
-        assert_eq!(reply["ok"], true);
-        wait_for(|| {
-            std::fs::read_to_string(root.join("fixture/frames.jsonl"))
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-                .any(|f| f["op"] == "on_acked" && f["signal_ids"] == json!(["source"]))
-        });
-        assert!(e
-            .inner
-            .db
-            .query(
-                "SELECT acked_at_ms FROM hub_signals WHERE signal_id='source'",
-                &[]
-            )
-            .unwrap()[0]["acked_at_ms"]
-            .is_number());
-        let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
-        let ack = frames
+    assert_eq!(reply["ok"], true);
+    wait_for(|| {
+        std::fs::read_to_string(root.join("fixture/frames.jsonl"))
+            .unwrap_or_default()
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|f| f["op"] == "on_acked" && f["signal_ids"] == json!(["source"]))
-            .unwrap();
-        assert_eq!(ack["principal_id"], "none#alice");
-        let mut external = ack["external_msg_ids"].as_array().unwrap().clone();
-        external.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-        assert_eq!(external, vec![json!("source-1"), json!("source-2")]);
-        let stored = e
-            .inner
-            .db
-            .query(
-                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",
-                &[reply["signal_id"].clone()],
-            )
-            .unwrap();
-        assert_eq!(parse(&stored[0], "data")["in_reply_to"], "source");
-    }));
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+            .any(|f| f["op"] == "on_acked" && f["signal_ids"] == json!(["source"]))
+    });
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id='source'",
+            &[]
+        )
+        .unwrap()[0]["acked_at_ms"]
+        .is_number());
+    let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
+    let ack = frames
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|f| f["op"] == "on_acked" && f["signal_ids"] == json!(["source"]))
+        .unwrap();
+    assert_eq!(ack["principal_id"], "none#alice");
+    let mut external = ack["external_msg_ids"].as_array().unwrap().clone();
+    external.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    assert_eq!(external, vec![json!("source-1"), json!("source-2")]);
+    let stored = e
+        .inner
+        .db
+        .query(
+            "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",
+            &[reply["signal_id"].clone()],
+        )
+        .unwrap();
+    assert_eq!(parse(&stored[0], "data")["in_reply_to"], "source");
 }
 #[test]
 fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure() {

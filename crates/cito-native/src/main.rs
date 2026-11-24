@@ -134,7 +134,7 @@ fn read_stdio_line(pending: &mut Vec<u8>, wake_fd: i32) -> Result<Option<String>
         pending.extend_from_slice(&bytes[..count as usize]);
     }
 }
-fn daemon_rpc_response(body: &str, status: u16, id: Option<&Value>) -> Result<Value, String> {
+fn daemon_rpc_response(body: &str, status: u16, id: &Value) -> Result<Value, String> {
     let body = extract_jsonrpc_from_http_body(body)
         .ok_or_else(|| format!("Invalid daemon response (HTTP {status})"))?;
     if body.get("jsonrpc").is_none() {
@@ -154,7 +154,7 @@ mod rpc_tests {
     #[test]
     fn http_failures_preserve_jsonrpc_request_ids() {
         for id in [json!(37), json!("request"), Value::Null] {
-            let rpc = daemon_rpc_response(r#"{"error":"Access denied"}"#, 403, Some(&id)).unwrap();
+            let rpc = daemon_rpc_response(r#"{"error":"Access denied"}"#, 403, &id).unwrap();
             assert_eq!(rpc["jsonrpc"], "2.0");
             assert_eq!(rpc["id"], id);
             assert_eq!(rpc["error"]["code"], -32603);
@@ -162,7 +162,7 @@ mod rpc_tests {
         }
         let original = json!({"jsonrpc":"2.0","id":"original","result":{}});
         assert_eq!(
-            daemon_rpc_response(&original.to_string(), 200, None).unwrap(),
+            daemon_rpc_response(&original.to_string(), 200, &Value::Null).unwrap(),
             original
         );
     }
@@ -354,7 +354,6 @@ fn run_mcp_stdio() -> Result<(), String> {
                 continue;
             }
         };
-        let id = req.get("id").cloned();
         if req["method"] == "tools/call" {
             if !req["params"].is_object() {
                 req["params"] = json!({})
@@ -366,24 +365,23 @@ fn run_mcp_stdio() -> Result<(), String> {
         }
         // Probe each subsequent request before forwarding. A failed mutating
         // request is reported once and is never replayed after uncertain delivery.
-        let result = load_native_config()
-            .and_then(|(current, _)| {
-                if current.state_dir != config.state_dir {
-                    return Err("MCP state directory changed; restart the client".into());
-                }
-                ensure_daemon(&current)?;
-                if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Err("MCP transport stopped".into());
-                }
-                http_post_mcp(
-                    current.daemon_port,
-                    &req.to_string(),
-                    Duration::from_secs(60),
-                )
-            })
-            .and_then(|r| daemon_rpc_response(&r.body, r.status, id.as_ref()));
-        if let Some(id) = id {
-            match result {
+        let result = load_native_config().and_then(|(current, _)| {
+            if current.state_dir != config.state_dir {
+                return Err("MCP state directory changed; restart the client".into());
+            }
+            ensure_daemon(&current)?;
+            if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("MCP transport stopped".into());
+            }
+            http_post_mcp(
+                current.daemon_port,
+                &req.to_string(),
+                Duration::from_secs(60),
+            )
+        });
+        // Notifications are forwarded too; only an absent id suppresses stdout.
+        if let Some(id) = req.get("id") {
+            match result.and_then(|r| daemon_rpc_response(&r.body, r.status, id)) {
                 Ok(mut rpc) => {
                     if rpc["result"].get("protocolVersion").is_some() {
                         if !rpc["result"]["capabilities"].is_object() {

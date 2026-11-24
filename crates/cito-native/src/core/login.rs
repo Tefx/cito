@@ -282,7 +282,10 @@ fn read_cache(path: &Path, settings: &Settings) -> std::io::Result<Option<Value>
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let Some(token) = cache["id_token"].as_str().filter(|s| !s.is_empty()) else {
+    let Some(token) = cache["id_token"]
+        .as_str()
+        .filter(|s| super::config::valid_hub_token(s))
+    else {
         return Ok(None);
     };
     if cache["issuer"] != settings.issuer
@@ -370,6 +373,12 @@ fn response_json(response: ureq::Response, deadline: &Deadline<'_>) -> Result<Va
 }
 fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), String> {
     deadline.remaining()?;
+    if !cache["id_token"]
+        .as_str()
+        .is_some_and(super::config::valid_hub_token)
+    {
+        return Err("UNAUTHORIZED: Invalid OIDC bearer token".into());
+    }
     let data = cache.to_string();
     if data.len() as u64 > MAX_JSON {
         return Err("AUTH_UNAVAILABLE: OIDC token cache exceeds 1 MiB".into());

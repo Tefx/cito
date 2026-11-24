@@ -192,8 +192,16 @@ fn record_effect(
         let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
         let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
         effects.push(json!({"pending":hash}));
-        // Only recent unmatched queue messages can be correlated with a later rollout.
-        effects.drain(..effects.len().saturating_sub(256));
+        let overflow = effects.len().saturating_sub(256);
+        if overflow > 0 {
+            // Reserve the evicted prefix before matching any retained (possibly
+            // identical) hashes. Stay conservative until the retained tail is seen.
+            ledger["unscanned_prefix"] = json!(ledger["unscanned_prefix"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(overflow as u64));
+            effects.drain(..overflow);
+        }
         ledger["effects"] = json!(effects);
     }
     if let Some((revision, at)) = activity {
@@ -372,8 +380,14 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                                 true
                             }
                         });
-                    let effect = replayed
-                        || ledger["effects"]
+                    let prefix = ledger["unscanned_prefix"].as_u64();
+                    let effect = if replayed {
+                        true
+                    } else if let Some(n) = prefix.filter(|&n| n > 0) {
+                        ledger["unscanned_prefix"] = json!(n - 1);
+                        true
+                    } else {
+                        let matched = ledger["effects"]
                             .as_array_mut()
                             .and_then(|effects| {
                                 let index = effects.iter().position(|value| value == &hash)?;
@@ -381,6 +395,15 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                                 Some(())
                             })
                             .is_some();
+                        if prefix.is_some()
+                            && ledger["effects"].as_array().is_some_and(Vec::is_empty)
+                        {
+                            ledger
+                                .as_object_mut()
+                                .map(|fields| fields.remove("unscanned_prefix"));
+                        }
+                        matched || prefix.is_some()
+                    };
                     if effect {
                         *consumed.entry(fingerprint()).or_default() += 1;
                         saw_effect = true;

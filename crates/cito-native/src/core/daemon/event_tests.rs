@@ -123,6 +123,23 @@ fn session_actions_validate_selectors_titles_and_retained_sessions() -> Result<(
             .action(&json!({"op":op,"harness":"human","session_id":"other"}))
             .is_err());
     }
+    for (harness, session) in [("Fixture!", "new"), ("agent", " \t"), ("", "new")] {
+        let action = json!({"op":"unlisten_session","harness":harness,"session_id":session});
+        assert!(f
+            .service
+            .action(&action)
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+        assert!(f
+            .service
+            .state
+            .db
+            .query(
+                "SELECT 1 FROM local_listeners WHERE harness=? AND session_id=?",
+                &[json!(harness), json!(session)]
+            )?
+            .is_empty());
+    }
     assert!(f
         .service
         .action(
@@ -380,16 +397,28 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
         .unwrap();
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     }
-    for hub in ["local", "work"] {
-        for sid in ["shared", "closed"] {
-            super::super::registration::register_listener(
-                &f.service.state,
-                f.service.slot(hub)?,
-                &f.service.host_id,
-                &json!({"about":"Work"}),
-                &json!({"harness":"agent","session_id":sid,"endpoint_pid":std::process::id(),"process_identity":{"command":"agent","started_at":"original"},"cwd":"/workspace","title":"Work"}),
-            )?;
+    // One PID may expose different sessions across hubs, but registration
+    // retires its previous session on the same hub. Keep both groups live.
+    f.service.mutate_config(|raw| {
+        for hub in ["shared-peer", "closed-peer"] {
+            raw["hubs"][hub] = json!({"url":"local://","autoListen":false});
         }
+        Ok(())
+    })?;
+    f.service.reload_slots()?;
+    for (hub, sid) in [
+        ("local", "shared"),
+        ("shared-peer", "shared"),
+        ("work", "closed"),
+        ("closed-peer", "closed"),
+    ] {
+        super::super::registration::register_endpoint(
+            &f.service.state,
+            f.service.slot(hub)?,
+            &f.service.host_id,
+            &json!({"about":"Work"}),
+            &json!({"harness":"agent","session_id":sid,"endpoint_pid":std::process::id(),"process_identity":{"command":"agent","started_at":"original"},"cwd":"/workspace","title":"Work"}),
+        )?;
     }
     f.service.schedule_probes()?;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -400,7 +429,7 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
     let previous = f.service.state.db.query("SELECT * FROM local_listeners WHERE hub='work' AND harness='agent' AND session_id='closed'", &[])?[0].clone();
     f.service
         .retire_id("work", string(&previous, "listener_id"), "hard_exit")?;
-    super::super::registration::register_listener(
+    super::super::registration::register_endpoint(
         &f.service.state,
         f.service.slot("work")?,
         &f.service.host_id,
@@ -768,8 +797,6 @@ fn receiver_liveness_uses_authority_without_a_poll_worker() -> Result<(), String
 fn open_settings_emits_inventory_changes_and_skips_identical_completions() -> Result<(), String> {
     let mut f = Fixture::new()?;
     let mailbox = Arc::new(UiMailbox::default());
-    let slot = f.service.slot("work")?.clone();
-    let inventory = f.service.channel_inventory(&slot);
     // Startup enrolls Human nodes after starting event readers. Settle their independent
     // revision changes before testing an inventory-only change to the Settings frame.
     for slot in f.service.slots.values() {
@@ -778,21 +805,41 @@ fn open_settings_emits_inventory_changes_and_skips_identical_completions() -> Re
     for event in f.service.events.drain(..) {
         event.join().map_err(|_| "Hub event reader panicked")?;
     }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let slot = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap())}),
+        "alice",
+        None,
+    );
+    let ok = json!({"ok":true,"result":{"channels":[]}});
+    let server = super::tests::serve_responses(
+        listener,
+        [
+            (200, ok.clone()),
+            (200, ok.clone()),
+            (503, json!({"message":"Service unavailable"})),
+            (200, ok),
+        ],
+    );
+    f.service.slots.insert("work".into(), slot.clone());
+    let inventory = f.service.channel_inventory(&slot);
+    inventory.refresh(&slot, 0)?;
     f.service.active_settings_hub = Some("work".into());
     f.service.ui = Some(mailbox.clone());
     f.service.push_ui();
     assert!(mailbox.next().is_some());
-    inventory.cached.lock().unwrap().completed_gen += 1;
+    inventory.refresh(&slot, 1)?;
     f.service.push_ui();
     assert!(mailbox.pending.lock().unwrap().is_empty());
-    inventory.cached.lock().unwrap().value =
-        json!({"status":"error","detail":"Service unavailable"});
+    assert!(inventory.refresh(&slot, 2).is_err());
     f.service.push_ui();
     assert!(!mailbox.pending.lock().unwrap().is_empty());
     let frame: Value = serde_json::from_slice(&mailbox.next().unwrap()).unwrap();
     assert_eq!(frame["op"], "state");
     mailbox.close();
-    inventory.cached.lock().unwrap().value = json!({"channels":[]});
+    inventory.refresh(&slot, 3)?;
+    server.join().unwrap()?;
     let last = f.service.last_ui_revision.lock().unwrap().clone();
     f.service.push_ui();
     assert_eq!(*f.service.last_ui_revision.lock().unwrap(), last);

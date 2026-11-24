@@ -6,7 +6,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 /// Stopping the listener never closes its shared engine. The daemon closes the engine last.
 pub struct HubServer {
     pub address: SocketAddr,
-    pub(in crate::core) auth: Arc<HubAuth>,
+    listener: std::sync::Weak<TcpListener>,
     running: Arc<AtomicBool>,
     pub(super) wake: Arc<crate::support::WakePipe>,
     sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
@@ -70,17 +70,60 @@ impl HubEngine {
         auth: impl Into<Arc<HubAuth>>,
     ) -> Result<HubServer, String> {
         let listener = TcpListener::bind((bind, port)).map_err(|e| e.to_string())?;
+        Ok(PreparedHubServer::new(Arc::new(listener), auth.into())?.start(self))
+    }
+}
+
+/// Own the bound port and wake pipe before committing a configuration change.
+/// No connections are served with candidate credentials until `start`.
+pub(in crate::core) struct PreparedHubServer {
+    listener: Arc<TcpListener>,
+    pub(in crate::core) address: SocketAddr,
+    auth: Arc<HubAuth>,
+    wake: Arc<crate::support::WakePipe>,
+}
+impl PreparedHubServer {
+    pub(in crate::core) fn prepare(
+        address: SocketAddr,
+        auth: Arc<HubAuth>,
+        current: Option<&HubServer>,
+    ) -> Result<Self, String> {
+        let listener = match current
+            .filter(|s| s.address == address && s.is_running())
+            .and_then(|s| s.listener.upgrade())
+        {
+            Some(listener) => listener,
+            None => Arc::new(
+                TcpListener::bind(address)
+                    .map_err(|e| format!("INVALID_INPUT: Cannot bind host hub listener: {e}"))?,
+            ),
+        };
+        Self::new(listener, auth)
+    }
+    fn new(listener: Arc<TcpListener>, auth: Arc<HubAuth>) -> Result<Self, String> {
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        Ok(Self {
+            listener,
+            address,
+            auth,
+            wake: Arc::new(crate::support::WakePipe::new()?),
+        })
+    }
+    pub(in crate::core) fn start(self, engine: &HubEngine) -> HubServer {
+        let Self {
+            listener,
+            address,
+            auth,
+            wake,
+        } = self;
+        let bound = Arc::downgrade(&listener);
         let running = Arc::new(AtomicBool::new(true));
-        let wake = Arc::new(crate::support::WakePipe::new()?);
         let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
-        let auth = auth.into();
-        let (engine, lifetime, ss, worker_auth) = (
-            self.clone(),
+        let (engine, lifetime, ss) = (
+            engine.clone(),
             ListenerLifetime(running.clone(), wake.clone()),
             sockets.clone(),
-            auth.clone(),
         );
         let handle = thread::spawn(move || {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
@@ -131,12 +174,8 @@ impl HubEngine {
                                 list.insert(socket_id, clone);
                             }
                         }
-                        let (e, a, s, connections) = (
-                            engine.clone(),
-                            worker_auth.clone(),
-                            lifetime.0.clone(),
-                            ss.clone(),
-                        );
+                        let (e, a, s, connections) =
+                            (engine.clone(), auth.clone(), lifetime.0.clone(), ss.clone());
                         let shutdown_wake = lifetime.1.clone();
                         workers.push(thread::spawn(move || {
                             handle_http(stream, e, a, s, address, shutdown_wake);
@@ -162,14 +201,14 @@ impl HubEngine {
                 let _ = worker.join();
             }
         });
-        Ok(HubServer {
+        HubServer {
             address,
-            auth,
+            listener: bound,
             running,
             wake,
             sockets,
             thread: Mutex::new(Some(handle)),
-        })
+        }
     }
 }
 fn http_json(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {

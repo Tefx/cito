@@ -3,9 +3,7 @@ use super::{
     copy_dir_recursive, ensure_cli_shims_native, publish_directory, resolve_app_bundle_path,
     resolve_bundled_plugins_root, resolve_package_root, Candidate,
 };
-use crate::plugins::{
-    is_staged_plugins_root, resolve_builtin_plugins_dir, LoadedPlugins, CITO_VERSION,
-};
+use crate::plugins::{resolve_builtin_plugins_dir, same_plugin_root, LoadedPlugins, CITO_VERSION};
 use std::os::unix::fs::PermissionsExt;
 use std::{
     env, fs,
@@ -168,7 +166,10 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
     }
 
     if let Some(mut plugins_src) = resolve_builtin_plugins_dir() {
-        if is_staged_plugins_root(&plugins_src, state_dir) {
+        if plugins_src.ends_with("runtime/plugins")
+            || fs::canonicalize(&plugins_src).is_ok_and(|dir| dir.ends_with("runtime/plugins"))
+            || same_plugin_root(&plugins_src, &state_dir.join("plugins"))
+        {
             // Runtime staging may omit overridden IDs; keep their bundled fallback in the App.
             plugins_src = resolve_bundled_plugins_root().unwrap_or(plugins_src);
         }

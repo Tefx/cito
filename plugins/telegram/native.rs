@@ -163,6 +163,10 @@ fn api_with_timeout(
             })
         }
     };
+    api_result(method, v)
+}
+
+fn api_result(method: &str, mut v: Value) -> std::result::Result<Value, ApiFailure> {
     if v["ok"] != true {
         let status = v["error_code"].as_u64().unwrap_or(400);
         return Err(ApiFailure {
@@ -177,7 +181,15 @@ fn api_with_timeout(
                 .flatten(),
         });
     }
-    Ok(v["result"].clone())
+    if method == "getUpdates" && !v["result"].is_array() {
+        return Err(ApiFailure {
+            message: "Telegram getUpdates result must be an array".into(),
+            retryable: true,
+            effect_unknown: false,
+            retry_after: None,
+        });
+    }
+    Ok(v["result"].take())
 }
 fn chunks(text: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
@@ -785,6 +797,28 @@ pub fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn poll_success_requires_an_updates_array() {
+        for reply in [
+            json!({"ok":true}),
+            json!({"ok":true,"result":null}),
+            json!({"ok":true,"result":{"update_id":42}}),
+        ] {
+            let error = api_result("getUpdates", reply).unwrap_err();
+            assert!(error.retryable);
+            assert!(!permanent_poll_error(&error));
+        }
+        assert_eq!(
+            api_result("getUpdates", json!({"ok":true,"result":[]})).unwrap(),
+            json!([])
+        );
+        let bot = json!({"username":"sample_bot"});
+        assert_eq!(
+            api_result("getMe", json!({"ok":true,"result":bot})).unwrap(),
+            bot
+        );
+    }
+
     #[test]
     fn polling_hysteresis_backoff_and_permanent_auth_errors() {
         let failure = |message: &str| ApiFailure {

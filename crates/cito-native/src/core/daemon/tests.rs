@@ -1,12 +1,11 @@
 use super::{
-    channels::{remote_channels_identity, ChannelInventory},
     host_hub::{advertised_hub_host, tailscale_host_from_status},
     mcp::default_session_title,
     projection::{address_peers, sender_display_address},
     ui_ipc::resolve_ui_binary,
     *,
 };
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 
 use crate::core::hub::{TestDirectory, TestEngine};
@@ -63,10 +62,39 @@ fn script_plugin(
     }
 }
 
+pub(super) fn serve_responses<const N: usize>(
+    listener: TcpListener,
+    responses: [(u16, Value); N],
+) -> thread::JoinHandle<Result<(), String>> {
+    thread::spawn(move || {
+        for (status, body) in responses {
+            let mut stream = crate::core::http_boundary::accept_test_client(&listener)?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .map_err(|e| e.to_string())?;
+            let mut reader = BufReader::new(&stream);
+            let head =
+                crate::core::http_boundary::read_head(&mut reader, 16384).map_err(|(_, e)| e)?;
+            reader
+                .read_exact(&mut vec![0; head.length])
+                .map_err(|e| e.to_string())?;
+            respond(&mut stream, status, &body);
+        }
+        Ok(())
+    })
+}
+
 struct TestService(Option<DaemonService>);
 impl TestService {
     fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
         DaemonService::open(config, plugins).map(|service| Self(Some(service)))
+    }
+    fn local() -> Result<(TestDirectory, Self), String> {
+        let dir =
+            TestDirectory(std::env::temp_dir().join(format!("cito-daemon-{}", random_uuid_v4())));
+        let config = profile_config(&dir, json!({}));
+        let service = Self::open(&config, &test_plugins(vec![]))?;
+        Ok((dir, service))
     }
     fn replace_slot(&mut self, client: HubClient) {
         if let Some(old) = self.slots.insert(client.name.clone(), client) {
@@ -137,7 +165,7 @@ fn ui_frame_bounds_preserve_cwd_and_mailbox_liveness() {
 }
 
 #[test]
-fn composer_prearm_failures_settle_once_and_config_producers_share_lock() -> Result<(), String> {
+fn composer_prearm_failures_settle_once() -> Result<(), String> {
     let dir = TestDirectory(std::env::temp_dir().join(format!("cito-prearm-{}", random_uuid_v4())));
     fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
     let config = test_config(&dir);
@@ -174,6 +202,17 @@ fn composer_prearm_failures_settle_once_and_config_producers_share_lock() -> Res
             assert_eq!(count, 1);
         }
     }
+    Ok(())
+}
+
+#[test]
+fn setup_and_daemon_config_writers_share_the_publication_lock() -> Result<(), String> {
+    let (dir, service) = TestService::local()?;
+    let config = service.config.clone();
+    let service = Arc::new(Mutex::new(service.into_inner()));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+    };
     fs::write(&config.config_path, "{\"count\":0}").unwrap();
     let alias = dir.join("alias.json");
     std::os::unix::fs::symlink(&config.config_path, &alias).unwrap();
@@ -272,11 +311,13 @@ fn action_failures_emit_correlated_settings_without_outer_errors() -> Result<(),
                 "{registered}"
             );
             s.state.db.execute("DROP TRIGGER fail_retirement", &[])?;
-            s.slot("local")?.closed.store(true, Ordering::SeqCst);
+            let backend =
+                super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
+            backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
             let renamed = s.rename_session("fixture", "new", "Custom title")?;
             assert!(!renamed["warnings"].as_array().unwrap().is_empty());
             assert!(renamed["warning"].is_string());
-            s.slot("local")?.closed.store(false, Ordering::SeqCst);
+            backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
             s.mutate_config(|raw| {
                 raw["hubs"] = json!({"local":{"url":"local://"},"work":{"url":"local://"}});
                 Ok(())
@@ -1247,7 +1288,7 @@ fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profi
         TestDirectory(std::env::temp_dir().join(format!("cito-removed-hub-{}", random_uuid_v4())));
     let config = profile_config(
         &dir,
-        json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://","enabled":false}}}),
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}),
     );
     let plugins = test_plugins(vec![]);
     let mut service = TestService::open(&config, &plugins)?;
@@ -1260,17 +1301,20 @@ fn external_hub_removal_reconciles_runtime_caches_without_purging_disabled_profi
             service
                 .observations
                 .insert(format!("{hub}:node"), (1, Instant::now()));
-            service.channel_inventories.insert(
-                hub.into(),
-                Arc::new(ChannelInventory::new(json!({"hub":hub}))),
-            );
+            let slot = service.slot(hub)?.clone();
+            service.channel_inventory(&slot).refresh(&slot, 0)?;
             fs::write(
                 config.state_dir.join(format!("oidc-token-{hub}.json")),
                 "credential",
             )
             .map_err(|e| e.to_string())?;
         }
+        service.mutate_config(|raw| {
+            raw["hubs"]["work"]["enabled"] = json!(false);
+            Ok(())
+        })?;
         service.reload_slots()?;
+        assert!(!service.channel_inventories.contains_key("work"));
         assert!(service.last_hub_errors.contains_key("work"));
         assert!(config.state_dir.join("oidc-token-work.json").exists());
         service.mutate_config(|raw| {
@@ -1520,13 +1564,7 @@ print(json.dumps(result))
             assert!(Instant::now() < deadline, "Initial badge did not arrive");
             thread::sleep(Duration::from_millis(5));
         }
-        // Let the original effect and targeted probe settle before modeling reload.
-        for probe in service.probes.values_mut() {
-            if let Some(worker) = probe.worker.take() {
-                let _ = worker.join();
-            }
-            probe.due = Instant::now();
-        }
+        // Lose only the provider's badge, leaving the daemon's normal probe schedule intact.
         let expected = fs::read_to_string(dir.join("badge.json")).map_err(|e| e.to_string())?;
         fs::write(dir.join("badge.json"), "null").map_err(|e| e.to_string())?;
         let deadline = Instant::now() + Duration::from_secs(4);
@@ -1789,12 +1827,17 @@ print(json.dumps(v))
         service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
         let captured = row()?;
         fs::write(dir.join("probe.txt"), "closed_definitive").map_err(|e| e.to_string())?;
-        super::super::receiver::probe_listener(
+        let result = super::super::receiver::plugin_request(
+            &plugin,
+            &json!({"op":"probe","session_id":captured["session_id"],"endpoint_pid":captured["endpoint_pid"],"process_identity":captured["process_identity"],"cwd":captured["cwd"],"state_dir":config.state_dir}),
+            None,
+            Some((&service.state, &captured)),
+        )?;
+        super::super::receiver::apply_probe(
             &service.state,
             service.slot("local")?,
             &captured,
-            &plugin,
-            &config.state_dir,
+            &result,
         )?;
         let closed = row()?;
         assert_eq!(closed["user_stopped"], 0);
@@ -1880,71 +1923,84 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
     let config = test_config(&dir);
     fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
     let mut service = TestService::open(&config, &test_plugins(vec![]))?;
-    let raw = json!({"hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":"https://id.example.com","clientId":"client","token":"old"}}});
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let raw = json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://","authMode":"oidc","issuer":issuer,"clientId":"client"}}});
     fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
-    let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
-    let hub = hubs["work"].clone();
-    let mut old = HubClient::new(
-        "work".into(),
-        hub.clone(),
-        "alice",
-        Some(service.local.clone()),
-    );
-    old.directory()?;
-    old.local = None;
-    old.expires_at = now_ms() / 1000 + 20;
-    let identity = old.identity.clone();
+    let sign = |expires: u64| {
+        let claims = json!({"iss":issuer,"sub":"alice","aud":"client","exp":expires as f64 + 0.5});
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_ed_pem(include_bytes!(
+                "../../../tests/hub/fixtures/ed25519-private.pem"
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let cache = json!({"id_token":"expired","refresh_token":"refresh","issuer":issuer,"client_id":"client","token_sha256":super::super::identity::hash("expired"),"expires_at":0,"verified_user":"alice","verified_principal_id":format!("oidc:{issuer}|alice")});
+    crate::support::atomic_write_with_mode(
+        &config.state_dir.join("oidc-token-work.json"),
+        cache.to_string().as_bytes(),
+        Some(0o600),
+    )?;
+    let der = include_bytes!("../../../tests/hub/fixtures/ed25519-public.der");
+    let jwk = json!({"kty":"OKP","crv":"Ed25519","alg":"EdDSA","x":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&der[der.len()-32..])});
+    let respond_to_refresh = |listener, token: &str| {
+        let discovery = json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys"),"authorization_endpoint":format!("{issuer}/authorize"),"token_endpoint":format!("{issuer}/token")});
+        serve_responses(
+            listener,
+            [
+                (200, discovery.clone()),
+                (200, json!({"id_token":token,"refresh_token":"refresh"})),
+                (200, discovery),
+                (200, json!({"keys":[jwk]})),
+            ],
+        )
+    };
+    let old_token = sign(now_ms() / 1000 + 25);
+    let first = respond_to_refresh(listener.try_clone().unwrap(), &old_token);
+    service.reload_slots()?;
+    first.join().unwrap()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while service.slots["work"].bearer.as_deref() != Some(&old_token) {
+        assert!(
+            Instant::now() < deadline,
+            "First credential was not installed"
+        );
+        service.reload_slots()?;
+    }
+    let old = service.slot("work")?.clone();
     let closed = old.closed.clone();
+    old.directory()?;
     let rows = old.cached_directory();
-    let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&old)));
-    inventory.cached.lock().map_err(|e| e.to_string())?.value =
-        json!({"channels":[{"id":"messenger","status":"ready"}]});
-    service
-        .channel_inventories
-        .insert("work".into(), inventory.clone());
-    service.replace_slot(old);
-    service
-        .receivers
-        .insert("auto:work".into(), thread::spawn(|| {}));
-    let (tx, rx) = std::sync::mpsc::channel();
-    service
-        .hub_controls
-        .entry("work".into())
-        .or_default()
-        .recovery = Some(OidcRecovery {
-        config: hub.clone(),
-        rejected: None,
-        cancelled: Arc::new(super::super::login::Cancellation::default()),
-        worker: thread::spawn(move || rx.recv().unwrap()),
-    });
+    assert!(!rows.is_empty());
+    let inventory = service.channel_inventory(&old);
+    inventory.refresh(&old, 0)?;
     service.reload_slots()?;
     assert!(!closed.load(Ordering::SeqCst));
-    assert_eq!(service.slots["work"].bearer.as_deref(), Some("old"));
+    assert_eq!(
+        service.slots["work"].bearer.as_deref(),
+        Some(old_token.as_str())
+    );
     assert!(Arc::ptr_eq(
         &inventory,
         &service.channel_inventories["work"]
     ));
     assert_eq!(service.slots["work"].cached_directory().len(), rows.len());
-    let expires = now_ms() / 1000 + 300;
-    let token = format!(
-        "header.{}.signature",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(json!({"exp":expires as f64 + 0.5}).to_string())
-    );
-    tx.send(Ok((token.clone(), identity)))
-        .map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while !service.hub_controls["work"]
-        .recovery
-        .as_ref()
-        .unwrap()
-        .worker
-        .is_finished()
-        && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(1));
+    let expires = now_ms() / 1000 + 2;
+    let token = sign(expires);
+    respond_to_refresh(listener, &token).join().unwrap()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while service.slots["work"].bearer.as_deref() != Some(&token) {
+        assert!(
+            Instant::now() < deadline,
+            "Verified credential was not installed"
+        );
+        service.reload_slots()?;
+        thread::yield_now();
     }
-    service.reload_slots()?;
     assert_eq!(service.slots["work"].expires_at, expires);
     assert_eq!(
         service.slots["work"].bearer.as_deref(),
@@ -1957,25 +2013,17 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
         &service.channel_inventories["work"]
     ));
     assert_eq!(service.slots["work"].cached_directory().len(), rows.len());
-    let expired = service
-        .slots
-        .get_mut("work")
-        .ok_or("Missing renewed slot")?;
-    expired.expires_at = now_ms() / 1000 - 1;
-    expired.auth_retry_at = now_ms() + 5000;
-    let cancelled = Arc::new(super::super::login::Cancellation::default());
-    let cancel = cancelled.clone();
-    service.hub_controls.get_mut("work").unwrap().recovery = Some(OidcRecovery {
-        config: hub,
-        rejected: None,
-        cancelled,
-        worker: thread::spawn(move || {
-            while !cancel.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err("Recovery cancelled".into())
-        }),
-    });
+    // Start a real renewal just before expiry, placing the still-live slot in backoff.
+    thread::sleep(Duration::from_millis(
+        (expires * 1000 - 400).saturating_sub(now_ms()),
+    ));
+    service.reload_slots()?;
+    assert!(service.slots["work"].auth_retry_at > expires * 1000);
+    thread::sleep(Duration::from_millis(
+        (expires * 1000).saturating_sub(now_ms()),
+    ));
+    // The issuer has gone away. An expired credential cannot retain a slot
+    // during a new recovery attempt, even within the previous retry window.
     service.reload_slots()?;
     assert!(
         closed.load(Ordering::SeqCst),
@@ -1988,6 +2036,7 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
 
 #[test]
 fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let slot = HubClient::new(
         "work".into(),
@@ -1995,27 +2044,33 @@ fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), Str
         "alice",
         None,
     );
-    let inventory = ChannelInventory::new(remote_channels_identity(&slot));
+    service.replace_slot(slot.clone());
+    let inventory = service.channel_inventory(&slot);
     let channels = json!([{"id":"fixture","status":"ready","fields":[]}]);
-    let responses = [
-        json!({"channels":channels}),
-        json!({"channels":["invalid"]}),
-    ];
-    let server = thread::spawn(move || -> Result<(), String> {
-        for result in responses {
-            let mut stream = crate::core::http_boundary::accept_test_client(&listener)?;
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let head =
-                crate::core::http_boundary::read_head(&mut reader, 16384).map_err(|(_, e)| e)?;
-            let mut body = vec![0; head.length];
-            reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-            respond(&mut stream, 200, &json!({"ok":true,"result":result}));
-        }
-        Ok(())
-    });
-    inventory.refresh(&slot, 0)?;
-    for generation in 1..3 {
-        assert!(inventory.refresh(&slot, generation).is_err());
+    let server = serve_responses(
+        listener,
+        [
+            (503, json!({"message":"Initial failure"})),
+            (200, json!({"ok":true,"result":{"channels":channels}})),
+            (200, json!({"ok":true,"result":{"channels":["invalid"]}})),
+        ],
+    );
+    let error = inventory.refresh(&slot, 0).unwrap_err();
+    {
+        let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
+        assert!(cached.value["channels"].is_null());
+        assert_eq!(cached.value["status"], "error");
+    }
+    let settings = service.settings_for_hub("work");
+    assert_eq!(settings["channels"], json!([]));
+    assert_eq!(settings["channel_inventory_error"], error);
+    assert!(service.settings_for_hub("local")["channel_inventory_error"].is_null());
+    inventory.refresh(&slot, 1)?;
+    for generation in 2..4 {
+        let error = inventory.refresh(&slot, generation).unwrap_err();
+        let settings = service.settings_for_hub("work");
+        assert_eq!(settings["channel_inventory_error"], error);
+        assert_eq!(settings["channels"][0]["id"], "fixture");
         let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
         assert_eq!(cached.value["channels"], channels);
         assert_eq!(cached.value["status"], "error");
@@ -2024,13 +2079,7 @@ fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), Str
             .is_some_and(|s| !s.is_empty()));
         assert_eq!(cached.completed_gen, generation + 1);
     }
-    server.join().unwrap()?;
-    let fresh = ChannelInventory::new(remote_channels_identity(&slot));
-    assert!(fresh.refresh(&slot, 0).is_err());
-    let cached = fresh.cached.lock().map_err(|e| e.to_string())?;
-    assert!(cached.value["channels"].is_null());
-    assert_eq!(cached.value["status"], "error");
-    Ok(())
+    server.join().unwrap()
 }
 
 #[test]
@@ -2117,7 +2166,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             "Release approvals"
         );
         for harness in ["human", "fixture"] {
-            super::super::registration::register_listener(
+            super::super::registration::register_endpoint(
                 &service.state,
                 service.slot("local")?,
                 &service.host_id,
@@ -2242,7 +2291,8 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             &json!({"harness":"fixture","session_id":"default","title":"Receiver"}),
         )?;
         let client = service.slot("local")?.clone();
-        client.closed.store(true, Ordering::SeqCst);
+        let backend = super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
+        backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
         assert!(service
             .retire_id("local", string(&personal, "listener_id"), "user")
             .is_err());
@@ -2264,7 +2314,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             "UNLISTENED"
         );
         service.ensure_human_nodes()?; // Failed reconciliation retains local intent.
-        client.closed.store(false, Ordering::SeqCst);
+        backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
         assert!(unpaused(&client)?);
         service.ensure_human_nodes()?;
         assert!(unpaused(&client)?);
@@ -2278,7 +2328,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         );
         assert!(unread()?);
         let other = LocalState::open(&dir.join("other-mac"))?;
-        super::super::registration::register_listener(
+        super::super::registration::register_endpoint(
             &other,
             &client,
             "other-mac",
@@ -2290,11 +2340,11 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             unpaused(&client)?,
             "Device detach and sibling attach must preserve shared inbox policy"
         );
-        client.closed.store(true, Ordering::SeqCst);
+        backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
         assert!(service
             .retire_id("local", string(&personal, "listener_id"), "user")
             .is_err());
-        client.closed.store(false, Ordering::SeqCst);
+        backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
         assert!(service
             .state
             .db
@@ -2303,7 +2353,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
                 &[]
             )?
             .is_empty());
-        super::super::registration::register_listener(
+        super::super::registration::register_endpoint(
             &service.state,
             &client,
             &service.host_id,
@@ -2383,7 +2433,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
 }
 
 #[test]
-fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Result<(), String> {
+fn default_titles_prefer_specific_session_labels_and_are_idempotent() {
     let caller = json!({"harness":"fixture","cwd":"/home/alice","title":"alice"});
     let home = std::path::Path::new("/home/alice");
     assert_eq!(
@@ -2444,281 +2494,296 @@ fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Res
             );
         }
     }
-    let dir =
-        TestDirectory(std::env::temp_dir().join(format!("cito-addresses-{}", random_uuid_v4())));
-    let config = test_config(&dir);
-    let plugins = test_plugins(vec![]);
-    let mut service = TestService::open(&config, &plugins)?;
-    let result = (|| {
-        // Model a post-RPC completion delayed across a real reconnect and a
-        // replacement owner's failed revocation, without production hooks.
+}
+
+#[test]
+fn malformed_control_actions_leave_config_unchanged() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let config_before = service.raw_config()?;
+    for (action, expected) in [
+        (json!({"op":"hub_action","hub":"local"}), "INVALID_INPUT:"),
+        (
+            json!({"op":"hub_action","hub":"local","action":true}),
+            "INVALID_INPUT:",
+        ),
+        (
+            json!({"op":"hub_action","hub":"local","action":"other"}),
+            "INVALID_INPUT:",
+        ),
+        (
+            json!({"op":"cli_human_device","hub":"local"}),
+            "INVALID_INPUT:",
+        ),
+        (
+            json!({"op":"cli_human_device","attach":"false"}),
+            "INVALID_INPUT:",
+        ),
+        (json!({"op":"set_launch_at_login"}), "INVALID_INPUT:"),
+        (
+            json!({"op":"set_launch_at_login","enabled":1}),
+            "INVALID_INPUT:",
+        ),
+        (
+            json!({"op":"hub_action","hub":"missing","action":"reconnect"}),
+            "NOT_FOUND:",
+        ),
+        (
+            json!({"op":"hub_action","hub":"missing","action":"disconnect"}),
+            "NOT_FOUND:",
+        ),
+        (
+            json!({"op":"setup_toggle_hub","hub":"missing","enabled":false}),
+            "NOT_FOUND:",
+        ),
+        (
+            json!({"op":"setup_toggle_hub","hub":"local","enabled":0}),
+            "INVALID_INPUT:",
+        ),
+        (
+            json!({"op":"hub_action","hub":42,"action":"reconnect"}),
+            "INVALID_INPUT:",
+        ),
+        (
+            json!({"op":"hub_action","hub":" ","action":"disconnect"}),
+            "INVALID_INPUT:",
+        ),
+    ] {
+        let error = service.action(&action).unwrap_err();
+        assert!(error.starts_with(expected), "{action}: {error}");
+    }
+    assert_eq!(service.raw_config()?, config_before);
+    Ok(())
+}
+
+#[test]
+fn reconnect_preserves_registration_authority_and_fences_stale_detach_completions(
+) -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let caller =
+        json!({"harness":"fixture","session_id":"late-cleanup","title":"Cleanup","cwd":""});
+    let enrolled = service.listen("local", &json!({"about":"Cleanup"}), &caller)?;
+    let id = string(&enrolled, "canonical_listener_id");
+    let old = service.slot("local")?.clone();
+    let prior = service
+        .state
+        .listener("local", id)?
+        .ok_or("Missing old binding")?;
+    let (mut remote, revision) = old.kv_get(id)?.ok_or("Missing old remote binding")?;
+    remote["owner_token"] = json!("sibling-owner");
+    remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
+    old.kv_save(id, &remote, Some(revision))?;
+    let remote = old.kv_get(id)?.ok_or("Missing Hub-stamped sibling")?.0;
+    assert!(service.retire_id("local", id, "user")?);
+    let authority = service.state.registration_lock("local")?;
+    assert!(Arc::ptr_eq(
+        &service.state.clone().registration_lock("local")?,
+        &authority
+    ));
+    assert!(!Arc::ptr_eq(
+        &service.state.registration_lock("other")?,
+        &authority
+    ));
+    service.action(&json!({"op":"hub_action","hub":"local","action":"reconnect"}))?;
+    let current = service.slot("local")?.clone();
+    assert!(old.closed.load(Ordering::SeqCst));
+    assert!(
+        !Arc::ptr_eq(&old.closed, &current.closed),
+        "Reconnect must actually replace the client"
+    );
+    assert!(
+        Arc::ptr_eq(&service.state.registration_lock(&current.name)?, &authority),
+        "Reconnect must preserve registration authority"
+    );
+    let guard = authority
+        .lock()
+        .map_err(|_| "Test registration lock poisoned")?;
+    assert!(matches!(
+        service.state.registration_lock(&current.name)?.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    ));
+    drop(guard);
+    service.listen("local", &json!({"about":"Replacement"}), &caller)?;
+    let replacement = service
+        .state
+        .listener("local", id)?
+        .ok_or("Missing replacement")?;
+    assert_eq!(
+        replacement["binding_generation"], prior["binding_generation"],
+        "Live sibling retains the shared generation"
+    );
+    assert_ne!(replacement["owner_token"], prior["owner_token"]);
+    // Fail the real reconciler's remote IO, retaining the newer intent.
+    let backend =
+        super::super::database::Database::open(&service.config.state_dir.join("hub.sqlite"))?;
+    backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
+    let revoked = service.retire_id("local", id, "user");
+    backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
+    assert!(
+        revoked.is_err(),
+        "Explicit detach must report transport failure"
+    );
+    let newer = service
+        .state
+        .listener("local", id)?
+        .ok_or("Missing newer revocation")?;
+    assert_eq!(newer["status"], "UNLISTENED");
+    assert_eq!(newer["owner_token"], replacement["owner_token"]);
+    let generation = newer["binding_generation"]
+        .as_u64()
+        .ok_or("Missing generation")?;
+    let pending = service.state.db.query(
+        "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+        &[json!(id)],
+    )?;
+    assert_eq!(pending.len(), 1);
+    service.state.clear_pending_detach_if_current(
+        "local",
+        id,
+        prior["binding_generation"]
+            .as_u64()
+            .ok_or("Missing old generation")?,
+        string(&prior, "owner_token"),
+    )?;
+    service.state.clear_pending_detach_if_current(
+        "local",
+        id,
+        generation + 1,
+        string(&newer, "owner_token"),
+    )?;
+    assert_eq!(
+        service.state.db.query(
+            "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+            &[json!(id)]
+        )?,
+        pending,
+        "Old completion or wrong generation cannot erase newer cleanup"
+    );
+    let channel = format!("{}:fixture", service.host_id);
+    assert_eq!(
+        current.kv_get(id)?.ok_or("Missing orphan")?.0["channels"][&channel]["state"],
+        "ACTIVE"
+    );
+    DaemonService::reconcile_unlistened(&service.state, &current, &service.host_id)?;
+    assert!(service
+        .state
+        .db
+        .query(
+            "SELECT 1 FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+            &[json!(id)]
+        )?
+        .is_empty());
+    let after = current.kv_get(id)?.ok_or("Missing cleaned Node")?.0;
+    assert_eq!(after["channels"][&channel]["state"], "UNLISTENED");
+    assert_eq!(
+        after["channels"]["sibling:fixture"],
+        remote["channels"]["sibling:fixture"]
+    );
+    assert_eq!(after["owner_token"], "sibling-owner");
+    Ok(())
+}
+
+#[test]
+fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Result<(), String> {
+    let (_dir, service) = TestService::local()?;
+    for session in ["session-26", "session-324"] {
+        service.listen(
+            "local",
+            &json!({"about":"Session"}),
+            &json!({"harness":"fixture","session_id":session,"title":"Review","cwd":""}),
+        )?;
+    }
+    let snapshot = service.snapshot()?;
+    for (session, address) in [
+        ("session-26", "alice/fixture#a5705540"),
+        ("session-324", "alice/fixture#a5706e4d"),
+    ] {
+        let row = snapshot["listeners"]
+            .as_array()
+            .ok_or("Missing listeners")?
+            .iter()
+            .find(|row| row["session_id"] == session)
+            .ok_or("Missing enrolled session")?;
+        assert_eq!(row["display_address"], address);
+        assert!(service
+            .slot("local")?
+            .cached_directory()
+            .iter()
+            .any(|peer| peer["listener_id"] == row["listener_id"]));
+    }
+    let id = listener_id("none#alice", "fixture", "session-324");
+    for state in ["UNLISTENED", "ACTIVE"] {
+        let slot = service.slot("local")?;
+        let (mut stale, revision) = slot.kv_get(&id)?.ok_or("Missing collision peer")?;
+        stale["state"] = json!(state);
+        stale["updated_at_ms"] = json!(1);
+        for channel in stale["channels"]
+            .as_object_mut()
+            .ok_or("Missing channels")?
+            .values_mut()
         {
-            let caller =
-                json!({"harness":"fixture","session_id":"late-cleanup","title":"Cleanup","cwd":""});
-            let enrolled = service.listen("local", &json!({"about":"Cleanup"}), &caller)?;
-            let id = string(&enrolled, "canonical_listener_id");
-            let old = service.slot("local")?.clone();
-            let prior = service
-                .state
-                .listener("local", id)?
-                .ok_or("Missing old binding")?;
-            let (mut remote, revision) = old.kv_get(id)?.ok_or("Missing old remote binding")?;
-            remote["owner_token"] = json!("sibling-owner");
-            remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
-            old.kv_save(id, &remote, Some(revision))?;
-            let remote = old.kv_get(id)?.ok_or("Missing Hub-stamped sibling")?.0;
-            assert!(service.retire_id("local", id, "user")?);
-            let authority = service.state.registration_lock("local")?;
-            assert!(Arc::ptr_eq(
-                &service.state.clone().registration_lock("local")?,
-                &authority
-            ));
-            assert!(!Arc::ptr_eq(
-                &service.state.registration_lock("other")?,
-                &authority
-            ));
-            let config_before = service.raw_config()?;
-            for (action, expected) in [
-                (json!({"op":"hub_action","hub":"local"}), "INVALID_INPUT:"),
-                (
-                    json!({"op":"hub_action","hub":"local","action":true}),
-                    "INVALID_INPUT:",
-                ),
-                (
-                    json!({"op":"hub_action","hub":"local","action":"other"}),
-                    "INVALID_INPUT:",
-                ),
-                (
-                    json!({"op":"cli_human_device","hub":"local"}),
-                    "INVALID_INPUT:",
-                ),
-                (
-                    json!({"op":"cli_human_device","attach":"false"}),
-                    "INVALID_INPUT:",
-                ),
-                (json!({"op":"set_launch_at_login"}), "INVALID_INPUT:"),
-                (
-                    json!({"op":"set_launch_at_login","enabled":1}),
-                    "INVALID_INPUT:",
-                ),
-                (
-                    json!({"op":"hub_action","hub":"missing","action":"reconnect"}),
-                    "NOT_FOUND:",
-                ),
-                (
-                    json!({"op":"hub_action","hub":"missing","action":"disconnect"}),
-                    "NOT_FOUND:",
-                ),
-                (
-                    json!({"op":"setup_toggle_hub","hub":"missing","enabled":false}),
-                    "NOT_FOUND:",
-                ),
-                (
-                    json!({"op":"setup_toggle_hub","hub":"local","enabled":0}),
-                    "INVALID_INPUT:",
-                ),
-                (
-                    json!({"op":"hub_action","hub":42,"action":"reconnect"}),
-                    "INVALID_INPUT:",
-                ),
-                (
-                    json!({"op":"hub_action","hub":" ","action":"disconnect"}),
-                    "INVALID_INPUT:",
-                ),
-            ] {
-                let error = service.action(&action).unwrap_err();
-                assert!(error.starts_with(expected), "{action}: {error}");
-            }
-            assert_eq!(service.raw_config()?, config_before);
-            service.action(&json!({"op":"hub_action","hub":"local","action":"reconnect"}))?;
-            let current = service.slot("local")?.clone();
-            assert!(old.closed.load(Ordering::SeqCst));
-            assert!(
-                !Arc::ptr_eq(&old.closed, &current.closed),
-                "Reconnect must actually replace the client"
-            );
-            assert!(
-                Arc::ptr_eq(&service.state.registration_lock(&current.name)?, &authority),
-                "Reconnect must preserve registration authority"
-            );
-            let guard = authority
-                .lock()
-                .map_err(|_| "Test registration lock poisoned")?;
-            assert!(matches!(
-                service.state.registration_lock(&current.name)?.try_lock(),
-                Err(std::sync::TryLockError::WouldBlock)
-            ));
-            drop(guard);
-            service.listen("local", &json!({"about":"Replacement"}), &caller)?;
-            let replacement = service
-                .state
-                .listener("local", id)?
-                .ok_or("Missing replacement")?;
-            assert_eq!(
-                replacement["binding_generation"], prior["binding_generation"],
-                "Live sibling retains the shared generation"
-            );
-            assert_ne!(replacement["owner_token"], prior["owner_token"]);
-            // Fail the real reconciler's remote IO, retaining the newer intent.
-            let backend =
-                super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
-            backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
-            let revoked = service.retire_id("local", id, "user");
-            backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
-            assert!(
-                revoked.is_err(),
-                "Explicit detach must report transport failure"
-            );
-            let newer = service
-                .state
-                .listener("local", id)?
-                .ok_or("Missing newer revocation")?;
-            assert_eq!(newer["status"], "UNLISTENED");
-            assert_eq!(newer["owner_token"], replacement["owner_token"]);
-            let generation = newer["binding_generation"]
-                .as_u64()
-                .ok_or("Missing generation")?;
-            let pending = service.state.db.query(
-                "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
-                &[json!(id)],
-            )?;
-            assert_eq!(pending.len(), 1);
-            service.state.clear_pending_detach_if_current(
-                "local",
-                id,
-                prior["binding_generation"]
-                    .as_u64()
-                    .ok_or("Missing old generation")?,
-                string(&prior, "owner_token"),
-            )?;
-            service.state.clear_pending_detach_if_current(
-                "local",
-                id,
-                generation + 1,
-                string(&newer, "owner_token"),
-            )?;
-            assert_eq!(
-                service.state.db.query(
-                    "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
-                    &[json!(id)]
-                )?,
-                pending,
-                "Old completion or wrong generation cannot erase newer cleanup"
-            );
-            let channel = format!("{}:fixture", service.host_id);
-            assert_eq!(
-                current.kv_get(id)?.ok_or("Missing orphan")?.0["channels"][&channel]["state"],
-                "ACTIVE"
-            );
-            DaemonService::reconcile_unlistened(&service.state, &current, &service.host_id)?;
-            assert!(service
-                .state
-                .db
-                .query(
-                    "SELECT 1 FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
-                    &[json!(id)]
-                )?
-                .is_empty());
-            let after = current.kv_get(id)?.ok_or("Missing cleaned Node")?.0;
-            assert_eq!(after["channels"][&channel]["state"], "UNLISTENED");
-            assert_eq!(
-                after["channels"]["sibling:fixture"],
-                remote["channels"]["sibling:fixture"]
-            );
-            assert_eq!(after["owner_token"], "sibling-owner");
+            channel["state"] = json!("UNLISTENED");
+            channel["updated_at_ms"] = json!(1);
         }
-        for session in ["session-26", "session-324"] {
-            service.listen(
-                "local",
-                &json!({"about":"Session"}),
-                &json!({"harness":"fixture","session_id":session,"title":"Review","cwd":""}),
-            )?;
-        }
+        slot.kv_save(&id, &stale, Some(revision))?;
+        slot.directory()?;
+        let merged = address_peers(&service.state, slot)
+            .into_iter()
+            .find(|peer| peer["listener_id"] == id)
+            .ok_or("Missing merged witness")?;
+        assert_eq!(merged["channels"], stale["channels"]);
+        assert!(super::super::identity::is_live_peer(&merged, now_ms()));
         let snapshot = service.snapshot()?;
         for (session, address) in [
             ("session-26", "alice/fixture#a5705540"),
             ("session-324", "alice/fixture#a5706e4d"),
         ] {
-            let row = snapshot["listeners"]
-                .as_array()
-                .ok_or("Missing listeners")?
-                .iter()
-                .find(|row| row["session_id"] == session)
-                .ok_or("Missing enrolled session")?;
-            assert_eq!(row["display_address"], address);
-            assert!(service
-                .slot("local")?
-                .cached_directory()
-                .iter()
-                .any(|peer| peer["listener_id"] == row["listener_id"]));
+            assert_eq!(
+                snapshot["listeners"]
+                    .as_array()
+                    .ok_or("Missing listeners")?
+                    .iter()
+                    .find(|row| row["session_id"] == session)
+                    .ok_or("Missing session")?["display_address"],
+                address
+            );
         }
-        let id = listener_id("none#alice", "fixture", "session-324");
-        for state in ["UNLISTENED", "ACTIVE"] {
-            let slot = service.slot("local")?;
-            let (mut stale, revision) = slot.kv_get(&id)?.ok_or("Missing collision peer")?;
-            stale["state"] = json!(state);
-            stale["updated_at_ms"] = json!(1);
-            for channel in stale["channels"]
-                .as_object_mut()
-                .ok_or("Missing channels")?
-                .values_mut()
-            {
-                channel["state"] = json!("UNLISTENED");
-                channel["updated_at_ms"] = json!(1);
-            }
-            slot.kv_save(&id, &stale, Some(revision))?;
-            slot.directory()?;
-            let merged = address_peers(&service.state, slot)
-                .into_iter()
-                .find(|peer| peer["listener_id"] == id)
-                .ok_or("Missing merged witness")?;
-            assert_eq!(merged["channels"], stale["channels"]);
-            assert!(super::super::identity::is_live_peer(&merged, now_ms()));
-            let snapshot = service.snapshot()?;
-            for (session, address) in [
-                ("session-26", "alice/fixture#a5705540"),
-                ("session-324", "alice/fixture#a5706e4d"),
-            ] {
-                assert_eq!(
-                    snapshot["listeners"]
-                        .as_array()
-                        .ok_or("Missing listeners")?
-                        .iter()
-                        .find(|row| row["session_id"] == session)
-                        .ok_or("Missing session")?["display_address"],
-                    address
-                );
-            }
-        }
-        // A registration absent from the Hub cache still participates locally.
-        service.local.rpc(
-            "kv_delete",
-            &json!({"key":id}),
-            Some(&super::super::identity::principal("alice")),
-        )?;
-        service.slot("local")?.directory()?;
-        let snapshot = service.snapshot()?;
-        let first = snapshot["listeners"]
-            .as_array()
-            .ok_or("Missing listeners")?
-            .iter()
-            .find(|row| row["session_id"] == "session-26")
-            .ok_or("Missing first session")?;
-        assert_eq!(first["display_address"], "alice/fixture#a5705540");
-        let activity = service.activity_dto(vec![json!({"hub":"local","listener_id":"missing","from_listener_id":"alice-abcd123456789012","from_user":"alice","from_harness":"fixture","message":"hello"})], &service.address_book());
-        assert_eq!(activity[0]["from_display_address"], "alice/fixture#abcd");
-        assert!(activity[0]["target_display_address"].is_null());
-        // Exercise late revocation in both destination iteration orders without
-        // a network server or sleeps: setup inspection performs the local transition.
-        let other = TestEngine(HubEngine::open(&dir.join("other-hub"))?);
-        service.replace_slot(HubClient::new(
-            "work".into(),
-            json!({"url":"local://"}),
-            "alice",
-            Some(Arc::new(other.clone())),
-        ));
-        let script = dir.join("fixture.py");
-        fs::write(&script,r#"# purpose: drive discovery and late setup-time revocation in a unit sandbox.
+    }
+    // A registration absent from the Hub cache still participates locally.
+    service.local.rpc(
+        "kv_delete",
+        &json!({"key":id}),
+        Some(&super::super::identity::principal("alice")),
+    )?;
+    service.slot("local")?.directory()?;
+    let snapshot = service.snapshot()?;
+    let first = snapshot["listeners"]
+        .as_array()
+        .ok_or("Missing listeners")?
+        .iter()
+        .find(|row| row["session_id"] == "session-26")
+        .ok_or("Missing first session")?;
+    assert_eq!(first["display_address"], "alice/fixture#a5705540");
+    let activity = service.activity_dto(vec![json!({"hub":"local","listener_id":"missing","from_listener_id":"alice-abcd123456789012","from_user":"alice","from_harness":"fixture","message":"hello"})], &service.address_book());
+    assert_eq!(activity[0]["from_display_address"], "alice/fixture#abcd");
+    assert!(activity[0]["target_display_address"].is_null());
+    Ok(())
+}
+
+#[test]
+fn late_revocation_vetoes_candidate_fanout_until_new_discovery() -> Result<(), String> {
+    let (dir, mut service) = TestService::local()?;
+    let config = service.config.clone();
+    // Exercise late revocation in both destination iteration orders without
+    // a network server or sleeps: setup inspection performs the local transition.
+    let other = TestEngine(HubEngine::open(&dir.join("other-hub"))?);
+    service.replace_slot(HubClient::new(
+        "work".into(),
+        json!({"url":"local://"}),
+        "alice",
+        Some(Arc::new(other.clone())),
+    ));
+    let script = dir.join("fixture.py");
+    fs::write(&script,r#"# purpose: drive discovery and late setup-time revocation in a unit sandbox.
 # usage: python3 fixture.py with one NDJSON plugin request.
 # effects: reads candidate/revocation files and updates only the sandbox state database.
 # requires: Python 3, sqlite3, and a pre-created local state.
@@ -2738,68 +2803,64 @@ elif request['op'] == 'setup_inspect':
     result.update(installed=True, configured=True, paths=[])
 print(json.dumps(result), flush=True)
 "#).map_err(|e|e.to_string())?;
-        service
-            .plugins
-            .plugins
-            .push(crate::plugins::PluginDescriptor {
-                kind: "agent-harness".into(),
-                pid_bound: true,
-                ..script_plugin(&dir, &script)
-            });
+    service
+        .plugins
+        .plugins
+        .push(crate::plugins::PluginDescriptor {
+            kind: "agent-harness".into(),
+            pid_bound: true,
+            ..script_plugin(&dir, &script)
+        });
+    service.invalidate_setup("fixture");
+    settle_setup_inspections(&mut service);
+    service.session_activity = Some(crate::core::session_activity::SessionActivity::new(
+        &config,
+        &service.plugins,
+    ));
+    let order: Vec<_> = service.slots.keys().cloned().collect();
+    for revoked_hub in order {
+        for slot in service.slots.values_mut() {
+            slot.config["autoListen"] = json!(false);
+        }
+        let session = format!("fanout-{revoked_hub}");
+        let candidate = json!({"harness":"fixture","session_id":session,"title":"Review","cwd":"","endpoint_pid":std::process::id()});
+        fs::write(dir.join("candidate.json"), candidate.to_string()).map_err(|e| e.to_string())?;
+        service.listen(&revoked_hub, &json!({"about":"Review"}), &candidate)?;
+        service.refresh_available()?;
+        if !service.session_activity.as_ref().is_some_and(|activity| {
+            activity
+                .candidates()
+                .any(|row| row["session_id"] == session)
+        }) {
+            return Err("Expected a confirmed cached candidate".into());
+        }
+        fs::write(
+            dir.join("revoke.json"),
+            json!({"hub":revoked_hub,"session_id":session}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        for slot in service.slots.values_mut() {
+            slot.config["autoListen"] = json!(true);
+        }
         service.invalidate_setup("fixture");
         settle_setup_inspections(&mut service);
-        service.session_activity = Some(crate::core::session_activity::SessionActivity::new(
-            &config,
-            &service.plugins,
-        ));
-        let order: Vec<_> = service.slots.keys().cloned().collect();
-        for revoked_hub in order {
-            for slot in service.slots.values_mut() {
-                slot.config["autoListen"] = json!(false);
-            }
-            let session = format!("fanout-{revoked_hub}");
-            let candidate = json!({"harness":"fixture","session_id":session,"title":"Review","cwd":"","endpoint_pid":std::process::id()});
-            fs::write(dir.join("candidate.json"), candidate.to_string())
-                .map_err(|e| e.to_string())?;
-            service.listen(&revoked_hub, &json!({"about":"Review"}), &candidate)?;
-            service.refresh_available()?;
-            if !service.session_activity.as_ref().is_some_and(|activity| {
-                activity
-                    .candidates()
-                    .any(|row| row["session_id"] == session)
-            }) {
-                return Err("Expected a confirmed cached candidate".into());
-            }
-            fs::write(
-                dir.join("revoke.json"),
-                json!({"hub":revoked_hub,"session_id":session}).to_string(),
-            )
-            .map_err(|e| e.to_string())?;
-            for slot in service.slots.values_mut() {
-                slot.config["autoListen"] = json!(true);
-            }
-            service.invalidate_setup("fixture");
-            settle_setup_inspections(&mut service);
-            service.auto_listen()?;
-            let rows = service.state.db.query(
-                "SELECT hub,status FROM local_listeners WHERE harness='fixture' AND session_id=?",
-                &[json!(session)],
-            )?;
-            if rows.len() != 1 || rows[0]["status"] != "UNLISTENED" || rows[0]["hub"] != revoked_hub
-            {
-                return Err(format!(
-                    "Late revocation must veto the entire candidate fan-out: {rows:?}"
-                ));
-            }
-            fs::remove_file(dir.join("revoke.json")).map_err(|e| e.to_string())?;
-            service.auto_listen()?;
-            if !service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.is_empty() { return Err("Stale presentation cannot regain enrollment authority".into()); }
-            service.refresh_available()?;
-            if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=2 { return Err("New discovery must restore enrollment on both Hubs".into()); }
+        service.auto_listen()?;
+        let rows = service.state.db.query(
+            "SELECT hub,status FROM local_listeners WHERE harness='fixture' AND session_id=?",
+            &[json!(session)],
+        )?;
+        if rows.len() != 1 || rows[0]["status"] != "UNLISTENED" || rows[0]["hub"] != revoked_hub {
+            return Err(format!(
+                "Late revocation must veto the entire candidate fan-out: {rows:?}"
+            ));
         }
-        Ok(())
-    })();
-    result
+        fs::remove_file(dir.join("revoke.json")).map_err(|e| e.to_string())?;
+        service.auto_listen()?;
+        if !service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.is_empty() { return Err("Stale presentation cannot regain enrollment authority".into()); }
+        service.refresh_available()?;
+        if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=2 { return Err("New discovery must restore enrollment on both Hubs".into()); }
+    }
+    Ok(())
 }
 #[test]
 fn sender_addresses_use_readable_metadata_before_directory_arrival() {
@@ -3127,7 +3188,7 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
             )
         };
         assert_eq!(unread()?, vec![json!({"hub":"work"})]);
-        service.activity_filter = "me".into();
+        service.action(&json!({"op":"query_directory","mode":"activity","filter":"me"}))?;
         service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"],"filter":"me","query":"not present"}))?;
         let queued = state.db.query(
             "SELECT channel_id FROM pending_hub_acks WHERE hub='work' AND signal_id='shared'",
@@ -3137,106 +3198,204 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
             queued[0]["channel_id"],
             format!("{}:fixture", service.host_id)
         );
-        service.activity_filter = "all".into();
         assert!(unread()?.is_empty());
-        for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
-            state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED','local://','none#alice')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
-        }
-        state.db.execute("CREATE TRIGGER reject_second_ack BEFORE INSERT ON pending_hub_acks WHEN NEW.signal_id IN ('matching','unmatched') AND EXISTS (SELECT 1 FROM pending_hub_acks WHERE signal_id IN ('matching','unmatched')) BEGIN SELECT RAISE(ABORT,'second ack rejected'); END", &[])?;
-        assert_eq!(
-            state
-                .acknowledge_activity(&json!({"hub":"local"}), "all", "host", true)
-                .unwrap_err(),
-            "second ack rejected"
-        );
-        assert_eq!(unread()?.len(), 2);
-        state.db.execute("DROP TRIGGER reject_second_ack", &[])?;
-        let (_, matched, _) = state.query_activity("all", " review ")?;
-        assert_eq!(matched, 1);
-        service.action(&json!({"op":"ack_signals","ack_all":true,"query":" review "}))?;
-        let remaining = state.db.query(
-            "SELECT signal_id FROM local_signals WHERE acknowledged_at_ms IS NULL",
-            &[],
-        )?;
-        assert_eq!(remaining, vec![json!({"signal_id":"unmatched"})]);
-        service.action(
-            &json!({"op":"ack_signals","signal_ids":["unmatched"],"filter":"me","query":"review"}),
-        )?;
-        assert!(unread()?.is_empty());
-
-        state.db.execute("UPDATE local_listeners SET principal_id='oidc:https://id.example.com|alice' WHERE listener_id='node'",&[])?;
-        state.db.execute("UPDATE local_signals SET principal_id='https://id.example.com#alice' WHERE listener_id='node'",&[])?;
-        let (_, total, unread) = state.query_activity("all", "")?;
-        assert_eq!(state.activity_counts()?, (total, unread));
-        assert!(total > 0);
-        let client = service.slot("local")?.clone();
-        let human = super::super::registration::local_node(&state, &client, "human", "default")?
-            .ok_or("Missing Human")?;
-        let id = string(&human, "listener_id");
-        state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local','clear-human',?,3,1,'alice','host','','clear me','now',?,'RECEIVED',?,?)", &[json!(id),json!(now_ms()+60_000),human["hub_url"].clone(),human["principal_id"].clone()])?;
-        state.clear_activity_history(
-            &json!({"hub":"local","signal_id":"clear-human"}),
-            "all",
-            &service.host_id,
-        )?;
-        let cleared = state.db.query("SELECT state,activity_hidden,acknowledged_at_ms FROM local_signals WHERE signal_id='clear-human'",&[])?;
-        assert_eq!(cleared[0]["state"], "STORED_PASSIVE");
-        assert_eq!(cleared[0]["activity_hidden"], 1);
-        assert!(cleared[0]["acknowledged_at_ms"].is_number());
-        let channel = format!("{}:human", service.host_id);
-        let hub_db = super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
-        for (age, expected_heartbeats) in [(0, 0), (21_000, 1), (0, 0)] {
-            let mut remote = client.kv_get(id)?.ok_or("Missing remote Human")?.0;
-            remote["channels"][&channel]["updated_at_ms"] = json!(now_ms() - age);
-            hub_db.execute(
-                "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
-                &[json!(remote.to_string()), json!(id)],
-            )?;
-            client.directory()?;
-            let count = || -> Result<u64, String> {
-                Ok(hub_db.query(
-                    "SELECT COUNT(*) AS n FROM hub_audit_log WHERE action='human_device_heartbeat'",
-                    &[],
-                )?[0]["n"]
-                    .as_u64()
-                    .unwrap_or(0))
-            };
-            let before = count()?;
-            service.poll()?;
-            for (_, task) in service.receivers.drain() {
-                task.join().map_err(|_| "Receiver panicked")?;
-            }
-            assert_eq!(
-                count()? - before,
-                expected_heartbeats,
-                "Heartbeat age {age}"
-            );
-        }
-
-        // Settings can arrive before Directory, and must retain the inventory's policy.
-        let remote = HubClient::new(
-            "local".into(),
-            json!({"url":"https://hub.example.com","authMode":"token"}),
-            "alice",
-            None,
-        );
-        let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&remote)));
-        inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"channels":[{"id":"messenger","enabled":true,"configured":true,"inbox_paused":true,"delivery_enabled":false}]});
-        service
-            .channel_inventories
-            .insert("local".into(), inventory);
-        service.replace_slot(remote);
-        assert_eq!(
-            service.human_projection("local")["human_state_status"],
-            "unknown"
-        );
-        let settings = service.settings_for_hub("local");
-        assert_eq!(settings["channels"][0]["inbox_paused"], true);
-        assert_eq!(settings["channels"][0]["delivery_enabled"], false);
         Ok(())
     })();
     result
 }
+
+fn activity_pair() -> Result<(TestDirectory, TestService), String> {
+    let (dir, service) = TestService::local()?;
+    let state = service.state.clone();
+    state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,hub_url,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES('local','node','none#alice','local://','alice','host','host','fixture','s','','Target','','self','ACTIVE')", &[])?;
+    for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
+        state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED','local://','none#alice')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
+    }
+    Ok((dir, service))
+}
+
+#[test]
+fn bulk_acknowledgements_roll_back_on_queue_failure() -> Result<(), String> {
+    let (_dir, service) = activity_pair()?;
+    let state = &service.state;
+    state.db.execute("CREATE TRIGGER reject_second_ack BEFORE INSERT ON pending_hub_acks WHEN NEW.signal_id IN ('matching','unmatched') AND EXISTS (SELECT 1 FROM pending_hub_acks WHERE signal_id IN ('matching','unmatched')) BEGIN SELECT RAISE(ABORT,'second ack rejected'); END", &[])?;
+    assert_eq!(
+        state
+            .acknowledge_activity(&json!({"hub":"local"}), "all", "host", true)
+            .unwrap_err(),
+        "second ack rejected"
+    );
+    assert_eq!(state.activity_counts()?.1, 2);
+    assert!(state
+        .db
+        .query("SELECT 1 FROM pending_hub_acks", &[])?
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn activity_search_scopes_bulk_but_not_explicit_acknowledgements() -> Result<(), String> {
+    let (_dir, mut service) = activity_pair()?;
+    let state = service.state.clone();
+    let (_, matched, _) = state.query_activity("all", " review ")?;
+    assert_eq!(matched, 1);
+    service.action(&json!({"op":"ack_signals","ack_all":true,"query":" review "}))?;
+    let remaining = state.db.query(
+        "SELECT signal_id FROM local_signals WHERE acknowledged_at_ms IS NULL",
+        &[],
+    )?;
+    assert_eq!(remaining, vec![json!({"signal_id":"unmatched"})]);
+    service.action(
+        &json!({"op":"ack_signals","signal_ids":["unmatched"],"filter":"me","query":"review"}),
+    )?;
+    assert_eq!(state.activity_counts()?.1, 0);
+    Ok(())
+}
+
+#[test]
+fn activity_counts_include_legacy_principal_aliases() -> Result<(), String> {
+    let (_dir, service) = activity_pair()?;
+    let state = &service.state;
+    state.db.execute("UPDATE local_listeners SET principal_id='oidc:https://id.example.com|alice' WHERE listener_id='node'",&[])?;
+    state.db.execute("UPDATE local_signals SET principal_id='https://id.example.com#alice' WHERE listener_id='node'",&[])?;
+    let (_, total, unread) = state.query_activity("all", "")?;
+    assert_eq!(state.activity_counts()?, (total, unread));
+    assert_eq!((total, unread), (2, 2));
+    Ok(())
+}
+
+#[test]
+fn clearing_human_history_keeps_acknowledged_passive_storage() -> Result<(), String> {
+    let (_dir, service) = TestService::local()?;
+    let state = service.state.clone();
+    let client = service.slot("local")?.clone();
+    let human = super::super::registration::local_node(&state, &client, "human", "default")?
+        .ok_or("Missing Human")?;
+    let id = string(&human, "listener_id");
+    state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local','clear-human',?,3,1,'alice','host','','clear me','now',?,'RECEIVED',?,?)", &[json!(id),json!(now_ms()+60_000),human["hub_url"].clone(),human["principal_id"].clone()])?;
+    state.clear_activity_history(
+        &json!({"hub":"local","signal_id":"clear-human"}),
+        "all",
+        &service.host_id,
+    )?;
+    let cleared = state.db.query("SELECT state,activity_hidden,acknowledged_at_ms FROM local_signals WHERE signal_id='clear-human'",&[])?;
+    assert_eq!(cleared[0]["state"], "STORED_PASSIVE");
+    assert_eq!(cleared[0]["activity_hidden"], 1);
+    assert!(cleared[0]["acknowledged_at_ms"].is_number());
+    Ok(())
+}
+
+#[test]
+fn human_heartbeat_refreshes_only_aged_channel_observations() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let client = service.slot("local")?.clone();
+    let human =
+        super::super::registration::local_node(&service.state, &client, "human", "default")?
+            .ok_or("Missing Human")?;
+    let id = string(&human, "listener_id");
+    let channel = format!("{}:human", service.host_id);
+    let hub_db =
+        super::super::database::Database::open(&service.config.state_dir.join("hub.sqlite"))?;
+    for (age, expected_heartbeats) in [(0, 0), (21_000, 1), (0, 0)] {
+        let mut remote = client.kv_get(id)?.ok_or("Missing remote Human")?.0;
+        remote["channels"][&channel]["updated_at_ms"] = json!(now_ms() - age);
+        hub_db.execute(
+            "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+            &[json!(remote.to_string()), json!(id)],
+        )?;
+        client.directory()?;
+        let count = || -> Result<u64, String> {
+            Ok(hub_db.query(
+                "SELECT COUNT(*) AS n FROM hub_audit_log WHERE action='human_device_heartbeat'",
+                &[],
+            )?[0]["n"]
+                .as_u64()
+                .unwrap_or(0))
+        };
+        let before = count()?;
+        service.poll()?;
+        for (_, task) in service.receivers.drain() {
+            task.join().map_err(|_| "Receiver panicked")?;
+        }
+        assert_eq!(
+            count()? - before,
+            expected_heartbeats,
+            "Heartbeat age {age}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn settings_before_directory_retains_inventory_delivery_policy() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = serve_responses(
+        listener,
+        [(
+            200,
+            json!({"ok":true,"result":{"channels":[{"id":"messenger","enabled":true,"configured":true,"inbox_paused":true,"delivery_enabled":false}]}}),
+        )],
+    );
+    let remote = HubClient::new(
+        "local".into(),
+        json!({"url":url,"authMode":"token"}),
+        "alice",
+        None,
+    );
+    service.channel_inventory(&remote).refresh(&remote, 0)?;
+    server.join().unwrap()?;
+    service.replace_slot(remote);
+    assert_eq!(
+        service.human_projection("local")["human_state_status"],
+        "unknown"
+    );
+    let settings = service.settings_for_hub("local");
+    assert_eq!(settings["channels"][0]["inbox_paused"], true);
+    assert_eq!(settings["channels"][0]["delivery_enabled"], false);
+    Ok(())
+}
+#[test]
+fn human_send_preserves_the_raw_reply_id_after_source_retention() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let target = service.listen(
+        "local",
+        &json!({"about":"Inbox"}),
+        &json!({"harness":"fixture","session_id":"target","title":"Target","cwd":""}),
+    )?;
+    let hub = super::super::database::Database::open(&service.config.state_dir.join("hub.sqlite"))?;
+    let human = crate::core::registration::local_node_id(
+        &service.state,
+        service.slot("local")?,
+        "human",
+        "default",
+    )?;
+    let source = service.local.rpc(
+        "js_publish",
+        &json!({"subject":format!("cito.signal.{human}"),"data":{"signal_id":"thread:source"}}),
+        None,
+    )?;
+    let mut check = |reference: &str, expected: &str| -> Result<(), String> {
+        let receipt = service.action(&json!({"op":"send_signal","to":target["listener_id"],"message":"Reply","in_reply_to":reference}))?;
+        let row = hub.query("SELECT json_extract(CAST(data AS TEXT),'$.in_reply_to') AS source FROM hub_signals WHERE seq=?", &[receipt["seq"].clone()])?;
+        assert_eq!(row, [json!({"source":expected})]);
+        Ok(())
+    };
+    check("local:thread:source", "thread:source")?;
+    assert_eq!(
+        hub.execute(
+            "DELETE FROM hub_signals WHERE seq=? AND acked_at_ms IS NOT NULL",
+            &[source["seq"].clone()]
+        )?,
+        1
+    );
+    check("local:thread:source", "thread:source")?;
+    check("local:thread:missing", "thread:missing")?;
+    check("plain", "plain")
+}
+
 #[test]
 fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
     for (status, expected) in [
@@ -3399,9 +3558,22 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
                 json!({"a":{"url":"http://127.0.0.1:1"},"b":{"url":"http://127.0.0.1:1"}});
             let duplicate = duplicate.to_string();
             fs::write(&config.config_path, &duplicate).map_err(|e| e.to_string())?;
+            // A rejected candidate must not tear down even an existing connection.
+            let mut pending = TcpStream::connect(address).map_err(|e| e.to_string())?;
+            pending
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|e| e.to_string())?;
+            pending
+                .write_all(b"GET /health HTTP/1.1\r\n")
+                .map_err(|e| e.to_string())?;
             let result =
                 service.action(&json!({"op":"set_host_hub","port":0,"token":"uncommitted-token"}));
             assert_eq!(result.unwrap_err(), host_hub::duplicate_hub_error("a"));
+            write!(pending, "Host: {address}\r\n\r\n").map_err(|e| e.to_string())?;
+            assert_eq!(
+                crate::plugins::read_http_response(&mut pending)?.status,
+                200
+            );
             assert_eq!(
                 fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
                 duplicate
@@ -3410,7 +3582,7 @@ fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
             assert_eq!(service.host_server.as_ref().unwrap().address, address);
             rpc(address, "previous-token")?;
 
-            // Updating credentials on the same socket must release and rebind that port.
+            // Updating credentials keeps the bound socket but retires its old workers.
             service.action(
                 &json!({"op":"set_host_hub","port":address.port(),"token":"--replacement=token"}),
             )?;
@@ -3478,9 +3650,7 @@ fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
     Ok(())
 }
 #[test]
-fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
-    use std::io::Write;
-    use std::net::{TcpListener, TcpStream};
+fn config_publication_follows_dangling_and_relative_symlinks() -> Result<(), String> {
     let dir =
         TestDirectory(std::env::temp_dir().join(format!("cito-boundary-{}", random_uuid_v4())));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -3489,138 +3659,151 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
     let config = test_config(&dir);
     std::os::unix::fs::symlink(&target, &config.config_path).map_err(|e| e.to_string())?;
     let plugins = test_plugins(vec![]);
-    let mut service = TestService::open(&config, &plugins)?;
-    let result = (|| -> Result<(), String> {
-        // Publication must follow a dangling symlink instead of replacing it.
-        fs::remove_file(&target).map_err(|e| e.to_string())?;
-        service.mutate_config(|value| {
-            value["user"] = json!("bob");
-            Ok(())
-        })?;
-        assert!(fs::symlink_metadata(&config.config_path)
-            .map_err(|e| e.to_string())?
-            .file_type()
-            .is_symlink());
-        let stored: Value =
-            serde_json::from_str(&fs::read_to_string(&target).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        assert_eq!(stored["user"], "bob");
-        // Resolve directory symlinks before interpreting a relative parent.
-        fs::remove_file(&config.config_path).map_err(|e| e.to_string())?;
-        fs::create_dir_all(dir.join("real/sub")).map_err(|e| e.to_string())?;
-        std::os::unix::fs::symlink("real/sub", dir.join("linkdir")).map_err(|e| e.to_string())?;
-        std::os::unix::fs::symlink("linkdir/../settings.json", &config.config_path)
+    let service = TestService::open(&config, &plugins)?;
+    // Publication must follow a dangling symlink instead of replacing it.
+    fs::remove_file(&target).map_err(|e| e.to_string())?;
+    service.mutate_config(|value| {
+        value["user"] = json!("bob");
+        Ok(())
+    })?;
+    assert!(fs::symlink_metadata(&config.config_path)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_symlink());
+    let stored: Value =
+        serde_json::from_str(&fs::read_to_string(&target).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        assert!(!dir.join("real/settings.json").exists());
-        service.mutate_config(|value| {
-            value["user"] = json!("charlie");
-            Ok(())
-        })?;
-        let stored: Value = serde_json::from_str(
-            &fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
-        )
+    assert_eq!(stored["user"], "bob");
+    // Resolve directory symlinks before interpreting a relative parent.
+    fs::remove_file(&config.config_path).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir.join("real/sub")).map_err(|e| e.to_string())?;
+    std::os::unix::fs::symlink("real/sub", dir.join("linkdir")).map_err(|e| e.to_string())?;
+    std::os::unix::fs::symlink("linkdir/../settings.json", &config.config_path)
         .map_err(|e| e.to_string())?;
-        assert_eq!(stored["user"], "charlie");
-        assert!(dir.join("real/settings.json").is_file());
-        assert!(!dir.join("settings.json").exists());
-        assert!(fs::symlink_metadata(&config.config_path)
-            .map_err(|e| e.to_string())?
-            .file_type()
-            .is_symlink());
-        // Local state contains ownership secrets; every exported session/activity
-        // row must cross the DTO projection even in lightweight status updates.
-        let active = service.state.active()?;
-        assert!(!active.is_empty());
-        let snapshot = service.snapshot()?;
-        let listeners = snapshot["listeners"].as_array().unwrap();
-        assert!(!listeners.is_empty());
-        for row in listeners {
-            assert!(row.get("owner_token").is_none());
-            assert!(row.get("dispatcher_token").is_none());
-            assert!(row.get("hub_url").is_none());
-            assert_eq!(row["is_self_principal"], true);
-            assert_eq!(row["can_set_scope"], false);
-            for control in ["can_pin", "can_rename", "can_stop"] {
-                assert_eq!(row[control], row["harness"] != "human", "{row}");
-            }
+    assert!(!dir.join("real/settings.json").exists());
+    service.mutate_config(|value| {
+        value["user"] = json!("charlie");
+        Ok(())
+    })?;
+    let stored: Value =
+        serde_json::from_str(&fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    assert_eq!(stored["user"], "charlie");
+    assert!(dir.join("real/settings.json").is_file());
+    assert!(!dir.join("settings.json").exists());
+    assert!(fs::symlink_metadata(&config.config_path)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_symlink());
+    Ok(())
+}
+
+#[test]
+fn session_and_activity_projections_do_not_expose_ownership_secrets() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    // Local state contains ownership secrets; every exported session/activity
+    // row must cross the DTO projection even in lightweight status updates.
+    let active = service.state.active()?;
+    assert!(!active.is_empty());
+    let snapshot = service.snapshot()?;
+    let listeners = snapshot["listeners"].as_array().unwrap();
+    assert!(!listeners.is_empty());
+    for row in listeners {
+        assert!(row.get("owner_token").is_none());
+        assert!(row.get("dispatcher_token").is_none());
+        assert!(row.get("hub_url").is_none());
+        assert_eq!(row["is_self_principal"], true);
+        assert_eq!(row["can_set_scope"], false);
+        for control in ["can_pin", "can_rename", "can_stop"] {
+            assert_eq!(row[control], row["harness"] != "human", "{row}");
         }
-        for hubs in [&snapshot["hubs"], &snapshot["settings"]["hubs"]] {
-            let hub = hubs
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|hub| hub["name"] == "local")
-                .unwrap();
-            assert_eq!(hub["is_builtin"], true);
-            assert_eq!(hub["supports_workspace_scope"], false);
-            assert_eq!(hub["can_login"], false);
-        }
-        let row = &active[0];
-        let signal = json!({"signal_id":"dto-signal","target_generation":row["binding_generation"],"from":{"principal_id":row["principal_id"],"user":"alice","host_name":"desktop"},"message":"hello"});
-        service.state.admit(
-            "local",
-            row,
-            &signal,
-            1,
-            "2026-01-01T00:00:00Z",
-            now_ms() + 60_000,
-            &Value::Null,
-        )?;
-        assert!(
-            service
-                .state
-                .db
-                .query("SELECT * FROM wake_retries", &[])?
-                .is_empty(),
-            "Human admission must not schedule wake work"
-        );
-        // Clear must also reconcile a retained legacy retry row.
-        service.state.db.execute(
-            "INSERT INTO wake_retries VALUES('local',?,0)",
-            &[row["listener_id"].clone()],
-        )?;
-        service.state.db.execute(
-            "UPDATE local_signals SET dispatcher_token='secret-dispatcher'",
-            &[],
-        )?;
-        let activity = service.snapshot()?["activity"].clone();
-        assert!(!activity.as_array().unwrap().is_empty());
-        assert!(!activity.to_string().contains("secret-dispatcher"));
-        assert!(activity[0].get("dispatcher_token").is_none());
-        assert_eq!(activity[0]["message"], "hello");
-        assert!(
-            activity[0]["can_reply"].is_boolean(),
-            "Activity DTOs retain reply authority"
-        );
-        let cleared = service.action(
-            &json!({"op":"clear_activity_history","hub":"local","signal_id":"dto-signal"}),
-        )?;
-        assert_eq!(cleared["committed"], true);
-        assert!(service
+    }
+    for hubs in [&snapshot["hubs"], &snapshot["settings"]["hubs"]] {
+        let hub = hubs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hub| hub["name"] == "local")
+            .unwrap();
+        assert_eq!(hub["is_builtin"], true);
+        assert_eq!(hub["supports_workspace_scope"], false);
+        assert_eq!(hub["can_login"], false);
+    }
+    let row = &active[0];
+    let signal = json!({"signal_id":"dto-signal","target_generation":row["binding_generation"],"from":{"principal_id":row["principal_id"],"user":"alice","host_name":"desktop"},"message":"hello"});
+    service.state.admit(
+        "local",
+        row,
+        &signal,
+        1,
+        "2026-01-01T00:00:00Z",
+        now_ms() + 60_000,
+        &Value::Null,
+    )?;
+    assert!(
+        service
             .state
             .db
             .query("SELECT * FROM wake_retries", &[])?
-            .is_empty());
-        service.reload_slots()?;
-        service.state.db.execute("DROP TABLE wake_retries", &[])?;
-        let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;
-        assert_eq!(sent["ok"], true);
-        assert!(sent["signal_id"].as_str().unwrap().contains("sig_"));
-        assert!(sent["maintenance_warning"].is_string(), "{sent}");
-        let reservation = service
-            .state
-            .db
-            .query("SELECT * FROM local_sent_idempotency", &[])?;
-        assert_eq!(reservation.len(), 1);
-        assert_eq!(reservation[0]["status"], "wake_accepted");
-        service.state.db.execute("CREATE TABLE wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id))", &[])?;
-        Ok(())
-    })();
+            .is_empty(),
+        "Human admission must not schedule wake work"
+    );
+    // Clear must also reconcile a retained legacy retry row.
+    service.state.db.execute(
+        "INSERT INTO wake_retries VALUES('local',?,0)",
+        &[row["listener_id"].clone()],
+    )?;
+    service.state.db.execute(
+        "UPDATE local_signals SET dispatcher_token='secret-dispatcher'",
+        &[],
+    )?;
+    let activity = service.snapshot()?["activity"].clone();
+    assert!(!activity.as_array().unwrap().is_empty());
+    assert!(!activity.to_string().contains("secret-dispatcher"));
+    assert!(activity[0].get("dispatcher_token").is_none());
+    assert_eq!(activity[0]["message"], "hello");
+    assert!(
+        activity[0]["can_reply"].is_boolean(),
+        "Activity DTOs retain reply authority"
+    );
+    let cleared = service
+        .action(&json!({"op":"clear_activity_history","hub":"local","signal_id":"dto-signal"}))?;
+    assert_eq!(cleared["committed"], true);
+    assert!(service
+        .state
+        .db
+        .query("SELECT * FROM wake_retries", &[])?
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn send_receipt_survives_wake_maintenance_failure() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    service.state.db.execute("DROP TABLE wake_retries", &[])?;
+    let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;
+    assert_eq!(sent["ok"], true);
+    assert!(sent["signal_id"].as_str().unwrap().contains("sig_"));
+    assert!(sent["maintenance_warning"].is_string(), "{sent}");
+    let reservation = service
+        .state
+        .db
+        .query("SELECT * FROM local_sent_idempotency", &[])?;
+    assert_eq!(reservation.len(), 1);
+    assert_eq!(reservation[0]["status"], "wake_accepted");
+    service.state.db.execute("CREATE TABLE wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id))", &[])?;
+    Ok(())
+}
+
+#[test]
+fn local_http_enforces_host_origin_content_type_and_framing() -> Result<(), String> {
+    use std::io::Write;
+    let (_dir, service) = TestService::local()?;
     let shared = Arc::new(Mutex::new(service.into_inner()));
     let _cleanup = ServiceCleanup {
         service: shared.clone(),
     };
-    let http_result = (|| -> Result<(), String> {
+    {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         for (method, headers, status) in [
@@ -3673,8 +3856,7 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             let _: Value = serde_json::from_str(&response.body).map_err(|e|e.to_string())?;
         }
         Ok(())
-    })();
-    result.and(http_result)
+    }
 }
 
 #[test]
@@ -3725,34 +3907,17 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         "http://{}",
         listener.local_addr().map_err(|e| e.to_string())?
     );
-    let server = thread::spawn(move || {
-        let mut stream = crate::core::http_boundary::accept_test_client(&listener).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut line = String::new();
-        let mut length = 0;
-        reader.read_line(&mut line).unwrap();
-        loop {
-            line.clear();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                if key.eq_ignore_ascii_case("content-length") {
-                    length = value.trim().parse::<usize>().unwrap();
-                }
-            }
-        }
-        reader.read_exact(&mut vec![0; length]).unwrap();
-        respond(
-            &mut stream,
-            200,
-            &json!({"ok":true,"result":{"server_now_ms":1000,"record":{"listener_id":"c_fixture","public_id":"alice-fixture","principal_id":"none#alice","owner_user":"alice","harness":"human","session_id":"default","state":"UNLISTENED","scope":"workspace","about":"Keep","human_control_revision":3,"updated_at_ms":1000,"channels":{"remote:human":{"host_id":"remote","host_name":"Laptop","state":"ACTIVE","updated_at_ms":1000}}}}}),
-        );
-    });
+    let server = serve_responses(
+        listener,
+        [
+            (
+                200,
+                json!({"ok":true,"result":{"server_now_ms":1000,"record":{"listener_id":"c_fixture","public_id":"alice-fixture","principal_id":"none#alice","owner_user":"alice","harness":"human","session_id":"default","state":"UNLISTENED","scope":"workspace","about":"Keep","human_control_revision":3,"updated_at_ms":1000,"channels":{"remote:human":{"host_id":"remote","host_name":"Laptop","state":"ACTIVE","updated_at_ms":1000}}}}}),
+            ),
+            (401, json!({})),
+            (401, json!({})),
+        ],
+    );
     let client = HubClient::new(
         "work".into(),
         json!({"url":url,"authMode":"none"}),
@@ -3760,7 +3925,6 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         None,
     );
     client.human_request("human_device_attach", &json!({}))?;
-    server.join().map_err(|_| "Fixture server panicked")?;
     fs::write(
         &config.config_path,
         json!({"hubs":{"local":{"url":"local://"},"work":{"url":client.config["url"]}}})
@@ -3792,7 +3956,11 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
     assert_eq!(peer["last_seen_at"], crate::core::identity::iso(1000));
     for current in [true, false] {
         let samples = service.hub_samples();
-        *client.rejected_bearer.lock().unwrap() = current.then(|| "rejected".into());
+        if current {
+            assert!(client.rpc("human_channels_list", &json!({})).is_err());
+        } else {
+            client.clone().inherit_authority(&client);
+        }
         assert_ne!(client.human_observation_current(), current);
         let frame = service.snapshot_from(&samples)?;
         for (key, name_field) in [("hubs", "name"), ("my_remote_listeners", "hub")] {
@@ -3809,26 +3977,8 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
             assert_eq!(projected["human_can_set_scope"], current);
         }
     }
-    let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&client)));
-    inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"status":"error","detail":"Temporary inventory failure","channels":[{"id":"messenger","status":"ready"}]});
-    service
-        .channel_inventories
-        .insert("work".into(), inventory.clone());
-    let settings = service.settings_for_hub("work");
-    assert_eq!(
-        settings["channel_inventory_error"],
-        "Temporary inventory failure"
-    );
-    assert_eq!(settings["channels"].as_array().unwrap().len(), 1);
-    assert_eq!(settings["channels"][0]["id"], "messenger");
-    inventory.cached.lock().map_err(|e| e.to_string())?.value =
-        json!({"status":"error","detail":"Initial failure"});
-    let settings = service.settings_for_hub("work");
-    assert_eq!(settings["channels"], json!([]));
-    assert_eq!(settings["channel_inventory_error"], "Initial failure");
-    assert!(service.settings_for_hub("local")["channel_inventory_error"].is_null());
-    *client.status.lock().map_err(|e| e.to_string())? = "connected".into();
-    *client.rejected_bearer.lock().map_err(|e| e.to_string())? = Some("rejected".into());
+    assert!(client.rpc("human_channels_list", &json!({})).is_err());
+    server.join().unwrap()?;
     let snapshot = service.snapshot()?;
     let hub = snapshot["hubs"]
         .as_array()
@@ -3845,7 +3995,6 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
     assert_eq!(hub["human_state_status"], "stale");
     assert_eq!(hub["human_can_set_scope"], false);
     assert_eq!(hub["human_state_status"], peer["human_state_status"]);
-    client.closed.store(true, Ordering::SeqCst);
     Ok(())
 }
 #[test]
@@ -3972,6 +4121,31 @@ fn canonical_editable_values_survive_ui_projection() -> Result<(), String> {
     let projected: Value = serde_json::from_slice(&bounded_frame(invite.clone())?).unwrap();
     assert_eq!(projected, invite);
     Ok(())
+}
+
+#[test]
+fn mcp_signal_reference_bounds_count_utf8_bytes() {
+    let reference = "é".repeat(80) + "x";
+    for (id, valid) in [
+        ("".to_string(), false),
+        (reference.clone(), true),
+        (reference + "x", false),
+    ] {
+        for (tool, args) in [
+            ("cito_inbox", json!({"ack_ids":[id]})),
+            (
+                "cito_send",
+                json!({"to":"@self","message":"reply","in_reply_to":id}),
+            ),
+        ] {
+            assert_eq!(
+                mcp::validate_tool_input(tool, &args).is_ok(),
+                valid,
+                "{tool}: {} bytes",
+                id.len()
+            );
+        }
+    }
 }
 
 #[test]

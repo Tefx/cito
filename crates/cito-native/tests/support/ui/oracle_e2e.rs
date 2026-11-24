@@ -2248,6 +2248,13 @@ fn correlation_editor_keys_and_modal_escape() {
         json!({"op":"directory","peers":[peer("one"),peer("two")]}),
     );
     control(&f, p, "dir_peer:personal:one");
+    f.send(p, json!({"op":"test_focus_field","id":"directory_table"}));
+    f.send(
+        p,
+        json!({"op":"test_directory_key","key":"down","via":"field"}),
+    );
+    assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
+    assert!(f.output(p, true).contains(r#"field-key {"handled":false}"#));
     control(&f, p, "msg_dir:personal:one");
     f.send(p, json!({"op":"test_focus_field","id":"composer_input"}));
     let selected = inspect(&f, p);
@@ -2260,7 +2267,15 @@ fn correlation_editor_keys_and_modal_escape() {
         f.send(p, json!({"op":"test_directory_key","key":"down","via":via}));
         assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
     }
-    f.send(p, json!({"op":"test_directory_key","key":"return"}));
+    f.send(
+        p,
+        json!({"op":"test_directory_key","key":"command-w","via":"field"}),
+    );
+    assert_eq!(inspect(&f, p)["directory_open"], true);
+    f.send(
+        p,
+        json!({"op":"test_directory_key","key":"return","via":"field"}),
+    );
     assert_eq!(
         inspect(&f, p).directory("composer_error")["text"],
         "Enter a message to send."

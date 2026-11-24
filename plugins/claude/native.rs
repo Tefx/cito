@@ -416,6 +416,8 @@ fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Va
         }
     }
     let sid = validate_session(sid)?;
+    let v = json!({"session_id":sid,"cwd":cwd,"start":identity.as_ref().and_then(|v|str_at(v,"started_at")),"process_identity":identity,"source":str_at(req,"_binding_source").unwrap_or("hook")});
+    atomic_write(&path, v.to_string().as_bytes())?;
     if let Some(old_sid) = previous
         .as_ref()
         .filter(|old| !channel && old["source"] == "hook" && old["session_id"] != sid)
@@ -427,8 +429,6 @@ fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Va
                 .map_err(|e| e.to_string())?;
         }
     }
-    let v = json!({"session_id":sid,"cwd":cwd,"start":identity.as_ref().and_then(|v|str_at(v,"started_at")),"process_identity":identity,"source":str_at(req,"_binding_source").unwrap_or("hook")});
-    atomic_write(&path, v.to_string().as_bytes())?;
     Ok(previous)
 }
 fn metadata_session(req: &Value, binding: Option<&(Value, String)>) -> Result<Option<String>> {
@@ -1218,6 +1218,11 @@ impl SidecarCleanup {
         }
     }
 }
+impl Drop for SidecarCleanup {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 static SIDECAR_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 static SIDECAR_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 extern "C" fn sidecar_signal(_: libc::c_int) {
@@ -1328,6 +1333,7 @@ fn sidecar(req: Value) -> Result<()> {
         return Ok(());
     }
     let cwd = raw_str_at(&req, "cwd").unwrap_or("");
+    let explicit = metadata_session(&req, None)?;
     let path = state(&req).join(format!("sockets/claude-pid-{p}.sock"));
     let parent = path.parent().ok_or("Invalid socket path")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1349,14 +1355,13 @@ fn sidecar(req: Value) -> Result<()> {
         }
         Err(e) => return Err(e.to_string()),
     };
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-    let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
     let cleanup = Arc::new(SidecarCleanup {
         path: path.clone(),
         inode: (metadata.dev(), metadata.ino()),
         badges: Mutex::new((false, std::collections::HashMap::new())),
     });
-    let explicit = metadata_session(&req, None)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     // An unhooked process cannot attribute a workspace transcript to itself.
     let fallback = format!("claude-{p}");
     let mut alias_active = explicit.is_none();
@@ -1370,10 +1375,10 @@ fn sidecar(req: Value) -> Result<()> {
     // before replying, but cap that handoff at 10 ms when stdout is blocked.
     // The durable queue remains authoritative; excess hints may be dropped.
     let (notify_tx, notify_rx) =
-        std::sync::mpsc::sync_channel::<(Value, std::sync::mpsc::SyncSender<()>)>(64);
+        std::sync::mpsc::sync_channel::<(String, std::sync::mpsc::SyncSender<()>)>(64);
     std::thread::spawn(move || {
         for (message, submitted) in notify_rx {
-            emit(&message);
+            let _ = writeln!(std::io::stdout().lock(), "{message}");
             let _ = submitted.try_send(());
         }
     });
@@ -1516,8 +1521,11 @@ fn sidecar(req: Value) -> Result<()> {
                 }
                 last_active = now_ms();
                 let (submitted_tx, submitted_rx) = std::sync::mpsc::sync_channel(1);
-                if notify_tx.try_send((json!({"jsonrpc":"2.0","method":"notifications/claude/channel","params":{"content":v["content"],"meta":{"origin":"cito","batch_id":batch}}}),submitted_tx)).is_ok() {
-                    let _=submitted_rx.recv_timeout(Duration::from_millis(10));
+                let message = json!({"jsonrpc":"2.0","method":"notifications/claude/channel","params":{"content":v["content"],"meta":{"origin":"cito","batch_id":batch}}}).to_string();
+                // The reader's 1 MiB frame budget includes the terminating newline.
+                if message.len() < 1_048_576 && notify_tx.try_send((message, submitted_tx)).is_ok()
+                {
+                    let _ = submitted_rx.recv_timeout(Duration::from_millis(10));
                 }
             }
             Ok(json!({"ok":true,"delivered":true,"deduplicated":deduplicated}))

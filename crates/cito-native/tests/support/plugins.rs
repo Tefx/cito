@@ -453,6 +453,7 @@ fn two_unhooked_claude_endpoints_never_adopt_a_shared_workspace_transcript() {
 
 #[test]
 fn claude_fallback_hook_handoff_and_descendant_session_fence() {
+    use std::os::unix::fs::PermissionsExt;
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let ack_server = r#"import http.server,json,socketserver
@@ -577,6 +578,19 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
         assert_eq!(session(), "real-session");
         assert!(!f.state.join("claude/aliases").join(sid).exists());
     }
+    let endpoints = binding.parent().unwrap();
+    let permissions = fs::metadata(endpoints).unwrap().permissions();
+    fs::set_permissions(endpoints, fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = hook("failed-switch", "direct");
+    fs::set_permissions(endpoints, permissions).unwrap();
+    assert_ne!(failed["err"], "");
+    assert_eq!(session(), "real-session");
+    assert_eq!(
+        fs::read_to_string(f.state.join("claude/aliases/real-session"))
+            .unwrap()
+            .trim_end(),
+        fallback
+    );
     let cleared = hook("cleared-session", "shell");
     assert_eq!(cleared["err"], "");
     assert_eq!(session(), "cleared-session");
@@ -2318,6 +2332,64 @@ fn codex_checkpoint_migrates_and_consumes_each_effect_once() {
 }
 
 #[test]
+fn codex_rollout_catches_up_after_unscanned_wake_eviction() {
+    use sha2::{Digest, Sha256};
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute(
+        "CREATE TABLE threads(id TEXT,cwd TEXT,recency_at_ms INTEGER,rollout_path TEXT)",
+        &[],
+    )
+    .unwrap();
+    let rollout = f.dir.join("rollout.jsonl");
+    db.execute(
+        "INSERT INTO threads VALUES('thread','/repo',1,?)",
+        &[json!(rollout)],
+    )
+    .unwrap();
+    let mut file = fs::File::create(&rollout).unwrap();
+    let event = |text: &str| json!({"timestamp":"2026-01-01T00:00:00Z","payload":{"type":"user_message","message":text}});
+    // A full persisted window followed by a real queue insertion crosses the cap.
+    let effects: Vec<_> = (0..256)
+        .map(|i| format!("{:x}", Sha256::digest(format!("wake-{i}"))))
+        .collect();
+    let checkpoint = f
+        .state
+        .join("activity/codex")
+        .join(format!("{:x}.json", Sha256::digest(b"thread")));
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    fs::write(&checkpoint, json!({"effects":effects}).to_string()).unwrap();
+    let queue = f.dir.join("queue");
+    script(&queue, "#!/bin/sh\nexit 0\n");
+    f.env
+        .insert("CITO_CODEX_BIN".into(), queue.display().to_string());
+    let sent = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"wake-256","checkpoint_only":true}),
+    );
+    assert_eq!(sent["queue_confirmed"], true, "{sent}");
+    assert_eq!(
+        read_json(&checkpoint)["effects"].as_array().unwrap().len(),
+        256
+    );
+    let activity =
+        || f.plugin(CODEX, json!({"op":"discover_sessions"}))["sessions"][0]["activity"].clone();
+    writeln!(file, "{}", event("wake-0")).unwrap();
+    assert_eq!(activity()["kind"], "cito_effect");
+    for i in 1..=256 {
+        writeln!(file, "{}", event(&format!("wake-{i}"))).unwrap();
+    }
+    assert_eq!(activity()["kind"], "cito_effect");
+    writeln!(file, "{}", event("wake-0")).unwrap();
+    assert_eq!(activity()["kind"], "user_turn");
+}
+
+#[test]
 fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -3525,6 +3597,14 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
     let endpoint_process = spawn_interactive(&f, "node", &[endpoint_script.to_str().unwrap()], &[]);
     wait(|| f.output(endpoint_process, false).contains("ready"));
     let endpoint = f.pid(endpoint_process);
+    let path = f.state.join(format!("sockets/claude-pid-{endpoint}.sock"));
+    let invalid = f.spawn(CLAUDE, &[], &[]);
+    f.send(invalid,json!({"op":"stdio_sidecar","state_dir":f.state,"endpoint_pid":endpoint,"explicit_session_id":"bad/id","cwd":"/repo"}));
+    wait(|| f.exited(invalid));
+    assert!(f
+        .output(invalid, true)
+        .contains("Invalid session identifier"));
+    assert!(!path.exists());
     let p = f.spawn(CLAUDE, &[], &[]);
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "session-a".into());
@@ -3534,7 +3614,6 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
         f.frames(p)[0]["capabilities_patch"]["experimental"]["claude/channel"],
         json!({})
     );
-    let path = f.state.join(format!("sockets/claude-pid-{endpoint}.sock"));
     assert_eq!(
         socket(&path, json!({"op":"identify"}))["session_id"],
         "session-a"
@@ -3579,6 +3658,32 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
             .lines()
             .count(),
         2
+    );
+    // Escapes put the serialized frame over 1 MiB, though the content alone fits.
+    let content = "a".repeat(1_048_300) + &"\"".repeat(200);
+    let deliver = |batch, text: &str| {
+        socket(
+            &path,
+            json!({"op":"deliver","session_id":"session-a","batch_id":batch,"content":text}),
+        )
+    };
+    assert_eq!(deliver("large", &content)["delivered"], true);
+    assert_eq!(deliver("sentinel", "after large wake")["delivered"], true);
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["params"]["meta"]["batch_id"] == "sentinel")
+    });
+    assert!(f
+        .output(p, false)
+        .lines()
+        .all(|line| line.len() < 1_048_576));
+    assert!(
+        fs::read_to_string(f.state.join("claude/wakes/session-a.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .any(|v| v["batch_id"] == "large" && v["content"] == content)
     );
     // Cleanup cannot remove a badge generation published by a different writer.
     let badge = f.state.join("claude/badges/session-a");
@@ -3716,6 +3821,44 @@ fn setup_uses_republished_command_and_reports_skipped_inspection_failure() {
         .unwrap()
         .contains("database is unavailable"));
     assert!(!out.contains("private_name"));
+
+    let bridge = stale.join("cito-bridge.ts");
+    let shipped = fs::read(&bridge).unwrap();
+    let mut damaged = shipped.clone();
+    damaged[0] ^= 1;
+    fs::write(&bridge, damaged).unwrap();
+    let refresh = || {
+        let (ok, out, err) = f.command(NATIVE, &["setup", "--enable", "pi", "--json"], "");
+        assert!(ok, "{out} {err}");
+    };
+    refresh();
+    assert_eq!(fs::read(&bridge).unwrap(), shipped);
+    let obsolete = stale.join("retired.ts");
+    fs::write(&obsolete, "obsolete").unwrap();
+    refresh();
+    assert!(!obsolete.exists());
+}
+
+#[test]
+fn app_built_through_another_profiles_shim_includes_unstaged_builtins() {
+    let _lock = serial();
+    let a = Fixture::new(json!({}));
+    install_provider_command(&a, "pi", json!([PI]));
+    let (ok, out, err) = a.command(NATIVE, &["setup", "--enable", "pi"], "");
+    assert!(ok, "{out} {err}");
+    assert!(!a.state.join("runtime/plugins/pi").exists());
+    let b = Fixture::new(json!({}));
+    let shim = a.state.join("bin/cito");
+    let (ok, out, err) = b.command(shim.to_str().unwrap(), &["setup", "--build-app"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        fs::read(
+            b.state
+                .join("Applications/Cito.app/Contents/Resources/plugins/pi/cito-bridge.ts")
+        )
+        .unwrap(),
+        fs::read(root().join("plugins/pi/cito-bridge.ts")).unwrap()
+    );
 }
 
 #[test]
@@ -3867,6 +4010,30 @@ fn setup_reports_only_committed_config_on_disconnect_apply_and_login_failure() {
 }
 
 #[test]
+fn staging_repairs_secondary_executables_without_content_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let plugin =
+        cito_native::plugins::parse_manifest_dir(&root().join("plugins/claude"), true).unwrap();
+    let stage = || cito_native::setup::ensure_single_plugin_staged(&f.state, &plugin).unwrap();
+    stage();
+    let helper = f.state.join("runtime/plugins/claude/bin/cito-claude-hook");
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!cito_native::setup::is_staged_plugin_intact(
+        &f.state, &plugin
+    ));
+    stage();
+    assert_ne!(
+        fs::metadata(helper).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    assert!(cito_native::setup::is_staged_plugin_intact(
+        &f.state, &plugin
+    ));
+}
+
+#[test]
 fn setup_reports_committed_config_after_staging_failure() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -3956,11 +4123,19 @@ fn uninstall_preserves_nested_profile_and_backups_including_plugin_runtime() {
         fs::write(&config, "{\"user\":\"alice\"}").unwrap();
         fs::write(dir.join("custom.json.bak.older"), "backup").unwrap();
         fs::write(dir.join("scratch"), "disposable").unwrap();
+        let link = f.home.join("selected-profile");
+        let middle = dir.join("middle");
+        std::os::unix::fs::symlink("custom.json", &middle).unwrap();
+        std::os::unix::fs::symlink(&middle, &link).unwrap();
         f.env
-            .insert("CITO_CONFIG_PATH".into(), config.display().to_string());
+            .insert("CITO_CONFIG_PATH".into(), link.display().to_string());
         let (ok, out, err) = f.command(NATIVE, &["setup", "--uninstall", "--json"], "");
         assert!(ok, "{out} {err}");
-        assert_eq!(read_json(config)["user"], "alice");
+        assert_eq!(read_json(link)["user"], "alice");
+        assert_eq!(
+            fs::read_link(middle).unwrap(),
+            std::path::Path::new("custom.json")
+        );
         assert_eq!(
             fs::read(dir.join("custom.json.bak.older")).unwrap(),
             b"backup"
@@ -3968,6 +4143,85 @@ fn uninstall_preserves_nested_profile_and_backups_including_plugin_runtime() {
         assert!(!dir.join("scratch").exists());
     }
 }
+#[test]
+fn uninstall_keeps_app_and_launch_agent_links_traversed_by_profile() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let app = f.home.join("Applications/Cito.app");
+    let plist = cito_native::setup::launch_agent_plist_path(&f.home);
+    for link in [&app, &plist] {
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+    }
+    std::os::unix::fs::symlink(&f.state, &app).unwrap();
+    std::os::unix::fs::symlink(app.join("config.json"), &plist).unwrap();
+    f.env
+        .insert("CITO_CONFIG_PATH".into(), plist.display().to_string());
+    let before = fs::read(&plist).unwrap();
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--uninstall", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert!(plist.is_symlink() && app.is_symlink());
+    assert_eq!(fs::read(plist).unwrap(), before);
+}
+
+#[test]
+fn setup_rejects_config_publication_over_owner_locks() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    for lock in ["daemon.lock", "runtime/staging.lock"] {
+        let owner = f.state.join(lock);
+        fs::create_dir_all(owner.parent().unwrap()).unwrap();
+        let alias = f.dir.join("alias");
+        std::os::unix::fs::symlink(&owner, &alias).unwrap();
+        for path in [
+            &owner,
+            &alias,
+            &owner.join("config.json"),
+            &alias.join("config.json"),
+            owner.parent().unwrap(),
+        ] {
+            f.env
+                .insert("CITO_CONFIG_PATH".into(), path.display().to_string());
+            let (ok, out, err) = f.command(NATIVE, &["setup", "--no-share-hub"], "");
+            assert!(!ok && err.contains("ownership lock"), "{out} {err}");
+            assert!(!owner.exists());
+        }
+        fs::remove_file(alias).unwrap();
+    }
+}
+
+#[test]
+fn semantic_profile_damage_allows_removal_without_rewriting_config() {
+    let _lock = serial();
+    for config in [
+        json!({"hubs":{"work":{"url":"not-a-url"}}}),
+        json!({"hubs":{"work":{"url":"https://hub.example.org","authMode":"oidc"}}}),
+        json!({"daemonPort":"broken"}),
+        json!({"default_hub":"missing","hubs":{"local":{"url":"local://"}}}),
+        json!({"user":"invalid user"}),
+    ] {
+        let mut f = Fixture::new(config.clone());
+        f.env.remove("CITO_USER");
+        if config.get("daemonPort").is_some() {
+            let port = f.env.remove("CITO_DAEMON_PORT").unwrap();
+            // Exercise default port selection without contacting a host service.
+            let (ok, out, err) = f.command(NATIVE, &["setup", "--uninstall", "--dry-run"], "");
+            assert!(ok, "{out} {err}");
+            f.env.insert("CITO_DAEMON_PORT".into(), port);
+        }
+        for action in ["--disconnect-all", "--uninstall"] {
+            assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+            let original = fs::read(&f.config).unwrap();
+            let (ok, out, err) = f.command(NATIVE, &["setup", action, "--json"], "");
+            assert!(ok, "{action}: {out} {err}");
+            assert_eq!(
+                f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+                false
+            );
+            assert_eq!(fs::read(&f.config).unwrap(), original);
+        }
+    }
+}
+
 #[test]
 fn disconnect_purge_recovers_a_structurally_valid_invalid_default() {
     let _lock = serial();
@@ -4261,6 +4515,13 @@ for (const [path, prefix] of [['~',process.env.HOME],['~/custom',`${process.env.
   bridge({on:(name,fn)=>{if(name==='session_shutdown') shutdown=fn},registerMcpServer:(_,server)=>shim=server.command});
   assert.equal(shim,`${prefix}/bin/cito-mcp`); await shutdown();
 }
+process.env.CITO_STATE_DIR='/dev/null';
+process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='1';
+const registered=new Map();
+bridge({on:(name,fn)=>registered.set(name,fn),registerCommand:(name,cmd)=>registered.set(name,cmd)});
+for (const name of ['session_start','cito','session_shutdown']) assert(registered.has(name),name);
+await registered.get('session_shutdown')();
+process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='0';
 process.env.CITO_STATE_DIR=originalState;
 for (const reject of [false,true]) {
   let run, shutdown, settle, urls=[], ui=[];

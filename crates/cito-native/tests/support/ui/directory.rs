@@ -145,17 +145,37 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
         p,
         json!({"op":"test_directory_query","query":"Review ready"}),
     );
-    inspect(&f, p);
+    // The server counted both matching messages, even though only one row is cached.
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[frame["activity"][0]],"activity_filter":"all","activity_query":"Review ready","activity_total":2,"activity_unread_count":2,"unread_count":3}),
+    );
     control(&f, p, "activity_mark_all_read");
-    let read = inspect(&f, p);
-    assert_eq!(read["unread_count"], 1);
-    assert!(f
-        .frames(p)
-        .iter()
-        .any(|a| a["op"] == "ack_signals" && a["ack_all"] == true && a["query"] == "Review ready"));
+    let ack = latest(&f, p, "ack_signals");
+    assert_eq!(ack["ack_all"], true);
+    assert_eq!(ack["query"], "Review ready");
+    f.send(p, json!({"op":"error","source_op":"ack_signals","request_id":ack["request_id"],"error":"Hub unavailable"}));
+    let failed = inspect(&f, p);
+    assert_eq!(
+        failed.directory("directory_warning_label")["tooltip"],
+        "Hub unavailable"
+    );
+    assert_eq!(failed["unread_count"], 3);
+    assert_eq!(
+        failed.directory("directory_summary")["text"],
+        "2 messages · 2 unread"
+    );
+    assert_eq!(failed.directory("unread_accent_bar")["hidden"], false);
+    assert_eq!(failed.directory("activity_mark_all_read")["enabled"], true);
     f.send(
         p,
         json!({"op":"test_directory_query","query":"Build passed"}),
+    );
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[frame["activity"][1]],"activity_filter":"all","activity_query":"Build passed","activity_total":1,"activity_unread_count":1}),
     );
     let remaining = inspect(&f, p);
     assert_eq!(
@@ -664,17 +684,32 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     control(&f, p, "composer_cancel");
     let queries = f.frames_for(p, "query_directory").count();
     control(&f, p, "activity_mark_all_read");
-    let read = inspect(&f, p);
-    assert_eq!(read["unread_count"], 0);
-    assert!(nodes(&read["directory_items"]).iter().any(|n| n["text"]
-        .as_str()
-        .is_some_and(|s| s.ends_with(" · 0 unread"))));
+    let pending = inspect(&f, p);
+    assert_eq!(pending["unread_count"], 1);
+    assert_eq!(
+        pending.directory("directory_summary")["text"],
+        "1 message · 1 unread"
+    );
     assert_eq!(f.frames_for(p, "query_directory").count(), queries + 1);
     wait(|| {
         f.frames(p)
             .iter()
             .any(|v| v["op"] == "ack_signals" && v["ack_all"] == true)
     });
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[],"activity_filter":"unread","activity_total":0,"activity_unread_count":0,"unread_count":0}),
+    );
+    let confirmed = inspect(&f, p);
+    assert_eq!(confirmed["unread_count"], 0);
+    assert_eq!(
+        confirmed.directory("directory_summary")["text"],
+        "0 messages · 0 unread"
+    );
+    assert!(confirmed
+        .directory("activity_row:personal:sig_unread")
+        .is_null());
     control(&f, p, "act_filter:all");
     for (reason, label) in [
         ("stale_generation", "App reloaded"),

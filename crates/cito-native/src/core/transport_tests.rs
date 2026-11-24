@@ -13,7 +13,7 @@ fn silent_established_sse_reconnects_without_peer_eof() {
         None,
     );
     let worker = client
-        .start_events_with(Duration::from_millis(150), ureq::AgentBuilder::new())
+        .start_events_with(Duration::from_millis(150), EVENT_TLS.clone())
         .unwrap();
     let accept = || {
         let mut fds = [libc::pollfd {
@@ -251,7 +251,8 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
     );
     old.stream_live.store(true, Ordering::SeqCst);
     let mut renewed = HubClient::new("work".into(), config, "alice", None);
-    renewed.bearer = Some("verified-new".into());
+    let token = "a".repeat(32 * 1024);
+    renewed.bearer = Some(token.clone());
     renewed.expires_at = old.expires_at + 300;
     renewed.inherit_authority(&old);
     assert!(Arc::ptr_eq(&old.closed, &renewed.closed));
@@ -271,8 +272,8 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut reader = BufReader::new(&mut socket);
-        let head = crate::core::http_boundary::read_head(&mut reader, 16_384).unwrap();
-        assert_eq!(head.headers["authorization"], "Bearer verified-new");
+        let head = crate::core::http_boundary::read_head(&mut reader, 65_536).unwrap();
+        assert_eq!(head.headers["authorization"], format!("Bearer {token}"));
         let mut request = vec![0; head.length];
         reader.read_exact(&mut request).unwrap();
         assert_eq!(
@@ -289,8 +290,20 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
     });
     old.rpc("fixture", &json!({})).unwrap();
     server.join().unwrap();
-    renewed.reject_token(&Some("verified-new".into()));
+    renewed.reject_token(&renewed.bearer);
     assert_eq!(renewed.connection_status(), "auth_required");
+
+    // Refuse an oversized renewal before opening another RPC or event connection.
+    renewed.bearer.as_mut().unwrap().push('x');
+    renewed.inherit_authority(&old);
+    assert!(old
+        .rpc("fixture", &json!({}))
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    let url = url::Url::parse(old.config["url"].as_str().unwrap()).unwrap();
+    assert!(
+        matches!(old.open_events(&url, renewed.bearer.as_deref(), &EVENT_TLS), Err(e) if e.kind() == io::ErrorKind::InvalidInput)
+    );
 }
 
 #[test]
@@ -403,7 +416,7 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.dir).unwrap();
     }
 }
-fn loopback_tls() -> (Arc<rustls::ServerConfig>, ureq::AgentBuilder) {
+fn loopback_tls() -> (Arc<rustls::ServerConfig>, Arc<rustls::ClientConfig>) {
     let cert = rustls::pki_types::CertificateDer::from(
         include_bytes!("../../tests/hub/fixtures/localhost-cert.der").to_vec(),
     );
@@ -421,14 +434,94 @@ fn loopback_tls() -> (Arc<rustls::ServerConfig>, ureq::AgentBuilder) {
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    (
-        Arc::new(server),
-        ureq::AgentBuilder::new().tls_config(Arc::new(tls)),
-    )
+    (Arc::new(server), Arc::new(tls))
+}
+#[test]
+fn https_events_require_a_trusted_certificate_for_the_requested_host() {
+    let (server_config, fixture_trust) = loopback_tls();
+    // The fixture certificate is self-signed and covers localhost, not the IP literal.
+    for (host, trust) in [("localhost", &*EVENT_TLS), ("127.0.0.1", &fixture_trust)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = url::Url::parse(&format!(
+            "https://{host}:{}/v1/events",
+            listener.local_addr().unwrap().port()
+        ))
+        .unwrap();
+        let config = server_config.clone();
+        let server = thread::spawn(move || {
+            let socket = crate::core::http_boundary::accept_test_client(&listener).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut tls =
+                rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), socket);
+            assert!(
+                !matches!(tls.read(&mut [0]), Ok(1)),
+                "Received application data before authentication"
+            );
+        });
+        let client = HubClient::new("work".into(), json!({}), "alice", None);
+        let error = client
+            .open_events(&url, Some("private"), trust)
+            .err()
+            .expect("TLS peer must be rejected");
+        client.close();
+        server.join().unwrap();
+        assert!(
+            matches!(
+                error
+                    .get_ref()
+                    .and_then(|e| e.downcast_ref::<rustls::Error>()),
+                Some(rustls::Error::InvalidCertificate(_))
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn https_events_resume_a_chunk_size_split_across_a_read_timeout() {
+    let (config, tls) = loopback_tls();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = url::Url::parse(&format!(
+        "https://localhost:{}/v1/events",
+        listener.local_addr().unwrap().port()
+    ))
+    .unwrap();
+    let (resume, timed_out) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let socket = crate::core::http_boundary::accept_test_client(&listener).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut tls =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), socket);
+        crate::core::http_boundary::read_head(&mut BufReader::new(&mut tls), 16_384).unwrap();
+        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n1").unwrap();
+        tls.flush().unwrap();
+        // Release the suffix only after the client actually encountered a timeout.
+        timed_out.recv_timeout(Duration::from_secs(3)).unwrap();
+        tls.write_all(b"0\r\ndata: received\n\n\r\n0\r\n\r\n")
+            .unwrap();
+        tls.flush().unwrap();
+    });
+    let client = HubClient::new("work".into(), json!({}), "alice", None);
+    let (status, mut body) = client.open_events(&url, None, &tls).unwrap();
+    assert_eq!(status, 200);
+    let error = body.read(&mut [0; 64]).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    ));
+    resume.send(()).unwrap();
+    server.join().unwrap();
+    let mut payload = String::new();
+    body.read_to_string(&mut payload).unwrap();
+    assert_eq!(payload, "data: received\n\n");
 }
 #[test]
 fn close_releases_quiet_https_subscription_within_budget() {
-    let (config, builder) = loopback_tls();
+    let (config, tls_config) = loopback_tls();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!(
         "https://localhost:{}",
@@ -446,13 +539,13 @@ fn close_releases_quiet_https_subscription_within_budget() {
         assert_eq!(head.target, "/v1/events");
         tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: ready\n\n").unwrap();
         tls.flush().unwrap();
-        // Read TCP directly: a dropped ureq body need not send TLS close_notify.
+        // close() shuts down the underlying TCP socket even during a quiet TLS read.
         assert_eq!(tls.sock.read(&mut [0; 1]).unwrap(), 0);
     });
     let client = HubClient::new("work".into(), json!({"url":url}), "alice", None);
     let revision = client.event_revision();
     let worker = client
-        .start_events_with(Duration::from_secs(90), builder)
+        .start_events_with(Duration::from_secs(90), tls_config)
         .unwrap();
     client.wait_for_event(revision, Instant::now() + Duration::from_secs(2));
     assert!(client.event_revision() > revision);
@@ -482,8 +575,8 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
     let mut url = format!("http://{}", f.server.address);
     let mut agent = ureq::agent();
     if https {
-        let (config, builder) = loopback_tls();
-        agent = builder.build();
+        let (config, tls) = loopback_tls();
+        agent = ureq::AgentBuilder::new().tls_config(tls).build();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         url = format!(
             "https://localhost:{}",

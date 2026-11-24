@@ -175,7 +175,7 @@ extension Companion {
                         cell.configureActivity(with:item,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
                     } else if directoryFilteredPeers.indices.contains(row) {
                         let peer = directoryFilteredPeers[row]
-                        cell.configure(with:peer,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] text,c in self?.copyText(text,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
+                        cell.configure(with:peer,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] _,c in self?.copyPeer(peer,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
                     }
                 }
                 return true
@@ -240,14 +240,18 @@ extension Companion {
             }
             if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
                 let window = op == "test_settings_key" ? settingsPanel : directoryPanel
-                if object["via"] as? String == "field", let editor = window?.firstResponder as? NSTextView,
-                   let field = editor.delegate as? NSTextField {
+                if object["via"] as? String == "field" {
                     let commands = ["up": #selector(NSResponder.moveUp(_:)), "down": #selector(NSResponder.moveDown(_:)),
                                     "return": #selector(NSResponder.insertNewline(_:)), "escape": #selector(NSResponder.cancelOperation(_:))]
-                    if let selector = commands[key] {
-                        _ = field.delegate?.control?(field, textView: editor, doCommandBy: selector)
-                        return true
+                    let handled: Bool
+                    if let editor = window?.firstResponder as? NSTextView, let field = editor.delegate as? NSTextField,
+                       field.currentEditor() === editor, let selector = commands[key] {
+                        handled = field.delegate?.control?(field, textView: editor, doCommandBy: selector) ?? false
+                    } else {
+                        handled = false
                     }
+                    diagnostic("field-key {\"handled\":\(handled)}")
+                    return true
                 }
                 if object["via"] as? String == "panel" {
                     let character = key.hasSuffix("comma") ? "," : String(key.suffix(1))
@@ -862,6 +866,8 @@ extension Companion {
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
+        let now = Date()
+        pruneCopyFeedback(at: now)
         let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "rename_field_identity": renameField.map { String(describing:ObjectIdentifier($0)) } ?? "",
@@ -884,7 +890,8 @@ extension Companion {
                     "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
             },
-            "activity_copy_remaining": activityCopiedUntil.mapValues { max(0,$0.timeIntervalSinceNow) },
+            "directory_copy_remaining": directoryCopiedUntil.mapValues { $0.timeIntervalSince(now) },
+            "activity_copy_remaining": activityCopiedUntil.mapValues { $0.timeIntervalSince(now) },
             "hub_attachment_counts": Dictionary(uniqueKeysWithValues: hubs.map { ($0.name, $0.attachments?.count ?? 0) }),
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,

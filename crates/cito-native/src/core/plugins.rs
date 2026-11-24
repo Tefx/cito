@@ -492,18 +492,6 @@ pub fn selected_plugin_dir(state_dir: &Path, plugin: &PluginDescriptor) -> PathB
     }
 }
 
-pub(super) fn is_staged_plugins_root(root: &Path, state_dir: &Path) -> bool {
-    [staged_plugins_dir(state_dir), state_dir.join("plugins")]
-        .iter()
-        .any(|staged| {
-            root == staged
-                || fs::canonicalize(root)
-                    .ok()
-                    .zip(fs::canonicalize(staged).ok())
-                    .is_some_and(|(builtin, staged)| builtin == staged)
-        })
-}
-
 /// Skip legacy copies and aliases even when discovery is read-only.
 fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
     let read_manifest = |dir: &Path| {
@@ -699,6 +687,35 @@ pub fn exit_cli_error(command: &str, error: &str) -> ! {
     std::process::exit(1)
 }
 
+pub(super) fn validate_saved_profile(
+    hubs: &serde_json::Map<String, Value>,
+    map: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    for hub in hubs.values() {
+        validate_nats_url(hub["url"].as_str().unwrap_or(""))?;
+        if hub["authMode"] == "oidc" {
+            super::login::Settings::new(hub)?;
+        }
+    }
+    if map
+        .get("defaultHub")
+        .or_else(|| map.get("default_hub"))
+        .and_then(Value::as_str)
+        .is_some_and(|h| !hubs.contains_key(h))
+    {
+        return Err("Invalid defaultHub".into());
+    }
+    if env::var("CITO_USER").is_err()
+        && map
+            .get("user")
+            .and_then(Value::as_str)
+            .is_some_and(|u| !validate_user(u))
+    {
+        return Err("Invalid user in config.json".into());
+    }
+    Ok(())
+}
+
 pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
     for (k, v) in env::vars() {
         if is_checked_cito_env_key(&k) && v.trim().is_empty() {
@@ -790,31 +807,15 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
             ));
         };
         let (configured_default, hubs_map, _) = try_normalize_existing_config(Some(&raw))?;
-        for hub in hubs_map.values() {
-            validate_nats_url(hub["url"].as_str().unwrap_or(""))?;
-            if hub["authMode"] == "oidc" {
-                super::login::Settings::new(hub)?;
-            }
-        }
+        validate_saved_profile(&hubs_map, &map)?;
         if env::var("CITO_HUB").is_err() {
             default_hub = configured_default;
         }
         if !hubs_map.contains_key(&default_hub) {
             return Err("Invalid defaultHub".into());
         }
-        if map
-            .get("defaultHub")
-            .or_else(|| map.get("default_hub"))
-            .and_then(Value::as_str)
-            .is_some_and(|h| !hubs_map.contains_key(h))
-        {
-            return Err("Invalid defaultHub".into());
-        }
         if env::var("CITO_USER").is_err() {
             if let Some(config_user) = map.get("user").and_then(Value::as_str) {
-                if !validate_user(config_user) {
-                    return Err("Invalid user in config.json".to_string());
-                }
                 user = config_user.to_string();
             }
         }

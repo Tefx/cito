@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,21 @@ fn hub_error(code: &str, message: &str) -> String {
     } else {
         format!("{code}: {message}")
     }
+}
+
+fn authorization(bearer: Option<&str>) -> io::Result<Option<String>> {
+    bearer
+        .map(|token| {
+            if super::config::valid_hub_token(token) {
+                Ok(format!("Bearer {token}"))
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid Hub bearer token",
+                ))
+            }
+        })
+        .transpose()
 }
 
 fn connect_http(url: &url::Url, deadline: Instant) -> io::Result<TcpStream> {
@@ -35,6 +50,16 @@ fn connect_http(url: &url::Url, deadline: Instant) -> io::Result<TcpStream> {
     }
     Err(error)
 }
+
+static EVENT_TLS: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
+    Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::from_iter(
+                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+            ))
+            .with_no_client_auth(),
+    )
+});
 
 // Preserve partial chunk headers and terminators across idle socket timeouts.
 struct ChunkedEvents<R> {
@@ -223,8 +248,15 @@ impl HubClient {
         if let Some(local) = &self.local {
             return local.rpc(op, params, Some(&self.identity));
         }
+        let bearer = self
+            .event_credentials
+            .lock()
+            .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
+            .clone();
+        let auth = authorization(bearer.as_deref()).map_err(|e| format!("INVALID_INPUT: {e}"))?;
         if string(&self.config, "url").starts_with("http://") {
-            return self.rpc_http(op, params);
+            let reply = self.rpc_http(op, params, auth.as_deref())?;
+            return self.parse_rpc_response(reply.status, reply.body.as_bytes(), &bearer);
         }
         let mut request = self
             .agent
@@ -234,13 +266,8 @@ impl HubClient {
             ))
             .timeout(Duration::from_secs(5))
             .set("X-Cito-User", string(&self.identity, "owner_user"));
-        let bearer = self
-            .event_credentials
-            .lock()
-            .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
-            .clone();
-        if let Some(token) = bearer.as_deref().filter(|s| !s.is_empty()) {
-            request = request.set("Authorization", &format!("Bearer {token}"));
+        if let Some(value) = auth {
+            request = request.set("Authorization", &value);
         }
         let result = match request.send_json(json!({"op":op,"params":params})) {
             Ok(response) => response,
@@ -305,7 +332,12 @@ impl HubClient {
             .cloned()
             .ok_or_else(|| "NATS_UNAVAILABLE: Missing Hub RPC result".into())
     }
-    fn rpc_http(&self, op: &str, params: &Value) -> Result<Value, String> {
+    fn rpc_http(
+        &self,
+        op: &str,
+        params: &Value,
+        authorization: Option<&str>,
+    ) -> Result<crate::plugins::HttpResponse, String> {
         let url = url::Url::parse(&format!(
             "{}/v1/rpc",
             string(&self.config, "url").trim_end_matches('/')
@@ -314,11 +346,6 @@ impl HubClient {
         let host = url.host_str().ok_or("Invalid Hub URL")?;
         let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
         let deadline = Instant::now() + Duration::from_secs(10);
-        let credential = self
-            .event_credentials
-            .lock()
-            .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
-            .clone();
         let result = (|| {
             let socket = connect_http(&url, deadline).map_err(|e| e.to_string())?;
             socket
@@ -333,16 +360,13 @@ impl HubClient {
                 deadline,
             };
             let body = json!({"op":op,"params":params}).to_string();
-            let bearer = credential
-                .as_deref()
-                .filter(|v| !v.is_empty())
-                .map(|v| format!("Authorization: Bearer {v}\r\n"))
+            let bearer = authorization
+                .map(|v| format!("Authorization: {v}\r\n"))
                 .unwrap_or_default();
             write!(stream,"POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nX-Cito-User: {}\r\n{bearer}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",url.path(),string(&self.identity,"owner_user"),body.len()).map_err(|e| e.to_string())?;
             crate::plugins::read_http_response(&mut stream)
         })();
-        let reply = result.map_err(|e| self.disconnected(e))?;
-        self.parse_rpc_response(reply.status, reply.body.as_bytes(), &credential)
+        result.map_err(|e| self.disconnected(e))
     }
     fn reject_token(&self, bearer: &Option<String>) {
         // An old in-flight request must not reject a newly verified credential.
@@ -522,28 +546,14 @@ impl HubClient {
         &self,
         url: &url::Url,
         bearer: Option<&str>,
+        tls: &Arc<rustls::ClientConfig>,
     ) -> io::Result<(u16, Box<dyn Read>)> {
         let user = string(&self.identity, "owner_user");
-        if url.scheme() == "https" {
-            use ureq::OrAnyStatus;
-            let mut request = self
-                .agent
-                .get(url.as_str())
-                .set("Accept-Encoding", "identity")
-                .set("X-Cito-User", user);
-            if let Some(token) = bearer {
-                request = request.set("Authorization", &format!("Bearer {token}"));
-            }
-            let response = request.call().or_any_status().map_err(io::Error::other)?;
-            return Ok((response.status(), response.into_reader()));
-        }
-        if url.scheme() != "http"
-            || user.chars().any(char::is_control)
-            || bearer.is_some_and(|t| t.chars().any(char::is_control))
-        {
+        let auth = authorization(bearer)?;
+        if !matches!(url.scheme(), "http" | "https") || user.chars().any(char::is_control) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let mut socket = connect_http(url, Instant::now() + Duration::from_secs(5))?;
+        let socket = connect_http(url, Instant::now() + Duration::from_secs(5))?;
         {
             // Publish before any request I/O. A concurrent close either takes
             // this socket or wins first and prevents its publication.
@@ -553,16 +563,46 @@ impl HubClient {
             }
             *active = Some(socket.try_clone()?);
         }
-        socket.set_read_timeout(Some(Duration::from_secs(1)))?;
         socket.set_write_timeout(Some(Duration::from_secs(1)))?;
-        let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
-        write!(socket, "GET {} HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\nAccept-Encoding: identity\r\nX-Cito-User: {user}\r\nConnection: close\r\n", url.path())?;
-        if let Some(token) = bearer {
-            write!(socket, "Authorization: Bearer {token}\r\n")?;
+        if url.scheme() == "https" {
+            socket.set_read_timeout(Some(Duration::from_millis(150)))?;
+            // URL hosts bracket IPv6 literals; rustls expects the unbracketed IP.
+            let host = url
+                .host_str()
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .trim_matches(['[', ']']);
+            let name = rustls::pki_types::ServerName::try_from(host.to_owned())
+                .map_err(io::Error::other)?;
+            let conn =
+                rustls::ClientConnection::new(tls.clone(), name).map_err(io::Error::other)?;
+            Self::event_response(
+                rustls::StreamOwned::new(conn, socket),
+                url,
+                user,
+                auth.as_deref(),
+            )
+        } else {
+            socket.set_read_timeout(Some(Duration::from_secs(1)))?;
+            Self::event_response(socket, url, user, auth.as_deref())
         }
-        socket.write_all(b"\r\n")?;
+    }
 
-        let mut reader = BufReader::new(socket);
+    // Both transports expose raw HTTP bytes here, before any chunk decoding.
+    fn event_response(
+        mut stream: impl Read + Write + 'static,
+        url: &url::Url,
+        user: &str,
+        auth: Option<&str>,
+    ) -> io::Result<(u16, Box<dyn Read>)> {
+        let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
+        write!(stream, "GET {} HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\nAccept-Encoding: identity\r\nX-Cito-User: {user}\r\nConnection: close\r\n", &url[url::Position::BeforePath..url::Position::AfterQuery])?;
+        if let Some(value) = auth {
+            write!(stream, "Authorization: {value}\r\n")?;
+        }
+        stream.write_all(b"\r\n")?;
+        stream.flush()?;
+
+        let mut reader = BufReader::new(stream);
         let mut headers = reader.by_ref().take(65_536);
         let mut line = String::new();
         headers.read_line(&mut line)?;
@@ -616,12 +656,12 @@ impl HubClient {
         Ok((status, body))
     }
     pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
-        self.start_events_with(Duration::from_secs(90), ureq::AgentBuilder::new())
+        self.start_events_with(Duration::from_secs(90), EVENT_TLS.clone())
     }
     fn start_events_with(
         &self,
         idle_timeout: Duration,
-        https: ureq::AgentBuilder,
+        tls: Arc<rustls::ClientConfig>,
     ) -> Option<thread::JoinHandle<()>> {
         if let Some(local) = &self.local {
             let mut subscription = local.subscribe(Some(self.identity.clone())).ok()?;
@@ -675,14 +715,7 @@ impl HubClient {
             string(&self.config, "url").trim_end_matches('/')
         ))
         .ok()?;
-        let mut client = self.clone();
-        if url.scheme() == "https" {
-            client.agent = https
-                .redirects(0)
-                .timeout_connect(Duration::from_secs(5))
-                .timeout_read(Duration::from_millis(150))
-                .build();
-        }
+        let client = self.clone();
         Some(thread::spawn(move || {
             let mut backoff = crate::support::RetryBackoff::default();
             while !client.closed.load(Ordering::SeqCst) {
@@ -691,8 +724,7 @@ impl HubClient {
                     .lock()
                     .ok()
                     .and_then(|token| token.clone());
-                let response =
-                    client.open_events(&url, bearer.as_deref().filter(|s| !s.is_empty()));
+                let response = client.open_events(&url, bearer.as_deref(), &tls);
                 let status = response.as_ref().ok().map(|(status, _)| *status);
                 if let Some(body) = response
                     .ok()
