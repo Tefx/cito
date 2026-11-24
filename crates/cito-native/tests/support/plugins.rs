@@ -4062,7 +4062,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    print(op, flush=True); self.reply(200,dict(ok=True))
   elif op=='set_host_hub': self.reply(503,dict(ok=False,error='Reload refused'))
   else: self.reply(200,dict(ok=True,warning=op+' incomplete',warnings=['Remote unavailable'],detach_status='pending'))
-s=http.server.HTTPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
+s=socketserver.TCPServer(('127.0.0.1',int(os.environ['CITO_DAEMON_PORT'])),Handler);print('ready',flush=True);s.serve_forever()
 "#,env!("CARGO_PKG_VERSION")], &[]);
     wait(|| f.output(daemon, false).contains("ready"));
     for (flag, value, op) in [

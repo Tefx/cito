@@ -40,7 +40,7 @@
     "actionLabel": "Pair Account…",
     "helpText": "Generate a one-time /start code to link your Telegram chat (expires in 10 minutes)."
   },
-  "version": "0.22.0",
+  "version": "0.22.1",
   "setupGuide": [
     "Create a bot via @BotFather (/newbot) on Telegram and paste its token:"
   ]

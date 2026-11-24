@@ -102,7 +102,7 @@ fn shared_endpoint_oidc_profiles_accept_either_login_order_until_subjects_collid
     for [first, second] in [["personal", "work"], ["work", "personal"]] {
         let f = Fixture::new(json!({}));
         let keys = root().join("crates/cito-native/tests/hub/fixtures");
-        let provider = f.spawn("python3", &["-u", "-c", r#"import base64,http.server,json,pathlib,subprocess,sys,time,urllib.parse as url
+        let provider = f.spawn("python3", &["-u", "-c", r#"import base64,http.server,json,pathlib,socketserver,subprocess,sys,time,urllib.parse as url
 keys=pathlib.Path(sys.argv[1])
 def b64(raw): return base64.urlsafe_b64encode(raw).rstrip(b'=')
 def part(obj): return b64(json.dumps(obj).encode())
@@ -118,7 +118,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
   p=url.parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode()); claims={'iss':issuer,'sub':'shared','aud':p['client_id'][0],'exp':int(time.time())+600,'nonce':p['code'][0]}
   payload=part({'alg':'RS256','kid':'fixture'})+b'.'+part(claims); signature=subprocess.check_output(['openssl','dgst','-sha256','-sign',keys/'rsa-private.pem'],input=payload)
   self.reply({'id_token':(payload+b'.'+b64(signature)).decode()})
-s=http.server.ThreadingHTTPServer(('127.0.0.1',0),Provider); issuer='http://127.0.0.1:'+str(s.server_port); print(json.dumps(issuer),flush=True); s.serve_forever()
+s=socketserver.ThreadingTCPServer(('127.0.0.1',0),Provider); issuer='http://127.0.0.1:'+str(s.server_address[1]); print(json.dumps(issuer),flush=True); s.serve_forever()
 "#, keys.to_str().unwrap()], &[]);
         wait(|| !f.frames(provider).is_empty());
         let issuer = f.frames(provider).remove(0);
