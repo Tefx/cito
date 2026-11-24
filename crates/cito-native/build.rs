@@ -28,8 +28,33 @@ fn main() {
     for source in &sources {
         println!("cargo:rerun-if-changed={}", source.display());
     }
-    // Tests execute the same UI source as release packages, always in headless mode.
     let output = root.join("bin/cito-ui-darwin-arm64");
+    let modified = |path: &Path| {
+        fs::metadata(path)
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+    };
+    let release = env::var("PROFILE").as_deref() == Ok("release");
+    if !release
+        && modified(&output).is_some_and(|built| {
+            sources
+                .iter()
+                .chain([&Path::new(&manifest).join("build.rs")])
+                .all(|input| modified(input).is_some_and(|changed| changed <= built))
+        })
+    {
+        return;
+    }
+    // A checkout does not preserve commit timestamps. Rebuild stale inputs for the
+    // test runner without publishing a path-dependent binary into the worktree.
+    let output = if release {
+        output
+    } else {
+        let private = Path::new(&env::var_os("OUT_DIR").unwrap()).join("cito-ui");
+        println!("cargo:rustc-env=CITO_TEST_BUILT_UI={}", private.display());
+        private
+    };
     let temporary = output.with_extension(format!("{}.tmp", std::process::id()));
     let mut args = vec!["-O", "-target", "arm64-apple-macos13.0"];
     args.extend(sources.iter().map(|source| source.to_str().unwrap()));

@@ -160,7 +160,11 @@ fn ui_fixture() -> (Fixture, usize) {
 }
 fn start(f: &Fixture) -> usize {
     let ui = root().join("bin/cito-ui-darwin-arm64");
-    f.spawn(ui.to_str().unwrap(), &[], &[])
+    f.spawn(
+        option_env!("CITO_TEST_BUILT_UI").unwrap_or_else(|| ui.to_str().unwrap()),
+        &[],
+        &[],
+    )
 }
 fn inspect(f: &Fixture, p: usize) -> Value {
     inspect_as(f, p, None)

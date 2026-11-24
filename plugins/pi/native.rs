@@ -123,6 +123,40 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
         .windows(2)
         .any(|w| w[0] == "--mode" && matches!(w[1], "rpc" | "json")))
 }
+fn prompt_about(row: &Value) -> Option<String> {
+    let message = &row["message"];
+    if row["type"] != "message" || message["role"] != "user" {
+        return None;
+    }
+    let content = &message["content"];
+    let parts = content.as_str().into_iter().chain(
+        content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str()),
+    );
+    let mut previous_space = true;
+    let mut summary: String = parts
+        .flat_map(|part| part.chars().chain([' ']))
+        .filter_map(|ch| {
+            if ch.is_whitespace() {
+                (!std::mem::replace(&mut previous_space, true)).then_some(' ')
+            } else if ch.is_control() {
+                None
+            } else {
+                previous_space = false;
+                Some(ch)
+            }
+        })
+        .take(120)
+        .collect();
+    if summary.ends_with(' ') {
+        summary.pop();
+    }
+    (!summary.is_empty()).then_some(summary)
+}
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0") {
@@ -186,7 +220,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         });
         if let Some((modified, path)) = latest.filter(|_| !shared_cwd) {
             use std::io::BufRead;
-            let projection = cached_file_projection(req, "pi/transcript-cache", &path, || {
+            let projection = cached_file_projection(req, "pi/transcript-cache-v2", &path, || {
                 let mut value =
                     json!({"session_id":path.file_stem().and_then(|s| s.to_str()).unwrap_or("")});
                 let file = fs::File::open(&path).map_err(|e| e.to_string())?;
@@ -200,16 +234,27 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
                             value["session_id"] = json!(id);
                         }
                     }
-                    if let Some(name) =
-                        str_at(&row, "session_name").or_else(|| str_at(&row, "name"))
-                    {
-                        value["session_name"] = json!(name);
+                    if value["about"].is_null() {
+                        if let Some(about) = prompt_about(&row) {
+                            value["about"] = json!(about);
+                        }
+                    }
+                    if matches!(
+                        row["type"].as_str(),
+                        None | Some("session" | "session_info")
+                    ) {
+                        if let Some(name) =
+                            str_at(&row, "session_name").or_else(|| str_at(&row, "name"))
+                        {
+                            value["session_name"] = json!(name);
+                        }
                     }
                 }
                 Ok(value)
             });
             if let Ok(projection) = projection {
                 v["session_id"] = projection["session_id"].clone();
+                v["about"] = projection["about"].clone();
                 if let Some(name) = projection.get("session_name") {
                     v["session_name"] = name.clone();
                 }
@@ -225,6 +270,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         {
             v["session_id"] = json!(format!("pid-{p}"));
             v["session_name"] = json!(basename);
+            v["about"] = Value::Null;
         }
         if !allow_process_only(req) {
             v["needs_reload"] = json!(true);
@@ -351,8 +397,10 @@ fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
         Some(p),
         str_at(v, "session_name"),
     );
-    if let Some(badge) = v.get("badge") {
-        result["badge"] = badge.clone();
+    for key in ["about", "badge"] {
+        if let Some(value) = v.get(key) {
+            result[key] = value.clone();
+        }
     }
     result
 }

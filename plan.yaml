@@ -25288,3 +25288,858 @@ phases:
       codesign --verify --strict, version 0.22.0 unchanged), cargo fmt --all -- --check,
       cargo clippy --workspace --all-targets --locked -- -D warnings (0 warnings),
       and git diff --check passed.'
+- id: v61
+  name: 'V61 Field Feedback Root-Cause Closure (FB-01..FB-15) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: All 6 steps (v61.pi_bridge_and_wake_envelope, v61.mcp_multi_hub_and_transport,
+    v61.setup_handover_and_build_hygiene, v61.consolidate, v61.repair_fb15_idempotency,
+    v61.gate) are DONE with FB-01..FB-15 closed, zero Larva awareness/dependency across
+    crates/, plugins/, src/macos/, tests, and docs, version = "0.22.1" unchanged,
+    7/7 codesign --verify --strict passing, and v61.gate verification report PASS.
+  depends_on:
+  - v60
+  steps:
+  - id: v61.pi_bridge_and_wake_envelope
+    name: 'Pi Bridge Reload State, Prompt-Derived About, Steer/FollowUp Delivery,
+      and Wake Card Envelope (FB-01, FB-02, FB-06, FB-08, FB-10, FB-11) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-08] `plugins/pi/cito-bridge.ts:fallbackIdentity` — Delete `fallbackIdentity()`
+      (`pid-${process.pid}`); persist `{ sessionId, cwd, sessionName, about }` across
+      `/reload` on `globalThis[Symbol.for("cito.pi.sessionState")]`; before `session_start`
+      binds `sessionId`, `identify`/`status` must never fabricate `"pid-${process.pid}"`
+      (return `{ ok: false, error: "SESSION_NOT_READY" }` or bind on `session_start`).
+
+      - [FB-01] `plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`, `crates/cito-native/src/core/daemon/mod.rs:auto_listen`
+      — Zero Larva awareness (never read `PI_PERSONA` or any Larva variable/file);
+      extract a concise single-line summary (`<= 120` chars) from native user prompt
+      history as `about` when no explicit `cito_listen(about)` was set, keeping `title`
+      as explicit `sessionName` or `basename(cwd)`. In `daemon/mod.rs:1850` (`auto_listen`),
+      use `candidate["about"]` (when non-empty and distinct) or preserve `prior["about"]`
+      on restore (`restoring == true`).
+
+      - [FB-10 & FB-11] `plugins/pi/cito-bridge.ts` (`op === "deliver"`), `crates/cito-native/src/core/state.rs:format_sender`
+      / `format_wake_card` — Pass `deliverAs: req.wake ? "steer" : "followUp"` to
+      `pi.sendMessage(...)`; include scoped `signal_id` in the wake card header when
+      non-empty and update `state_tests.rs` / `receiver_tests.rs`.
+
+      - [FB-02 & FB-06] `plugins/pi/cito-bridge.ts:renderNotificationCard` — Add 1
+      full-width blank `theme.bg("customMessageBg", " ".repeat(w))` padding line at
+      top and bottom, and clarify in wake-card rendering/text that delivered wake
+      cards are already auto-acknowledged.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["plugins/pi/cito-bridge.ts", "plugins/pi/native.rs", "crates/cito-native/src/core/state.rs",
+      "crates/cito-native/src/core/daemon/mod.rs", "crates/cito-native/src/core/state_tests.rs",
+      "crates/cito-native/src/core/receiver_tests.rs", "crates/cito-native/src/core/daemon/tests.rs",
+      "crates/cito-native/tests/support/pi-bridge.mjs", "crates/cito-native/tests/support/plugins.rs"]`
+
+      - blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - invariant: Zero Larva awareness/dependency (`PI_PERSONA` forbidden); `version
+      = "0.22.1"` unchanged.
+
+
+      Admit:
+
+      - Seam contract (`delta s|_d = 0`): `about` summary (`<= 120` chars) and auto-ack
+      wake card semantics align with `v61.mcp_multi_hub_and_transport` (`cito_inbox`
+      tool description) and `v61.consolidate`.
+
+
+      Recovery:
+
+      - Reconcile failed unit/bridge tests in place within the step worktree; never
+      touch `blocked_paths` or introduce `pid-${process.pid}` fallback IDs.'
+    verification: node --test crates/cito-native/tests/support/pi-bridge.mjs && cargo
+      test -p cito-native --lib state_tests && cargo test -p cito-native --lib receiver_tests
+      && cargo test -p cito-native --test integration plugins
+    evidence_template: Commands run + outputs for pi-bridge.mjs, state_tests, receiver_tests,
+      plugins, and daemon::tests + git diff stat + zero PI_PERSONA/Larva check.
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T15:39:11.979726Z'
+    done_at: '2026-11-24T15:52:48.407047+00:00'
+    evidence: 'Integrated c55cde24cdd017c6adce2d657db28ceaf4e4ad03 onto main (9 files,
+      0 Larva/PI_PERSONA references, version 0.22.1 unchanged). Owner checks passed:
+      cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked
+      -- -D warnings, node --test crates/cito-native/tests/support/pi-bridge.mjs (1
+      pass), cargo test --lib state::tests receiver::tests daemon::tests (129 pass),
+      detached PPID=1 cargo test --test native plugins:: (76 pass), git diff --check.
+      Worktree removed.'
+  - id: v61.mcp_multi_hub_and_transport
+    name: 'MCP Multi-Hub Discovery/Fallback, Default Scope Resolution, HTTP Transport
+      Diagnostics, and Tool Metadata (FB-04, FB-07, FB-12, FB-13, FB-14, FB-15) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-13] `crates/cito-native/src/core/registration.rs:463-481` — Honor `client.config["defaultScope"]`
+      (`"self"` or `"workspace"`). For automatic registrations (`args["_auto"] ==
+      true` and not restoring a manual registration), resolve default scope from `client.config["defaultScope"]`
+      -> `authMode` (`"workspace"` when `authMode == "none"`, else `"self"`); preserve
+      explicit user-set scope.
+
+      - [FB-14 & FB-15] `crates/cito-native/src/core/daemon/mcp.rs:find_listeners`
+      & `ToolCall::Send` / `send_from` — When `args["hub"]` is omitted in `find_listeners`,
+      order slots with `self.config.default_hub` first, deduplicate nodes representing
+      the same listener across hubs (recording reachable hub names in `hubs: [...]`),
+      and omit GUI-only capability booleans (`can_pin`, `can_rename`, `can_set_scope`,
+      `can_stop`, `can_remove`, `can_reopen`) from MCP `cito_find` output. In `ToolCall::Send`
+      / `send_from`, when `args["hub"]` is omitted and `to` is not `<hub>:`-prefixed,
+      if `send_from(&default_hub, ...)` fails with `NATS_UNAVAILABLE:` and `"local"`
+      is an active connected slot (`default_hub != "local"`), automatically fall back
+      to `send_from("local", ...)` when target listener is active on `"local"`.
+
+      - [FB-07 & FB-04] `crates/cito-native/src/core/transport.rs:connect_http`, `crates/cito-native/src/core/http_boundary.rs:read_head`,
+      `crates/cito-native/src/core/plugins.rs:read_http_response` — In `connect_http`
+      (lines 39-52), raise per-attempt connect timeout from `500ms` to `remaining.min(Duration::from_millis(1500))`
+      when a single address is resolved (or retry across `socket_addrs` until `Instant::now()
+      >= deadline`); in `read_head` and `read_http_response`, when `0` bytes are read
+      before EOF on the initial status line, return `"Connection closed by peer before
+      HTTP response"`.
+
+      - [FB-12] `crates/cito-native/src/core/daemon/mcp.rs:tools_list` — Include `"Cito"`
+      and explicit tool name / control-plane domain terms (`cito_find`, `cito_send`,
+      `cito_inbox`, `cito_listen`, `cito_unlisten`, `cito_status`, `Cito control plane`,
+      `peer node`, `wake signal`) in all 6 MCP tool descriptions, and state on `cito_inbox`
+      that wake cards are already auto-acknowledged.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/daemon/mcp.rs", "crates/cito-native/src/core/registration.rs",
+      "crates/cito-native/src/core/transport.rs", "crates/cito-native/src/core/http_boundary.rs",
+      "crates/cito-native/src/core/plugins.rs", "crates/cito-native/src/core/transport_tests.rs",
+      "crates/cito-native/tests/support/daemon/mcp_and_inbox.rs", "crates/cito-native/tests/support/daemon/discovery_and_setup.rs"]`
+
+      - blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - invariant: Zero Larva awareness/dependency; `version = "0.22.1"` unchanged;
+      GUI IPC directory projections retain capability booleans while MCP `cito_find`
+      omits them.
+
+
+      Admit:
+
+      - Seam contract (`delta s|_d = 0`): Built-in `"local"` hub fallback in `mcp.rs`
+      pairs with `v61.setup_handover_and_build_hygiene` keeping `"local"` (`local://`)
+      `enabled: true`.
+
+
+      Recovery:
+
+      - Reconcile failed transport or MCP tests in place within the step worktree;
+      never touch `blocked_paths`.'
+    verification: cargo test -p cito-native --lib transport_tests && cargo test -p
+      cito-native --test integration mcp_and_inbox && cargo test -p cito-native --test
+      integration discovery_and_setup
+    evidence_template: Commands run + outputs for transport_tests, mcp_and_inbox,
+      and discovery_and_setup + git diff stat.
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/http_boundary.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/transport_tests.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T15:39:11.981456Z'
+    done_at: '2026-11-24T15:54:43.679718+00:00'
+    evidence: 'Integrated 96d434e62aaa6e5d30de5db458fdf8601a29c0af (rebased to 8658434)
+      onto main (8 files, 0 Larva/PI_PERSONA references, version 0.22.1 unchanged).
+      Owner checks passed: cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, 73 tests passed (22 transport/registration, 49 detached
+      native PPID=1, 2 HTTP framing), git diff --check. Worktree removed.'
+  - id: v61.setup_handover_and_build_hygiene
+    name: 'Same-Version Setup Daemon Handover, Built-In Local Hub Retention, Dev Build
+      swiftc Mtime Guard, and Feedback Ledger Closure (FB-03, FB-05, FB-09) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-03] `crates/cito-native/src/core/setup.rs` (`build_app` branch) — After
+      `build_mac_app_bundle_native` replaces the app bundle on disk, if `probe_daemon_health(&control)`
+      returns `Some(existing)`, unconditionally call `stop_daemon(&control, &existing)`
+      before `reconcile()` calls `ensure_daemon(&control)` so same-version rebuilds
+      always restart the daemon cleanly.
+
+      - [FB-05] `crates/cito-native/src/core/config.rs` & `crates/cito-native/src/core/setup.rs`
+      — Ensure adding or switching a default remote Hub keeps the built-in `"local"`
+      (`local://`) Hub `enabled: true` unless explicitly disabled.
+
+      - [FB-09] `crates/cito-native/build.rs` — When `std::env::var("PROFILE").as_deref()
+      != Ok("release")` and `bin/cito-ui-darwin-arm64` already exists with `modified()`
+      >= all `src/macos/*.swift` files and `build.rs`, skip running `swiftc`.
+
+      - [DOCS] `docs/FEEDBACK.md` — Update `FB-01..FB-15` status entries to `RESOLVED
+      (v61)` with vendor-neutral English summaries of the root-cause fixes and zero
+      Larva references.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["crates/cito-native/src/core/setup.rs", "crates/cito-native/src/core/config.rs",
+      "crates/cito-native/build.rs", "docs/FEEDBACK.md", "crates/cito-native/tests/support/distribution.rs"]`
+
+      - blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - invariant: Zero Larva awareness/dependency; `version = "0.22.1"` unchanged;
+      release builds (`PROFILE == "release"`) continue to compile and stage `cito-ui-darwin-arm64`.
+
+
+      Admit:
+
+      - Seam contract (`delta s|_d = 0`): Preserving `"local"` hub `enabled: true`
+      by default in `config.rs`/`setup.rs` backs the `"local"` hub fallback in `v61.mcp_multi_hub_and_transport`.
+
+
+      Recovery:
+
+      - Reconcile failed setup/config/distribution tests in place within the step
+      worktree; never touch `blocked_paths`.'
+    verification: cargo test -p cito-native --lib config && cargo test -p cito-native
+      --test integration distribution
+    evidence_template: Commands run + outputs for config/setup unit tests and distribution
+      integration tests + docs/FEEDBACK.md check + git diff stat.
+    refs:
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/build.rs
+    - docs/FEEDBACK.md
+    - crates/cito-native/tests/support/distribution.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T15:39:11.981650Z'
+    done_at: '2026-11-24T15:54:53.090758+00:00'
+    evidence: 'Integrated 40b9f5e89e8d75c4f656298e923fd3f51f0ee8b1 (rebased to ccf2165)
+      onto main (5 files, 0 Larva/PI_PERSONA references, version 0.22.1 unchanged).
+      Owner checks passed: cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, 36 setup/config lib tests (2 ignored), 8 detached distribution
+      tests (PPID=1), 4 Hub config checks, git diff --check. Worktree removed.'
+  - id: v61.consolidate
+    name: 'Cross-Track Seam Consolidation, Release Binary Restaging, and Full Workspace
+      Verification (FB-01..FB-15) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [CONSOLIDATE] Reconcile all cross-track seams across `v61.pi_bridge_and_wake_envelope`,
+      `v61.mcp_multi_hub_and_transport`, and `v61.setup_handover_and_build_hygiene`,
+      verifying `FB-01..FB-15` are closed and recorded as `RESOLVED (v61)` in `docs/FEEDBACK.md`.
+
+      - [INVARIANT] Verify zero Larva awareness/dependency (`PI_PERSONA` or Larva
+      references absent across `crates/`, `plugins/`, `src/macos/`, tests, and docs)
+      and `version = "0.22.1"` unchanged in `crates/cito-native/Cargo.toml` and `Cargo.lock`.
+
+      - [PACKAGE & VERIFY] Run `cargo fmt --all -- --check`, `cargo clippy --workspace
+      --all-targets --locked -- -D warnings`, detached `PPID=1` `cargo test --workspace
+      --locked -- --test-threads=4`, post-test `cargo build --release --locked` with
+      `7/7 codesign --verify --strict` on staged `bin/` and `plugins/*/bin/` artifacts,
+      `python3 -m unittest discover -s packaging/tests -p ''test_*.py''`, `ruby -c
+      packaging/homebrew/cito.rb`, `node --test crates/cito-native/tests/support/pi-bridge.mjs`,
+      `node --test crates/cito-native/tests/support/site-clipboard.mjs`, and `git
+      diff --check`.
+
+
+      Boundary:
+
+      - owner: `rust-senior`
+
+      - allowed_paths: `["plugins/pi/cito-bridge.ts", "plugins/pi/native.rs", "crates/cito-native/src/**",
+      "crates/cito-native/tests/**", "crates/cito-native/build.rs", "docs/FEEDBACK.md",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - invariant: Zero Larva awareness/dependency; `version = "0.22.1"` unchanged;
+      all 7 staged binaries signed and verified.
+
+
+      Admit:
+
+      - Requires `v61.pi_bridge_and_wake_envelope`, `v61.mcp_multi_hub_and_transport`,
+      and `v61.setup_handover_and_build_hygiene` completed and merged.
+
+
+      Recovery:
+
+      - Fix any cross-track seam regression, compiler warning, test failure, or staged
+      binary drift in place and re-run the consolidation suite before completing.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=4
+      && cargo build --release --locked && python3 -m unittest discover -s packaging/tests
+      -p 'test_*.py' && ruby -c packaging/homebrew/cito.rb && node --test crates/cito-native/tests/support/pi-bridge.mjs
+      && node --test crates/cito-native/tests/support/site-clipboard.mjs && git diff
+      --check
+    evidence_template: Complete command receipts for fmt, clippy, detached PPID=1
+      cargo test --workspace, cargo build --release, 7/7 codesign --verify --strict,
+      packaging unittest, ruby -c, pi-bridge.mjs, site-clipboard.mjs, zero Larva grep,
+      version 0.22.1 check, and git diff --check.
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/setup.rs
+    - docs/FEEDBACK.md
+    depends_on:
+    - v61.pi_bridge_and_wake_envelope
+    - v61.mcp_multi_hub_and_transport
+    - v61.setup_handover_and_build_hygiene
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T15:54:56.351316Z'
+    done_at: '2026-11-24T16:22:21.365598+00:00'
+    evidence: 'Integrated e42beb8b5a7f9be2ab3a474db5314478e3d9d0c7 onto main (15 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.1 unchanged). Verified: cargo fmt --all -- --check, cargo clippy --workspace
+      --all-targets --locked -- -D warnings, detached PPID=1 cargo test --workspace
+      --locked -- --test-threads=4 (703 passed, 0 failed, 5 ignored), git status --short
+      clean after debug test (FB-09), post-test cargo build --release --locked + 7/7
+      shipped artifacts codesign --verify --strict, 26 packaging unittests, ruby -c,
+      pi-bridge.mjs (1/1), site-clipboard.mjs (1/1), docs/FEEDBACK.md 15/15 RESOLVED
+      (v61). Worktree removed.'
+  - id: v61.gate
+    name: Phase V61 Independent DELTA Verification Gate (FB-01..FB-15)
+    status: done
+    description: 'step_type: gate
+
+      repo_change_policy: no_repo_change
+
+      gate_tier: DELTA
+
+
+      Deliver:
+
+      - [GATE] Execute independent `DELTA` verification gate (`gate.report.v2`) auditing
+      complete bidirectional closure of `FB-15` (`default_hub` -> `"local"` offline
+      fallback guard and `"local"` -> `default_hub` recovery symmetry) in `crates/cito-native/src/core/daemon/mcp.rs`
+      and `crates/cito-native/tests/support/daemon/mcp_and_inbox.rs`, post-reload
+      socket-repair test stability in `crates/cito-native/tests/support/pi-bridge.mjs`,
+      and regression-cone integrity across Phase `v61`.
+
+      - [INVARIANTS] Verify zero Larva awareness/dependency (`PI_PERSONA` or Larva
+      references absent across `crates/`, `plugins/`, `src/macos/`, tests, and docs),
+      `version = "0.22.1"` unchanged with no new Git release tag, and `7/7 codesign
+      --verify --strict` passing on staged binaries.
+
+
+      Boundary:
+
+      - owner: `gate-reviewer`
+
+      - allowed_paths: `[]`
+
+      - blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock",
+      "crates/**", "plugins/**", "src/**", "docs/**", "bin/**"]`
+
+      - invariant: Strict read-only verification (`no_repo_change`).
+
+
+      Admit:
+
+      - Requires `v61.repair_fb15_reverse_symmetry` completed with clean working tree
+      and committed artifacts; reuses prior `FULL` and `DELTA` gate pass evidence
+      for untouched suites while verifying the `v61.repair_fb15_reverse_symmetry`
+      diff cone and staged binary signatures.
+
+
+      Recovery:
+
+      - Emit structured `gate.report.v2` (`PASS` or `FAIL` with exact `path:line`
+      findings); never mutate repository files.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --test daemon mcp_and_inbox && node --test
+      crates/cito-native/tests/support/pi-bridge.mjs && git diff --check
+    evidence_template: gate.report.v2 JSON/YAML receipt verifying FB-01..FB-15 closure,
+      zero Larva dependency, version 0.22.1 unchanged, 7/7 codesign --verify --strict,
+      and workspace/packaging/site check receipts.
+    refs:
+    - docs/FEEDBACK.md
+    - plugins/pi/cito-bridge.ts
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    depends_on:
+    - v61.repair_fb15_reverse_symmetry
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-24T17:10:46.426839Z'
+    done_at: '2026-11-24T17:11:21.069361+00:00'
+    evidence: Phase v61 DELTA gate PASS (gate-reviewer 01a20e5d-eb0d-731c-8a24-cf65a071adad,
+      bound to git:403225c6fe717bd5ee7426d9e605e7ff702de1b4, validator valid:true
+      / POSITIVE_GATE_EVIDENCE). All FB-01..FB-15 PROVEN, INV-ZERO-LARVA PROVEN, INV-VERSION-0.22.1
+      PROVEN; detached mcp_and_inbox (32/32 PPID=1), fmt, clippy -D warnings, and
+      7/7 strict codesign passed.
+  - id: v61.repair_fb15_idempotency
+    name: 'FB-15 Implicit Send Idempotency Reservation Guard Across Local Fallback
+      and Pi Bridge Reload Test Stabilization [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [FB-15] crates/cito-native/src/core/daemon/mcp.rs:HubAccess::send_from — Prevent
+      an implicit cito_send to default_hub from falling back to "local" on NATS_UNAVAILABLE:
+      when local_sent_idempotency on default_hub already holds an unexpired reservation
+      (PENDING_PUBLISH or wake_accepted) for the caller + idempotency_key. Compute
+      the per-hub caller dedup_id deterministically without requiring prepare_send
+      (slot.directory()) to succeed first (while preserving IDEMPOTENCY_KEY_CONFLICT
+      detection when the same idempotency_key is reused with a different resolved
+      target or payload and keeping request_hash = hash([message, reply_to])), so
+      retrying after a dropped remote publish response returns NATS_UNAVAILABLE: while
+      default_hub is offline and recovers the original default_hub signal_id/seq once
+      reachable, never double-publishing to "local".
+
+      - [TEST-FB15] crates/cito-native/tests/support/daemon/mcp_and_inbox.rs — Add
+      regression test proving that after an implicit cito_send with idempotency_key
+      creates a PENDING_PUBLISH reservation on default_hub (or commits remotely before
+      a dropped HTTP response) and default_hub becomes NATS_UNAVAILABLE:, an identical
+      retry does not reroute to "local" or emit a duplicate signal on "local", and
+      recovers the original default_hub receipt when default_hub reconnects.
+
+      - [TEST-PI-BRIDGE] crates/cito-native/tests/support/pi-bridge.mjs — Stabilize
+      the post-reload socket-repair assertion after reloaded.default(api) by awaiting
+      socket readiness before issuing request({op:''identify''}).
+
+      - [STAGE] bin/**, plugins/*/bin/** — Rebuild and restage release binaries (cargo
+      build --release) and verify 7/7 codesign --verify --strict.
+
+
+      Boundary:
+
+      - owner: rust-senior
+
+      - allowed_paths: ["crates/cito-native/src/core/daemon/mcp.rs", "crates/cito-native/tests/support/daemon/mcp_and_inbox.rs",
+      "crates/cito-native/tests/support/pi-bridge.mjs", "bin/**", "plugins/*/bin/**"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - invariant: Keep version = "0.22.1" unchanged and zero Larva awareness/dependency.
+
+
+      Admit:
+
+      - Witnessed inputs: v61.consolidate (git:3e1c0c3c9e85f7d4163c1320c352d3178ae3024e)
+      and v61.gate FAIL report on FB-15.
+
+      - Verification checks: targeted mcp_and_inbox test, node --test crates/cito-native/tests/support/pi-bridge.mjs,
+      cargo test --workspace && cargo build --release, and 7/7 codesign --verify --strict.
+
+
+      Recovery:
+
+      - Reconcile within the isolated worktree; stop and report if blocked by an external
+      contract contradiction.'
+    verification: cargo test --workspace && cargo build --release && node --test crates/cito-native/tests/support/pi-bridge.mjs
+      && git diff --check
+    evidence_template: "commit_sha: <git rev-parse HEAD>\ncommands_run:\n  - <targeted\
+      \ mcp_and_inbox + pi-bridge.mjs + workspace tests + release build + codesign>\n\
+      outputs:\n  - <test and codesign results>\ngaps: none"
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - docs/FEEDBACK.md
+    depends_on:
+    - v61.consolidate
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T16:40:21.576440Z'
+    done_at: '2026-11-24T16:53:39.446989+00:00'
+    evidence: 'Integrated 0f73f17170cc580eb8b5f4232d8df77952a17f8b onto main (10 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.1 unchanged). Verified: FB-15 idempotency reservation guard across local
+      fallback + payload/target conflict + reconnect receipt recovery; pi-bridge.mjs
+      reload socket-repair stabilized (1/1); mcp_and_inbox detached PPID=1 (31/31)
+      & foreground (31/31); URL-scoped reservation unit test (1/1); fmt, clippy -D
+      warnings, git diff --check, and 7/7 codesign --verify --strict. Worktree removed.'
+  - id: v61.repair_fb15_reverse_symmetry
+    name: 'FB-15 Reverse-Direction Idempotency Symmetry Across Local-to-Default-Hub
+      Recovery [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [FB-15-REV] crates/cito-native/src/core/daemon/mcp.rs:HubAccess::send_from
+      — Close reverse-direction idempotency symmetry across default_hub <-> "local"
+      fallback: when an implicit cito_send with idempotency_key targets default_hub
+      and "local" already holds an unexpired local_sent_idempotency reservation for
+      the caller + idempotency_key (e.g., created during a prior default_hub NATS_UNAVAILABLE:
+      fallback whose MCP response was dropped before default_hub recovered), reuse
+      that "local" reservation (returning its existing "local" receipt or PENDING_PUBLISH
+      publication on "local", and enforcing IDEMPOTENCY_KEY_CONFLICT on payload/target
+      mismatch) rather than preparing/publishing a second signal on the recovered
+      default_hub.
+
+      - [TEST-FB15-REV] crates/cito-native/tests/support/daemon/mcp_and_inbox.rs —
+      Add regression test proving that when an implicit cito_send with idempotency_key
+      falls back and commits on "local" while default_hub is offline, an identical
+      retry after default_hub recovers returns the existing "local"-scoped receipt
+      without publishing a duplicate signal on default_hub (and rejects mismatched
+      payload/target with IDEMPOTENCY_KEY_CONFLICT).
+
+      - [STAGE] bin/**, plugins/*/bin/** — Rebuild and restage release binaries (cargo
+      build --release) and verify 7/7 codesign --verify --strict.
+
+
+      Boundary:
+
+      - owner: rust-senior
+
+      - allowed_paths: ["crates/cito-native/src/core/daemon/mcp.rs", "crates/cito-native/tests/support/daemon/mcp_and_inbox.rs",
+      "bin/**", "plugins/*/bin/**"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - invariant: Keep version = "0.22.1" unchanged and zero Larva awareness.
+
+
+      Admit:
+
+      - Witnessed inputs: v61.repair_fb15_idempotency and v61.gate DELTA FAIL report
+      (git:8cbfcadedb8f68d614b468f3f1d28e0109708368) on reverse-direction local ->
+      default_hub recovery.
+
+      - Checks: targeted mcp_and_inbox test, cargo fmt/clippy/test/build --release,
+      and 7/7 codesign --verify --strict.
+
+
+      Recovery:
+
+      - Reconcile within the isolated worktree; stop and report if blocked by an external
+      contract contradiction.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --test daemon mcp_and_inbox && cargo build
+      --release && git diff --check
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - docs/FEEDBACK.md
+    depends_on:
+    - v61.repair_fb15_idempotency
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T16:58:38.462436Z'
+    done_at: '2026-11-24T17:10:43.505773+00:00'
+    evidence: 'Integrated ebbc33c14fe8679e16a0718aa5483bda4d6329fe onto main (9 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.1 unchanged). Verified: FB-15 reverse-direction symmetry (local reservation
+      reused on default_hub recovery, pending publication settled on local, payload/target
+      mismatch -> IDEMPOTENCY_KEY_CONFLICT); mcp_and_inbox (32/32), send lib tests
+      (8/8), fmt, clippy -D warnings, release build, git diff --check, and 7/7 codesign
+      --verify --strict. Worktree removed.'
+- id: v62
+  name: 'V62 FB-15 Route-Scope Isolation and Disabled-Local Retry Idempotency Closure
+    [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: All steps (v62.repair_fb15_route_scope, v62.repair_fb15_upgrade_legacy, v62.gate_final)
+    are DONE with FB-15 Case A (disabled-local retry idempotency including migrated
+    pre-upgrade v7 rows with fallback_key IS NULL) and Case B (explicit local vs.
+    unqualified default_hub route-scope isolation) closed, zero Larva awareness/dependency
+    across crates/, plugins/, src/macos/, tests, and docs, version = "0.22.1" unchanged,
+    7/7 codesign --verify --strict passing, and v62.gate_final DELTA verification
+    report PASS.
+  depends_on:
+  - v61
+  steps:
+  - id: v62.repair_fb15_route_scope
+    name: 'FB-15 Route-Scope Isolation and Disabled-Local Retry Idempotency [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [FB-15-ROUTE-A] crates/cito-native/src/core/daemon/mcp.rs:HubAccess::send_from
+      & crates/cito-native/src/core/state.rs — Preserve reverse-direction fallback
+      idempotency when "local" is disabled or unavailable before retry: if a prior
+      implicit default_hub send fell back and recorded an unexpired reservation on
+      "local" in local_sent_idempotency, a retry after "local" is disabled/disconnected
+      and default_hub has recovered must still detect that unexpired fallback reservation
+      (returning its committed "local" receipt, enforcing IDEMPOTENCY_KEY_CONFLICT
+      on payload/target mismatch, or rejecting an unsettled pending local reservation
+      cleanly) rather than bypassing the check via can_fallback/self.slot("local")
+      and double-publishing on default_hub.
+
+      - [FB-15-ROUTE-B] crates/cito-native/src/core/daemon/mcp.rs:HubAccess::send_from
+      & crates/cito-native/src/core/state.rs — Isolate explicit "local" sends from
+      unqualified default_hub sends: distinguish reservations created via implicit
+      default_hub -> "local" fallback from explicit "local" sends (hub: "local" or
+      to: "local:...") so reverse fallback lookup on an unqualified default_hub send
+      only matches reservations originating from implicit default_hub fallback, while
+      explicit "local" sends remain strictly isolated to "local".
+
+      - [TEST-FB15-ROUTE] crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+      — Add regression tests covering both Case A (implicit send falls back to "local",
+      "local" is disabled before retry, default_hub recovers -> retry resolves/blocks
+      against the "local" reservation without double-publishing on default_hub) and
+      Case B (with default_hub healthy, an explicit "local" send with idempotency_key
+      K does not intercept a subsequent unqualified default_hub send using the same
+      key K).
+
+      - [STAGE] bin/**, plugins/*/bin/** — Rebuild and restage release binaries (cargo
+      build --release) and verify 7/7 codesign --verify --strict.
+
+
+      Boundary:
+
+      - owner: rust-senior
+
+      - allowed_paths: ["crates/cito-native/src/core/daemon/mcp.rs", "crates/cito-native/src/core/state.rs",
+      "crates/cito-native/tests/support/daemon/mcp_and_inbox.rs", "bin/**", "plugins/*/bin/**"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - invariant: Keep version = "0.22.1" unchanged and zero Larva awareness.
+
+
+      Admit:
+
+      - Witnessed inputs: v61.repair_fb15_reverse_symmetry and gate-reviewer (01a20e5d-eb0d-731c-8a24-cf65a071adad)
+      FAIL report at git:403225c6 on FB-15 Case A (local disabled before retry) and
+      Case B (explicit local send vs. unqualified send).
+
+      - Checks: targeted mcp_and_inbox tests, cargo fmt/clippy/test/build --release,
+      and 7/7 codesign --verify --strict.
+
+
+      Recovery:
+
+      - Reconcile within the isolated worktree; stop and report if blocked by an external
+      contract contradiction.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --test daemon mcp_and_inbox && cargo build
+      --release && git diff --check
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - docs/FEEDBACK.md
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T17:18:56.430030Z'
+    done_at: '2026-11-24T17:31:27.317759+00:00'
+    evidence: Integrated 43531ccaf417f9936ac57d599406879b4cf57497 onto main (10 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.1 unchanged). Verified Case A (disabled local before retry reuses committed
+      local receipt, blocks unsettled pending local, enforces IDEMPOTENCY_KEY_CONFLICT)
+      & Case B (explicit local sends isolated from unqualified default_hub sends);
+      mcp_and_inbox (33/33), state/daemon lib tests (96/96), fmt, clippy -D warnings,
+      release build, git diff --check, and 7/7 codesign --verify --strict. Worktree
+      removed.
+  - id: v62.gate_final
+    name: Phase V62 Final Independent DELTA Verification Gate (FB-01..FB-15)
+    status: done
+    description: 'step_type: gate
+
+      repo_change_policy: no_repo_change
+
+      gate_tier: DELTA
+
+
+      Deliver:
+
+      - [GATE] Execute independent DELTA verification gate (gate.report.v2) auditing
+      complete closure of FB-15 route-scope isolation, disabled-local retry idempotency,
+      and pre-upgrade v7 legacy row (fallback_key IS NULL) fallback idempotency across
+      crates/cito-native/src/core/daemon/mcp.rs, crates/cito-native/src/core/state.rs,
+      and crates/cito-native/tests/support/daemon/mcp_and_inbox.rs.
+
+      - [INVARIANTS] Verify zero Larva awareness/dependency (PI_PERSONA or Larva references
+      absent across crates/, plugins/, src/macos/, tests, and docs), version = "0.22.1"
+      unchanged with no new Git release tag, and 7/7 codesign --verify --strict passing
+      on staged binaries.
+
+
+      Boundary:
+
+      - owner: gate-reviewer
+
+      - allowed_paths: []
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock",
+      "crates/**", "plugins/**", "src/**", "docs/**", "bin/**"]
+
+      - invariant: Strict read-only verification (no_repo_change).
+
+
+      Admit:
+
+      - Requires v62.repair_fb15_upgrade_legacy completed with clean working tree
+      and committed artifacts; reuses prior FULL and DELTA gate pass evidence for
+      untouched suites while verifying the v62 FB-15 diff cone and staged binary signatures.
+
+
+      Recovery:
+
+      - Emit structured gate.report.v2 (PASS or FAIL with exact path:line findings);
+      never mutate repository files.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --test daemon mcp_and_inbox && git diff
+      --check
+    refs:
+    - docs/FEEDBACK.md
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    depends_on:
+    - v62.repair_fb15_upgrade_legacy
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-24T17:49:11.297702Z'
+    done_at: '2026-11-24T17:50:09.496053+00:00'
+    evidence: v62.gate_final DELTA PASS (gate-reviewer 01a20e9d-2805-7013-9b4c-2ef3c832b078,
+      bound to git:156153771620198251874d73ff249c5c7ac91fde, POSITIVE_GATE_EVIDENCE,
+      valid:true). FB-15 PROVEN across all forward/reverse/disabled-local/explicit-local/pre-upgrade-v7
+      cases; INV-ZERO-LARVA PROVEN; INV-VERSION-0.22.1 PROVEN; detached PPID=1 mcp_and_inbox
+      (33/33), state/daemon lib (96/96), fmt, clippy -D warnings, and 7/7 strict codesign
+      passed.
+  - id: v62.repair_fb15_upgrade_legacy
+    name: 'FB-15 Pre-Upgrade Legacy v7 Row Fallback Idempotency Closure [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [FB-15-LEGACY-MARKER] crates/cito-native/src/core/daemon/mcp.rs:HubAccess::send_from
+      & crates/cito-native/src/core/state.rs — Distinguish new explicit "local" sends
+      from migrated pre-upgrade v7 rows (fallback_key IS NULL): new explicit "local"
+      sends write a non-null marker (fallback_key = "" or explicit route marker),
+      whereas migrated pre-upgrade v7 "local" rows have fallback_key IS NULL.
+
+      - [FB-15-LEGACY-LOOKUP] crates/cito-native/src/core/daemon/mcp.rs:HubAccess::send_from
+      & crates/cito-native/src/core/state.rs — On an unqualified default_hub send
+      with idempotency_key, if no fallback_key = <key> match is found, also check
+      for an unexpired legacy "local" reservation with hub = ''local'' AND fallback_key
+      IS NULL AND dedup_id = <computed_local_dedup_id> (using "local"''s principal,
+      host, harness, session, "local://" url, canonical, key) so upgrade + disabled-local
+      retries resolve/block against the migrated "local" row without double-publishing
+      on default_hub.
+
+      - [TEST-FB15-LEGACY] crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+      — Add regression test simulating a migrated v7 "local" row (fallback_key IS
+      NULL) + "local" disabled + default_hub recovered -> retry resolves/blocks against
+      the migrated "local" row without double-publishing on default_hub, while new
+      explicit "local" sends still remain isolated.
+
+      - [STAGE] bin/**, plugins/*/bin/** — Rebuild and restage release binaries (cargo
+      build --release) and verify 7/7 codesign --verify --strict.
+
+
+      Boundary:
+
+      - owner: rust-senior
+
+      - allowed_paths: ["crates/cito-native/src/core/daemon/mcp.rs", "crates/cito-native/src/core/state.rs",
+      "crates/cito-native/tests/support/daemon/mcp_and_inbox.rs", "bin/**", "plugins/*/bin/**"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - invariant: Keep version = "0.22.1" unchanged and zero Larva awareness.
+
+
+      Admit:
+
+      - Witnessed inputs: v62.repair_fb15_route_scope and v62.gate_final (01a20e9d-2805-7013-9b4c-2ef3c832b078)
+      FAIL report on pre-upgrade v7 local_sent_idempotency rows (fallback_key IS NULL)
+      during upgrade + disabled-local retry.
+
+      - Checks: targeted mcp_and_inbox tests, cargo fmt/clippy/test/build --release,
+      and 7/7 codesign --verify --strict.
+
+
+      Recovery:
+
+      - Reconcile within the isolated worktree; stop and report if blocked by an external
+      contract contradiction.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --test daemon mcp_and_inbox && cargo build
+      --release && git diff --check
+    refs:
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - docs/FEEDBACK.md
+    depends_on:
+    - v62.repair_fb15_route_scope
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-24T17:38:03.998279Z'
+    done_at: '2026-11-24T17:49:00.915026+00:00'
+    evidence: Integrated 0a1580ca90d708959b1f97854ee1bef8e2b6a785 onto main (10 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.1 unchanged). Verified migrated v7 legacy local row handling (blocks with
+      NATS_UNAVAILABLE when local disabled, returns original receipt when re-enabled,
+      explicit local sends isolated); mcp_and_inbox (33/33), state/daemon lib tests
+      (96/96), fmt, clippy -D warnings, release build, git diff --check, and 7/7 codesign
+      --verify --strict. Worktree removed.

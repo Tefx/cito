@@ -193,6 +193,97 @@ fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
         .contains(".tmp.")));
 }
 #[test]
+fn debug_ui_build_reuses_fresh_output_and_release_always_rebuilds() {
+    use std::{
+        path::Path,
+        time::{Duration, UNIX_EPOCH},
+    };
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let manifest = f.dir.join("crates/native");
+    let src = f.dir.join("src/macos");
+    let bin = f.dir.join("bin");
+    let out_dir = f.dir.join("out");
+    for dir in [&manifest, &src, &bin, &out_dir] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let build = manifest.join("build.rs");
+    fs::copy(root().join("crates/cito-native/build.rs"), &build).unwrap();
+    let runner = f.dir.join("build-script");
+    let rustc = Path::new(env!("CARGO")).with_file_name("rustc");
+    let (ok, out, err) = f.command(
+        rustc.to_str().unwrap(),
+        &[
+            "--edition=2021",
+            build.to_str().unwrap(),
+            "-o",
+            runner.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    let main = src.join("main.swift");
+    let peer = src.join("Peer.swift");
+    let ui = bin.join("cito-ui-darwin-arm64");
+    fs::write(&main, "print(message)\n").unwrap();
+    fs::write(&peer, "let message = \"rebuilt\"\n").unwrap();
+    let stamp = |path: &Path, secs| {
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap()
+    };
+    f.env.insert("TARGET".into(), "aarch64-apple-darwin".into());
+    f.env
+        .insert("CARGO_MANIFEST_DIR".into(), manifest.display().to_string());
+    f.env
+        .insert("OUT_DIR".into(), out_dir.display().to_string());
+    for (profile, newer, rebuild) in [
+        ("debug", None, false),
+        ("debug", Some(&peer), true),
+        ("debug", Some(&build), true),
+        ("release", None, true),
+    ] {
+        f.env.insert("PROFILE".into(), profile.into());
+        fs::write(&ui, "existing").unwrap();
+        for path in [&ui, &main, &peer, &build] {
+            stamp(path, 100);
+        }
+        if let Some(path) = newer {
+            stamp(path, 101);
+        }
+        let (ok, out, err) = f.command(runner.to_str().unwrap(), &[], "");
+        assert!(ok, "{out} {err}");
+        if rebuild {
+            let rebuilt = if profile == "release" {
+                ui.clone()
+            } else {
+                out_dir.join("cito-ui")
+            };
+            if profile != "release" {
+                assert!(out.contains(&format!(
+                    "cargo:rustc-env=CITO_TEST_BUILT_UI={}",
+                    rebuilt.display()
+                )));
+            }
+            assert_eq!(
+                f.command(rebuilt.to_str().unwrap(), &[], ""),
+                (true, "rebuilt\n".into(), String::new())
+            );
+            if profile != "release" {
+                fs::remove_file(rebuilt).unwrap();
+            }
+        }
+        if profile != "release" {
+            assert_eq!(fs::read(&ui).unwrap(), b"existing");
+            assert_eq!(
+                fs::metadata(&ui).unwrap().modified().unwrap(),
+                UNIX_EPOCH + Duration::from_secs(100)
+            );
+        }
+    }
+}
+#[test]
 fn distribution_versions_native_manifests_cask_and_signed_ui() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -310,6 +401,8 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
         "",
     );
     assert!(ok, "{out} {err}");
+    f.env.insert("CITO_DISABLE_UI".into(), "0".into());
+    let old_daemon = f.daemon(&[]);
     let (ok, out, err) = f.command(
         NATIVE,
         &[
@@ -323,6 +416,35 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     assert!(ok, "{out} {err}");
     let v: Value = serde_json::from_str(&out).unwrap();
     let original = std::path::Path::new(v["appPath"].as_str().unwrap());
+    assert!(f.exited(old_daemon));
+    let check_generation = |f: &Fixture, app: &std::path::Path, old_pid: u32| {
+        let (status, health) = http(f.port, "/health", None);
+        assert_eq!(status, 200, "{health}");
+        assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(health["stateDir"], json!(f.state));
+        let pid = u32::try_from(health["pid"].as_u64().unwrap()).unwrap();
+        assert_ne!(pid, old_pid);
+        let helpers = app.join("Contents/Helpers").canonicalize().unwrap();
+        let (ok, path, err) = f.command("/bin/ps", &["-p", &pid.to_string(), "-o", "comm="], "");
+        assert!(ok, "{err}");
+        assert_eq!(
+            std::fs::canonicalize(path.trim()).unwrap(),
+            helpers.join("cito-native")
+        );
+        wait(|| {
+            let (_, children, _) = f.command(
+                "/usr/bin/pgrep",
+                &["-P", &pid.to_string(), "-x", "cito-ui"],
+                "",
+            );
+            children.lines().any(|child| {
+                let (_, path, _) = f.command("/bin/ps", &["-p", child, "-o", "comm="], "");
+                std::fs::canonicalize(path.trim()).is_ok_and(|path| path == helpers.join("cito-ui"))
+            })
+        });
+        pid
+    };
+    let original_pid = check_generation(&f, original, f.pid(old_daemon));
     let moved = f.dir.join("Relocated/Cito.app");
     fs::create_dir_all(moved.parent().unwrap()).unwrap();
     fs::rename(original, &moved).unwrap();
@@ -342,6 +464,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
         "",
     );
     assert!(ok, "In-place app rebuild failed: {out} {err}");
+    check_generation(&f, app, original_pid);
     assert!(!obsolete.exists());
     assert!(!obsolete_plugin.exists());
     assert_eq!(fs::read(&bundled).unwrap(), b"relocated source");

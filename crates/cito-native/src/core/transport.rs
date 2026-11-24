@@ -38,12 +38,14 @@ fn authorization(bearer: Option<&str>) -> io::Result<Option<String>> {
 
 fn connect_http(url: &url::Url, deadline: Instant) -> io::Result<TcpStream> {
     let mut error = io::Error::new(io::ErrorKind::NotConnected, "Hub address unavailable");
-    for address in url.socket_addrs(|| None)? {
+    let addresses = url.socket_addrs(|| None)?;
+    let attempt = Duration::from_millis(if addresses.len() == 1 { 1500 } else { 500 });
+    for address in addresses {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
-        match TcpStream::connect_timeout(&address, remaining.min(Duration::from_millis(500))) {
+        match TcpStream::connect_timeout(&address, remaining.min(attempt)) {
             Ok(socket) => return Ok(socket),
             Err(e) => error = e,
         }

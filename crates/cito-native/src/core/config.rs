@@ -6,9 +6,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-fn select_default_hub(hubs: &Map<String, Value>, requested: Option<&str>) -> String {
+fn complete_hub_profiles(hubs: &mut Map<String, Value>, requested: Option<&str>) -> String {
     let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
-    requested
+    let default = requested
         .filter(|name| hubs.get(*name).is_some_and(enabled))
         .or_else(|| {
             hubs.iter()
@@ -16,21 +16,38 @@ fn select_default_hub(hubs: &Map<String, Value>, requested: Option<&str>) -> Str
                 .map(|(name, _)| name.as_str())
         })
         .unwrap_or("local")
-        .to_owned()
+        .to_owned();
+    // Preserve a remote-only profile's existing default. Do not add a second
+    // local endpoint to standalone configurations that use a local alias.
+    if !hubs.contains_key("local")
+        && (hubs.is_empty()
+            || hubs.values().any(|hub| {
+                hub.get("url")
+                    .or_else(|| hub.get("natsUrl"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url != "local://")
+            }))
+    {
+        hubs.insert("local".into(), json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true, "defaultScope":"workspace"}));
+        if requested == Some("local") || !enabled(&hubs[&default]) {
+            return "local".into();
+        }
+    }
+    default
 }
 
 pub fn repair_default_hub(v: &mut Value) {
-    let fallback = v["hubs"].as_object().map_or_else(
-        || "local".into(),
-        |hubs| {
-            select_default_hub(
-                hubs,
-                v["default_hub"]
-                    .as_str()
-                    .or_else(|| v["defaultHub"].as_str()),
-            )
-        },
-    );
+    let requested = v["default_hub"]
+        .as_str()
+        .or_else(|| v["defaultHub"].as_str())
+        .map(str::to_owned);
+    let fallback = v
+        .get_mut("hubs")
+        .and_then(Value::as_object_mut)
+        .map_or_else(
+            || "local".into(),
+            |hubs| complete_hub_profiles(hubs, requested.as_deref()),
+        );
     if let Some(config) = v.as_object_mut() {
         config.insert("default_hub".into(), json!(fallback));
         config.remove("defaultHub");
@@ -267,9 +284,6 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         Some(_) => return Err("Expected hubs object in config.json".to_string()),
         None => Map::new(),
     };
-    if hubs.is_empty() {
-        hubs.insert("local".to_string(), json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true, "defaultScope":"workspace"}));
-    }
     for (name, value) in &mut hubs {
         canonicalize_hub_aliases(value);
         let hm = value
@@ -308,7 +322,7 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         .as_ref()
         .and_then(Value::as_str)
         .or_else(|| camel.as_ref().and_then(Value::as_str));
-    let default_hub = select_default_hub(&hubs, requested);
+    let default_hub = complete_hub_profiles(&mut hubs, requested);
     Ok((default_hub, hubs, obj))
 }
 
@@ -633,6 +647,8 @@ mod tests {
         let (default, hubs, rest) = try_normalize_existing_config(Some(r#"{"default_hub":"cloud","other":7,"hubs":{"cloud":{"url":"https://example.com","auth":"ToKeN","user":"bob"}}}"#)).unwrap();
         assert_eq!(default, "cloud");
         assert_eq!(hubs["cloud"]["authMode"], "token");
+        assert_eq!(hubs["local"]["url"], "local://");
+        assert_eq!(hubs["local"]["enabled"], true);
         assert!(hubs["cloud"].get("auth").is_none());
         assert_eq!(hubs["cloud"]["user"], "bob");
         assert_eq!(rest["other"], 7);
@@ -690,6 +706,14 @@ mod tests {
                 "local",
             ),
             (json!({"a":{"enabled":false},"z":{"disabled":true}}), "a"),
+            (
+                json!({"work":{"natsUrl":"https://work.example.com"}}),
+                "work",
+            ),
+            (
+                json!({"work":{"url":"https://work.example.com","disabled":true}}),
+                "local",
+            ),
         ] {
             let mut config = json!({"default_hub":"missing","hubs":hubs});
             assert_eq!(

@@ -2153,11 +2153,40 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     wait(|| f.output(process, false).contains("ready"));
     f.env.insert("CITO_PI_PROCESS_DISCOVERY".into(), "1".into());
     assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+    let cwd = fs::canonicalize(&f.dir).unwrap();
+    let sessions = f.home.join(".pi/agent/sessions").join(format!(
+        "--{}--",
+        cwd.to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('/', "-")
+    ));
+    fs::create_dir_all(&sessions).unwrap();
+    let rows = [
+        json!({"type":"session","id":"active-session","cwd":cwd}),
+        json!({"type":"session_info","name":"Work"}),
+        json!({"type":"message","message":{"role":"assistant","content":"Not a prompt"}}),
+        json!({"type":"message","message":{"role":"user","content":[{"type":"image"},{"type":"text","text":" Review\u{7}\nrouting "},{"type":"text","text":"🦀".repeat(140)}]}}),
+    ];
+    fs::write(
+        sessions.join("active.jsonl"),
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
     let enrolled = f.plugin(
         PI,
         json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir}),
     );
     assert_eq!(enrolled["ok"], true, "{enrolled}");
+    assert_eq!(enrolled["caller"]["session_id"], "active-session");
+    assert_eq!(enrolled["caller"]["title"], "Work");
+    assert_eq!(
+        enrolled["caller"]["about"],
+        format!("Review routing {}", "🦀".repeat(105))
+    );
     let cache_path = f
         .state
         .join(format!("pi/endpoints/{}.json", f.pid(process)));

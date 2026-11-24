@@ -83,14 +83,18 @@ impl LocalState {
             .first()
             .and_then(|v| v["user_version"].as_i64())
             .unwrap_or(0);
-        let has_process_identity =
-            |columns: &[Value]| columns.iter().any(|r| r["name"] == "process_identity");
-        if current != 7
-            || !has_process_identity(&db.query("PRAGMA table_info(local_listeners)", &[])?)
-        {
+        let schema_complete = |c: &Connection| -> Result<bool, String> {
+            Ok(c.query("PRAGMA table_info(local_listeners)", &[])?
+                .iter()
+                .any(|r| r["name"] == "process_identity")
+                && c.query("PRAGMA table_info(local_sent_idempotency)", &[])?
+                    .iter()
+                    .any(|r| r["name"] == "fallback_key"))
+        };
+        if current != 7 || !db.read(schema_complete)? {
             db.transaction(|c| {
             let version=c.query("PRAGMA user_version",&[])?.first().and_then(|v|v["user_version"].as_i64()).unwrap_or(0);
-            if version == 7 && has_process_identity(&c.query("PRAGMA table_info(local_listeners)", &[])?) { return Ok(()); }
+            if version == 7 && schema_complete(c)? { return Ok(()); }
             if version>7 { return Err(format!("Unsupported state schema version {version}")); }
             if version < 4 {
                 c.execute("DROP TABLE IF EXISTS local_pairwise_wakes; DROP TABLE IF EXISTS local_signals; DROP TABLE IF EXISTS local_listeners; DROP TABLE IF EXISTS local_sent_idempotency; DROP TABLE IF EXISTS pending_hub_acks; DROP TABLE IF EXISTS pending_hub_detaches; DROP TABLE IF EXISTS wake_retries; DROP TABLE IF EXISTS daemon_owner;", &[])?;
@@ -127,6 +131,14 @@ impl LocalState {
                 CREATE TABLE IF NOT EXISTS pending_hub_detaches(hub TEXT NOT NULL,listener_id TEXT NOT NULL,hub_url TEXT,PRIMARY KEY(hub,listener_id));
                 CREATE TABLE IF NOT EXISTS wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id));
                 PRAGMA user_version=7;",&[])?;
+            // Leave migrated rows NULL: their original route is unknown. New local
+            // rows store a logical fallback hash or a disjoint direct:<dedup_id> marker.
+            if !c.query("PRAGMA table_info(local_sent_idempotency)", &[])?.iter().any(|r| r["name"] == "fallback_key") {
+                c.execute("ALTER TABLE local_sent_idempotency ADD COLUMN fallback_key TEXT;
+                    ALTER TABLE local_sent_idempotency ADD COLUMN fallback_to TEXT;
+                    ALTER TABLE local_sent_idempotency ADD COLUMN fallback_public_id TEXT;
+                    CREATE UNIQUE INDEX sent_fallback_key ON local_sent_idempotency(fallback_key) WHERE fallback_key IS NOT NULL", &[])?;
+            }
             // Additive V4 extension: a successful insertion and an unknown insertion
             // both set queue_written, but only the former may become business-read.
             if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "queue_confirmed") {
@@ -829,8 +841,14 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
     } else {
         format!(" [↩ {}]", escape_card(&scoped))
     };
+    let signal_id = scoped_reply_id(hub, string(signal, "signal_id"), qualify_ids);
+    let correlation = if signal_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [signal_id: {}]", escape_card(&signal_id))
+    };
     format!(
-        "{}@{}{title_part}{reply}",
+        "{}@{}{title_part}{reply}{correlation}",
         escape_card(string(signal, "from_user")),
         escape_card(host)
     )
@@ -838,7 +856,7 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
 pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_ids: bool) -> String {
     if signals.len() == 1 {
         return format!(
-            "Cito · {}\n\n{}",
+            "Cito · {} · auto-acknowledged on delivery\n\n{}",
             format_sender(&signals[0], hub, qualify_ids),
             escape_card(string(&signals[0], "message"))
         );
@@ -863,7 +881,7 @@ pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_id
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
-        "Cito · {} notifications{target_part}\n\n{body}",
+        "Cito · {} notifications{target_part} · auto-acknowledged on delivery\n\n{body}",
         signals.len()
     )
 }

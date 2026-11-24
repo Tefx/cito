@@ -787,6 +787,40 @@ fn setup_receipts_wait_for_post_mutation_inspections() {
     }
 }
 #[test]
+fn auto_listen_reenrollment_preserves_ui_scope_on_the_hub() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (_, port) = host.hub();
+    let f = Fixture::new(
+        json!({"defaultHub":"work","hubs":{"work":{"url":format!("http://127.0.0.1:{port}"),"defaultScope":"workspace","autoListen":true}}}),
+    );
+    f.provider("delivered");
+    f.daemon(&[]);
+    let active = || {
+        f.rows("SELECT listener_id,scope FROM local_listeners WHERE hub='work' AND harness='fixture' AND listen_mode='auto' AND status='ACTIVE'")
+    };
+    wait(|| !active().is_empty());
+    let before = &active()[0];
+    assert_eq!(before["scope"], "workspace");
+    f.action_ok(
+        json!({"op":"set_scope","hub":"work","listener_id":before["listener_id"],"scope":"self"}),
+    );
+    f.action_ok(json!({"op":"set_auto_listen","hub":"work","enabled":false}));
+    assert!(active().is_empty());
+    f.action_ok(json!({"op":"set_auto_listen","hub":"work","enabled":true}));
+    wait(|| !active().is_empty());
+    assert_eq!(active()[0]["scope"], "self");
+    let directory = f.tool(
+        "cito_find",
+        json!({"hub":"work","harness":"fixture"}),
+        json!({}),
+    );
+    let listener = &directory["listeners"][0];
+    assert_eq!(listener["listener_id"], before["listener_id"]);
+    assert_eq!(listener["scope"], "self");
+}
+
+#[test]
 fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding() {
     let _lock = serial();
     let host = Fixture::new(json!({}));

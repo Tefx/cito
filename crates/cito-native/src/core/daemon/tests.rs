@@ -1626,7 +1626,7 @@ print(json.dumps(v))
         ..script_plugin(&dir, &script)
     };
     let plugins = test_plugins(vec![plugin.clone()]);
-    let mut candidates:Vec<Value>=(0..12).map(|i|json!({"harness":"fixture","session_id":format!("s{i}"),"title":"Work","cwd":"/workspace","activity":{"revision":10,"at_ms":now_ms(),"kind":"unknown"}})).collect();
+    let mut candidates:Vec<Value>=(0..12).map(|i|json!({"harness":"fixture","session_id":format!("s{i}"),"title":"Work","about":"Review session routing","cwd":"/workspace","activity":{"revision":10,"at_ms":now_ms(),"kind":"unknown"}})).collect();
     let save = |rows: &Vec<Value>| {
         fs::write(dir.join("sessions.json"), json!(rows).to_string()).map_err(|e| e.to_string())
     };
@@ -1658,6 +1658,8 @@ print(json.dumps(v))
                 .ok_or_else(|| "Missing session row".to_string())
         };
         assert_eq!(row()?["last_activity_revision"], "10");
+        assert_eq!(row()?["title"], "Work");
+        assert_eq!(row()?["about"], "Review session routing");
         service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
         service.action(&json!({"op":"set_auto_listen","hub":"local","enabled":false}))?;
         assert_eq!(
@@ -1800,10 +1802,15 @@ print(json.dumps(v))
         save(&candidates)?;
         service.refresh_available()?;
         assert_eq!(row()?["status"], "UNLISTENED");
+        // A candidate without prompt history registers with its title as the fallback.
+        candidates[0]["about"] = Value::Null;
         candidates[0]["activity"]["revision"] = json!(13);
         save(&candidates)?;
         service.refresh_available()?;
         assert_eq!(row()?["status"], "ACTIVE");
+        assert_eq!(row()?["about"], "Work");
+        candidates[0]["title"] = json!("Renamed");
+        candidates[0]["about"] = json!("Review recovery");
         // A long provider closure must not renew an expired automatic lease.
         service.retire_id("local", &id, "hard_exit")?;
         let old = now_ms() - 3_600_001;
@@ -1821,6 +1828,8 @@ print(json.dumps(v))
         service.auto_listen()?;
         let renewed = row()?;
         assert_eq!(renewed["status"], "ACTIVE");
+        assert_eq!(renewed["title"], "Renamed");
+        assert_eq!(renewed["about"], "Review recovery");
         assert!(renewed["last_activity_at_ms"]
             .as_u64()
             .is_some_and(|at| at > old));
@@ -1846,6 +1855,7 @@ print(json.dumps(v))
         service.refresh_available()?;
         let restored = row()?;
         assert_eq!(restored["listen_mode"], "manual");
+        assert_eq!(restored["about"], "Pinned");
         assert_eq!(
             restored["last_activity_at_ms"],
             closed["last_activity_at_ms"]

@@ -1275,7 +1275,15 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
         .clone();
     assert_eq!(retained["status"], "ACTIVE");
     assert_eq!(retained["owner_token"], sibling_device["owner_token"]);
-    assert_eq!(a.snapshot()["hubs"][0]["human_paused"], false);
+    let work = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|hub| hub["name"] == "work")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(work(&a.snapshot()["hubs"])["human_paused"], false);
     a.action_ok(json!({"op":"cli_human_device","hub":"work","attach":true}));
     let reattached =
         a.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0].clone();
@@ -1397,7 +1405,7 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
                 &[],
             ).unwrap();
             assert_eq!(status, 200, "{snapshot}");
-            assert_eq!(snapshot["settings"]["hubs"][0]["url"], url);
+            assert_eq!(work(&snapshot["settings"]["hubs"])["url"], url);
         }
         assert_channels_active();
         sent_signals.push(send_human(
@@ -1481,7 +1489,7 @@ fn cli_formats_real_mcp_error_envelopes_without_json_or_internal_codes() {
     );
 }
 #[test]
-fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
+fn sqlite_pre_v4_and_additive_v7_upgrades_preserve_outbound_recovery_rows() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let db = f.db("state.sqlite");
@@ -1500,14 +1508,16 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
         .is_empty());
     db.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES('work','d','p','s','c_abcdefgh2345','PENDING_PUBLISH','now',0)",&[]).unwrap();
     f.stop(daemon);
+    // Reopen the V7 schema that predates route-origin metadata.
+    db.execute("DROP INDEX sent_fallback_key; ALTER TABLE local_sent_idempotency DROP COLUMN fallback_key; ALTER TABLE local_sent_idempotency DROP COLUMN fallback_to; ALTER TABLE local_sent_idempotency DROP COLUMN fallback_public_id", &[]).unwrap();
     f.daemon(&[]);
     assert_eq!(
         db.query(
-            "SELECT signal_id FROM local_sent_idempotency WHERE hub='work' AND dedup_id='d'",
+            "SELECT signal_id,fallback_key FROM local_sent_idempotency WHERE hub='work' AND dedup_id='d'",
             &[]
         )
         .unwrap(),
-        vec![json!({"signal_id":"s"})]
+        vec![json!({"signal_id":"s","fallback_key":null})]
     );
 }
 
@@ -2281,16 +2291,22 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
         )
         .unwrap();
     let all = f.tool("cito_find", json!({"harness":"fixture"}), json!({}));
-    assert_eq!(all["listeners"].as_array().unwrap().len(), 3);
+    assert_eq!(all["listeners"].as_array().unwrap().len(), 1);
     assert_eq!(all["matched_count"], all["online_count"]);
-    assert_eq!(all["matched_count"], 3);
-    let hubs: Vec<_> = all["listeners"]
+    assert_eq!(all["matched_count"], 1);
+    let primary = &all["listeners"][0];
+    assert_eq!(primary["hub"], "personal");
+    assert_eq!(primary["hubs"], json!(["personal", "local", "work"]));
+    assert!(primary
+        .as_object()
+        .unwrap()
+        .keys()
+        .all(|key| !key.starts_with("can_")));
+    assert!(snapshot["listeners"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|row| row["hub"].as_str().unwrap())
-        .collect();
-    assert_eq!(hubs, vec!["local", "personal", "work"]);
+        .any(|row| row["can_stop"] == true));
     assert!(all["listeners"]
         .as_array()
         .unwrap()
@@ -2393,6 +2409,29 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     let inbox = f.tool("cito_inbox", json!({}), meta.clone());
     assert_eq!(inbox["signals"].as_array().unwrap().len(), 2);
     assert_eq!(f.rows("SELECT * FROM pending_hub_acks").len(), 2);
+    for args in [
+        json!({"hub":"personal","to":"@self"}),
+        json!({"to":"personal:@self"}),
+        json!({"to":"@missing"}),
+    ] {
+        let mut args = args;
+        args["message"] = json!("Do not reroute");
+        let rejected = f.tool_result("cito_send", args, meta.clone());
+        assert_eq!(rejected["isError"], true, "{rejected}");
+        assert!(
+            rejected.to_string().contains("NATS_UNAVAILABLE"),
+            "{rejected}"
+        );
+    }
+    let sent = f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Local wake"}),
+        meta.clone(),
+    );
+    assert!(
+        sent["signal_id"].as_str().unwrap().starts_with("local:"),
+        "{sent}"
+    );
     assert_eq!(
         f.action(json!({"op":"unlisten_session","harness":"fixture","session_id":"session-1"}))
             .0,
@@ -2403,6 +2442,291 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
         .iter()
         .all(|v| v["status"] == "UNLISTENED"));
 }
+#[test]
+fn implicit_send_keeps_the_remote_reservation_after_a_lost_publish_receipt() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (_, upstream) = host.hub();
+    let proxy = port();
+    let f = Fixture::new(json!({"default_hub":"work","hubs":{
+        "work":{"url":format!("http://127.0.0.1:{proxy}")}, "local":{"url":"local://"}
+    }}));
+    let meta = f.provider("delivered");
+    // Drop the first publish response only after the real Hub has committed it.
+    // Keep the RPC route offline until the test explicitly reconnects it.
+    let relay = f.spawn("node", &["-e", r#"
+const http=require('node:http');
+let offline=false,first=true;
+http.createServer(async(req,res)=>{
+ if(req.url==='/reconnect'||req.url==='/disconnect'){offline=req.url==='/disconnect';return res.end('{}');}
+ if(offline||req.url!=='/v1/rpc'){res.writeHead(503);return res.end();}
+ let body='';for await(const chunk of req)body+=chunk;
+ const upstream=await fetch('http://127.0.0.1:'+process.argv[2]+req.url,{method:'POST',body,headers:{'content-type':'application/json','x-cito-user':req.headers['x-cito-user']}});
+ const receipt=await upstream.text();
+ if(first&&JSON.parse(body).op==='js_publish'&&JSON.parse(receipt).ok){first=false;offline=true;return res.destroy();}
+ res.writeHead(upstream.status,{'Content-Length':Buffer.byteLength(receipt)});res.end(receipt);
+}).listen(+process.argv[1],'127.0.0.1',()=>console.log('ready'));
+"#, &proxy.to_string(), &upstream.to_string()], &[]);
+    wait(|| f.output(relay, false).contains("ready"));
+    f.daemon(&[]);
+    let send = json!({"to":"@self","message":"Reserved on work","idempotency_key":"once"});
+    let reject = |args: Value, code: &str| {
+        let result = f.tool_result("cito_send", args, meta.clone());
+        assert_eq!(result["isError"], true, "{result}");
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], code, "{body}");
+    };
+    // The same alias is deliverable on both Hubs, so a fallback would really publish.
+    f.tool(
+        "cito_send",
+        json!({"hub":"local","to":"@self","message":"Local control"}),
+        meta.clone(),
+    );
+    reject(send.clone(), "NATS_UNAVAILABLE");
+    let pending = f.rows("SELECT * FROM local_sent_idempotency WHERE hub='work'");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["status"], "PENDING_PUBLISH");
+    let remote = host.db("hub/hub.sqlite");
+    let committed = remote
+        .query("SELECT signal_id,seq FROM hub_signals", &[])
+        .unwrap();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0]["signal_id"], pending[0]["signal_id"]);
+    reject(send.clone(), "NATS_UNAVAILABLE");
+    let mut changed = send.clone();
+    changed["message"] = json!("Different payload");
+    reject(changed, "IDEMPOTENCY_KEY_CONFLICT");
+    let mut retargeted = send.clone();
+    retargeted["to"] = f
+        .rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")[0]
+        ["listener_id"]
+        .clone();
+    reject(retargeted, "IDEMPOTENCY_KEY_CONFLICT");
+    assert_eq!(http(proxy, "/reconnect", None).0, 200);
+    let recovered = f.tool("cito_send", send.clone(), meta.clone());
+    assert_eq!(
+        recovered["signal_id"],
+        format!("work:{}", committed[0]["signal_id"].as_str().unwrap())
+    );
+    assert_eq!(recovered["seq"], committed[0]["seq"]);
+    assert_eq!(
+        remote
+            .query("SELECT signal_id,seq FROM hub_signals", &[])
+            .unwrap(),
+        committed
+    );
+    assert_eq!(http(proxy, "/disconnect", None).0, 200);
+    reject(send.clone(), "NATS_UNAVAILABLE");
+    let local = f.db("hub.sqlite");
+    assert_eq!(
+        local
+            .query("SELECT seq FROM hub_signals", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut fresh = send;
+    fresh["idempotency_key"] = json!("another-key");
+    let new_send = f.tool("cito_send", fresh, meta);
+    assert!(new_send["signal_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("local:"));
+}
+
+#[test]
+fn implicit_send_reuses_local_reservations_after_default_hub_recovers() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let remote = port();
+    let f = Fixture::new(json!({"default_hub":"work","hubs":{
+        "work":{"url":format!("http://127.0.0.1:{remote}")}, "local":{"url":"local://","user":"bob"}
+    }}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    let send = |args| f.tool("cito_send", args, meta.clone());
+    let control_args =
+        json!({"to":"@self","message":"Explicit route control","idempotency_key":"fresh"});
+    let mut explicit = control_args.clone();
+    explicit["hub"] = json!("local");
+    send(explicit);
+    let args = json!({"to":"@self","message":"Committed locally","idempotency_key":"once"});
+    let receipt = send(args.clone());
+    assert!(receipt["signal_id"].as_str().unwrap().starts_with("local:"));
+
+    // Lose local bookkeeping after a second real publication, leaving it pending.
+    let db = f.db("state.sqlite");
+    db.execute("CREATE TRIGGER lose_receipt BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'lost receipt'); END", &[]).unwrap();
+    let pending = json!({"to":"@self","message":"Pending locally","idempotency_key":"pending"});
+    let first = send(pending.clone());
+    assert!(first["maintenance_warning"].is_string());
+    db.execute("DROP TRIGGER lose_receipt", &[]).unwrap();
+    let local = f.db("hub.sqlite");
+    let signals = || {
+        local
+            .query("SELECT signal_id,seq FROM hub_signals ORDER BY seq", &[])
+            .unwrap()
+    };
+    // V7 used the physical local dedup ID even when the default route fell back.
+    // A direct send produces that same wire ID; remove its post-upgrade marker.
+    let legacy = json!({"to":"@self","message":"Before upgrade","idempotency_key":"legacy"});
+    let mut direct = legacy.clone();
+    direct["hub"] = json!("local");
+    let before_upgrade = send(direct);
+    let signal_id = before_upgrade["signal_id"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("local:")
+        .unwrap();
+    assert_eq!(db.execute("UPDATE local_sent_idempotency SET fallback_key=NULL WHERE hub='local' AND signal_id=? AND fallback_key IS NOT NULL", &[json!(signal_id)]).unwrap(), 1);
+    let original = signals();
+    assert_eq!(original.len(), 4);
+    f.action_ok(json!({"op":"setup_toggle_hub","hub":"local","enabled":false}));
+
+    host.spawn(
+        NATIVE,
+        &[
+            "hub",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &remote.to_string(),
+            "--data-dir",
+            host.state.join("hub").to_str().unwrap(),
+            "--auth",
+            "none",
+        ],
+        &[],
+    );
+    wait(|| std::net::TcpStream::connect(("127.0.0.1", remote)).is_ok());
+    let control = send(control_args);
+    let remote_id = control["signal_id"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("work:")
+        .unwrap();
+    assert_eq!(send(args.clone()), receipt);
+    let legacy_blocked = f.tool_result("cito_send", legacy.clone(), meta.clone());
+    assert_eq!(legacy_blocked["isError"], true, "{legacy_blocked}");
+    assert!(
+        legacy_blocked.to_string().contains("NATS_UNAVAILABLE"),
+        "{legacy_blocked}"
+    );
+    let blocked = f.tool_result("cito_send", pending.clone(), meta.clone());
+    assert_eq!(blocked["isError"], true, "{blocked}");
+    assert!(
+        blocked.to_string().contains("NATS_UNAVAILABLE"),
+        "{blocked}"
+    );
+    for (field, value) in [
+        ("message", "Different payload"),
+        ("to", "c_0123456789abcdef"),
+        ("to", "@another-user"),
+    ] {
+        let mut changed = args.clone();
+        changed[field] = json!(value);
+        let result = f.tool_result("cito_send", changed, meta.clone());
+        assert_eq!(result["isError"], true, "{result}");
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "IDEMPOTENCY_KEY_CONFLICT", "{body}");
+    }
+    f.action_ok(json!({"op":"setup_toggle_hub","hub":"local","enabled":true}));
+    assert_eq!(send(args.clone()), receipt);
+    assert_eq!(send(legacy), before_upgrade);
+    let mut changed_alias = args;
+    changed_alias["to"] = json!("@another-user");
+    let rejected = f.tool_result("cito_send", changed_alias, meta.clone());
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected.to_string().contains("IDEMPOTENCY_KEY_CONFLICT"),
+        "{rejected}"
+    );
+    let replay = send(pending);
+    assert_eq!(replay["signal_id"], first["signal_id"]);
+    assert_eq!(replay["seq"], first["seq"]);
+    assert!(replay["maintenance_warning"].is_null());
+    assert!(f
+        .rows("SELECT 1 FROM local_sent_idempotency WHERE status='PENDING_PUBLISH'")
+        .is_empty());
+    assert_eq!(signals(), original);
+    assert_eq!(
+        host.db("hub/hub.sqlite")
+            .query("SELECT signal_id FROM hub_signals", &[])
+            .unwrap(),
+        vec![json!({"signal_id":remote_id})]
+    );
+}
+
+#[test]
+fn explicit_local_reservations_do_not_intercept_default_hub_sends() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (_, remote) = host.hub();
+    let f = Fixture::new(json!({"default_hub":"work","hubs":{
+        "work":{"url":format!("http://127.0.0.1:{remote}")}, "local":{"url":"local://"}
+    }}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    let send = |args| f.tool("cito_send", args, meta.clone());
+    for (i, (field, value)) in [("hub", "local"), ("to", "local:@self")]
+        .into_iter()
+        .enumerate()
+    {
+        let implicit = json!({"to":"@self","message":"Same payload","idempotency_key":field});
+        let mut explicit = implicit.clone();
+        explicit[field] = json!(value);
+        let local = send(explicit);
+        let work = send(implicit);
+        for (db, receipt, hub) in [
+            (f.db("hub.sqlite"), local, "local"),
+            (host.db("hub/hub.sqlite"), work, "work"),
+        ] {
+            let rows = db
+                .query("SELECT signal_id FROM hub_signals ORDER BY seq", &[])
+                .unwrap();
+            assert_eq!(rows.len(), i + 1, "{hub}: {rows:?}");
+            assert_eq!(
+                receipt["signal_id"],
+                format!("{hub}:{}", rows[i]["signal_id"].as_str().unwrap())
+            );
+        }
+    }
+}
+
+#[test]
+fn implicit_send_fallback_requires_an_in_process_local_hub() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (_, remote) = host.hub();
+    let offline = port();
+    let f = Fixture::new(json!({"default_hub":"work","hubs":{
+        "work":{"url":format!("http://127.0.0.1:{offline}")},
+        "local":{"url":format!("http://127.0.0.1:{remote}")}
+    }}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    f.tool(
+        "cito_send",
+        json!({"hub":"local","to":"@self","message":"Explicit route"}),
+        meta.clone(),
+    );
+    let rejected = f.tool_result(
+        "cito_send",
+        json!({"to":"@self","message":"Same-host only"}),
+        meta,
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected.to_string().contains("NATS_UNAVAILABLE"),
+        "{rejected}"
+    );
+    assert!(f
+        .rows("SELECT 1 FROM local_signals WHERE message='Same-host only'")
+        .is_empty());
+}
+
 #[test]
 fn stdio_signal_handlers_exit_cleanly_and_daemon_health_owns_sandbox() {
     let _lock = serial();

@@ -779,6 +779,7 @@ pub(super) fn hub_control(
             );
         }
         row["scope"] = json!(scope);
+        row["scope_explicit"] = json!(true);
         match slot.kv_save(id, &row, Some(rev)) {
             Ok(_) => break,
             Err(error) if attempt == 2 || !error.starts_with("10071:") => return Err(error),

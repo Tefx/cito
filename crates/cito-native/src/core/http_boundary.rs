@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::net::SocketAddr;
 
+pub(super) const PEER_CLOSED: &str = "Connection closed by peer before HTTP response";
+
 pub(super) struct RequestHead {
     pub method: String,
     pub target: String,
@@ -20,6 +22,9 @@ pub(super) fn read_head(
         .take(8193)
         .read_line(&mut line)
         .map_err(|_| (400, "Invalid request line"))?;
+    if line.is_empty() {
+        return Err((400, PEER_CLOSED));
+    }
     if line.len() > 8192 {
         return Err((400, "Request line too long"));
     }
@@ -196,6 +201,14 @@ mod tests {
     #[test]
     fn framing_rejects_transfer_encoding_duplicates_and_truncation() {
         for limit in [16384, 65536] {
+            assert_eq!(
+                read_head(&mut &b""[..], limit).err(),
+                Some((400, PEER_CLOSED))
+            );
+            assert_eq!(
+                read_head(&mut &b"GET"[..], limit).err(),
+                Some((400, "Malformed HTTP request"))
+            );
             for headers in [
                 "Transfer-Encoding: chunked\r\n\r\n",
                 "Content-Length: 1\r\ncontent-length: 2\r\n\r\n",

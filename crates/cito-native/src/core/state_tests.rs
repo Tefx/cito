@@ -1251,10 +1251,10 @@ fn unlisten_racing_final_completion_cannot_business_ack_or_resurrect_dispatch() 
 #[test]
 fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
     let target = json!({"title":" <Target> "});
-    let one = json!({"from_user":"alice","from_host_name":"host.LOCAL","from_title":"Alice Smith","from_listener_id":"alice-smith-abcdefghijkl","message":"<x> & hello"});
+    let one = json!({"signal_id":"s:123","from_user":"alice","from_host_name":"host.LOCAL","from_title":"Alice Smith","from_listener_id":"alice-smith-abcdefghijkl","message":"<x> & hello"});
     assert_eq!(
         format_wake_card(&target, std::slice::from_ref(&one), "cloud", true),
-        "Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl]\n\n&lt;x&gt; & hello"
+        "Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl] [signal_id: cloud:s:123] · auto-acknowledged on delivery\n\n&lt;x&gt; & hello"
     );
     for suffix in ["abcdefghijkl", "0123456789abcdef"] {
         let mut sender = one.clone();
@@ -1265,7 +1265,7 @@ fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
     distinct["from_title"] = json!("Different title");
     assert!(format_sender(&distinct, "local", false).contains("Different title"));
     let two = json!({"from_user":"bob","from_host_name":"other.local","from_title":" Sender <B> ","from_listener_id":null,"message":"second"});
-    assert_eq!(format_wake_card(&target, &[one, two], "local", false), "Cito · 2 notifications → &lt;Target&gt;\n\n[1] alice@host [↩ alice-smith-abcdefghijkl]\n&lt;x&gt; & hello\n\n[2] bob@other · Sender &lt;B&gt;\nsecond");
+    assert_eq!(format_wake_card(&target, &[one, two], "local", false), "Cito · 2 notifications → &lt;Target&gt; · auto-acknowledged on delivery\n\n[1] alice@host [↩ alice-smith-abcdefghijkl] [signal_id: local:s:123]\n&lt;x&gt; & hello\n\n[2] bob@other · Sender &lt;B&gt;\nsecond");
 }
 
 #[test]

@@ -1847,7 +1847,21 @@ impl DaemonService {
                         continue;
                     }
                 }
-                let args = json!({"about":candidate["title"],"discovered_at":candidate["discovered_at"],"_auto":true,"_restore":restoring});
+                let title = string(&candidate, "title");
+                let about = prior
+                    .as_ref()
+                    .filter(|row| restoring && (manual || row["about"] != row["title"]))
+                    .map(|row| string(row, "about"))
+                    .filter(|about| !about.trim().is_empty())
+                    .or_else(|| {
+                        candidate["about"].as_str().filter(|s| {
+                            !s.trim().is_empty()
+                                && s.trim() != title.trim()
+                                && s.chars().count() <= 500
+                        })
+                    })
+                    .unwrap_or(title);
+                let args = json!({"about":about,"discovered_at":candidate["discovered_at"],"_auto":true,"_restore":restoring});
                 {
                     let mut args = args;
                     let mut caller = candidate.clone();
@@ -1856,7 +1870,7 @@ impl DaemonService {
                         &self.config.home_dir,
                         &plugin.display_name,
                         string(&slot.identity, "owner_user"),
-                        string(&args, "about")
+                        title
                     ));
                     if slot.local.is_none() {
                         args["_expected_revision"] = candidate["discovery_revision"].clone();

@@ -12,8 +12,7 @@ use std::fs;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -1547,10 +1546,24 @@ pub fn run_setup_cli(args: &[String]) {
         let host_edit = share_hub.is_some() || share_port.is_some();
         let refresh_apps =
             !host_edit || !enable_harnesses.is_empty() || !disable_harnesses.is_empty();
-        let reconcile = || -> Result<(), String> {
+        let reconcile = |built_app: Option<&Path>| -> Result<(), String> {
             let config = daemon_control_config(&state_dir, &config_path, &home_dir, None)?;
-            if crate::plugins::probe_daemon_health(&config).is_some() {
-                crate::plugins::ensure_daemon(&config)?;
+            if let Some(existing) = crate::plugins::probe_daemon_health(&config) {
+                if let Some(app) = built_app {
+                    crate::plugins::stop_daemon(&config, &existing)?;
+                    // status runs ensure_daemon from the published helper, even if setup
+                    // itself was invoked from a checkout or a different installation.
+                    let status = Command::new(app.join("Contents/Helpers/cito-native"))
+                        .arg("status")
+                        .stdout(Stdio::null())
+                        .status()
+                        .map_err(|e| e.to_string())?;
+                    if !status.success() {
+                        return Err(format!("Rebuilt application status failed: {status}"));
+                    }
+                } else {
+                    crate::plugins::ensure_daemon(&config)?;
+                }
                 for op in [
                     host_edit.then_some("set_host_hub"),
                     refresh_apps.then_some("refresh_available"),
@@ -1572,10 +1585,8 @@ pub fn run_setup_cli(args: &[String]) {
         if build_app {
             let (app_path, bytes) =
                 build_mac_app_bundle_native(build_app_dest.as_deref(), &state_dir, &plugins)?;
-            if !uninstall {
-                reconcile()
-                    .map_err(|e| format!("Application built; daemon update incomplete: {e}"))?;
-            }
+            reconcile(Some(&app_path))
+                .map_err(|e| format!("Application built; daemon update incomplete: {e}"))?;
             if json_output {
                 let out = json!({
                     "appPath": app_path.to_string_lossy(),
@@ -1606,7 +1617,7 @@ pub fn run_setup_cli(args: &[String]) {
                 }
             }
             if !dry_run {
-                reconcile()?;
+                reconcile(None)?;
             }
             emit_setup_result(&config_path, &default_hub, dry_run, &actions, json_output);
             return Ok(!dry_run);
@@ -1908,7 +1919,7 @@ pub fn run_setup_cli(args: &[String]) {
             if let Some(en) = launch_at_login {
                 set_launch_at_login(en, &state_dir, &home_dir, &plugins).map_err(setup_error)?;
             }
-            reconcile().map_err(setup_error)?;
+            reconcile(None).map_err(setup_error)?;
         }
 
         emit_setup_result(
@@ -2509,6 +2520,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn remote_default_changes_preserve_local_hub_opt_out() {
+        let (root, _) = fixture();
+        let path = root.join("config.json");
+        fs::write(&path, r#"{"defaultHub":"personal","hubs":{"personal":{"url":"https://personal.example.com"}}}"#).unwrap();
+        for (name, url, disable_local, expected) in [
+            ("work", "https://work.example.com", false, true),
+            ("personal", "https://personal.example.com", true, false),
+            ("work", "https://work.example.com", false, false),
+        ] {
+            let mut args = vec!["--hub", name, "--url", url, "--auth", "none", "--default"];
+            if disable_local {
+                args.extend(["--disable-hub", "local"]);
+            }
+            let result = cli_child(&root, &root, &args);
+            assert!(result.status.success(), "{result:?}");
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["default_hub"], name);
+            assert_eq!(saved["hubs"]["local"]["url"], "local://");
+            assert_eq!(saved["hubs"]["local"]["enabled"], expected);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

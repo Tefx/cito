@@ -459,26 +459,34 @@ fn register_locked(
             return Err("STALE_GENERATION: Listener collision".into());
         }
         let local = local_node(state, client, harness, session)?;
-        let scope = args["scope"]
-            .as_str()
-            .or_else(|| local.as_ref().and_then(|row| row["scope"].as_str()))
+        let explicit_scope = args["scope"].as_str().or_else(|| {
+            (previous["scope_explicit"] == true)
+                .then(|| previous["scope"].as_str())
+                .flatten()
+        });
+        let retained_scope = if listen_mode == "manual" {
+            previous["scope"]
+                .as_str()
+                .or_else(|| local.as_ref().and_then(|row| row["scope"].as_str()))
+        } else {
+            None
+        };
+        let scope = explicit_scope
+            .or(retained_scope)
             .or_else(|| {
-                previous["scope"]
+                client.config["defaultScope"]
                     .as_str()
-                    .filter(|scope| matches!(*scope, "self" | "workspace"))
+                    .filter(|s| matches!(*s, "self" | "workspace"))
             })
-            .unwrap_or(
-                if client.config["authMode"]
+            .unwrap_or_else(|| {
+                match client.config["authMode"]
                     .as_str()
                     .or_else(|| client.config["auth_mode"].as_str())
-                    .unwrap_or("none")
-                    == "none"
                 {
-                    "workspace"
-                } else {
-                    "self"
-                },
-            );
+                    None | Some("none") => "workspace",
+                    _ => "self",
+                }
+            });
         if !matches!(scope, "self" | "workspace") {
             return Err("INVALID_INPUT: Invalid scope".into());
         }
@@ -531,6 +539,9 @@ fn register_locked(
             .unwrap_or_default();
         channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":"wake_exclusive","priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":client.server_now()}));
         let mut value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
+        if explicit_scope.is_some() {
+            value["scope_explicit"] = json!(true);
+        }
         value["custom_title"] = json!(custom_title.is_some());
         value["listen_mode"] = json!(listen_mode);
         super::lease::reconcile_registration_state(&mut value, client.server_now());
@@ -922,6 +933,50 @@ mod tests {
             .db
             .query("SELECT 1 FROM pending_hub_detaches", &[])?
             .is_empty());
+        engine.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_agent_scope_tracks_profile_but_preserves_explicit_and_manual_intent(
+    ) -> Result<(), String> {
+        let root = crate::core::hub::TestDirectory(std::env::temp_dir().join(random_uuid_v4()));
+        let engine = Arc::new(HubEngine::open(&root.join("hub"))?);
+        let state = LocalState::open(&root.join("state"))?;
+        let caller = json!({"harness":"fixture", "session_id":"s"});
+        let enroll = |auth, default: Value, args: Value| {
+            let client = HubClient::new(
+                "work".into(),
+                json!({"url":"local://", "authMode":auth,"defaultScope":default}),
+                "alice",
+                Some(engine.clone()),
+            );
+            register_endpoint(&state, &client, "host", &args, &caller)
+                .map(|row| row["scope"].clone())
+        };
+        let auto = json!({"about":"Review", "_auto":true});
+        let restore = json!({"about":"Review", "_auto":true, "_restore":true});
+        assert_eq!(enroll("none", Value::Null, auto.clone())?, "workspace");
+        assert_eq!(enroll("token", Value::Null, restore.clone())?, "self");
+        assert_eq!(
+            enroll("token", json!("workspace"), auto.clone())?,
+            "workspace"
+        );
+        assert_eq!(enroll("none", json!("self"), auto.clone())?, "self");
+        assert_eq!(
+            enroll("none", Value::Null, json!({"about":"Manual"}))?,
+            "self"
+        );
+        assert_eq!(enroll("none", Value::Null, restore)?, "self");
+        assert_eq!(
+            enroll(
+                "none",
+                Value::Null,
+                json!({"about":"Manual", "scope":"self"})
+            )?,
+            "self"
+        );
+        assert_eq!(enroll("none", Value::Null, auto)?, "self");
         engine.shutdown();
         Ok(())
     }

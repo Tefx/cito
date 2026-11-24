@@ -1008,6 +1008,9 @@ pub fn read_http_response(stream: &mut impl Read) -> Result<HttpResponse, String
             .read_until(b'\n', &mut bytes)
             .map_err(|e| e.to_string())?;
         *total += bytes.len();
+        if *total == 0 {
+            return Err(super::http_boundary::PEER_CLOSED.into());
+        }
         if *total > MAX_BYTES || !bytes.ends_with(b"\n") {
             return Err("Truncated or oversized HTTP headers".into());
         }
@@ -1941,6 +1944,18 @@ mod tests {
     }
     #[test]
     fn http_response_bounds_and_malformed_framing_are_errors() {
+        for (response, error) in [
+            ("", "Connection closed by peer before HTTP response"),
+            ("HTTP/1.1 200", "Truncated or oversized HTTP headers"),
+            ("HTTP/1.1 200 OK\r\n", "Truncated or oversized HTTP headers"),
+        ] {
+            assert_eq!(
+                read_http_response(&mut response.as_bytes())
+                    .err()
+                    .as_deref(),
+                Some(error)
+            );
+        }
         for response in [
             "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\n\r\n",
             "HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n",

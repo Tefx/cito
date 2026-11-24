@@ -9,7 +9,7 @@ use crate::core::{
 use crate::plugins::{now_ms, random_uuid_v4};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -87,6 +87,7 @@ pub(super) enum ToolCall {
         value: Value,
         pending_is_error: bool,
     },
+    McpFind(Value),
     Find {
         args: Value,
         harness: Option<String>,
@@ -166,14 +167,12 @@ impl ToolCall {
                 }
                 Ok(result)
             }
+            Self::McpFind(args) => snapshot.find_listeners(args, None),
             Self::Find {
                 args,
                 harness,
                 mine,
-            } => snapshot.find_listeners(args, |row| {
-                harness.as_ref().is_none_or(|id| row["harness"] == *id)
-                    && (!mine || row["is_self_principal"] == true)
-            }),
+            } => snapshot.find_listeners(args, Some((harness.as_deref(), *mine))),
             Self::Listen { hub, args, caller } => snapshot.listen(hub, args, caller),
             Self::Send { hub, args, caller } => snapshot.send_from(hub, args, caller.clone()),
             Self::Rename { caller, title } => snapshot.rename_session(
@@ -205,7 +204,9 @@ impl ToolCall {
         reason: &str,
     ) -> Result<Value, String> {
         match result {
-            Ok(mut value) if !matches!(self, Self::Find { .. } | Self::Ready(_)) => {
+            Ok(mut value)
+                if !matches!(self, Self::Find { .. } | Self::McpFind(_) | Self::Ready(_)) =>
+            {
                 value["committed"] = json!(true);
                 let warning = if matches!(self, Self::Send { .. }) {
                     "maintenance_warning"
@@ -245,11 +246,16 @@ impl ToolCall {
             Self::Ready(_) => false,
             Self::RegistrationEdit { hubs, .. } => hubs.iter().any(|hub| hub == name),
             Self::Drain { batch, .. } => batch.0.contains(name),
-            Self::Find { args, .. } => args["hub"].as_str().is_none_or(|hub| hub == name),
+            Self::Find { args, .. } | Self::McpFind(args) => {
+                args["hub"].as_str().is_none_or(|hub| hub == name)
+            }
             Self::Listen { hub, .. } | Self::HubControl { hub, .. } => hub == name,
             Self::Rename { .. } => true,
             Self::Switch { from, to, .. } => from == name || to == name,
-            Self::Send { hub, args, .. } => {
+            Self::Send { hub, args, caller } => {
+                if name == "local" && implicit_send(args, caller.as_ref()) {
+                    return true;
+                }
                 string(args, "to")
                     .split_once(':')
                     .map_or(hub.as_str(), |(prefix, _)| prefix)
@@ -402,7 +408,7 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
         if !retried
             && match (work, &result) {
                 (ToolCall::Send { .. }, Err(e)) => unauthorized(e),
-                (ToolCall::Find { .. }, Ok(value)) => {
+                (ToolCall::Find { .. } | ToolCall::McpFind(_), Ok(value)) => {
                     value["warnings"].as_array().is_some_and(|ws| {
                         ws.iter().any(|w| {
                             access
@@ -611,12 +617,12 @@ pub(super) fn validate_agent_session(harness: &str, session: &str) -> Result<(),
 
 pub(super) fn tools_list() -> Value {
     let mut tools = json!({"tools":[
-     {"name":"cito_status","description":"Inspect this session's current Cito registration, address, connected hubs, and unread inbox count.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
-     {"name":"cito_listen","description":"Enroll this session in the lightweight control plane for signaling and wake notifications.","inputSchema":{"type":"object","properties":{"about":{"type":"string","minLength":1,"maxLength":500},"title":{"type":"string","minLength":1,"maxLength":128},"tag":{"type":"string","maxLength":64},"hub":{"type":"string"},"scope":{"type":"string","enum":["self","workspace"]}},"required":["about"]}},
-     {"name":"cito_unlisten","description":"Revoke this session on one or all hubs.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
-     {"name":"cito_find","description":"Find opted-in active nodes.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"query":{"type":"string","maxLength":200},"user":{"type":"string","maxLength":64},"host":{"type":"string","maxLength":128},"harness":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,31}$"},"repo":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":50}}}},
-     {"name":"cito_send","description":"Send a lightweight control plane signal of 1..65,536 Unicode code points. Prefer external channels for long debates or large artifacts.","inputSchema":{"type":"object","properties":{"to":{"type":"string","pattern":"^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_(?:[a-f0-9]{16}|[a-z2-7]{12})|[a-z0-9]+(?:-[a-z0-9]+)*-(?:[a-f0-9]{16}|[a-z2-7]{12})|@[a-zA-Z0-9._-]{1,64}|[a-zA-Z0-9._-]{1,64}(?:/[a-z0-9][a-z0-9_-]{0,31})?#[a-z0-9]{1,16})$"},"message":{"type":"string","minLength":1,"maxLength":65536},"hub":{"type":"string"},"in_reply_to":{"type":"string","minLength":1,"maxLength":161},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["to","message"]}},
-     {"name":"cito_inbox","description":"Read and acknowledge this node's inbox.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"ack_all":{"type":"boolean"},"ack_ids":{"type":"array","maxItems":1000,"items":{"type":"string","minLength":1,"maxLength":161}},"limit":{"type":"integer","minimum":1,"maximum":1000}}}}
+     {"name":"cito_status","description":"Use cito_status to check this session's Cito control plane registration, address, connected hubs, and unread signal count.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
+     {"name":"cito_listen","description":"Use cito_listen to register this session as a peer node on the Cito control plane so it can receive wake signals.","inputSchema":{"type":"object","properties":{"about":{"type":"string","minLength":1,"maxLength":500},"title":{"type":"string","minLength":1,"maxLength":128},"tag":{"type":"string","maxLength":64},"hub":{"type":"string"},"scope":{"type":"string","enum":["self","workspace"]}},"required":["about"]}},
+     {"name":"cito_unlisten","description":"Use cito_unlisten to stop this peer node from receiving wake signals on one or all Cito control plane hubs.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
+     {"name":"cito_find","description":"Use cito_find to discover a peer node on the Cito control plane and get its address for cito_send.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"query":{"type":"string","maxLength":200},"user":{"type":"string","maxLength":64},"host":{"type":"string","maxLength":128},"harness":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,31}$"},"repo":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":50}}}},
+     {"name":"cito_send","description":"Use cito_send to deliver a wake signal of 1..65,536 Unicode code points to a peer node on the Cito control plane. Prefer external channels for long debates or large artifacts.","inputSchema":{"type":"object","properties":{"to":{"type":"string","pattern":"^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_(?:[a-f0-9]{16}|[a-z2-7]{12})|[a-z0-9]+(?:-[a-z0-9]+)*-(?:[a-f0-9]{16}|[a-z2-7]{12})|@[a-zA-Z0-9._-]{1,64}|[a-zA-Z0-9._-]{1,64}(?:/[a-z0-9][a-z0-9_-]{0,31})?#[a-z0-9]{1,16})$"},"message":{"type":"string","minLength":1,"maxLength":65536},"hub":{"type":"string"},"in_reply_to":{"type":"string","minLength":1,"maxLength":161},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["to","message"]}},
+     {"name":"cito_inbox","description":"Use cito_inbox to read and acknowledge pending wake signals for this peer node on the Cito control plane. Delivered wake cards are already auto-acknowledged.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"ack_all":{"type":"boolean"},"ack_ids":{"type":"array","maxItems":1000,"items":{"type":"string","minLength":1,"maxLength":161}},"limit":{"type":"integer","minimum":1,"maximum":1000}}}}
     ]});
     if let Some(list) = tools["tools"].as_array_mut() {
         for tool in list {
@@ -1056,7 +1062,7 @@ impl HubAccess {
     pub(super) fn find_listeners(
         &self,
         args: &Value,
-        include: impl Fn(&Value) -> bool,
+        ui_filters: Option<(Option<&str>, bool)>,
     ) -> Result<Value, String> {
         let hub = args["hub"]
             .as_str()
@@ -1067,9 +1073,9 @@ impl HubAccess {
             return Err("INVALID_INPUT: limit must be 1..50".into());
         }
         let query = string(args, "query").to_lowercase();
-        let mut rows = Vec::new();
+        let mut groups = BTreeMap::new();
         let mut warnings = Vec::new();
-        let snapshots = thread::scope(|scope| {
+        let mut snapshots = thread::scope(|scope| {
             let workers: Vec<_> = self
                 .slots
                 .iter()
@@ -1092,6 +1098,7 @@ impl HubAccess {
                 })
                 .collect::<Vec<_>>()
         });
+        snapshots.sort_by_key(|(name, _, _)| (name != &self.config.default_hub, name.clone()));
         for (name, slot, snapshot) in snapshots {
             match snapshot {
                 Ok(directory) => {
@@ -1236,16 +1243,50 @@ impl HubAccess {
                         }) {
                             continue;
                         }
-                        rows.push(self.peer_dto(&name, row, &display_address, &sample));
+                        let dto = self.peer_dto(&name, row, &display_address, &sample);
+                        if let Some((harness, mine)) = ui_filters {
+                            if harness.is_none_or(|h| dto["harness"] == h)
+                                && (!mine || dto["is_self_principal"] == true)
+                            {
+                                groups
+                                    .entry(directory_identity(&dto))
+                                    .or_insert((dto, Vec::new()));
+                            }
+                        } else {
+                            let (_, hubs) = groups
+                                .entry((String::new(), string(row, "listener_id").into()))
+                                .or_insert_with(|| (dto, Vec::new()));
+                            if hubs.last() != Some(&name) {
+                                hubs.push(name.clone());
+                            }
+                        }
                     }
                 }
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
             }
         }
-        let mut seen = HashSet::new();
-        rows.retain(|row| seen.insert(directory_identity(row)));
-        rows.retain(include);
-        rows.sort_by_key(|r| format!("{}:{}", string(r, "hub"), string(r, "listener_id")));
+        let mut rows: Vec<_> = groups
+            .into_values()
+            .map(|(mut row, hubs)| {
+                if ui_filters.is_none() {
+                    if args["hub"].is_null() {
+                        row["hubs"] = json!(hubs);
+                    }
+                    if let Some(fields) = row.as_object_mut() {
+                        fields.retain(|key, _| {
+                            !key.starts_with("can_") && key != "human_can_set_scope"
+                        });
+                    }
+                }
+                row
+            })
+            .collect();
+        rows.sort_by_key(|r| {
+            (
+                ui_filters.is_none() && r["hub"] != self.config.default_hub,
+                directory_identity(r),
+            )
+        });
         let matched_count = rows.len();
         let online_count = matched_count;
         rows.truncate(limit as usize);
@@ -1361,11 +1402,7 @@ impl DaemonService {
             }
             "cito_find" => {
                 let _ = crate::support::caller_pid_hint(meta, true)?;
-                Ok(ToolCall::Find {
-                    args: args.clone(),
-                    harness: None,
-                    mine: false,
-                })
+                Ok(ToolCall::McpFind(args.clone()))
             }
             "cito_send" => Ok(ToolCall::Send {
                 hub,
@@ -1383,52 +1420,81 @@ impl DaemonService {
         self.send_from(default, args, caller)
     }
 }
+fn implicit_send(args: &Value, caller: Option<&Value>) -> bool {
+    args["hub"].is_null()
+        && !string(args, "to").contains(':')
+        && caller.is_none_or(|c| c["harness"] != "human")
+}
+
+// Persisted and wire dedup IDs include the resolved listener. On a miss (or an
+// offline alias), probe using stored targets rather than consulting the directory.
+fn sent_reservation(
+    db: &crate::core::database::Connection,
+    hub: &str,
+    target: Option<&str>,
+    now: u64,
+    dedup_id: impl Fn(&str) -> String,
+) -> Result<Option<Value>, String> {
+    let find = |id: &str| {
+        db.query(
+            "SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=? AND expires_at_ms>?",
+            &[json!(hub), json!(dedup_id(id)), json!(now)],
+        )
+        .map(|mut rows| rows.pop())
+    };
+    if let Some(id) = target {
+        if let Some(old) = find(id)? {
+            return Ok(Some(old));
+        }
+    }
+    let mut old = None;
+    db.query_while(
+        "SELECT DISTINCT to_listener_id FROM local_sent_idempotency WHERE hub=? AND expires_at_ms>? AND to_listener_id IS NOT ?",
+        &[json!(hub), json!(now), json!(target)],
+        |row| {
+            old = find(string(&row, "to_listener_id"))?;
+            if old.is_some() && target.is_some() {
+                return Err("IDEMPOTENCY_KEY_CONFLICT: Different target".into());
+            }
+            Ok(old.is_none())
+        },
+    )?;
+    Ok(old)
+}
+
 impl HubAccess {
-    /// The UI action boundary supplies Human authority directly, never through MCP metadata.
-    pub(super) fn send_from(
+    fn prepare_send(
         &self,
-        default: &str,
-        args: &Value,
-        caller: Option<Value>,
-    ) -> Result<Value, String> {
-        let message = sanitize_message(
-            args["message"]
-                .as_str()
-                .ok_or("INVALID_INPUT: message is required")?,
-        )?;
-        let raw = string(args, "to");
-        if raw.is_empty() {
-            return Err("INVALID_INPUT: to is required".into());
-        }
-        let (hub, to) = raw.split_once(':').unwrap_or((default, raw));
-        if args["hub"].is_string() && hub != default {
-            return Err("INVALID_INPUT: Conflicting hub prefixes".into());
-        }
+        hub: &str,
+        to: &str,
+        reply_hub: Option<&str>,
+        caller: Option<&Value>,
+        fallback: Option<&str>,
+        reservation: Option<&Value>,
+    ) -> Result<(Value, Option<String>), String> {
         let slot = self.slot(hub)?;
         let mut directory = slot.directory()?;
+        if fallback.is_some() {
+            directory.retain(|row| {
+                crate::core::lease::evaluate_node_lease(row, slot.server_now()) == "ACTIVE"
+            });
+        }
         let alias = crate::core::identity::readable_alias(to);
         let canonical_target = if to.starts_with('@') || alias.is_some() {
             None
         } else {
             Some(crate::core::identity::canonical_node_id(to)?)
         };
-        let reply_to = if let Some(raw) = args["in_reply_to"].as_str() {
-            if let Some((reply_hub, id)) = raw.split_once(':') {
-                if reply_hub != hub {
-                    return Err("INVALID_INPUT: Reply belongs to another Hub".into());
-                }
-                json!(id)
-            } else {
-                json!(raw)
-            }
-        } else {
-            Value::Null
-        };
+        if reply_hub.is_some_and(|name| name != hub) {
+            return Err("INVALID_INPUT: Reply belongs to another Hub".into());
+        }
         let handle = to.strip_prefix('@');
         let own_handle = handle.is_some_and(|handle| {
             handle == "self" || handle.eq_ignore_ascii_case(string(&slot.identity, "owner_user"))
         });
-        if own_handle
+        if fallback.is_none()
+            && reservation.is_none()
+            && own_handle
             && !directory.iter().any(|row| {
                 row["harness"] == "human"
                     && crate::core::auth::principal_ids_equal(
@@ -1537,6 +1603,9 @@ impl HubAccess {
                 .collect()
         };
         if matches.is_empty() {
+            if let Some(error) = fallback {
+                return Err(error.to_owned());
+            }
             if let Some(id) = canonical_target.as_deref() {
                 match slot.kv_get(id) {
                     Ok(Some((row, _))) => matches.push(row),
@@ -1574,23 +1643,38 @@ impl HubAccess {
                 crate::core::registration::local_node_id(&self.state, slot, "human", "default")?;
             matches.sort_by_key(|row| row["listener_id"] != preferred);
         }
-        let target = matches
-            .first()
-            .ok_or("LISTENER_NOT_FOUND: Target listener does not exist")?;
-        match crate::core::lease::evaluate_node_lease(target, slot.server_now()) {
-            "UNLISTENED" => return Err("LISTENER_NOT_FOUND: Target listener was revoked".into()),
-            "EXPIRED" => return Err("LISTENER_EXPIRED: Target listener expired".into()),
-            _ => {}
+        let target = matches.into_iter().next();
+        if reservation.is_some_and(|old| {
+            target
+                .as_ref()
+                .is_none_or(|row| row["listener_id"] != old["to_listener_id"])
+        }) {
+            return Err("IDEMPOTENCY_KEY_CONFLICT: Different target".into());
+        }
+        let target = target.ok_or("LISTENER_NOT_FOUND: Target listener does not exist")?;
+        let committed = reservation.is_some_and(|old| old["status"] != "PENDING_PUBLISH");
+        if !committed {
+            match crate::core::lease::evaluate_node_lease(&target, slot.server_now()) {
+                "UNLISTENED" => {
+                    return Err("LISTENER_NOT_FOUND: Target listener was revoked".into())
+                }
+                "EXPIRED" => return Err("LISTENER_EXPIRED: Target listener expired".into()),
+                _ => {}
+            }
         }
         let own_principal = crate::core::auth::principal_ids_equal(
-            string(target, "principal_id"),
+            string(&target, "principal_id"),
             string(&slot.identity, "principal_id"),
         );
         if !own_principal && target["scope"] != "workspace" {
             return Err("FORBIDDEN_TARGET_SCOPE: Target is private".into());
         }
-        let canonical = string(target, "listener_id");
-        if let Some(caller) = caller.as_ref().filter(|c| {
+        if committed {
+            // Returning a receipt does not require a new sender enrollment or target lease.
+            return Ok((target, None));
+        }
+        let canonical = string(&target, "listener_id");
+        if let Some(caller) = caller.filter(|c| {
             !string(c, "harness").is_empty()
                 && c["harness"] != "human"
                 && !string(c, "session_id").is_empty()
@@ -1618,7 +1702,6 @@ impl HubAccess {
             }
         }
         let from_id = caller
-            .as_ref()
             .map(|caller| {
                 crate::core::registration::local_node_id(
                     &self.state,
@@ -1637,45 +1720,240 @@ impl HubAccess {
         {
             return Err("SELF_SEND_FORBIDDEN: Cannot send to your own session".into());
         }
-        let fields = [
-            string(&slot.identity, "principal_id"),
-            self.host_id.as_str(),
-            caller
-                .as_ref()
-                .map(|c| string(c, "harness"))
-                .unwrap_or("unbound"),
-            caller
-                .as_ref()
-                .map(|c| string(c, "session_id"))
-                .unwrap_or("default"),
-        ];
-        let endpoint = fields.join("|");
-        let [principal, host, harness, session] = fields;
-        let key = args["idempotency_key"]
-            .as_str()
-            .map(str::to_string)
+        Ok((target, from_id))
+    }
+
+    /// The UI action boundary supplies Human authority directly, never through MCP metadata.
+    pub(super) fn send_from(
+        &self,
+        default: &str,
+        args: &Value,
+        caller: Option<Value>,
+    ) -> Result<Value, String> {
+        let message = sanitize_message(
+            args["message"]
+                .as_str()
+                .ok_or("INVALID_INPUT: message is required")?,
+        )?;
+        let raw = string(args, "to");
+        if raw.is_empty() {
+            return Err("INVALID_INPUT: to is required".into());
+        }
+        let (hub, to) = raw.split_once(':').unwrap_or((default, raw));
+        if args["hub"].is_string() && hub != default {
+            return Err("INVALID_INPUT: Conflicting hub prefixes".into());
+        }
+        let reply = args["in_reply_to"].as_str();
+        let scoped_reply = reply.and_then(|id| id.split_once(':'));
+        let reply_hub = scoped_reply.map(|(name, _)| name);
+        let reply_to = json!(scoped_reply.map(|(_, id)| id).or(reply));
+        let request_hash = hash(&json!([message, reply_to]).to_string());
+        let requested_key = args["idempotency_key"].as_str();
+        let key = requested_key
+            .map(str::to_owned)
             .unwrap_or_else(random_uuid_v4);
-        let dedup = hash(
-            &json!([
-                principal,
-                host,
-                harness,
-                session,
+        let host = self.host_id.as_str();
+        let harness = caller.as_ref().map_or("unbound", |c| string(c, "harness"));
+        let session = caller
+            .as_ref()
+            .map_or("default", |c| string(c, "session_id"));
+        let scoped_key = |principal: &str, url: &str, canonical: &str| {
+            hash(&json!([principal, host, harness, session, url, canonical, key]).to_string())
+        };
+        let dedup_id = |slot: &crate::core::transport::HubClient, canonical: &str| {
+            scoped_key(
+                string(&slot.identity, "principal_id"),
                 string(&slot.config, "url"),
                 canonical,
-                key
-            ])
-            .to_string(),
-        );
-        let request_hash = hash(&json!([message, reply_to]).to_string());
-        let now = now_ms();
-        let reservation=self.state.db.transaction(|c|{
-            if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
-            c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?",&[json!(now)])?;
-            if let Some(old)=c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next(){if old["request_hash"]!=request_hash{return Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".into());}return Ok(old);}
-            let id=format!("sig_{}",random_uuid_v4().replace('-',""));c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?)",&[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(now+1_800_000)),json!(now+1_800_000)])?;
-            c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next().ok_or("Sent reservation missing".into())
-        })?;
+            )
+        };
+        let check_payload = |row: &Value, hub: &str| {
+            if row["request_hash"] != request_hash || reply_hub.is_some_and(|name| name != hub) {
+                Err("IDEMPOTENCY_KEY_CONFLICT: Different payload".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        let reserved = |db: &crate::core::database::Connection,
+                        hub: &str,
+                        target: Option<&str>,
+                        now|
+         -> Result<Option<Value>, String> {
+            if requested_key.is_none() {
+                return Ok(None);
+            }
+            let slot = self.slot(hub)?;
+            let old = sent_reservation(db, hub, target, now, |id| dedup_id(slot, id))?;
+            if let Some(row) = &old {
+                check_payload(row, hub)?;
+            }
+            Ok(old)
+        };
+        let id = crate::core::identity::canonical_node_id(to).ok();
+        let guard_fallback = |db: &crate::core::database::Connection, error: &str, now| {
+            if reserved(db, hub, id.as_deref(), now)?.is_some() {
+                Err(error.to_owned())
+            } else {
+                Ok(())
+            }
+        };
+        let implicit_default = hub != "local"
+            && hub == self.config.default_hub
+            && implicit_send(args, caller.as_ref());
+        let local_slot = self.slots.get("local").filter(|slot| {
+            implicit_default
+                && slot.local.is_some()
+                && !slot.closed.load(Ordering::Acquire)
+                && slot.connection_status() == "connected"
+        });
+        // The logical route, not the eventual local target, owns a fallback retry.
+        // Reuse the sender/key scope with the requested hub in place of the target.
+        let fallback_key = if implicit_default && requested_key.is_some() {
+            Some(dedup_id(self.slot(hub)?, hub))
+        } else {
+            None
+        };
+        let legacy_principals = std::cell::OnceCell::new();
+        let local_reservation = |db: &crate::core::database::Connection, now| {
+            let Some(key) = &fallback_key else {
+                return Ok(None);
+            };
+            let mut old = db
+                .query(
+                    "SELECT * FROM local_sent_idempotency WHERE fallback_key=? AND expires_at_ms>?",
+                    &[json!(key), json!(now)],
+                )?
+                .pop();
+            if old.is_none() {
+                db.query_while(
+                    "SELECT * FROM local_sent_idempotency WHERE hub='local' AND fallback_key IS NULL AND expires_at_ms>?",
+                    &[json!(now)],
+                    |row| {
+                        let principals = legacy_principals.get_or_init(|| -> Result<Vec<Value>, String> {
+                            if let Some(slot) = local_slot {
+                                return Ok(vec![slot.identity.clone()]);
+                            }
+                            // Disabling a slot removes its client, not its local:// send history.
+                            // Retained principals can fence publication, never authorize a replay.
+                            let user = self.config.effective_user("local")?;
+                            db.query("SELECT DISTINCT principal_id FROM local_listeners WHERE hub='local' AND hub_url='local://' UNION SELECT ? AS principal_id", &[crate::core::identity::principal(&user)["principal_id"].clone()])
+                        }).as_ref().map_err(Clone::clone)?;
+                        if principals.iter().any(|identity| scoped_key(string(identity, "principal_id"), "local://", string(&row, "to_listener_id")) == row["dedup_id"]) {
+                            if local_slot.is_none() {
+                                return Err("NATS_UNAVAILABLE: Original local reservation cannot be verified while the local Hub is unavailable".into());
+                            }
+                            old = Some(row);
+                        }
+                        Ok(old.is_none())
+                    },
+                )?;
+            }
+            if let Some(row) = &old {
+                check_payload(row, "local")?;
+            }
+            Ok::<_, String>(old)
+        };
+        let fallback_dedup = |physical: String| hash(&json!([fallback_key, physical]).to_string());
+        let prepare = |hub: &str, error: Option<&str>, reservation: Option<&Value>| {
+            self.prepare_send(hub, to, reply_hub, caller.as_ref(), error, reservation)
+        };
+        let local = if fallback_key.is_some() {
+            self.state.db.read(|db| local_reservation(db, now_ms()))?
+        } else {
+            None
+        };
+        let (reservation, prepared) = if let Some(row) = local {
+            (row, None)
+        } else {
+            let (hub, prepared, fallback_error) = match prepare(hub, None, None) {
+                Ok(prepared) => (hub, prepared, None),
+                Err(error) if local_slot.is_some() && error.starts_with("NATS_UNAVAILABLE:") => {
+                    self.state
+                        .db
+                        .read(|db| guard_fallback(db, &error, now_ms()))?;
+                    ("local", prepare("local", Some(&error), None)?, Some(error))
+                }
+                Err(error) => return Err(error),
+            };
+            let slot = self.slot(hub)?;
+            let origin = fallback_key.as_ref().filter(|_| fallback_error.is_some());
+            let physical = dedup_id(slot, string(&prepared.0, "listener_id"));
+            let dedup = if origin.is_some() {
+                fallback_dedup(physical)
+            } else {
+                physical
+            };
+            self.state.db.transaction(|c| {
+                let now = now_ms();
+                if slot.closed.load(Ordering::Acquire) {
+                    return Err(STALE_HUB.into());
+                }
+                c.execute("DELETE FROM local_sent_idempotency WHERE expires_at_ms<=?", &[json!(now)])?;
+                // Another call may have reserved on the other hub during preparation.
+                if let Some(error) = &fallback_error {
+                    guard_fallback(c, error, now)?;
+                }
+                if let Some(old) = local_reservation(c, now)? {
+                    return Ok((old, None));
+                }
+                let canonical = string(&prepared.0, "listener_id");
+                if origin.is_none() {
+                    if let Some(old) = reserved(c, hub, Some(canonical), now)? {
+                        return Ok((old, Some(prepared)));
+                    }
+                }
+                let id = format!("sig_{}", random_uuid_v4().replace('-', ""));
+                let expires = now + 1_800_000;
+                let route_key = origin.cloned().or_else(|| (hub == "local").then(|| format!("direct:{dedup}")));
+                c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms,fallback_key,fallback_to,fallback_public_id) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?,?,?,?)", &[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(expires)),json!(expires),json!(route_key),json!(origin.map(|_| to)),json!(origin.map(|_| &prepared.0["public_id"]))])?;
+                let row = c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?", &[json!(hub), json!(dedup)])?.pop().ok_or("Sent reservation missing")?;
+                Ok((row, Some(prepared)))
+            })?
+        };
+        let hub = string(&reservation, "hub");
+        let receipt = |public_id: &str, signal_id: &str, seq: u64, warning: Option<&str>| {
+            json!({
+                "ok": true, "signal_id": self.scoped(hub, signal_id), "seq": seq,
+                "to": self.scoped(hub, public_id), "status": "wake_accepted", "held_reason": null,
+                "expires_at": reservation["expires_at_iso"], "maintenance_warning": warning
+            })
+        };
+        let (target, from_id) = if let Some(prepared) = prepared {
+            prepared
+        } else if local_slot.is_some_and(|slot| {
+            reservation["fallback_key"].is_null()
+                || fallback_dedup(dedup_id(slot, string(&reservation, "to_listener_id")))
+                    == reservation["dedup_id"]
+        }) {
+            prepare(hub, None, Some(&reservation))?
+        } else {
+            // With no original local authority, only replay a known committed receipt.
+            // A different alias cannot be resolved safely without that directory.
+            if reservation["fallback_to"] != to
+                && id.as_deref() != reservation["to_listener_id"].as_str()
+            {
+                return Err("IDEMPOTENCY_KEY_CONFLICT: Different target".into());
+            }
+            if reservation["status"] == "PENDING_PUBLISH" {
+                return Err("NATS_UNAVAILABLE: Local fallback publication is still pending".into());
+            }
+            return Ok(receipt(
+                string(&reservation, "fallback_public_id"),
+                string(&reservation, "signal_id"),
+                reservation["seq"].as_u64().unwrap_or(0),
+                None,
+            ));
+        };
+        let slot = self.slot(hub)?;
+        let canonical = string(&target, "listener_id");
+        let dedup = string(&reservation, "dedup_id");
+        let endpoint = [
+            string(&slot.identity, "principal_id"),
+            host,
+            harness,
+            session,
+        ]
+        .join("|");
         let mut signal_id = string(&reservation, "signal_id").to_owned();
         let mut seq = reservation["seq"].as_u64().unwrap_or(0);
         let mut maintenance_warning = None;
@@ -1725,9 +2003,12 @@ impl HubAccess {
                 maintenance_warning = Some("Message sent; local sent history could not be refreshed");
             }
         }
-        Ok(
-            json!({"ok":true,"signal_id":self.scoped(hub,&signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"],"maintenance_warning":maintenance_warning}),
-        )
+        Ok(receipt(
+            string(&target, "public_id"),
+            &signal_id,
+            seq,
+            maintenance_warning,
+        ))
     }
 }
 impl DaemonService {

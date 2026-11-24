@@ -22,11 +22,24 @@ process.env.CITO_PI_HOME=join(root,'.pi','agent');
 process.env.CITO_CONFIG_PATH=join(state,'config.json');
 process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='1';
 const handlers=new Map(), messages=[], badges=[], notices=[], registrations=[], calls=[];
-let session='session-a', renderer, command, attempts=0, failSend=false, stallHttp=false, holdHttp=false, heldArrival;
+let session='session-a', renderer, toolRenderer, command, attempts=0, failSend=false, stallHttp=false, holdHttp=false, heldArrival;
 const held=[];
-const context={cwd:'/repo',sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work'},ui:{setStatus:(_k,v)=>badges.push(v),notify:(s,t)=>notices.push({s,t})}};
-const api={on:(n,f)=>handlers.set(n,f),registerMcpServer:(name,config)=>{if(++attempts===1)throw Error('Registry not ready');registrations.push({name,config});},registerMessageRenderer:(_n,r)=>{renderer=r},registerCommand:(_n,c)=>{command=c},sendMessage:(m,o)=>{if(failSend)throw Error('Retry');messages.push({m,o});}};
+const branch=[{type:'message',message:{role:'assistant',content:'Not the user prompt'}},
+ {type:'message',message:{role:'user',content:[{type:'image'},{type:'text',text:'  Review\u0007\n routing '},{type:'text',text:'🦀'.repeat(140)}]}}];
+const about='Review routing '+'🦀'.repeat(105);
+const context={cwd:'/repo',sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work',getBranch:()=>branch},ui:{setStatus:(_k,v)=>badges.push(v),notify:(s,t)=>notices.push({s,t})}};
+const api={on:(n,f)=>handlers.set(n,f),registerMcpServer:(name,config)=>{if(++attempts===1)throw Error('Registry not ready');registrations.push({name,config});},registerMessageRenderer:(_n,r)=>{renderer=r},registerToolRenderer:r=>{toolRenderer=r},registerCommand:(_n,c)=>{command=c},sendMessage:(m,o)=>{if(failSend)throw Error('Retry');messages.push({m,o});}};
 function request(value,fragment=false){return new Promise((resolve,reject)=>{const s=createConnection(path);let data='';s.setTimeout(2000,()=>s.destroy(Error('Timeout')));s.on('error',reject);s.on('connect',()=>{const raw=JSON.stringify(value)+'\n';if(fragment){s.write(raw.slice(0,5));s.end(raw.slice(5));}else s.write(raw);});s.on('data',c=>{data+=c;if(data.includes('\n')){s.destroy();resolve(JSON.parse(data));}});});}
+async function waitForSocket() {
+ const deadline=Date.now()+2000;
+ for(;;) {
+  try {assert.deepEqual(await request({op:'ping'}),{ok:true});return;}
+  catch(error) {
+   if(!['ENOENT','ECONNREFUSED'].includes(error.code)||Date.now()>=deadline)throw error;
+   await new Promise(r=>setTimeout(r,10));
+  }
+ }
+}
 const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;calls.push(JSON.parse(body));if(holdHttp){held.push(res);heldArrival?.();return;}if(stallHttp)return;res.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'  alice-very-long-project-abcdefgh1234  ',scope:'self'})}]}}));});
 try {
  mkdirSync(join(state,'sockets'),{recursive:true});execFileSync('python3',['-c','import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()',path]);
@@ -37,21 +50,13 @@ try {
  };
  try { bridge(api); } finally { globalThis.setInterval=interval; }
  // Startup must recover an F58 stale socket, even before session_start.
- for(let i=0;i<100;i++){try{if((await request({op:'ping'})).ok)break;}catch{}await new Promise(r=>setTimeout(r,10));}
- const fallback=await request({op:'identify'});assert.equal(fallback.ok,true);assert.equal(fallback.session_id,`pid-${process.pid}`);assert.equal(fallback.cwd,process.cwd());
+ await waitForSocket();
  const sessionDir=join(process.env.HOME,'.pi','agent','sessions',`--${process.cwd().replace(/^\//,'').replaceAll('/','-')}--`);mkdirSync(sessionDir,{recursive:true});
  writeFileSync(join(sessionDir,'latest.jsonl'),JSON.stringify({type:'session',id:'pre-start',name:'Before start'})+'\n{"partial":');
- let recovered, reads=0;
- const originalRead=fs.readFileSync;
- fs.readFileSync=(file,...args)=>{if(file===join(sessionDir,'latest.jsonl'))reads++;return originalRead(file,...args);};
- syncBuiltinESMExports();
- try {
-  recovered=await request({op:'identify'});await request({op:'identify'});
-  assert.equal(reads,0,'An external session file must never steal the pre-start process identity');
- } finally {fs.readFileSync=originalRead;syncBuiltinESMExports();}
- assert.equal(recovered.ok,true);assert.equal(recovered.session_id,`pid-${process.pid}`);
- session='pre-start';await handlers.get('session_start')({},context);
- recovered=await request({op:'identify'});assert.equal(recovered.session_id,'pre-start');
+ for(const op of ['identify','status','deliver']) assert.deepEqual(await request({op}),{ok:false,error:'SESSION_NOT_READY'});
+ session='baadf00d-cafe-47b1-beca-238e0bd64e9d';await handlers.get('session_start')({},context);
+ const recovered=await request({op:'identify'});assert.equal(recovered.session_id,session);
+ assert.equal(recovered.session_name,'Work');assert.equal(recovered.about,about);
  // The first session_start owns the transition; all later socket operations use that session.
  const early={op:'deliver',session_id:recovered.session_id,batch_id:'before-start',content:'Wake after session_start',wake:true};
  assert.equal((await request({op:'status',session_id:recovered.session_id,badge:'listening before start'})).ok,true);
@@ -67,7 +72,7 @@ try {
  assert.equal((await request({...early,session_id:'wrong'})).error,'SESSION_MISMATCH');
  assert.equal((await request({op:'status',session_id:'wrong',badge:'wrong'})).error,'SESSION_MISMATCH');
  assert.equal((await request(early)).deduplicated,false);assert.equal((await request(early)).deduplicated,true);
- assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true},o:{triggerTurn:true,deliverAs:'followUp'}}]);
+ assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true},o:{triggerTurn:true,deliverAs:'steer'}}]);
  session=recovered.session_id;
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
  assert.equal(badges.at(-1),'listening before start','Repeated session_start must retain the session badge');
@@ -87,6 +92,21 @@ try {
  assert.equal((await request(delivery)).deduplicated,false,'The oldest inactive session must be evicted');
  assert.equal((await request(delivery)).deduplicated,true,'The active session must retain deduplication');
  const plain={fg:(_n,t)=>t,bg:(_n,t)=>t,bold:t=>t};
+ const painted={...plain,bg:(color,text)=>`<${color}>${text}</${color}>`};
+ const padding='<customMessageBg>'+' '.repeat(40)+'</customMessageBg>';
+ const send=toolRenderer('mcp__cito__cito_send',()=>undefined);
+ const args={to:'bob/agent#123'};
+ for(const card of [renderer({content:'Cito · hello'},{expanded:false},painted),send.renderCall(args,painted,{outputPad:1})]) {
+  const lines=card.render(40);assert.equal(lines[0],padding);assert.equal(lines.at(-1),padding);assert.match(lines[1],/Cito ·/);
+ }
+ const receipt={content:[{type:'text',text:'{"signal_id":"sig_1","expires_at":"later"}'}]};
+ for(const expanded of [true,false]) {
+  const rendered=send.renderResult(receipt,{expanded},plain,{isError:false,outputPad:1}).render(60).join('\n');
+  assert.match(rendered,/sig_1/);assert.equal(rendered.includes('expires_at'),expanded);
+ }
+ const degraded={content:[{type:'text',text:JSON.stringify({ok:true,signal_id:'sig_1',maintenance_warning:'Sent history unavailable'})}]};
+ assert.match(send.renderResult(degraded,{expanded:false},plain,{isError:false,outputPad:1}).render(120).join('\n'),/Sent history unavailable/);
+ assert.equal(toolRenderer('mcp__other__cito_send',()=> 'fallback'),'fallback');
  const narrow=renderer({content:'\u4e2d👩‍💻é'.repeat(8)},{expanded:false,outputPad:4},plain);
  for(let width=1;width<=12;width++)for(const line of narrow.render(width)){const cells=Array.from(line.replaceAll('\u4e2d','XX').replaceAll('👩‍💻','XX').replaceAll('é','e')).length;assert(cells<=width,`width ${width}: ${line}`);}
  let c=0;const theme={fg:(_n,t)=>{c++;return t},bg:(_n,t)=>t,bold:t=>t};const card=renderer({content:[{type:'text',text:'hello café 👩‍💻 é'}]},{expanded:false},theme);assert(card.render(12).some(s=>s.includes('hello')));assert.deepEqual(card.render(0),[]);const before=c;card.invalidate();card.render(10);assert(c>before);
@@ -96,7 +116,7 @@ try {
   if(arg.startsWith('on'))assert.equal(badges.at(-1),'Cito · alice-very-l');
  }
  assert.deepEqual(calls.map(v=>v.params.arguments),[{about:'Review',scope:'self',hub:'work'},{about:'Pair',scope:'workspace',hub:'work'},{hub:'work'}]);assert(calls.every(v=>v.params._meta.endpoint_pid===process.pid));assert(calls.every(v=>v.params._meta.expected_session_id==='session-a'));
- process.env.CITO_DAEMON_PORT='0';process.env.CITO_CONFIG_PATH='~/bridge-config.json';writeFileSync(join(process.env.HOME,'bridge-config.json'),JSON.stringify({daemonPort:port}));await command.handler('on',context);assert.equal(calls.length,4);
+ process.env.CITO_DAEMON_PORT='0';process.env.CITO_CONFIG_PATH='~/bridge-config.json';writeFileSync(join(process.env.HOME,'bridge-config.json'),JSON.stringify({daemonPort:port}));await command.handler('on',context);assert.equal(calls.length,4);assert.equal(calls.at(-1).params.arguments.about,about);
  await command.handler('on --hub INVALID!',context);assert.equal(calls.length,4);assert.equal(notices.at(-1).t,'warning');
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
  // The daemon sees each mutation only after the prior same-session request settles.
@@ -152,6 +172,19 @@ try {
  stallHttp=true;
  try {await command.handler('on',context);assert.equal(timeoutRequested,15000);assert.equal(notices.at(-1).t,'error');}
  finally {AbortSignal.timeout=timeout;stallHttp=false;}
+ // A fresh module must identify the same session before the next session_start.
+ session='edd50a9a-982b-447a-8541-bbb3b2c8531a';
+ await handlers.get('session_start')({},context);
+ const beforeReload={...early,session_id:session,batch_id:'reload'};
+ assert.equal((await request(beforeReload)).deduplicated,false);
+ await handlers.get('session_shutdown')({reason:'reload'},context);
+ const reloaded=await import('../../../../plugins/pi/cito-bridge.ts?reload');
+ reloaded.default(api);
+ await waitForSocket();
+ const current=await request({op:'identify'});
+ assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about],[session,'/repo','Work',about]);
+ assert.equal((await request(beforeReload)).deduplicated,true);
+ await handlers.get('session_start')({reason:'reload'},context);
  // U2: recover an unlinked socket only while the package remains configured.
  const home=join(process.env.HOME,'.pi','agent');mkdirSync(home,{recursive:true});
  const custom=join(process.env.HOME,'custom-pi');mkdirSync(custom,{recursive:true});
@@ -167,6 +200,7 @@ try {
   writeFileSync(join(state,'sockets',`sibling-${i}`),'');
   await new Promise(r=>setTimeout(r,100));
  }
+ assert(existsSync(path),'The reloaded bridge must repair its socket on a directory change');
  assert.equal((await request({op:'identify'})).session_id,session);
  // Remaining cases exercise repair policy. A real session_start is a repair
  // opportunity even if FSEvents batched two successive unlinks into one event.

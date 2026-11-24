@@ -1,18 +1,31 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, watch } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
 /** Structural subset of Pi 1.5.0's public API: no host package is needed to load this file. */
 export interface BridgeContext {
   cwd: string;
-  sessionManager: { getSessionId(): string | undefined; getSessionName(): string | undefined };
+  sessionManager: {
+    getSessionId(): string | undefined;
+    getSessionName(): string | undefined;
+    getBranch?(): SessionEntry[];
+    getEntries?(): SessionEntry[];
+  };
   ui: {
     setStatus(key: string, value: string | undefined): void;
     notify?(message: string, type?: "info" | "warning" | "error"): void;
   };
 }
+interface SessionEntry { type: string; message?: { role: string; content?: unknown } }
+interface SessionState {
+  sessionId?: string; cwd: string; sessionName: string; about: string;
+  batches: Map<string, Set<string>>;
+}
+const sessionKey = Symbol.for("cito.pi.sessionState");
+const host = globalThis as typeof globalThis & { [sessionKey]?: SessionState };
+
 export interface BridgeCommandOptions {
   description: string;
   getArgumentCompletions?: (prefix: string) => { value: string; label: string }[] | null;
@@ -28,11 +41,12 @@ export type NotificationRenderer = (message: { content: unknown }, options: { ex
 export interface BridgeAPI {
   registerMcpServer?(name: string, config: { command: string; args?: string[]; env?: Record<string, string> }): void;
   registerMessageRenderer?(customType: string, renderer: NotificationRenderer): void;
+  registerToolRenderer?(resolve: (name: string, next: () => ToolRenderers | undefined) => ToolRenderers | undefined): void;
   registerCommand?(name: string, options: BridgeCommandOptions): void;
   on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree",
     handler: (event: unknown, ctx: BridgeContext) => void | Promise<void>): unknown;
   sendMessage(message: { customType: string; content: string; display: boolean },
-    options: { triggerTurn: boolean; deliverAs: "followUp" }): void;
+    options: { triggerTurn: boolean; deliverAs: "steer" | "followUp" }): void;
 }
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
@@ -55,10 +69,20 @@ function wrapLine(value: string, width: number): { text: string; width: number }
   lines.push({ text: line, width: used });
   return lines;
 }
+function contentText(content: unknown): string {
+  return typeof content === "string" ? content : Array.isArray(content)
+    ? content.filter(part => part?.type === "text" && typeof part.text === "string").map(part => part.text).join("\n") : "";
+}
+function promptAbout(manager: BridgeContext["sessionManager"]): string {
+  for (const entry of manager.getBranch?.() ?? manager.getEntries?.() ?? []) {
+    if (entry.type !== "message" || entry.message?.role !== "user") continue;
+    const text = contentText(entry.message.content).replace(/\p{White_Space}/gu, " ").replace(/\p{Cc}/gu, "").replace(/ +/g, " ").trim();
+    if (text) return Array.from(text).slice(0, 120).join("").trimEnd();
+  }
+  return "";
+}
 function cardLines(content: unknown): string[] {
-  const text = typeof content === "string" ? content : Array.isArray(content)
-    ? content.filter(part => part?.type === "text").map(part => part.text).join("\n") : "";
-  const clean = stripVTControlCharacters(text).replace(/\t/g, "  ").replace(/\r/g, "");
+  const clean = stripVTControlCharacters(contentText(content)).replace(/\t/g, "  ").replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, "");
   return clean.startsWith("Cito") ? clean.split("\n") : ["Cito", "", ...clean.split("\n")];
 }
 const notificationRenderer: NotificationRenderer = (message, options, theme) => ({
@@ -68,7 +92,8 @@ const notificationRenderer: NotificationRenderer = (message, options, theme) => 
     const inner = width - 2 * pad;
     const lines = cardLines(message.content);
     while (lines.at(-1) === "") lines.pop();
-    return lines.flatMap((line, index) => {
+    const padding = theme.bg("customMessageBg", " ".repeat(width));
+    const body = lines.flatMap((line, index) => {
       const bar = index > 0 && inner >= 3;
       return wrapLine(line, inner - (bar ? 2 : 0)).map(part => {
         const styled = index === 0 ? theme.fg("accent", theme.bold(part.text)) : part.text;
@@ -77,9 +102,16 @@ const notificationRenderer: NotificationRenderer = (message, options, theme) => 
           + " ".repeat(inner - (bar ? 2 : 0) - part.width + pad));
       });
     });
+    return [padding, ...body, padding];
   },
   invalidate() {}, // Rendering is stateless; colors are reapplied on every render.
 });
+
+interface ToolRenderers {
+  renderShell?: "default" | "self";
+  renderCall?(args: Record<string, unknown>, theme: NotificationTheme, context: { expanded: boolean; outputPad: number }): ReturnType<NotificationRenderer>;
+  renderResult?(result: { content: unknown }, options: { expanded: boolean }, theme: NotificationTheme, context: { isError: boolean; outputPad: number }): ReturnType<NotificationRenderer>;
+}
 
 function expandHome(path: string): string {
   return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : resolve(path);
@@ -87,6 +119,31 @@ function expandHome(path: string): string {
 
 export default function citoBridge(pi: BridgeAPI): void {
   pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
+  pi.registerToolRenderer?.((name, next) => {
+    const action = /^mcp__cito__cito_(send|find|listen|unlisten|inbox|status)$/.exec(name)?.[1];
+    if (!action) return next();
+    return {
+      renderShell: "self",
+      renderCall(args, theme, context) {
+        const subject = args.to ?? args.query ?? args.about ?? args.hub;
+        return notificationRenderer({ content: `Cito · ${action}${typeof subject === "string" ? ` · ${subject}` : ""}` }, context, theme);
+      },
+      renderResult(result, options, theme, context) {
+        let body = contentText(result.content);
+        if (!options.expanded && !context.isError) {
+          try {
+            const receipt = JSON.parse(body);
+            const summary = receipt.signal_id ?? receipt.listener_id ?? receipt.status
+              ?? (Array.isArray(receipt.signals) ? `${receipt.signals.length} signals · ${receipt.acknowledged_count ?? 0} acknowledged`
+                : Array.isArray(receipt.listeners) ? `${receipt.matched_count} listeners · ${receipt.online_count} online`
+                : typeof receipt.registered === "boolean" ? `${receipt.registered ? "Listening" : "Not listening"} · ${receipt.unread_count} unread` : undefined);
+            if (typeof summary === "string" && receipt.ok !== false && !receipt.error && !receipt.warning && !receipt.maintenance_warning && !receipt.warnings?.length && !receipt.replay_gap_detected) body = summary;
+          } catch { /* Preserve non-JSON results and diagnostics. */ }
+        }
+        return notificationRenderer({ content: `Cito · ${action} ${context.isError ? "error" : "result"}\n${body}` }, { ...options, outputPad: context.outputPad }, theme);
+      },
+    };
+  });
   const resolvedStateDir = expandHome(process.env.CITO_STATE_DIR ?? "~/.cito");
   const shim = join(resolvedStateDir, "bin", "cito-mcp");
   let mcpRegistered = false;
@@ -106,8 +163,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   // Some hosts initialize the registry after synchronous extension loading.
   try { registerMcpServer(); }
   catch { /* session_start retries and surfaces any persistent failure. */ }
-  const sessions = new Map<string, Set<string>>();
-  let sessionId: string | undefined;
+  const session: SessionState = host[sessionKey] ??= { cwd: "", sessionName: "", about: "", batches: new Map() };
   let commandGen = 0;
   let activeBadge: string | undefined;
   let lastActiveMs = Date.now();
@@ -124,9 +180,6 @@ export default function citoBridge(pi: BridgeAPI): void {
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
   const hubUsage = "Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]";
 
-  function defaultAbout(ctx: BridgeContext): string {
-    return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
-  }
   async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>, expectedSessionId: string | undefined): Promise<Record<string, unknown>> {
     let config: unknown = {};
     const rawConfig = process.env.CITO_CONFIG_PATH ?? join(resolvedStateDir, "config.json");
@@ -188,20 +241,27 @@ export default function citoBridge(pi: BridgeAPI): void {
     return payload;
   }
 
-  function setSession(nextSessionId: string | undefined): void {
-    if (nextSessionId !== sessionId) {
+  function update(ctx: BridgeContext): void {
+    const next = ctx.sessionManager.getSessionId();
+    if (next?.trim() && next !== session.sessionId) {
+      session.sessionId = next;
+      session.about = "";
       activeBadge = undefined;
       commandGen++;
       lastActiveMs = Date.now();
     }
-    sessionId = nextSessionId;
-    if (sessionId) {
-      const delivered = sessions.get(sessionId) ?? new Set<string>();
-      sessions.delete(sessionId);
-      sessions.set(sessionId, delivered);
+    if (next?.trim()) {
+      session.cwd = ctx.cwd;
+      session.sessionName = ctx.sessionManager.getSessionName() ?? "";
+      if (!session.about) session.about = promptAbout(ctx.sessionManager);
+      const delivered = session.batches.get(next) ?? new Set<string>();
+      session.batches.delete(next);
+      session.batches.set(next, delivered);
       // Keep recent inactive sessions for deduplication without unbounded growth.
-      while (sessions.size > 128) sessions.delete(sessions.keys().next().value!);
+      while (session.batches.size > 128) session.batches.delete(session.batches.keys().next().value!);
     }
+    context = ctx;
+    renderBadge(ctx);
   }
   let renderedBadge: string | undefined;
   let renderedContext: BridgeContext | undefined;
@@ -212,48 +272,35 @@ export default function citoBridge(pi: BridgeAPI): void {
       renderedBadge = activeBadge;
     }
   }
-  function update(ctx: BridgeContext): void {
-    setSession(ctx.sessionManager.getSessionId() ?? sessionId ?? `pid-${process.pid}`);
-    context = ctx;
-    renderBadge(ctx);
-  }
   function unlinkSocket(): void {
     if (!ownsSocket) return;
     try { unlinkSync(socketPath); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     ownsSocket = false;
   }
-  // Without a live SessionManager, a shared CWD cannot prove transcript ownership.
-  function fallbackIdentity(): { session_id: string; session_name: string; cwd: string } {
-    const cwd = process.cwd();
-    return { session_id: `pid-${process.pid}`, session_name: basename(cwd), cwd };
-  }
   function handle(req: Record<string, unknown>): Record<string, unknown> {
     const ctx = context;
     if (ctx) update(ctx);
     if (req.op === "ping") return { ok: true };
     if (req.op !== "identify" && req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
-    const identity = ctx && sessionId
-      ? { session_id: sessionId, session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd }
-      : fallbackIdentity();
-    setSession(identity.session_id);
-    const currentId = identity.session_id;
+    const currentId = session.sessionId;
+    if (!currentId) return { ok: false, error: "SESSION_NOT_READY" };
     if (req.op === "identify") return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid,
-      ...identity, badge: activeBadge ?? null, updated_at_ms: lastActiveMs };
-    if (!currentId || req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
+      session_id: currentId, session_name: session.sessionName, cwd: session.cwd, about: session.about, badge: activeBadge ?? null, updated_at_ms: lastActiveMs };
+    if (req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
       activeBadge = (req.badge as string | undefined) ?? undefined;
       renderBadge(ctx);
       return { ok: true };
     }
-    const processedBatchIds = sessions.get(currentId)!;
+    const processedBatchIds = session.batches.get(currentId)!;
     if (typeof req.batch_id !== "string" || !req.batch_id) return { ok: false, error: "INVALID_REQUEST" };
     if (processedBatchIds.has(req.batch_id)) return { ok: true, delivered: true, deduplicated: true };
     if (typeof req.content !== "string" || typeof req.wake !== "boolean") return { ok: false, error: "INVALID_REQUEST" };
     // Pi 1.5.0 sendMessage is synchronous. No await between the effect and recording its ID.
     pi.sendMessage({ customType: "cito-notification", content: req.content, display: true },
-      { triggerTurn: req.wake, deliverAs: "followUp" });
+      { triggerTurn: req.wake, deliverAs: req.wake ? "steer" : "followUp" });
     lastActiveMs = Date.now();
     processedBatchIds.add(req.batch_id);
     if (processedBatchIds.size > 200) processedBatchIds.delete(processedBatchIds.values().next().value!);
@@ -437,10 +484,11 @@ export default function citoBridge(pi: BridgeAPI): void {
       if (shuttingDown) return;
       lastActiveMs = Date.now();
       update(ctx);
-      const id = sessionId!;
+      const id = session.sessionId;
+      if (!id) { ctx.ui.notify?.("Session not ready", "warning"); return; }
       const epoch = commandGen;
       const run = async () => {
-        if (!shuttingDown && sessionId === id && epoch === commandGen) await execute(args, ctx, id, epoch);
+        if (!shuttingDown && session.sessionId === id && epoch === commandGen) await execute(args, ctx, id, epoch);
       };
       const previous = commands.get(id);
       const next = previous ? previous.then(run, run) : run();
@@ -454,13 +502,14 @@ export default function citoBridge(pi: BridgeAPI): void {
       let tool: "cito_listen" | "cito_unlisten";
       let toolArgs: Record<string, unknown>;
       let targetHub: string | undefined;
+      const about = session.about || "Pi session";
       if (!trimmed) {
         if (activeBadge) {
           tool = "cito_unlisten";
           toolArgs = {};
         } else {
           tool = "cito_listen";
-          toolArgs = { about: defaultAbout(ctx), scope: "self" };
+          toolArgs = { about, scope: "self" };
         }
       } else {
         const space = trimmed.search(/\s/);
@@ -494,10 +543,10 @@ export default function citoBridge(pi: BridgeAPI): void {
         }
         if (sub === "on") {
           tool = "cito_listen";
-          toolArgs = { about: rest || defaultAbout(ctx), scope: "self", ...(targetHub ? { hub: targetHub } : {}) };
+          toolArgs = { about: rest || about, scope: "self", ...(targetHub ? { hub: targetHub } : {}) };
         } else if (sub === "team") {
           tool = "cito_listen";
-          toolArgs = { about: rest || defaultAbout(ctx), scope: "workspace", ...(targetHub ? { hub: targetHub } : {}) };
+          toolArgs = { about: rest || about, scope: "workspace", ...(targetHub ? { hub: targetHub } : {}) };
         } else {
           if (rest) {
             ctx.ui.notify?.(targetHub ? hubUsage : usage, "warning");
@@ -509,7 +558,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       }
       try {
         const payload = await callMcpTool(tool, toolArgs, commandSessionId);
-        if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
+        if (shuttingDown || session.sessionId !== commandSessionId || generation !== commandGen) return;
         if (tool === "cito_listen") {
           const publicId = String(payload.listener_id).trim().split(":").at(-1)!;
           const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
@@ -523,14 +572,15 @@ export default function citoBridge(pi: BridgeAPI): void {
           ctx.ui.notify?.("Cito stopped listening", "info");
         }
       } catch (error) {
-        if (shuttingDown || sessionId !== commandSessionId || generation !== commandGen) return;
+        if (shuttingDown || session.sessionId !== commandSessionId || generation !== commandGen) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
       renderBadge(ctx);
   }
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
-  pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
-  pi.on("session_shutdown", async () => {
+  pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); session.about = ""; update(ctx); });
+  pi.on("session_shutdown", async event => {
+    if ((event as { reason?: string })?.reason !== "reload") delete host[sessionKey];
     shuttingDown = true;
     commandGen++;
     repairWatcher?.close();
