@@ -21,40 +21,6 @@ func normalizedHubURL(_ raw: String) -> String {
     return trimmed.hasSuffix("://") ? trimmed : trimmed.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
 }
 
-func proposedHubName(_ raw: String, url: String, existing: [HubConfigItem], creating: Bool, original: String = "") -> String {
-    let url = normalizedHubURL(url)
-    let automatic = raw.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
-    var source = raw
-    if automatic {
-        let host = URLComponents(string:url)?.host ?? ""
-        let labels = host.split(separator:".")
-        if labels.count == 4 && labels.allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }) {
-            let ip = labels.compactMap { Int($0) }
-            source = ip[0] == 10 || ip[0] == 192 && ip[1] == 168 || ip[0] == 172 && (16...31).contains(ip[1]) ? "lan" : (ip[0] == 100 && (64...127).contains(ip[1]) ? "tailscale" : "remote")
-        } else if !host.contains(":"), let first = labels.first(where: { $0.unicodeScalars.contains { $0.isASCII && CharacterSet.alphanumerics.contains($0) } }) {
-            source = String(first)
-        } else { source = "remote" }
-    }
-    var slug = ""
-    for scalar in source.unicodeScalars {
-        if scalar.isASCII && CharacterSet.alphanumerics.contains(scalar) {
-            if slug.count < 32 { slug += String(scalar).lowercased() }
-        } else if !slug.isEmpty && !slug.hasSuffix("-") && slug.count < 32 { slug += "-" }
-    }
-    slug = slug.trimmingCharacters(in:CharacterSet(charactersIn:"-"))
-    if automatic {
-        if slug.isEmpty { slug = "remote" }
-        let base = slug
-        var suffix = 2
-        while existing.contains(where:{(creating || $0.name != original) && $0.name == slug && ($0.is_builtin == true || normalizedHubURL($0.url) != url)}) {
-            let ending = "-\(suffix)"
-            slug = String(base.prefix(32-ending.count)).trimmingCharacters(in:CharacterSet(charactersIn:"-")) + ending
-            suffix += 1
-        }
-    }
-    return automatic && !creating && !original.isEmpty ? original : slug
-}
-
 extension NSColor {
     // Applying alpha eagerly snapshots semantic RGB values; defer it until appearance resolution.
     func withAppearanceAlpha(_ alpha: CGFloat) -> NSColor {

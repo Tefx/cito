@@ -5,14 +5,31 @@ use super::*;
 fn payload_free_save_errors_have_only_the_form_as_their_owner() {
     let _lock = serial();
     let (f, p) = ui_fixture();
-    open(&f, p, &settings(), "hubs");
+    let mut cfg = settings();
+    cfg["host_hub"]["enabled"] = json!(true);
+    open(&f, p, &cfg, "hubs");
     control(&f, p, "open_add_hub");
+    control(&f, p, "settings_hub_auth:oidc");
+    assert_eq!(inspect(&f, p).settings("add_hub_form")["height"], 252);
     input(&f, p, "settings_hub_url", "https://hub.example.com");
     control(&f, p, "submit_add_hub");
+    f.send(p, json!({"op":"test_settings_scroll","offset":10000}));
     let request = latest(&f, p, "setup_save_hub");
     f.send(p, json!({"op":"settings","source_op":"setup_save_hub","request_id":request["request_id"],"ok":false,"warning":"Save failed"}));
     let s = inspect(&f, p);
-    assert_eq!(s.settings("add_hub_error")["text"], "Save failed");
+    let error = s.settings("add_hub_error");
+    assert_eq!(error["text"], "Save failed");
+    assert_eq!(
+        s.settings("add_hub_form")["height"].as_f64().unwrap(),
+        298.0 + error["height"].as_f64().unwrap() + 6.0
+    );
+    assert_eq!(s.settings("settings_hub_issuer")["text"], "");
+    assert!(
+        s.settings("settings_hubs_tab")["content_y"]
+            .as_f64()
+            .unwrap()
+            <= s.settings("add_hub_form")["y"].as_f64().unwrap()
+    );
     assert!(s.settings("settings_error_banner").is_null());
     assert!(s.menu("menu_error_row").is_null());
 }
@@ -151,6 +168,16 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     cfg["hubs"][0]["client_id"] = json!("desktop");
     open(&f, p, &cfg, "hubs");
     control(&f, p, "edit_hub:personal");
+    let collapsed = inspect(&f, p);
+    assert_eq!(collapsed.settings("add_hub_form")["height"], 252);
+    let summary = collapsed.settings("hub_oidc_discovery_summary");
+    assert_eq!(summary["text"], "OIDC: id.example.com · Auto-discovered");
+    assert_eq!(
+        summary["tooltip"],
+        "Issuer: https://id.example.com\nClient ID: desktop\nRedirect port: 4317"
+    );
+    assert!(collapsed.settings("settings_hub_issuer").is_null());
+    control(&f, p, "manual_hub_oidc");
     let s = inspect(&f, p);
     assert_eq!(s.settings("add_hub_form")["height"], 298);
     assert_eq!(s.settings("settings_hub_redirect_port")["text"], "4317");
@@ -163,11 +190,19 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     assert!(
         s.settings("settings_hub_issuer")["y"].as_f64().unwrap() > client["y"].as_f64().unwrap()
     );
+    control(&f, p, "manual_hub_oidc");
+    assert_eq!(inspect(&f, p).settings("add_hub_form")["height"], 252);
     control(&f, p, "submit_add_hub");
     let saved = latest(&f, p, "setup_save_hub");
     assert_eq!(saved["redirect_port"], 4317);
     assert_eq!(inspect(&f, p).settings("submit_add_hub")["text"], "Saving…");
-    f.send(p,json!({"op":"settings","source_op":"setup_save_hub","request_id":saved["request_id"],"ok":false,"error":"Try again"}));
+    f.send(p,json!({"op":"settings","source_op":"setup_save_hub","request_id":saved["request_id"],"ok":false,"settings":cfg,"error":"Try again"}));
+    let failed = inspect(&f, p);
+    assert_eq!(failed.settings("add_hub_error")["text"], "Try again");
+    assert_eq!(
+        failed.settings("settings_hub_redirect_port")["text"],
+        "4317"
+    );
     for id in [
         "settings_hub_issuer",
         "settings_hub_client_id",
@@ -193,8 +228,10 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     input(&f, p, "settings_hub_url", "https://hub.example.com");
     control(&f, p, "submit_add_hub");
     let discovered = latest(&f, p, "setup_save_hub");
+    assert_eq!(inspect(&f, p).settings("add_hub_form")["height"], 252);
     assert!(discovered.get("issuer").is_none());
     assert!(discovered.get("client_id").is_none());
+    assert!(discovered.get("redirect_port").is_none());
     control(&f, p, "cancel_add_hub");
     control(&f, p, "open_add_hub");
     for (alias, port_value) in ["redirect_port", "redirectPort", "oidcRedirectPort"]
@@ -218,7 +255,18 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
         let s = inspect(&f, p);
         assert_eq!(s.settings("settings_hub_redirect_port")["text"], "4319");
         assert_eq!(s.settings("settings_hub_client_id")["text"], "desktop");
+        assert_eq!(s.settings("add_hub_form")["height"], 298);
     }
+    // Drafts keep their fields visible even when the manual disclosure flag is off.
+    input(&f, p, "settings_hub_redirect_port", "65536");
+    control(&f, p, "manual_hub_oidc");
+    assert_eq!(inspect(&f, p).settings("add_hub_form")["height"], 298);
+    control(&f, p, "submit_add_hub");
+    assert_eq!(
+        inspect(&f, p).settings("add_hub_error")["text"],
+        "Redirect port must be an integer from 0 to 65535."
+    );
+    assert_eq!(latest(&f, p, "setup_save_hub"), discovered);
 }
 
 #[test]

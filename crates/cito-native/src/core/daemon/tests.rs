@@ -985,12 +985,34 @@ fn invite_join_settles_each_request_and_records_its_saved_hub() -> Result<(), St
                     ["settings", "state"]
                 );
                 assert!(frames.iter().all(|v| v["committed"] == true));
+                assert_eq!(frames[0]["hub"], target);
                 assert_eq!(frames[0]["warning"], result["warning"]);
                 assert_eq!(result["warning"].is_string(), request == "warn");
             }
         }
     }
     Ok(())
+}
+
+#[test]
+fn disabled_hub_does_not_probe_or_trust_a_submitted_discovery_name() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    for mut profile in [
+        json!({"enabled":false}),
+        json!({"disabled":true}),
+        json!({"enabled":true,"disabled":true}),
+    ] {
+        profile["url"] = json!(url);
+        profile["discovered_name"] = json!("forged");
+        let cfg = crate::core::config::discover_hub_config(profile).unwrap();
+        assert!(cfg.get("discovered_name").is_none());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 #[test]
@@ -1012,16 +1034,23 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
         service: service.clone(),
     };
     let result = (|| -> Result<(), String> {
-        for (op, concurrent) in [
-            ("setup_save_hub", false),
-            ("setup_save_hub", true),
-            ("paste_hub_invite", false),
+        service
+            .lock()
+            .unwrap()
+            .last_hub_errors
+            .insert("suggestion".into(), ("other profile error".into(), false));
+        for (op, requested, explicit, concurrent, target) in [
+            ("setup_save_hub", "suggestion", false, false, "team_hub"),
+            ("setup_save_hub", "127", false, false, "remote"),
+            ("setup_save_hub", "work", true, true, "work"),
+            ("setup_save_hub", "work", true, false, "work"),
+            ("paste_hub_invite", "alias", false, false, "alias"),
+            ("paste_hub_invite", "", false, false, "team_hub-2"),
+            ("setup_save_hub", "team_hub-2", false, false, "team_hub-2"),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-            let url = format!(
-                "http://{}",
-                listener.local_addr().map_err(|e| e.to_string())?
-            );
+            let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+            let url = format!("http://127.1:{port}");
             let (started, observed) = mpsc::sync_channel(1);
             let (release, wait) = mpsc::sync_channel(1);
             let server = thread::spawn(move || -> Result<(), String> {
@@ -1034,7 +1063,11 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
                 started.send(()).map_err(|e| e.to_string())?;
                 wait.recv_timeout(Duration::from_secs(3))
                     .map_err(|e| e.to_string())?;
-                let body = json!({"auth_mode":"oidc","oidc":{"issuer":"https://id.example.com","client_id":"client","redirect_port":4280}}).to_string();
+                let mut health = json!({"auth_mode":"oidc","oidc":{"issuer":"http://127.0.0.1:1","client_id":"client","redirect_port":4280}});
+                if target != "remote" {
+                    health["name"] = json!("team_hub");
+                }
+                let body = health.to_string();
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1042,9 +1075,9 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
                 )
                 .map_err(|e| e.to_string())
             });
-            let mut action = json!({"op":op,"name":"work","url":url,"enabled":false});
+            let mut action = json!({"op":op,"name":requested,"name_explicit":explicit,"url":url,"edit":requested == "team_hub-2"});
             if op == "paste_hub_invite" {
-                action = json!({"op":op,"invite":action.to_string()});
+                action = json!({"op":op,"invite":json!({"hub":requested,"url":url}).to_string()});
             }
             let worker_service = service.clone();
             let worker = thread::spawn(move || {
@@ -1072,13 +1105,18 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
             } else {
                 assert_eq!(saved?["committed"], true);
                 let s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-                assert_eq!(s.raw_config()?["hubs"]["work"]["redirectPort"], 4280);
+                assert_eq!(s.last_hub_errors["suggestion"].0, "other profile error");
+                let entry = &s.raw_config()?["hubs"][target];
+                assert_eq!(entry["url"], url);
+                assert_eq!(entry["redirectPort"], 4280);
+                assert!(entry.get("discovered_name").is_none());
+                assert!(entry.get("name_explicit").is_none());
                 assert_eq!(
                     s.settings()["hubs"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .find(|hub| hub["name"] == "work")
+                        .find(|hub| hub["name"] == target)
                         .unwrap()["redirect_port"],
                     4280
                 );
@@ -3078,15 +3116,25 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
                 ("", "https://node.example.com", "node"),
                 ("", "https://node.other.example.com", "node-2"),
                 ("", "https://local.example.com", "local-2"),
+                ("", "https://cito.internal.acme.example", "acme"),
+                ("", "https://www.login.id.example.com", "example"),
+                ("", "https://id.sso.example", "sso"),
+                ("", "https://auth.test.local", "auth"),
+                ("", "https://login.node.ts.net", "login"),
                 ("", "http://192.0.2.8:4291", "remote"),
                 ("", "http://[::1]:4291", "remote-2"),
                 ("", "http://192.168.1.2:4291", "lan"),
                 ("", "http://10.1.2.3:4291", "lan-2"),
                 ("", "http://172.16.0.2:4291", "lan-3"),
                 ("", "http://100.64.0.2:4291", "tailscale"),
+                ("", "http://10.1..:4291", "10"),
+                ("", "http://10.1.2.3..:4291", "10-2"),
+                ("", "http://127.1", "remote-3"),
+                ("", "http://10.1", "lan-4"),
+                ("", "http://10.1.", "lan-5"),
             ] {
                 service.action(
-                    &json!({"op":"setup_save_hub","name":requested,"url":url,"enabled":false,"authMode":"none"}),
+                    &json!({"op":"setup_save_hub","name":requested,"name_explicit":!requested.is_empty(),"url":url,"enabled":false,"authMode":"none"}),
                 )?;
                 assert_eq!(service.raw_config()?["hubs"][expected]["url"], url);
             }
@@ -3102,13 +3150,13 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
                 .unwrap()
                 .contains("--url http://[::1]:4291"));
             service.action(
-                &json!({"op":"setup_save_hub","name":"user","url":"local://","enabled":false}),
+                &json!({"op":"setup_save_hub","name":"user","name_explicit":true,"url":"local://","enabled":false}),
             )?;
             assert!(service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"user","name":"user","url":"http://"})).is_err());
             let user_error = service.last_hub_errors["user"].clone();
             for requested in ["!!!", "local", "Office Mac"] {
                 let before = fs::read(&config.config_path).map_err(|e| e.to_string())?;
-                assert!(service.action(&json!({"op":"setup_save_hub","name":requested,"url":"https://different.example.com","enabled":false,"authMode":"none"})).is_err());
+                assert!(service.action(&json!({"op":"setup_save_hub","name":requested,"name_explicit":true,"url":"https://different.example.com","enabled":false,"authMode":"none"})).is_err());
                 assert_eq!(
                     fs::read(&config.config_path).map_err(|e| e.to_string())?,
                     before
@@ -3143,6 +3191,7 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
                 let mut retry = json!({"op":op,"url":url,"enabled":false,"authMode":"none"});
                 if let Some(requested) = requested {
                     retry["name"] = json!(requested);
+                    retry["name_explicit"] = json!(true);
                 }
                 assert_eq!(
                     service.action(&retry)?,

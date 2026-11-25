@@ -180,6 +180,14 @@ extension Companion {
                 }
                 return true
             }
+            if (op == "test_focus_field" || (op == "test_settings_input" && object["value"] is String)),
+               let id = object["id"] as? String,
+               ["settings_hub_issuer", "settings_hub_client_id", "settings_hub_redirect_port"].contains(id),
+               settingsActiveTab == "hubs", hubForm.isOpen, hubForm.auth == "oidc", !editingBuiltinHub,
+               !uninstallConfirmOpen, !hubForm.oidcManualExpanded {
+                hubForm.oidcManualExpanded = true
+                rebuildSettingsPanel(syncFields: true)
+            }
             if op == "test_focus_field", let id = object["id"] as? String {
                 if id.hasPrefix("rename_field:"), let field = renameField, let root = cardMenu.items.compactMap({ $0.view }).first(where: { findView(in:$0,id:id,as:NSTextField.self) != nil }) {
                     let panel = headlessMenuPanel ?? KeyPanel(contentRect:NSRect(x:0,y:0,width:380,height:600),styleMask:[.titled],backing:.buffered,defer:false)
@@ -415,7 +423,7 @@ extension Companion {
         func intentionallyTruncatedLabel(_ label: NSTextField) -> Bool {
             guard !(label.toolTip ?? label.superview?.toolTip ?? "").isEmpty,
                   label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail else { return false }
-            if isDataRow(label) { return !(label.toolTip ?? "").isEmpty }
+            if isDataRow(label) || name(label) == "hub_oidc_discovery_summary" { return !(label.toolTip ?? "").isEmpty }
             let parentID = label.superview?.identifier?.rawValue
             let title = label.stringValue
             return (hubs.count == 2 && parentID == "hub:\(title)") ||
@@ -524,7 +532,11 @@ extension Companion {
                         generatedText = "→ " + target
                     }
                 }
-                if hasJargon(data ? (id.hasPrefix("act_title:") ? generatedText : "") : label.stringValue) { jargonLeaks.append(id) }
+                if id == "hub_oidc_discovery_summary", generatedText.hasPrefix("OIDC: ") {
+                    // The issuer is server metadata, not UI copy.
+                    generatedText = "OIDC · Auto-discovered"
+                }
+                if hasJargon(data && !id.hasPrefix("act_title:") ? "" : generatedText) { jargonLeaks.append(id) }
             }
             if visible {
                 for (source, value) in [("tooltip",view.toolTip),("accessibility label",view.accessibilityLabel())] {
@@ -659,7 +671,7 @@ extension Companion {
                 if ["inbox_control_bar","footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_channel:","settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
                     let barItems = edgeItems.filter { item in
                         if id == "inbox_control_bar" { return item is MenuControl }
-                        return !((item as? NSTextField)?.isEditable ?? false) && !name(item).hasPrefix("manual_channel:") && !pairingActions.contains { $0 === item }
+                        return !((item as? NSTextField)?.isEditable ?? false) && name(item) != "manual_hub_oidc" && !name(item).hasPrefix("manual_channel:") && !pairingActions.contains { $0 === item }
                     }
                     if id == "inbox_control_bar", barItems.contains(where: { abs($0.frame.midY-parentBounds.midY)>1.5 }) {
                         let issue = id + ": controls are not centered in the bar"

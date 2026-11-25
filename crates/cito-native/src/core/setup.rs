@@ -1331,12 +1331,12 @@ pub fn run_setup_cli(args: &[String]) {
             (hub_client_id.is_some(), "--client-id"),
             (hub_redirect_port.is_some(), "--redirect-port"),
         ] {
-            if present && hub_name.is_none() {
-                return Err(format!("{flag} requires --hub and --url"));
+            if present && hub_url.is_none() {
+                return Err(format!("{flag} requires --url"));
             }
         }
-        if hub_name.is_some() != hub_url.is_some() {
-            return Err("--hub and --url must be specified together".to_string());
+        if hub_name.is_some() && hub_url.is_none() {
+            return Err("--hub requires --url".to_string());
         }
 
         if invite.is_some() || print_invite || disconnect_all {
@@ -1347,7 +1347,7 @@ pub fn run_setup_cli(args: &[String]) {
                 || uninstall
                 || build_app
                 || status_only
-                || hub_name.is_some()
+                || hub_url.is_some()
                 || share_hub.is_some()
                 || share_port.is_some()
                 || !enable_hubs.is_empty()
@@ -1601,7 +1601,7 @@ pub fn run_setup_cli(args: &[String]) {
 
         let only_disable = !disable_harnesses.is_empty()
             && enable_harnesses.is_empty()
-            && hub_name.is_none()
+            && hub_url.is_none()
             && enable_hubs.is_empty()
             && disable_hubs.is_empty()
             && remove_hubs.is_empty()
@@ -1639,15 +1639,14 @@ pub fn run_setup_cli(args: &[String]) {
         }
 
         let mut validated_hub: Option<(String, Value)> = None;
-        if let (Some(ref name), Some(ref url_raw)) = (&hub_name, &hub_url) {
-            if !validate_hub_name(name) {
+        if let Some(url_raw) = &hub_url {
+            if let Some(name) = hub_name.as_deref().filter(|s| !validate_hub_name(s)) {
                 return Err(format!("Invalid hub name: {name}"));
             }
             let url = validate_nats_url(url_raw)?;
-            if name == "local" && url != "local://" {
+            if hub_name.as_deref() == Some("local") && url != "local://" {
                 return Err("INVALID_INPUT: The local hub must use local://".into());
             }
-            let base = existing_hubs.get(name).unwrap_or(&Value::Null);
             let def_scope = if url == "local://" {
                 "workspace"
             } else {
@@ -1689,8 +1688,17 @@ pub fn run_setup_cli(args: &[String]) {
             if let Some(port) = hub_redirect_port {
                 entry.insert("redirectPort".into(), port);
             }
+            let health = super::config::probe_hub_health(&url, true);
+            let name = hub_name.clone().unwrap_or_else(|| {
+                super::config::available_hub_name(
+                    super::config::advertised_name(&health).map(str::to_owned),
+                    Some(&existing_hubs),
+                    &entry["url"],
+                )
+            });
+            let base = existing_hubs.get(&name).unwrap_or(&Value::Null);
             let entry = super::config::merge_hub_config(base, &Value::Object(entry));
-            validated_hub = Some((name.clone(), super::config::discover_hub_config(entry)?));
+            validated_hub = Some((name, super::config::apply_hub_auth(entry, &health)?));
         }
 
         let editing_endpoints = validated_hub.is_some()
@@ -1790,8 +1798,9 @@ pub fn run_setup_cli(args: &[String]) {
                 super::daemon::host_hub::validate_hub_edit(
                     &next,
                     live_port,
-                    hub_name
-                        .as_deref()
+                    validated_hub
+                        .as_ref()
+                        .map(|(name, _)| name.as_str())
                         .or_else(|| enable_hubs.first().map(String::as_str)),
                 )?;
             }
@@ -1856,7 +1865,7 @@ pub fn run_setup_cli(args: &[String]) {
 
         let bare_setup = enable_harnesses.is_empty()
             && disable_harnesses.is_empty()
-            && hub_name.is_none()
+            && hub_url.is_none()
             && enable_hubs.is_empty()
             && disable_hubs.is_empty()
             && remove_hubs.is_empty()
@@ -2520,6 +2529,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn setup_url_alone_uses_advertised_name_without_overwriting_other_profiles() {
+        let (root, _) = fixture();
+        let engine = crate::core::hub::HubEngine::open(&root.join("hub")).unwrap();
+        let mut auth = crate::core::auth::HubAuth::new("none", None, None, None).unwrap();
+        auth.advertise_name(Some("team")).unwrap();
+        let server = engine.start_server("127.0.0.1", 0, auth).unwrap();
+        let url = format!("http://{}", server.address);
+        let path = root.join("config.json");
+        let initial = json!({"hubs":{"team":{"url":"local://"}}});
+        for (extra, name) in [(vec![], "team-2"), (vec!["--hub", "custom"], "custom")] {
+            fs::write(&path, initial.to_string()).unwrap();
+            let mut args = vec!["--url", &url, "--auth", "none", "--default"];
+            args.extend(extra);
+            let output = cli_child(&root, &root, &args);
+            assert!(output.status.success(), "{output:?}");
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["default_hub"], name);
+            assert_eq!(saved["hubs"][name]["url"], url);
+            assert!(saved["hubs"][name].get("discovered_name").is_none());
+            assert_eq!(saved["hubs"]["team"]["url"], "local://");
+        }
+        let before = json!({"hubs":{"team":{"url":url,"authMode":"token","token":"saved-token"}}});
+        fs::write(&path, before.to_string()).unwrap();
+        let output = cli_child(&root, &root, &["--url", &url]);
+        assert!(output.status.success(), "{output:?}");
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["hubs"]["team"]["authMode"], "token");
+        assert_eq!(saved["hubs"]["team"]["token"], "saved-token");
+        server.shutdown();
+        engine.shutdown();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

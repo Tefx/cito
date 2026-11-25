@@ -21,6 +21,8 @@ CITO_OIDC_ADMIN_USERS=alice cito hub --bind 127.0.0.1 --auth oidc --issuer https
 
 Create the data directory with ownership for the service account. Flags accept both `--key value` and `--key=value` and take precedence over the corresponding environment variable. Blank standalone Hub environment values count as unset; empty CLI values are rejected. `SIGTERM` and `SIGINT` close the listener, SSE streams, and managed channels gracefully. Use `cito --version` to inspect the installed release.
 
+Set `cito hub --name work` or `CITO_HUB_NAME=work` to advertise a stable name, especially in containers. Otherwise the Hub derives its name from the OIDC issuer domain in OIDC mode or from the hostname. The name `local` is reserved. Clients joining with `cito setup --url <url>` use the advertised name, or derive one from the Hub URL if none is advertised. An explicit client `--hub` overrides this choice.
+
 On a client Mac, join a token Hub with:
 
 ```sh
@@ -95,7 +97,7 @@ Keep secrets out of unit files, shell history, screenshots, and support logs. Re
 
 Any TLS reverse proxy can serve the Hub. Preserve `Authorization`, `Content-Type`, and the public `Host`; stream `/v1/events` without response buffering or caching, allow long-lived connections, and route `/v1/rpc` and `/health` to the same Hub. Do not add a mismatched browser `Origin`. A reconnecting SSE client must be able to pass `Last-Event-ID` through the proxy.
 
-- `GET /health` is unauthenticated and returns `ok`, `pid`, `version`, and `auth_mode`. In OIDC mode it also returns `oidc` with `issuer`, `client_id`, and optional `redirect_port`; other modes omit `oidc`.
+- `GET /health` is unauthenticated and returns `ok`, `pid`, `version`, `auth_mode`, and the advertised `name` when available. In OIDC mode it also returns `oidc` with `issuer`, `client_id`, and optional `redirect_port`; other modes omit `oidc`.
 - `POST /v1/rpc` requires `Content-Type: application/json` (`415` otherwise); protected operations require authentication.
 - `GET /v1/events` is the authenticated SSE stream.
 - Authenticated Hubs (`token` or `oidc`) accept any syntactically valid `Host` authority when `Origin` is absent, including `cito.example.com`, whether the upstream binds loopback or a wildcard address. Cross-origin browser requests return `403`.
@@ -188,6 +190,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | Variable | Default / behavior |
 | --- | --- |
 | `CITO_HUB_PORT` | `4291`; standalone `--port` (`0` requests an ephemeral port). |
+| `CITO_HUB_NAME` | Optional advertised name; standalone `--name` overrides it. Compose forwards this variable. |
 | `CITO_HUB_BIND` | `127.0.0.1` with `none`, `0.0.0.0` with `token`/`oidc`; standalone `--bind`, an IP address. |
 | `CITO_HUB_DATA_DIR` | `~/.cito/hub`; standalone `--data-dir`. Docker uses `/data`. |
 | `CITO_AUTH_MODE` | `none`; standalone `--auth`: `none`, `token`, or `oidc`. Client config validation also recognizes this variable; configure per-Hub client authentication in `config.json`. |

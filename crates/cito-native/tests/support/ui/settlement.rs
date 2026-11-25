@@ -583,10 +583,28 @@ fn native_form_accessibility_checkbox_values_and_tab_navigation() {
             vec![
                 ("settings_hub_issuer", "OIDC issuer URL"),
                 ("settings_hub_client_id", "OIDC client ID"),
+                ("settings_hub_redirect_port", "OIDC redirect port"),
             ],
         ),
     ] {
         control(&f, p, &format!("settings_hub_auth:{mode}"));
+        let collapsed = inspect(&f, p);
+        assert_eq!(collapsed.settings("add_hub_form")["height"], 252);
+        if mode == "oidc" {
+            assert_eq!(
+                collapsed.settings("manual_hub_oidc")["accessibility_label"],
+                "▸ Configure OIDC settings manually…"
+            );
+            assert!(collapsed.settings("settings_hub_client_id").is_null());
+            f.send(
+                p,
+                json!({"op":"test_focus_field","id":"settings_hub_client_id"}),
+            );
+            let expanded = inspect(&f, p);
+            assert_eq!(expanded.settings("add_hub_form")["height"], 298);
+            assert_eq!(expanded["field_editors"][0]["id"], "settings_hub_client_id");
+            f.send(p, json!({"op":"test_end_editing"}));
+        }
         let s = inspect(&f, p);
         for (id, label) in fields {
             assert_eq!(s.settings(id)["accessibility_label"], label);

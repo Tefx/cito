@@ -62,7 +62,7 @@ fn listen_preflight_preserves_sibling_titles_and_blank_descriptions_use_defaults
         "Human"
     );
     let bytes = fs::read(&f.config).unwrap();
-    let (status,result)=f.action(json!({"op":"setup_save_hub","name":"local","url":"https://hub.example.com","auth_mode":"none"}));
+    let (status,result)=f.action(json!({"op":"setup_save_hub","name":"local","name_explicit":true,"url":"https://hub.example.com","auth_mode":"none"}));
     assert_eq!(status, 400, "{result}");
     assert_eq!(fs::read(&f.config).unwrap(), bytes);
     for args in [
@@ -1470,7 +1470,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         .is_empty());
     f.action_ok(json!({"op":"unlisten_session","hub":"work","harness":row["harness"],"session_id":row["session_id"]}));
     f.action_ok(json!({"op":"unlisten_all"}));
-    f.action_ok(json!({"op":"setup_save_hub","name":"extra","url":"local://","auth_mode":"none"}));
+    f.action_ok(json!({"op":"setup_save_hub","name":"extra","name_explicit":true,"url":"local://","auth_mode":"none"}));
     f.action_ok(json!({"op":"setup_toggle_hub","hub":"extra","enabled":false}));
     f.action_ok(json!({"op":"setup_remove_hub","hub":"extra"}));
     f.action_ok(json!({"op":"hub_action","hub":"work","action":"reconnect"}));

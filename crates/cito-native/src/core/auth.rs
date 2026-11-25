@@ -463,6 +463,7 @@ mod tests;
 
 pub struct HubAuth {
     pub mode: String,
+    name: Option<String>,
     pub redirect_port: Option<u16>,
     token: Option<String>,
     verifier: Option<OidcVerifier>,
@@ -498,13 +499,38 @@ impl HubAuth {
         };
         Ok(Self {
             mode: mode.into(),
+            name: None,
             redirect_port: None,
             token,
             verifier,
         })
     }
+    pub(super) fn advertise_name(&mut self, explicit: Option<&str>) -> Result<(), String> {
+        let normalize = |raw: &str| {
+            raw.bytes()
+                .any(|b| b.is_ascii_alphanumeric())
+                .then(|| super::identity::normalize_slug(raw))
+                .filter(|s| super::config::valid_advertised_name(s))
+        };
+        self.name = match explicit {
+            Some(raw) => {
+                Some(normalize(raw).ok_or("INVALID_INPUT: Invalid Hub name (local is reserved)")?)
+            }
+            None => self
+                .verifier
+                .as_ref()
+                .and_then(|v| url::Url::parse(&v.issuer).ok())
+                .and_then(|url| super::daemon::host_hub::domain_slug(url.domain()?))
+                .filter(|s| super::config::valid_advertised_name(s))
+                .or_else(|| normalize(&super::identity::local_host_name())),
+        };
+        Ok(())
+    }
     pub fn health(&self) -> Value {
         let mut health = json!({"ok":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"auth_mode":self.mode});
+        if let Some(name) = &self.name {
+            health["name"] = json!(name);
+        }
         if let Some(verifier) = &self.verifier {
             health["oidc"] = json!({"issuer":verifier.issuer,"client_id":verifier.client_id});
             if let Some(port) = self.redirect_port.filter(|port| *port != 0) {

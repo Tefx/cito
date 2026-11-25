@@ -337,7 +337,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
         f.rows("SELECT title FROM local_listeners WHERE harness='human'")[0]["title"],
         "Human"
     );
-    f.action_ok(json!({"op":"setup_save_hub","name":"archive","url":"https://hub.example.com","auth_mode":"none","enabled":false}));
+    f.action_ok(json!({"op":"setup_save_hub","name":"archive","name_explicit":true,"url":"https://hub.example.com","auth_mode":"none","enabled":false}));
     l.control("open_settings");
     l.control("settings_tab:hubs");
     let s = l.until(|s| !s.settings("settings_hub:archive").is_null());

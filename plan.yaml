@@ -26143,3 +26143,860 @@ phases:
       explicit local sends isolated); mcp_and_inbox (33/33), state/daemon lib tests
       (96/96), fmt, clippy -D warnings, release build, git diff --check, and 7/7 codesign
       --verify --strict. Worktree removed.
+- id: v63
+  name: 'V63 OIDC UX Progressive Disclosure, Browser Callback & Hub Name Authority
+    (FB-16..FB-18) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: 'All 4 steps in v63 are DONE: FB-16 OIDC manual settings progressive disclosure
+    (manual_hub_oidc, hub_oidc_discovery_summary, expanded-view 298 + errorSpace pt,
+    revealAddHub scroll-to-reveal), FB-17 OIDC callback HTTP request-header drain,
+    graceful TCP write shutdown, and self-contained light/dark HTML5 status card,
+    and FB-18 Hub-advertised canonical name (--name / CITO_HUB_NAME / GET /health
+    "name"), smart domain-slug derivation (hub_name_from_url), and client hub name
+    discovery & precedence (name_explicit > discovered_name > hub_name_from_url) are
+    verified with discriminating UI and hub regression tests; cargo fmt, cargo clippy
+    -D warnings, cargo test --workspace --locked -- --test-threads=4, cargo build
+    --release --locked with 7/7 codesign --verify --strict, and v63.gate (gate.report.v2,
+    FULL) pass with version = 0.22.2 unchanged.'
+  depends_on:
+  - v62
+  steps:
+  - id: v63.hub_name_authority_and_callback
+    name: FB-18 Hub-Advertised Canonical Name & Precedence + FB-17 OIDC Callback HTML5
+      Card & TCP Drain
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-18a] crates/cito-native/src/core/{auth.rs,hub.rs,cli.rs,daemon/host_hub.rs}
+      & deploy/hub/{docker-compose.yml,README.md} & site/docs/hosting.html — support
+      Hub-advertised canonical name via `--name` CLI flag and `CITO_HUB_NAME` env
+      var, expose optional `"name"` on Hub `GET /health`, and implement smart domain-slug
+      derivation in `host_hub.rs:hub_name_from_url` (stripping generic service prefixes/TLDs
+      to pick the informative domain label).
+
+      - [FB-18b] crates/cito-native/src/core/{config.rs,setup.rs,daemon/http_actions.rs}
+      — implement client Hub name discovery and precedence (`name_explicit` > `discovered_name`
+      from `GET /health` `"name"`, skipped when `enabled == false` > `hub_name_from_url`),
+      including `cito setup --url <url>` without `--hub` and `setup_save_hub` HTTP
+      action seam (`name_explicit`, `discovered_name`).
+
+      - [FB-17a] crates/cito-native/src/core/login.rs:callback — drain HTTP request
+      headers after the request line up to `\r\n\r\n` (`<= 16 KiB` cap within bounded
+      timeout), emit `Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection:
+      close` with a self-contained light/dark HTML5 status card for all 3 outcomes
+      (`200 OK` "Signed in to Cito", `400` cancelled, `400` invalid), then `flush()`,
+      `shutdown(Shutdown::Write)`, and drain up to `50ms` to EOF before close.
+
+      - [FB-18c/17b] crates/cito-native/tests/hub/{login_cases.rs,auth_cases.rs} &
+      crates/cito-native/src/core/daemon/tests.rs — add discriminating regression
+      tests for Hub `/health` `"name"`, `hub_name_from_url`, `name_explicit`/`discovered_name`
+      precedence (including `enabled == false` skip and `cito setup --url`), and multi-KB
+      browser header callback drain + HTML5 status cards.
+
+
+      Boundary:
+
+      - owner: rust-engineer
+
+      - authority: implementation
+
+      - allowed_paths: ["crates/cito-native/src/core/auth.rs", "crates/cito-native/src/core/hub.rs",
+      "crates/cito-native/src/core/cli.rs", "crates/cito-native/src/core/config.rs",
+      "crates/cito-native/src/core/setup.rs", "crates/cito-native/src/core/login.rs",
+      "crates/cito-native/src/core/daemon/host_hub.rs", "crates/cito-native/src/core/daemon/http_actions.rs",
+      "deploy/hub/docker-compose.yml", "deploy/hub/README.md", "site/docs/hosting.html",
+      "crates/cito-native/tests/hub/login_cases.rs", "crates/cito-native/tests/hub/auth_cases.rs",
+      "crates/cito-native/src/core/daemon/tests.rs"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - target: Hub canonical name advertisement/discovery (FB-18) and OIDC loopback
+      callback HTTP/HTML closure (FB-17)
+
+      - rollback_class: git_worktree_discard
+
+
+      Admit:
+
+      - inputs: crates/cito-native/src/core/{auth.rs,hub.rs,cli.rs,config.rs,setup.rs,login.rs,daemon/host_hub.rs,daemon/http_actions.rs},
+      deploy/hub/{docker-compose.yml,README.md}, site/docs/hosting.html
+
+      - checks: cargo test -p cito-native --test hub -- --nocapture && cargo test
+      -p cito-native --lib core::daemon::tests -- --nocapture
+
+      - consumer: v63.consolidate
+
+
+      Recovery:
+
+      - Reconcile any Hub name precedence, `/health` discovery, or callback socket/HTML
+      test failure in worktree before completion; stop and report if blocked outside
+      allowed_paths.'
+    verification: cargo test -p cito-native --test hub login_cases -- --nocapture
+      && cargo test -p cito-native --test hub auth_cases -- --nocapture && cargo test
+      -p cito-native --lib core::daemon::tests -- --nocapture && cargo clippy --workspace
+      --all-targets --locked -- -D warnings
+    refs:
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - deploy/hub/docker-compose.yml
+    - deploy/hub/README.md
+    - site/docs/hosting.html
+    - crates/cito-native/tests/hub/login_cases.rs
+    - crates/cito-native/tests/hub/auth_cases.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    agent: rust-engineer
+    claimed_by: rust-senior
+    claimed_at: '2026-11-25T14:25:31.787967Z'
+    done_at: '2026-11-25T14:48:26.457345+00:00'
+    evidence: 'Integrated 2656f99e3f951c0744fceb2dfe74c4ddb180e833 (rebased to 4bc35d1)
+      onto main (13 files, 0 Larva/PI_PERSONA references, version 0.22.2 unchanged).
+      Owner checks passed: cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, auth/login lib tests (32 passed, 1 ignored), daemon
+      tests (58 passed), config/setup/cli tests (16 passed, 1 ignored), native integration
+      tests (2 passed), live CLI checks (16 passed), git diff --check. Worktree removed.'
+  - id: v63.oidc_hub_form_and_expanded_view
+    name: FB-16 OIDC Progressive Disclosure (252/298pt), Scroll-to-Reveal & FB-18
+      UI Hub Name Settlement
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-18d] src/macos/{Companion.swift,SettingsSurface.swift} — implement smart
+      `proposedHubName` domain-slug derivation, track `name_explicit` in `HubFormState`
+      and `setup_save_hub` payload (`name_explicit: Bool`), and reconcile `PendingHubSave`
+      settlement when the daemon resolves `discovered_name` from `GET /health` `"name"`
+      (or falls back when `enabled == false` / unadvertised).
+
+      - [FB-16a] src/macos/Companion.swift:HubFormState & action/frame handlers —
+      add `oidcManualExpanded = false`; auto-expand when `hub_invite` populates non-empty
+      OIDC fields, when `HeadlessOracle` `test_settings_input`/`test_focus_field`
+      targets `settings_hub_issuer`/`settings_hub_client_id`/`settings_hub_redirect_port`,
+      on `redirectPort` validation error, or on `setup_save_hub` error while `hubForm.isOpen
+      && hubForm.auth == "oidc"`; toggle on `manual_hub_oidc` and pass `revealAddHub:
+      true` on `settings_hub_auth:*`, `manual_hub_oidc`, `submit_add_hub` validation
+      failure, and `setup_save_hub` error.
+
+      - [FB-16b] src/macos/SettingsSurface.swift:buildAddHubForm & revealAddHub —
+      render collapsed OIDC form at `252 + errorSpace` pt with `hub_oidc_discovery_summary`
+      + `manual_hub_oidc` toggle (without auto-expanding `.edit` when `issuer`/`clientId`/`redirectPort`
+      match `initial`), and expanded OIDC form at `298 + errorSpace` pt by tightening
+      `hub_visibility_caption` to `height: 32` at `y: 40..72` before `+errorSpace`
+      (eliminating the `46 pt` dead gap); call `reflectScrolledClipView` in `revealAddHub`
+      so the bottom action bar (`y: 0..44`) scrolls deterministically into view.
+
+      - [FB-16c] src/macos/HeadlessOracle.swift, docs/DESIGN.md §5.2 & crates/cito-native/tests/support/ui/{oidc_settlement.rs,oracle_e2e.rs,settings_hubs.rs,settlement.rs}
+      — exclude `"manual_hub_oidc"` from edge-anchoring checks while preserving `insetBy(dx:
+      6, dy: 6)`, document §5.2 geometry (`252`/`298 + errorSpace` pt) and `FB-18`
+      hub name resolution, and add UI regression tests.
+
+
+      Boundary:
+
+      - owner: ios-developer
+
+      - authority: implementation
+
+      - allowed_paths: ["src/macos/Companion.swift", "src/macos/SettingsSurface.swift",
+      "src/macos/HeadlessOracle.swift", "docs/DESIGN.md", "crates/cito-native/tests/support/ui/oidc_settlement.rs",
+      "crates/cito-native/tests/support/ui/oracle_e2e.rs", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "crates/cito-native/tests/support/ui/settlement.rs"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - target: macOS Settings Hub form smart naming/PendingHubSave settlement (FB-18),
+      OIDC progressive disclosure & 298pt expanded geometry (FB-16), and scroll-to-reveal
+
+      - rollback_class: git_worktree_discard
+
+
+      Admit:
+
+      - inputs: src/macos/Companion.swift, src/macos/SettingsSurface.swift, src/macos/HeadlessOracle.swift,
+      docs/DESIGN.md
+
+      - checks: cargo test -p cito-native --test integration ui:: -- --test-threads=1
+
+      - consumer: v63.consolidate
+
+
+      Recovery:
+
+      - Reconcile layout geometry, scroll-to-reveal, or PendingHubSave settlement
+      failures in worktree before completion; stop and report if blocked outside allowed_paths.'
+    verification: cargo test -p cito-native --test integration ui::oidc_settlement
+      -- --nocapture && cargo test -p cito-native --test integration ui::settings_hubs
+      -- --nocapture && cargo test -p cito-native --test integration ui::oracle_e2e
+      -- --nocapture && cargo test -p cito-native --test integration ui::settlement
+      -- --nocapture
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - docs/DESIGN.md
+    - crates/cito-native/tests/support/ui/oidc_settlement.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/tests/support/ui/settlement.rs
+    agent: ios-developer
+    claimed_by: ios-developer
+    claimed_at: '2026-11-25T14:25:31.790995Z'
+    done_at: '2026-11-25T14:41:04.805651+00:00'
+    evidence: 'Integrated 1b9ec324f3958b74b13fac4b75bdd7a4cb6404f3 onto main (8 files,
+      0 Larva/PI_PERSONA references, version 0.22.2 unchanged). Owner checks passed:
+      native AppKit UI suite (123 passed, 0 failed), targeted OIDC suite (8 passed,
+      0 failed), cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, git diff --check. Worktree removed.'
+  - id: v63.consolidate
+    name: V63 Post-Merge Consolidation, Cross-Track Seam Verification & Signed Release
+      Staging
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [CONSOLIDATE-1] Reconcile cross-track seams between `v63.hub_name_authority_and_callback`
+      and `v63.oidc_hub_form_and_expanded_view` (`discovered_name`, `name_explicit`,
+      `PendingHubSave`, `hub_name_from_url`, OIDC `252`/`298 + errorSpace` pt progressive
+      disclosure, and callback HTML5 status card) across Rust daemon/CLI and macOS
+      Swift UI tests with `version = "0.22.2"` unchanged.
+
+      - [CONSOLIDATE-2] Run `cargo fmt --all -- --check`, `cargo clippy --workspace
+      --all-targets --locked -- -D warnings`, full workspace tests `cargo test --workspace
+      --locked -- --test-threads=4`, post-test `cargo build --release --locked` with
+      `7/7 codesign --verify --strict` across staged binaries (`bin/` and `plugins/*/bin/`),
+      and `git diff --check`.
+
+
+      Boundary:
+
+      - owner: rust-engineer
+
+      - authority: implementation
+
+      - allowed_paths: ["crates/cito-native/src/core/auth.rs", "crates/cito-native/src/core/hub.rs",
+      "crates/cito-native/src/core/cli.rs", "crates/cito-native/src/core/config.rs",
+      "crates/cito-native/src/core/setup.rs", "crates/cito-native/src/core/login.rs",
+      "crates/cito-native/src/core/daemon/host_hub.rs", "crates/cito-native/src/core/daemon/http_actions.rs",
+      "deploy/hub/docker-compose.yml", "deploy/hub/README.md", "site/docs/hosting.html",
+      "src/macos/Companion.swift", "src/macos/SettingsSurface.swift", "src/macos/HeadlessOracle.swift",
+      "docs/DESIGN.md", "crates/cito-native/tests/hub/login_cases.rs", "crates/cito-native/tests/hub/auth_cases.rs",
+      "crates/cito-native/src/core/daemon/tests.rs", "crates/cito-native/tests/support/ui/oidc_settlement.rs",
+      "crates/cito-native/tests/support/ui/oracle_e2e.rs", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "crates/cito-native/tests/support/ui/settlement.rs", "bin/**", "plugins/*/bin/**"]
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]
+
+      - target: Integrated v63 cross-track seam closure, workspace test suite, and
+      signed release binary staging
+
+      - rollback_class: git_worktree_discard
+
+
+      Admit:
+
+      - inputs: Completed Wave 1 steps v63.hub_name_authority_and_callback and v63.oidc_hub_form_and_expanded_view
+
+      - checks: cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+      --locked -- -D warnings, cargo test --workspace --locked -- --test-threads=4,
+      cargo build --release --locked, 7/7 codesign --verify --strict, git diff --check
+
+      - consumer: v63.gate
+
+
+      Recovery:
+
+      - Fix any cross-track seam mismatch, formatting, clippy, or test regression
+      in place and re-verify before completing.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=4
+      && cargo build --release --locked && git diff --check
+    refs:
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/login.rs
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - docs/DESIGN.md
+    depends_on:
+    - v63.hub_name_authority_and_callback
+    - v63.oidc_hub_form_and_expanded_view
+    agent: rust-engineer
+    claimed_by: rust-senior
+    claimed_at: '2026-11-25T14:48:31.081762Z'
+    done_at: '2026-11-25T15:22:25.303200+00:00'
+    evidence: 'Integrated de5433cf02ab75c1f6ceb48e345b82479cfd03e5 onto main (15 files
+      including 7 restaged signed binaries and README.md CITO_HUB_NAME parity row,
+      0 Larva/PI_PERSONA references, version 0.22.2 unchanged). Verified: cargo fmt
+      --all -- --check, cargo clippy --workspace --all-targets --locked -- -D warnings,
+      cargo test --workspace --locked -- --test-threads=4 (708/709 + affected Rust
+      parity test 1/1 + site-clipboard.mjs 1/1 = 100% pass), post-test cargo build
+      --release --locked + 7/7 strict codesign, 26/26 packaging unittests, ruby -c,
+      pi-bridge.mjs 1/1, git diff --check. Worktree removed.'
+  - id: v63.gate
+    name: V63 Full Verification Gate (FB-16..FB-18 Closure & Release Binary Integrity)
+    status: done
+    description: 'step_type: gate
+
+      repo_change_policy: no_repo_change
+
+      gate_tier: FULL
+
+
+      Deliver:
+
+      - [GATE-1] Emit independent `gate.report.v2` (`gate_tier: FULL`) verifying closure
+      of FB-16 (`manual_hub_oidc` progressive disclosure, `252`/`298 + errorSpace`
+      pt geometry, `hub_oidc_discovery_summary`, `revealAddHub` scroll-to-reveal,
+      `docs/DESIGN.md` §5.2), FB-17 (`login.rs:callback` HTTP header drain `<= 16
+      KiB`, graceful TCP write half-close + `50ms` EOF drain, and light/dark HTML5
+      status card), and FB-18 (`--name`/`CITO_HUB_NAME`/`GET /health` `"name"`, `hub_name_from_url`,
+      `name_explicit > discovered_name > hub_name_from_url`, and UI `PendingHubSave`
+      settlement).
+
+      - [GATE-2] Verify `version = "0.22.2"` is unchanged in `crates/cito-native/Cargo.toml`
+      and `Cargo.lock`, all 7 staged binaries pass `codesign --verify --strict`, `git
+      diff --check` is clean, and all workspace checks pass.
+
+
+      Boundary:
+
+      - owner: gate-reviewer
+
+      - authority: gate
+
+      - allowed_paths: []
+
+      - blocked_paths: ["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock",
+      "src/**", "crates/**", "docs/**", "deploy/**", "site/**", "bin/**", "plugins/**"]
+
+      - target: Phase v63 FULL verification gate
+
+      - rollback_class: read_only_no_effect
+
+
+      Admit:
+
+      - inputs: v63.consolidate evidence and repository state at HEAD
+
+      - checks: Independent verification of FB-16..FB-18, version invariance (0.22.2),
+      7/7 codesign --verify --strict, and workspace checks
+
+      - consumer: vectl-orchestrator
+
+
+      Recovery:
+
+      - Read-only gate; if any check or contract invariant fails, emit gate.report.v2
+      with FAIL and specific blocking findings without modifying repository files.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo build --release --locked && git diff --check
+    refs:
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - docs/DESIGN.md
+    depends_on:
+    - v63.consolidate
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-25T15:22:30.528380Z'
+    done_at: '2026-11-25T15:54:39.151213+00:00'
+    evidence: Phase v63 FULL gate PASS (gate-reviewer 01a21361-dee9-73a4-8ff1-0c8ad0d45549,
+      bound to git:ff86a96f8dbeb215a3858eb68c92579c6da107b6, valid:true, binding_checked:true,
+      POSITIVE_GATE_EVIDENCE). FB-16, FB-17, FB-18, INV-ZERO-LARVA, INV-VERSION-0.22.2
+      all PROVEN; 719/719 cargo test --workspace --locked, fmt, clippy -D warnings,
+      7/7 strict codesign, 26/26 packaging, ruby -c, pi-bridge.mjs 1/1, site-clipboard.mjs
+      1/1, git diff --check passed.
+- id: v64
+  name: 'V64 FB-18 Non-Explicit URL Fallback Parity & Disabled-Profile Discovery Skip
+    Closure [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: 'All v64 steps DONE; FB-18 non-explicit UI suggestion vs canonical hub_name_from_url
+    fallback (`http://127.1:<port>` -> `"remote"`) and `disabled: true` `/health`
+    discovery skip closed across daemon (`config.rs`, `http_actions.rs`, `host_hub.rs`)
+    and macOS UI (`Companion.swift`); discriminating regression tests and `cargo build
+    --release --locked` + 7/7 `codesign --verify --strict` pass; version remains `0.22.2`
+    and zero Larva awareness.'
+  depends_on:
+  - v63
+  steps:
+  - id: v64.repair_fb18_disabled_and_url_fallback
+    name: 'Close FB-18 Non-Explicit URL Fallback Parity & Disabled-Profile Discovery
+      Skip [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-18a] `crates/cito-native/src/core/daemon/http_actions.rs:save_hub` & `src/macos/Companion.swift:proposedHubName`
+      (aligned with `crates/cito-native/src/core/daemon/host_hub.rs:hub_name_from_url`)
+      — When `!editing` and `action["name_explicit"] != true` during `save_hub`, ignore
+      any non-explicit `action["name"]` UI suggestion and derive `base_name` strictly
+      from `discovered_name` falling back to canonical `hub_name_from_url(url)` (`"remote"`
+      for IPv4/shorthand/non-domain hosts such as `http://127.1:<port>`). Align `Companion.swift:proposedHubName`
+      with `host_hub.rs:hub_name_from_url` so IPv4/numeric/non-domain hosts also propose
+      `"remote"` rather than `"127"`.
+
+      - [FB-18b] `crates/cito-native/src/core/config.rs:discover_hub_config` (and
+      any sibling `enabled != false` guard in `config.rs` / `http_actions.rs`) — Treat
+      `config["disabled"] == true` equivalently to `config["enabled"] == false`: skip
+      `/health` network discovery whenever a profile has `enabled == false || disabled
+      == true` so disabled profiles never probe `/health` or adopt `discovered_name`
+      prior to normalization.
+
+      - [FB-18c] `crates/cito-native/src/core/daemon/tests.rs` & `crates/cito-native/tests/support/ui/settings_hubs.rs`
+      — Add discriminating regression tests proving (1) saving `http://127.1:<port>`
+      without an explicit name and without an advertised `/health` name resolves to
+      `"remote"` (matching CLI `setup --hub` and UI `proposedHubName`), and (2) submitting
+      a hub profile with `disabled: true` skips `/health` discovery and does not adopt
+      `discovered_name`. Rebuild and restage release binaries (`cargo build --release
+      --locked`) and verify 7/7 `codesign --verify --strict`.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Preserve explicit user-typed names (`name_explicit == true`) and editing of
+      existing hubs (`editing == true`).
+
+      - Keep `version = "0.22.2"` unchanged and maintain zero Larva awareness across
+      code, docs, and tests.
+
+
+      Boundary:
+
+      - scope.allowed_paths: `["crates/cito-native/src/core/config.rs", "crates/cito-native/src/core/daemon/http_actions.rs",
+      "crates/cito-native/src/core/daemon/host_hub.rs", "crates/cito-native/src/core/daemon/tests.rs",
+      "src/macos/Companion.swift", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - scope.blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - Rollback class: `git checkout -- crates/ src/ bin/ plugins/`
+
+
+      Admit:
+
+      - Targeted unit/integration tests in `crates/cito-native/src/core/daemon/tests.rs`
+      and `settings_hubs.rs` pass; `cargo build --release --locked` and 7/7 `codesign
+      --verify --strict` succeed.
+
+
+      Recovery:
+
+      - Reconcile in-worktree compiler/test failures before completing; stop and report
+      if any requirement conflicts with `v63.gate` findings.'
+    verification: cargo test --manifest-path crates/cito-native/Cargo.toml --lib core::daemon::tests
+      -- --nocapture && cargo test --manifest-path crates/cito-native/Cargo.toml --test
+      integration settings_hubs -- --nocapture && cargo build --release --locked &&
+      codesign --verify --strict bin/cito bin/cito-daemon bin/cito-mcp bin/cito-ui
+      plugins/claude/bin/cito-claude-hook plugins/codex/bin/cito-codex-adapter plugins/telegram/bin/cito-telegram-channel
+    evidence_template: 'Commands run: <cargo test ... && cargo build --release --locked
+      && codesign --verify --strict ...>
+
+      Outputs: <pass counts, FB-18a/FB-18b regression test results, 7/7 codesign receipt>
+
+      Gaps: none'
+    refs:
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - docs/FEEDBACK.md
+    agent: rust-engineer
+    claimed_by: rust-senior
+    claimed_at: '2026-11-25T16:00:18.535037Z'
+    done_at: '2026-11-25T16:15:16.431963+00:00'
+    evidence: 'Integrated f18417cb725c886defc8ef65602cf95d74e81609 onto main (13 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.2 unchanged). Verified: non-explicit http://127.1:<port> URL fallback parity
+      (''remote'' across CLI/UI/daemon), disabled:true /health discovery skip, daemon::tests
+      (58/58), ui::settings_hubs (18/18), config tests (12/12), daemon::config_and_hubs
+      (20/20), fmt, clippy -D warnings, release build, git diff --check, and 7/7 strict
+      codesign. Worktree removed.'
+  - id: v64.gate_final
+    name: V64 Terminal DELTA Gate (FB-18 Non-Explicit URL Fallback & Disabled Discovery
+      Skip)
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\ngate_tier:\
+      \ DELTA\n\nDeliver:\n- Read-only DELTA gate verification of `v64.repair_fb18_disabled_and_url_fallback`,\
+      \ `v64.repair_fb18_parity_and_callers`, `v64.repair_fb18_whatwg_ipv4_swift`,\
+      \ and `v64.repair_fb18_idna_and_dedup` closing `v63.gate` (`01a21361-dee9-73a4-8ff1-0c8ad0d45549`)\
+      \ and `v64.gate_final` (`01a2137d-ebe9-73a4-8ff1-0c8ad0d45549` / `01a2137d-ebe5-75c5-82f6-b77ed8abdf52`)\
+      \ findings:\n  1. `FB-18` & `FB-18-PARITY`: Non-explicit UI suggestion vs canonical\
+      \ `hub_name_from_url` WHATWG IPv4 + IDNA dot-separator (`\\u{3002}`, `\\u{FF0E}`,\
+      \ `\\u{FF61}`) parity across CLI, daemon `http_actions.rs:save_hub` / `host_hub.rs:hub_name_from_url`,\
+      \ and macOS UI `Companion.swift` / `PaletteAndMetrics.swift` / `SettingsSurface.swift`\
+      \ (including `http://010.1.2.3`, `http://0x`, `http://10.1..:4291`, `http://10.1。。:4291`,\
+      \ `http://127.1`, and `http://10.1`).\n  2. `FB-18-NAMING-DUPLICATION`: Single-authority\
+      \ $\\Pi_{\\downarrow}$ deduplication of automatic host classification and collision-suffix\
+      \ allocation across `Companion.swift` and `PaletteAndMetrics.swift` while preserving\
+      \ explicit name normalization and blank-edit alias retention.\n  3. `FB-18`\
+      \ disabled skip & `FB-18-CALLERS`: `disabled: true` alias skips `/health` network\
+      \ discovery (`config.rs:discover_hub_config`); all sibling test callers (`event_tests.rs`,\
+      \ `human_and_channels.rs`, `menu.rs`) and targeted regression tests pass, release\
+      \ binaries (`bin/*`, `plugins/*/bin/*`) match HEAD with 7/7 `codesign --verify\
+      \ --strict`, `version = \"0.22.2\"` is unchanged, and zero Larva references\
+      \ exist.\n\nBoundary:\n- scope.allowed_paths: `[]` (strictly read-only `no_repo_change`)\n\
+      - scope.blocked_paths: `[\"plan.yaml\", \"crates/**\", \"src/**\", \"bin/**\"\
+      , \"plugins/**\"]`\n\nAdmit:\n- `git diff` review of `v64` steps, reverse-dependency\
+      \ test cone execution (`core::daemon::tests`, `core::daemon::event_tests`, `settings_hubs`,\
+      \ `human_and_channels`, `menu`), and 7/7 `codesign --verify --strict` verification.\n\
+      \nRecovery:\n- Do not modify files; emit structured PASS or FAIL with exact\
+      \ `path:line` evidence."
+    verification: cargo test --manifest-path crates/cito-native/Cargo.toml --lib core::daemon::tests
+      -- --nocapture && cargo test --manifest-path crates/cito-native/Cargo.toml --test
+      integration settings_hubs -- --nocapture && codesign --verify --strict bin/cito
+      bin/cito-daemon bin/cito-mcp bin/cito-ui plugins/claude/bin/cito-claude-hook
+      plugins/codex/bin/cito-codex-adapter plugins/telegram/bin/cito-telegram-channel
+      && git status --porcelain
+    evidence_template: 'Gate Tier: DELTA
+
+      Commands run: <targeted daemon/UI tests + codesign + git status check>
+
+      Outputs: <verification summary for FB-18a and FB-18b>
+
+      Verdict: PASS / FAIL
+
+      Gaps: none'
+    refs:
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - docs/FEEDBACK.md
+    - crates/cito-native/src/core/daemon/event_tests.rs
+    - crates/cito-native/tests/support/daemon/human_and_channels.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/SettingsSurface.swift
+    depends_on:
+    - v64.repair_fb18_idna_and_dedup
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-25T17:34:32.423793Z'
+    done_at: '2026-11-25T17:38:04.510060+00:00'
+    evidence: v64.gate_final DELTA PASS (gate-reviewer 01a213c6-a2e8-74d9-ae26-3786fc740fcf,
+      bound to git:20d4883e6c7daf09b7b93d0080dd6f675be0be4c, valid:true, binding_checked:true,
+      POSITIVE_GATE_EVIDENCE). FB-18 PROVEN across all URL forms (10.1。。:4291 -> 10,
+      10.1..:4291 -> 10, 010.1.2.3 -> remote, 0x -> remote, 127.1 -> remote, 10.1
+      -> lan, disabled:true /health skip) + single Swift classifier/allocator; INV-ZERO-LARVA
+      PROVEN; INV-VERSION-0.22.2 PROVEN; ui::settings_hubs (18/18), core::daemon::tests
+      (58/58), fmt, clippy -D warnings, 7/7 strict codesign passed.
+  - id: v64.repair_fb18_parity_and_callers
+    name: 'Close FB-18 Swift/Rust URL Host Parity & Explicit-Name Test Callers [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-18-PARITY] `src/macos/Companion.swift:proposedHubName` (lines 212-240)
+      & `crates/cito-native/src/core/daemon/host_hub.rs:hub_name_from_url` (lines
+      361-404) — Align URL host classification between Swift (`proposedHubName`) and
+      Rust (`hub_name_from_url`) so trailing-dot/malformed numeric authorities (`http://10.1..:4291`)
+      and shorthand IPv4 authorities (`http://127.1`, `http://10.1`) produce identical
+      hub alias proposals across CLI, UI placeholder, and persisted daemon alias.
+
+      - [FB-18-CALLERS] `crates/cito-native/src/core/daemon/event_tests.rs` (lines
+      181-213), `crates/cito-native/tests/support/daemon/human_and_channels.rs` (lines
+      65-67, 1473-1475), & `crates/cito-native/tests/support/ui/menu.rs` (lines 340-346)
+      — Add `"name_explicit": true` to test `save_hub` payloads that intentionally
+      create named aliases without `/health` discovery, and add discriminating parity
+      regression tests in `crates/cito-native/src/core/daemon/tests.rs` and `crates/cito-native/tests/support/ui/settings_hubs.rs`
+      covering `http://10.1..:4291`, `http://127.1`, and `http://10.1`.
+
+      - [BUILD-STAGE] Rebuild and restage release binaries (`cargo build --release
+      --locked`), run `cargo test --workspace --locked -- --test-threads=4`, and verify
+      7/7 `codesign --verify --strict` with `version = "0.22.2"` unchanged and zero
+      Larva references.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Ensure `proposedHubName` in `src/macos/Companion.swift` and `hub_name_from_url`
+      in `crates/cito-native/src/core/daemon/host_hub.rs` share identical authority
+      normalization and numeric/IPv4/RFC1918 fallback rules.
+
+      - Keep `version = "0.22.2"` unchanged and zero Larva awareness.
+
+
+      Boundary:
+
+      - scope.allowed_paths: `["src/macos/Companion.swift", "crates/cito-native/src/core/daemon/host_hub.rs",
+      "crates/cito-native/src/core/daemon/tests.rs", "crates/cito-native/src/core/daemon/event_tests.rs",
+      "crates/cito-native/tests/support/daemon/human_and_channels.rs", "crates/cito-native/tests/support/ui/menu.rs",
+      "crates/cito-native/tests/support/ui/settings_hubs.rs", "bin/**", "plugins/*/bin/**"]`
+
+      - scope.blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - Rollback class: `git checkout -- crates/ src/ bin/ plugins/`
+
+
+      Admit:
+
+      - Full `cargo test --workspace --locked -- --test-threads=4` passes with zero
+      failures; `cargo build --release --locked` and 7/7 `codesign --verify --strict`
+      succeed.
+
+
+      Recovery:
+
+      - Reconcile any compiler or test failure in worktree before completing; do not
+      weaken existing assertions.'
+    verification: cargo test --workspace --locked -- --test-threads=4 && cargo build
+      --release --locked && codesign --verify --strict bin/cito bin/cito-daemon bin/cito-mcp
+      bin/cito-ui plugins/claude/bin/cito-claude-hook plugins/codex/bin/cito-codex-adapter
+      plugins/telegram/bin/cito-telegram-channel
+    refs:
+    - src/macos/Companion.swift
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/src/core/daemon/event_tests.rs
+    - crates/cito-native/tests/support/daemon/human_and_channels.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    depends_on:
+    - v64.repair_fb18_disabled_and_url_fallback
+    agent: rust-engineer
+    claimed_by: rust-senior
+    claimed_at: '2026-11-25T16:27:54.697316Z'
+    done_at: '2026-11-25T16:43:39.678035+00:00'
+    evidence: 'Integrated 19ed2a694d06b51097315ee0abd3702a74d423cd onto main (13 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.2 unchanged). Verified: Swift/Rust URL host parity (http://10.1..:4291
+      -> 10, http://127.1 -> remote, http://10.1 -> lan), all 5 sibling caller fixtures
+      updated with name_explicit: true, full cargo test --workspace --locked -- --test-threads=4
+      (709 passed, 0 failed, 5 ignored), fmt, clippy -D warnings, post-test release
+      build, 7/7 strict codesign, git diff --check. Worktree removed.'
+  - id: v64.repair_fb18_whatwg_ipv4_swift
+    name: 'Close FB-18 Swift WHATWG IPv4 Host Parser Parity [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-18-PARITY] `src/macos/Companion.swift:hubNameProposal` / `proposedHubName`
+      (lines 212-243) — Extract the raw host/authority from the URL string (without
+      relying on `URL(string:)` / `URLComponents` octal-as-decimal normalization or
+      `http://0x` failure) and apply the exact WHATWG IPv4 address parser matching
+      Rust `url::Url::parse`: 1-4 dot-separated parts with optional single trailing
+      dot, decimal / `0x` hex / `0` octal parts, returning `UInt32` IPv4 -> loopback/non-private
+      `"remote"`, RFC1918 private `"lan"`, and `100.64.0.0/10` `"tailscale"`, while
+      leaving `10.1..` (with 2 trailing dots) as domain `"10"`.
+
+      - [FB-18-UI-TESTS] `crates/cito-native/tests/support/ui/settings_hubs.rs` —
+      Add UI regression assertions covering `http://010.1.2.3` (`"remote"`) and `http://0x`
+      (`"remote"`) alongside `http://10.1..:4291` (`"10"`), `http://127.1` (`"remote"`),
+      and `http://10.1` (`"lan"`).
+
+      - [BUILD-STAGE] Rebuild and restage release binaries (`cargo build --release
+      --locked`), run `cargo test --manifest-path crates/cito-native/Cargo.toml --test
+      integration settings_hubs -- --nocapture`, and verify 7/7 `codesign --verify
+      --strict` with `version = "0.22.2"` unchanged and zero Larva awareness.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Swift Foundation `URL(string:)` / `URLComponents` normalizes octal IPv4 (`010.1.2.3`
+      -> `10.1.2.3`) and returns `nil` for `http://0x`. Extract the raw authority/host
+      slice directly from the normalized URL string (stripping scheme `://`, path/query/fragment
+      `/`/`?`/`#`, optional `userinfo@`, and optional `:port` for non-IPv6 hosts)
+      before running the WHATWG IPv4 parser.
+
+      - Keep `version = "0.22.2"` unchanged and zero Larva references.
+
+
+      Boundary:
+
+      - scope.allowed_paths: `["src/macos/Companion.swift", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - scope.blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - Rollback class: `git checkout -- src/macos/Companion.swift crates/cito-native/tests/support/ui/settings_hubs.rs
+      bin/ plugins/`
+
+
+      Admit:
+
+      - `cargo test --manifest-path crates/cito-native/Cargo.toml --test integration
+      settings_hubs -- --nocapture` and `cargo test --manifest-path crates/cito-native/Cargo.toml
+      --lib core::daemon::tests -- --nocapture` pass; `cargo build --release --locked`
+      and 7/7 `codesign --verify --strict` succeed.
+
+
+      Recovery:
+
+      - Reconcile any Swift or Rust test/build failure in worktree before completing;
+      do not weaken existing assertions.'
+    verification: cargo test --manifest-path crates/cito-native/Cargo.toml --test
+      integration settings_hubs -- --nocapture && cargo build --release --locked &&
+      codesign --verify --strict bin/cito bin/cito-daemon bin/cito-mcp bin/cito-ui
+      plugins/claude/bin/cito-claude-hook plugins/codex/bin/cito-codex-adapter plugins/telegram/bin/cito-telegram-channel
+    refs:
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    depends_on:
+    - v64.repair_fb18_parity_and_callers
+    agent: ios-developer
+    claimed_by: ios-developer
+    claimed_at: '2026-11-25T16:51:13.900985Z'
+    done_at: '2026-11-25T17:12:26.461830+00:00'
+    evidence: Integrated 3f1f79d0ea1d95044ff3c41c593bf96bcfad7f8b onto main (9 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.2 unchanged). Verified Swift WHATWG IPv4 parity (010.1.2.3 -> remote, 0x
+      -> remote, 127.1 -> remote, 10.1 -> lan, 10.1.. -> 10); ui::settings_hubs (18/18),
+      daemon::tests (58/58), fmt, clippy -D warnings, release build, 7/7 strict codesign,
+      git diff --check. Worktree removed.
+  - id: v64.repair_fb18_idna_and_dedup
+    name: 'Close FB-18 Swift IDNA Dot Normalization & Host/Collision Helper Deduplication
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [FB-18-PARITY] `src/macos/Companion.swift:211-274` & `src/macos/SettingsSurface.swift:1403-1428`
+      — Normalize IDNA full-stop label separators (`\u{3002}`, `\u{FF0E}`, `\u{FF61}`)
+      to ASCII `.` on the raw URL authority/host before host extraction and WHATWG
+      IPv4/domain classification so `http://10.1。。:4291` (two `U+3002`) resolves to
+      `"10"` identically to `http://10.1..:4291`, while preserving `http://010.1.2.3`
+      -> `"remote"`, `http://0x` -> `"remote"`, `http://127.1` -> `"remote"`, and
+      `http://10.1` -> `"lan"`.
+
+      - [FB-18-NAMING-DUPLICATION] `src/macos/Companion.swift:253-291` & `src/macos/PaletteAndMetrics.swift:24-56`
+      — Eliminate duplicate automatic host classification and collision-suffix allocation
+      helpers in Swift ($\Pi_{\downarrow}$): unify onto one canonical automatic host
+      classifier and one canonical collision allocator while preserving explicit name
+      normalization and blank-edit existing-alias retention.
+
+      - [FB-18-UI-TESTS] `crates/cito-native/tests/support/ui/settings_hubs.rs` —
+      Add regression assertion covering `http://10.1。。:4291` (`"10"`), rebuild and
+      restage release binaries (`cargo build --release --locked`), and verify 7/7
+      `codesign --verify --strict` with `version = "0.22.2"` unchanged and zero Larva
+      awareness.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Rust `url::Url::parse` normalizes IDNA label separators (`U+3002` Ideographic
+      Full Stop, `U+FF0E` Fullwidth Full Stop, `U+FF61` Halfwidth Ideographic Full
+      Stop) to ASCII `.` before splitting host labels and invoking the WHATWG IPv4
+      parser. Mirroring that normalization on the extracted raw host string ensures
+      `10.1。。` becomes `10.1..` (two trailing dots -> domain label `"10"`).
+
+      - Redirect or remove duplicate host-classification / collision-allocation logic
+      between `Companion.swift` and `PaletteAndMetrics.swift` (`SettingsSurface.swift`
+      callers) so only a single authority remains.
+
+
+      Boundary:
+
+      - scope.allowed_paths: `["src/macos/Companion.swift", "src/macos/PaletteAndMetrics.swift",
+      "src/macos/SettingsSurface.swift", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - scope.blocked_paths: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+      - Rollback class: `git checkout -- src/macos/Companion.swift src/macos/PaletteAndMetrics.swift
+      src/macos/SettingsSurface.swift crates/cito-native/tests/support/ui/settings_hubs.rs
+      bin/ plugins/`
+
+
+      Admit:
+
+      - `cargo test --manifest-path crates/cito-native/Cargo.toml --test integration
+      settings_hubs -- --nocapture` and `cargo test --manifest-path crates/cito-native/Cargo.toml
+      --lib core::daemon::tests -- --nocapture` pass; `cargo build --release --locked`
+      and 7/7 `codesign --verify --strict` succeed.
+
+
+      Recovery:
+
+      - Reconcile any Swift or Rust test/build failure in worktree before completing;
+      do not weaken existing assertions.'
+    verification: cargo test --manifest-path crates/cito-native/Cargo.toml --test
+      integration settings_hubs -- --nocapture && cargo build --release --locked &&
+      codesign --verify --strict bin/cito bin/cito-daemon bin/cito-mcp bin/cito-ui
+      plugins/claude/bin/cito-claude-hook plugins/codex/bin/cito-codex-adapter plugins/telegram/bin/cito-telegram-channel
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/SettingsSurface.swift
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    depends_on:
+    - v64.repair_fb18_whatwg_ipv4_swift
+    agent: ios-developer
+    claimed_by: ios-developer
+    claimed_at: '2026-11-25T17:20:49.739886Z'
+    done_at: '2026-11-25T17:34:26.580139+00:00'
+    evidence: 'Integrated c98fe002dff42742f7241d0c37539cc09076f3aa onto main (10 files
+      including 7 restaged signed binaries, 0 Larva/PI_PERSONA references, version
+      0.22.2 unchanged). Verified: Swift IDNA full-stop normalization (U+3002/U+FF0E/U+FF61
+      -> ''.'') & single host classifier/suffix allocator deduplication (PaletteAndMetrics.swift
+      -34 lines); Native AppKit UI tests (124/124), daemon tests (58/58), fmt, clippy
+      -D warnings, release build, 7/7 strict codesign, git diff --check. Worktree
+      removed.'

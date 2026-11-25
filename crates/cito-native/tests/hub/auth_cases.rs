@@ -48,11 +48,13 @@ fn oidc_network_errors_redact_discovery_paths_and_jwks_query_credentials() {
 }
 
 #[test]
-fn health_exposes_only_oidc_discovery_metadata() {
+fn health_advertises_names_without_disclosing_credentials() {
     for (mode, token) in [("none", None), ("token", Some("secret".into()))] {
         let auth = HubAuth::new(mode, token, None, None).unwrap();
         assert!(auth.health().get("oidc").is_none());
         assert_eq!(auth.health()["auth_mode"], mode);
+        assert!(auth.health().get("name").is_none());
+        assert!(auth.health().get("token").is_none());
     }
     let mut auth = HubAuth::new(
         "oidc",
@@ -65,6 +67,17 @@ fn health_exposes_only_oidc_discovery_metadata() {
         auth.health()["oidc"],
         json!({"issuer":"https://id.example.com","client_id":"client"})
     );
+    auth.advertise_name(None).unwrap();
+    assert_eq!(auth.health()["name"], "example");
+    auth.advertise_name(Some("Office Mac")).unwrap();
+    assert_eq!(auth.health()["name"], "office-mac");
+    for raw in ["!!!", "Local"] {
+        assert!(auth
+            .advertise_name(Some(raw))
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+        assert_eq!(auth.health()["name"], "office-mac");
+    }
     auth.redirect_port = Some(0);
     assert!(auth.health()["oidc"].get("redirect_port").is_none());
     auth.redirect_port = Some(65535);
@@ -622,6 +635,7 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
         "Clock leeway admits authentication, but must not extend SSE lifetime"
     );
     let auth = HubAuth {
+        name: None,
         mode: "oidc".into(),
         redirect_port: None,
         token: None,
@@ -682,6 +696,7 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
             "127.0.0.1",
             0,
             HubAuth {
+                name: None,
                 mode: "oidc".into(),
                 redirect_port: None,
                 token: None,

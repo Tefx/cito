@@ -700,6 +700,94 @@ fn scopes_and_cache_identity_validation_are_hub_local() {
     );
 }
 #[test]
+fn callback_drains_browser_headers_and_delivers_each_status_card_to_eof() {
+    for (query, status, title, heading, detail) in [
+        (
+            "state=expected&code=ok",
+            200,
+            "Signed In",
+            "Signed in to Cito",
+            "Cito login complete. You may close this window.",
+        ),
+        (
+            "state=expected&error=access_denied",
+            400,
+            "Sign-In Cancelled",
+            "Sign-in was cancelled",
+            "Sign In…",
+        ),
+        (
+            "state=stale&code=ok",
+            400,
+            "Invalid Callback",
+            "Sign-in link is no longer valid",
+            "Invalid callback",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut browser = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let server = std::thread::spawn(move || {
+            let outcome = callback(
+                &mut stream,
+                "expected",
+                &Deadline {
+                    at: Instant::now() + Duration::from_secs(2),
+                    cancelled: &|| false,
+                    cancellation_fd: None,
+                },
+            );
+            assert_eq!(
+                stream.read(&mut [0; 1]).unwrap(),
+                0,
+                "undrained request bytes"
+            );
+            outcome
+        });
+        let nl = if status == 200 { "\n" } else { "\r\n" };
+        write!(
+            browser,
+            "GET /callback?{query} HTTP/1.1{nl}Host: localhost{nl}Cookie: fixture={}{nl}{nl}",
+            "x".repeat(12 * 1024)
+        )
+        .unwrap();
+        browser.write_all(&[b'x'; 4096]).unwrap();
+        browser.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        browser.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with(&format!("HTTP/1.1 {status} ")));
+        for header in [
+            "Content-Type: text/html; charset=utf-8",
+            "Cache-Control: no-store",
+            "Connection: close",
+            &format!("Content-Length: {}", body.len()),
+        ] {
+            assert!(headers.lines().any(|line| line == header));
+        }
+        assert!(body.starts_with("<!DOCTYPE html>"));
+        for part in [
+            &format!("<title>Cito — {title}</title>"),
+            heading,
+            detail,
+            "prefers-color-scheme: dark",
+            "<svg",
+        ] {
+            assert!(body.contains(part), "missing {part}");
+        }
+        let outcome = server.join().unwrap();
+        match title {
+            "Signed In" => assert_eq!(outcome.unwrap().as_deref(), Some("ok")),
+            "Sign-In Cancelled" => assert!(outcome.unwrap_err().contains("cancelled")),
+            _ => assert_eq!(outcome.unwrap(), None),
+        }
+    }
+}
+
+#[test]
 fn overall_deadline_includes_discovery_token_and_jwks() {
     for stall in [
         "/.well-known/openid-configuration",

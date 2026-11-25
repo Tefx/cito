@@ -66,7 +66,8 @@ pub(super) fn host_hub_server_config(
             "INVALID_INPUT: Host hub token cannot contain whitespace or control characters".into(),
         );
     }
-    let auth = HubAuth::new(mode, host["token"].as_str().map(str::to_string), None, None)?;
+    let mut auth = HubAuth::new(mode, host["token"].as_str().map(str::to_string), None, None)?;
+    auth.advertise_name(None)?;
     Ok(Some((bind, port, Arc::new(auth))))
 }
 
@@ -357,14 +358,33 @@ fn validate_endpoints(
     Ok(())
 }
 
-pub(super) fn hub_name_from_url(raw: &str) -> String {
-    let candidate = url::Url::parse(raw.trim())
+pub(crate) fn domain_slug(host: &str) -> Option<String> {
+    let host = host.trim_end_matches('.');
+    let mut labels = host
+        .split('.')
+        .filter(|s| s.bytes().any(|b| b.is_ascii_alphanumeric()))
+        .peekable();
+    let mut label = labels.next()?;
+    if !host.ends_with(".local") && !host.ends_with(".ts.net") {
+        while matches!(
+            label,
+            "cito" | "auth" | "sso" | "id" | "login" | "internal" | "corp" | "www"
+        ) {
+            let Some(next) = labels.next() else { break };
+            if labels.peek().is_none() {
+                break;
+            }
+            label = next;
+        }
+    }
+    Some(normalize_slug(label))
+}
+
+pub(crate) fn hub_name_from_url(raw: &str) -> String {
+    url::Url::parse(raw.trim())
         .ok()
         .and_then(|url| match url.host()? {
-            url::Host::Domain(host) => host
-                .split('.')
-                .find(|label| label.chars().any(|c| c.is_ascii_alphanumeric()))
-                .map(str::to_owned),
+            url::Host::Domain(host) => domain_slug(host),
             url::Host::Ipv4(ip) => {
                 let octets = ip.octets();
                 Some(
@@ -380,8 +400,7 @@ pub(super) fn hub_name_from_url(raw: &str) -> String {
             }
             _ => None,
         })
-        .unwrap_or_else(|| "remote".into());
-    normalize_slug(&candidate)
+        .unwrap_or_else(|| "remote".into())
 }
 
 pub(super) fn parse_hub_invite(raw: &str) -> Result<Value, String> {

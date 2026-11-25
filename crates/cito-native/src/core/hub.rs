@@ -3655,6 +3655,7 @@ extern "C" fn hub_signal(_: libc::c_int) {
 }
 fn cli_setting(flag: &str) -> &str {
     match flag {
+        "--name" => "CITO_HUB_NAME",
         "--auth" => "CITO_AUTH_MODE",
         "--port" => "CITO_HUB_PORT",
         "--bind" => "CITO_HUB_BIND",
@@ -3672,18 +3673,8 @@ fn cli_options(args: &[String]) -> Result<HashMap<String, String>, String> {
     while i < args.len() {
         let arg = &args[i];
         let key = arg.split_once('=').map(|(key, _)| key).unwrap_or(arg);
-        if ![
-            "--port",
-            "--bind",
-            "--auth",
-            "--token",
-            "--issuer",
-            "--client-id",
-            "--redirect-port",
-            "--data-dir",
-        ]
-        .contains(&key)
-        {
+        let setting = cli_setting(key);
+        if setting == key {
             return Err(if arg.starts_with('-') {
                 format!("Unknown flag: {arg}")
             } else {
@@ -3691,12 +3682,14 @@ fn cli_options(args: &[String]) -> Result<HashMap<String, String>, String> {
             });
         }
         let value = super::cli_value::read(args, &mut i, key, true)
-            .map_err(|_| format!("Missing value for {key} ({})", cli_setting(key)))?
+            .map_err(|_| format!("Missing value for {key} ({setting})"))?
             .to_owned();
         if value.trim().is_empty() {
-            return Err(format!("{key} ({}) must not be empty", cli_setting(key)));
+            return Err(format!(
+                "INVALID_INPUT: {key} ({setting}) must not be empty"
+            ));
         }
-        opts.insert(key.into(), value);
+        opts.insert(setting.into(), value);
         i += 1;
     }
     Ok(opts)
@@ -3709,13 +3702,13 @@ pub fn run_hub_cli(args: &[String]) {
 }
 fn hub_cli(args: &[String]) -> Result<(), String> {
     let opts = cli_options(args)?;
-    let value = |flag: &str, env: &str| opts.get(flag).cloned().or_else(|| env_value(env));
-    let mode = value("--auth", "CITO_AUTH_MODE").unwrap_or_else(|| "none".into());
-    let port = value("--port", "CITO_HUB_PORT")
+    let value = |env: &str| opts.get(env).cloned().or_else(|| env_value(env));
+    let mode = value("CITO_AUTH_MODE").unwrap_or_else(|| "none".into());
+    let port = value("CITO_HUB_PORT")
         .unwrap_or_else(|| "4291".into())
         .parse::<u16>()
         .map_err(|_| "CITO_HUB_PORT must be an integer in 0..65535")?;
-    let bind = value("--bind", "CITO_HUB_BIND").unwrap_or_else(|| {
+    let bind = value("CITO_HUB_BIND").unwrap_or_else(|| {
         if mode == "none" {
             "127.0.0.1".into()
         } else {
@@ -3727,11 +3720,12 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
     }
     let mut auth = HubAuth::new(
         &mode,
-        value("--token", "CITO_HUB_TOKEN"),
-        value("--issuer", "CITO_OIDC_ISSUER"),
-        value("--client-id", "CITO_OIDC_CLIENT_ID"),
+        value("CITO_HUB_TOKEN"),
+        value("CITO_OIDC_ISSUER"),
+        value("CITO_OIDC_CLIENT_ID"),
     )?;
-    auth.redirect_port = value("--redirect-port", "CITO_OIDC_REDIRECT_PORT")
+    auth.advertise_name(value("CITO_HUB_NAME").as_deref())?;
+    auth.redirect_port = value("CITO_OIDC_REDIRECT_PORT")
         .map(|raw| {
             raw.parse::<u16>()
                 .ok()
@@ -3739,7 +3733,7 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
                 .ok_or("INVALID_INPUT: redirect port must be an integer in 1..65535")
         })
         .transpose()?;
-    let raw = value("--data-dir", "CITO_HUB_DATA_DIR").unwrap_or_else(|| "~/.cito/hub".into());
+    let raw = value("CITO_HUB_DATA_DIR").unwrap_or_else(|| "~/.cito/hub".into());
     let home = env_value("HOME").unwrap_or_else(|| ".".into());
     let data_dir = super::plugins::expand_home_dir(&raw, "CITO_HUB_DATA_DIR", Some(&home))?;
     let engine = HubEngine::open_with_auth_mode(&data_dir, &mode)?;
@@ -3753,14 +3747,10 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
         &bind
     };
     let url = format!("http://{host}:{}", server.port());
-    let join = match mode.as_str() {
-        "token" => format!("cito setup --hub work --url {url} --auth token --token <token>"),
-        "oidc" => format!(
-            "cito setup --hub work --url {url} --auth oidc --issuer {} --client-id {}",
-            value("--issuer", "CITO_OIDC_ISSUER").unwrap_or_default(),
-            value("--client-id", "CITO_OIDC_CLIENT_ID").unwrap_or_default()
-        ),
-        _ => format!("cito setup --hub personal --url {url}"),
+    let join = if mode == "token" {
+        format!("cito setup --url {url} --auth token --token <token>")
+    } else {
+        format!("cito setup --url {url}")
     };
     eprintln!("cito hub: join with: {join}");
     // The listener and signal handler share the same level-triggered shutdown wake.

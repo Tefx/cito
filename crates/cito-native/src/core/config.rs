@@ -6,13 +6,18 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+pub(super) fn hub_enabled(cfg: &Value) -> bool {
+    cfg["enabled"] != false && cfg["disabled"] != true
+}
+
 fn complete_hub_profiles(hubs: &mut Map<String, Value>, requested: Option<&str>) -> String {
-    let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
     let default = requested
-        .filter(|name| hubs.get(*name).is_some_and(enabled))
+        .filter(|name| hubs.get(*name).is_some_and(hub_enabled))
         .or_else(|| {
             hubs.iter()
-                .min_by_key(|(name, cfg)| (!enabled(cfg), name.as_str() != "local", name.as_str()))
+                .min_by_key(|(name, cfg)| {
+                    (!hub_enabled(cfg), name.as_str() != "local", name.as_str())
+                })
                 .map(|(name, _)| name.as_str())
         })
         .unwrap_or("local")
@@ -29,7 +34,7 @@ fn complete_hub_profiles(hubs: &mut Map<String, Value>, requested: Option<&str>)
             }))
     {
         hubs.insert("local".into(), json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true, "defaultScope":"workspace"}));
-        if requested == Some("local") || !enabled(&hubs[&default]) {
+        if requested == Some("local") || !hub_enabled(&hubs[&default]) {
             return "local".into();
         }
     }
@@ -286,6 +291,7 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
     };
     for (name, value) in &mut hubs {
         canonicalize_hub_aliases(value);
+        let enabled = hub_enabled(value);
         let hm = value
             .as_object_mut()
             .ok_or_else(|| format!("Expected object for hub {name}"))?;
@@ -308,8 +314,6 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));
         hm.insert("authMode".to_string(), json!(auth));
-        let enabled = hm.get("enabled").and_then(Value::as_bool) != Some(false)
-            && hm.get("disabled").and_then(Value::as_bool) != Some(true);
         hm.remove("disabled");
         hm.insert("enabled".to_string(), json!(enabled));
     }
@@ -422,11 +426,74 @@ pub fn merge_hub_config(base: &Value, patch: &Value) -> Value {
     Value::Object(merged)
 }
 
+pub(super) fn valid_advertised_name(name: &str) -> bool {
+    name != "local" && crate::plugins::validate_hub_name(name)
+}
+
+pub(super) fn available_hub_name(
+    base: Option<String>,
+    hubs: Option<&Map<String, Value>>,
+    url: &Value,
+) -> String {
+    let base = base.unwrap_or_else(|| {
+        super::daemon::host_hub::hub_name_from_url(url.as_str().unwrap_or_default())
+    });
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while name == "local"
+        || hubs
+            .and_then(|h| h.get(&name))
+            .is_some_and(|existing| existing["url"] != *url)
+    {
+        let ending = format!("-{suffix}");
+        name = format!(
+            "{}{}",
+            base[..base.len().min(32 - ending.len())].trim_end_matches('-'),
+            ending
+        );
+        suffix += 1;
+    }
+    name
+}
+
 /// Bounded, credential-free discovery. Call outside configuration and service locks.
 pub fn discover_hub_config(mut config: Value) -> Result<Value, String> {
-    let url = config["url"].as_str().unwrap_or("").trim().to_owned();
-    config["url"] = json!(crate::plugins::validate_nats_url(&url)
-        .map_err(|error| format!("INVALID_INPUT: {error}"))?);
+    let url = crate::plugins::validate_nats_url(config["url"].as_str().unwrap_or_default())?;
+    let health = probe_hub_health(&url, hub_enabled(&config));
+    config["url"] = json!(url);
+    let mut config = apply_hub_auth(config, &health)?;
+    if let Some(name) = advertised_name(&health) {
+        config["discovered_name"] = json!(name);
+    }
+    Ok(config)
+}
+
+pub(super) fn advertised_name(health: &Value) -> Option<&str> {
+    health["name"].as_str().filter(|s| valid_advertised_name(s))
+}
+
+pub(super) fn probe_hub_health(url: &str, enabled: bool) -> Value {
+    if !enabled || url == "local://" {
+        return Value::Null;
+    }
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(2))
+        .timeout_connect(std::time::Duration::from_secs(1))
+        .build()
+        .get(&format!("{url}/health"))
+        .call()
+        .ok()
+        .and_then(|response| {
+            serde_json::from_reader(std::io::Read::take(response.into_reader(), 65536)).ok()
+        })
+        .unwrap_or(Value::Null)
+}
+
+pub(super) fn apply_hub_auth(mut config: Value, health: &Value) -> Result<Value, String> {
+    if let Some(fields) = config.as_object_mut() {
+        fields.remove("discovered_name");
+    }
     let nonempty = |key: &str| config[key].as_str().is_some_and(|s| !s.trim().is_empty());
     if config["token"]
         .as_str()
@@ -434,56 +501,36 @@ pub fn discover_hub_config(mut config: Value) -> Result<Value, String> {
     {
         return Err("INVALID_INPUT: Invalid Hub token".into());
     }
-    let explicit = config["authMode"].as_str().map(str::to_ascii_lowercase);
-    let mut mode = explicit.clone().unwrap_or_else(|| {
+    let configured = config["authMode"].as_str().unwrap_or_else(|| {
         if nonempty("token") {
-            "token".into()
+            "token"
         } else if nonempty("issuer") || nonempty("clientId") {
-            "oidc".into()
+            "oidc"
         } else {
-            String::new()
+            ""
         }
     });
-    if url != "local://" && (mode.is_empty() || mode == "oidc") {
-        let health = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout(std::time::Duration::from_secs(2))
-            .timeout_connect(std::time::Duration::from_secs(1))
-            .build()
-            .get(&format!("{}/health", url.trim_end_matches('/')))
-            .call()
-            .ok()
-            .and_then(|response| {
-                serde_json::from_reader::<_, Value>(std::io::Read::take(
-                    response.into_reader(),
-                    65536,
-                ))
-                .ok()
-            });
-        if let Some(health) = health {
-            if mode.is_empty() {
-                mode = health["auth_mode"]
-                    .as_str()
-                    .unwrap_or("none")
-                    .to_ascii_lowercase();
-            }
-            if mode == "oidc" && health["auth_mode"] == "oidc" {
-                for (canonical, remote) in [
-                    ("issuer", "issuer"),
-                    ("clientId", "client_id"),
-                    ("redirectPort", "redirect_port"),
-                ] {
-                    if config.get(canonical).is_none() {
-                        if let Some(value) = health["oidc"].get(remote).filter(|v| !v.is_null()) {
-                            config[canonical] = value.clone();
-                        }
-                    }
+    let mode = if configured.is_empty() {
+        health["auth_mode"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("none")
+    } else {
+        configured
+    }
+    .to_ascii_lowercase();
+    if mode == "oidc" && health["auth_mode"] == "oidc" {
+        for (canonical, remote) in [
+            ("issuer", "issuer"),
+            ("clientId", "client_id"),
+            ("redirectPort", "redirect_port"),
+        ] {
+            if config.get(canonical).is_none() {
+                if let Some(value) = health["oidc"].get(remote).filter(|v| !v.is_null()) {
+                    config[canonical] = value.clone();
                 }
             }
         }
-    }
-    if mode.is_empty() {
-        mode = "none".into();
     }
     if !matches!(mode.as_str(), "none" | "token" | "oidc") {
         return Err("INVALID_INPUT: Invalid authMode".into());
@@ -514,7 +561,8 @@ mod tests {
             json!({"auth_mode":"oidc","oidc":{"issuer":"https://id.example.com","client_id":"discovered","redirect_port":4280}}),
             json!({"auth_mode":"oidc","oidc":{"issuer":"https://id.example.com","client_id":"discovered","redirect_port":4280}}),
             json!({"auth_mode":"token"}),
-            json!({"auth_mode":"none"}),
+            json!({"auth_mode":"none", "name":"local"}),
+            json!({"auth_mode":"none", "name":"Bad Name"}),
         ];
         let server = std::thread::spawn(move || {
             for value in responses {
@@ -553,10 +601,11 @@ mod tests {
         assert!(discover_hub_config(json!({"url":url}))
             .unwrap_err()
             .starts_with("INVALID_INPUT:"));
-        assert_eq!(
-            discover_hub_config(json!({"url":url})).unwrap()["authMode"],
-            "none"
-        );
+        for _ in 0..2 {
+            let found = discover_hub_config(json!({"url":url})).unwrap();
+            assert_eq!(found["authMode"], "none");
+            assert!(found.get("discovered_name").is_none());
+        }
         server.join().unwrap();
         let unreachable = "http://127.0.0.1:1";
         assert_eq!(

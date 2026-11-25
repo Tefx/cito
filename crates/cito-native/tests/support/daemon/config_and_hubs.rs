@@ -44,7 +44,7 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
     let callback = url::Url::parse(&callback).unwrap();
     // Creating or editing a different Hub must leave the default Hub's callback live.
     for action in [
-        json!({"op":"setup_save_hub","name":"personal","url":"local://"}),
+        json!({"op":"setup_save_hub","name":"personal","name_explicit":true,"url":"local://"}),
         json!({"op":"setup_save_hub","edit":true,"name":"personal","autoListen":false}),
     ] {
         let result = f.action(action);
@@ -129,7 +129,7 @@ s=socketserver.ThreadingTCPServer(('127.0.0.1',0),Provider); issuer='http://127.
             ("personal", "http://127.0.0.1:1/"),
             ("work", "http://127.0.0.1:1"),
         ] {
-            f.action_ok(json!({"op":"setup_save_hub","name":name,"url":url,"authMode":"oidc","issuer":issuer,"clientId":name,"redirectPort":0}));
+            f.action_ok(json!({"op":"setup_save_hub","name":name,"name_explicit":true,"url":url,"authMode":"oidc","issuer":issuer,"clientId":name,"redirectPort":0}));
         }
         for name in [first, second] {
             let result = f.action(json!({"op":"hub_action","action":"login","hub":name}));
@@ -478,7 +478,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     }
     f.action_ok(json!({"op":"paste_hub_invite","invite":"{\"name\":\"work\",\"url\":\"local://\",\"authMode\":\"none\"}"}));
     f.action_ok(json!({"op":"set_auto_listen","hub":"local","enabled":false}));
-    f.action_ok(json!({"op":"setup_save_hub","name":"other","url":"local://","auth_mode":"none"}));
+    f.action_ok(json!({"op":"setup_save_hub","name":"other","name_explicit":true,"url":"local://","auth_mode":"none"}));
     let config: Value = read_json(&f.config);
     assert_eq!(config["hubs"]["local"]["autoListen"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
@@ -585,14 +585,14 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     f.action_ok(json!({"op":"paste_hub_invite","invite":invite.to_string()}));
     let url = &invite["url"];
     f.action_ok(
-        json!({"op":"setup_save_hub","name":"alias","url":url,"authMode":"none","enabled":false}),
+        json!({"op":"setup_save_hub","name":"alias","name_explicit":true,"url":url,"authMode":"none","enabled":false}),
     );
     let committed = fs::read(&f.config).unwrap();
     for action in [
         json!({"op":"hub_action","hub":"alias","action":"reconnect"}),
         json!({"op":"hub_action","hub":"alias","action":"login"}),
         json!({"op":"setup_toggle_hub","hub":"alias","enabled":true}),
-        json!({"op":"setup_save_hub","name":"alias","url":url,"authMode":"none"}),
+        json!({"op":"setup_save_hub","name":"alias","name_explicit":true,"url":url,"authMode":"none"}),
     ] {
         let (status, result) = f.action(action);
         assert_eq!(status, 400, "{result}");
@@ -1147,6 +1147,7 @@ fn disabled_hub_alias_saves_preserve_effective_enablement() {
         action["url"] = json!("local://");
         action["op"] = json!("setup_save_hub");
         action["name"] = json!("work");
+        action["name_explicit"] = json!(true);
         let (status, response) = f.action(action.clone());
         assert_eq!(status, 200, "{action}: {response}");
         let saved: Value = read_json(&f.config);
@@ -1206,7 +1207,7 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","redirectPort":65536}),
     ];
     for fields in &invalid {
-        let mut action = json!({"op":"setup_save_hub","name":"work","url":"local://","auth_mode":"none","set_default":true});
+        let mut action = json!({"op":"setup_save_hub","name":"work","name_explicit":true,"url":"local://","auth_mode":"none","set_default":true});
         action
             .as_object_mut()
             .unwrap()
@@ -1234,7 +1235,7 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         json!("a".repeat(64)),
     ] {
         let (status, response) = f.action(
-            json!({"op":"setup_save_hub","name":"work","url":"local://","auth_mode":"none","user":user}),
+            json!({"op":"setup_save_hub","name":"work","name_explicit":true,"url":"local://","auth_mode":"none","user":user}),
         );
         assert_eq!(status, 200, "{response}");
         let config: Value = read_json(&f.config);
@@ -1249,8 +1250,8 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         let mut cfg = fields.clone();
         cfg["url"] = json!("local://");
         cfg["enabled"] = json!(false);
-        let (status, response) =
-            f.action(json!({"op":"setup_save_hub","name":"work","config":cfg}));
+        let (status, response) = f
+            .action(json!({"op":"setup_save_hub","name":"work","name_explicit":true,"config":cfg}));
         assert_eq!(status, 200, "{response}");
         let config: Value = read_json(&f.config);
         for (key, value) in fields.as_object().unwrap() {

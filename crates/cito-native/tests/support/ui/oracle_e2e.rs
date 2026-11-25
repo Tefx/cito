@@ -1268,7 +1268,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     for (running, error) in [
         (false, None),
         (false, Some("Address already in use")),
-        (false, Some("The port is already in use.\nStop the other service or choose a different port.\nThen apply the new port to resume sharing.")),
+        (
+            false,
+            Some(
+                "The port is already in use.\nStop the other service or choose a different port.\nThen apply the new port to resume sharing.",
+            ),
+        ),
         (false, Some("")),
         (true, Some("")),
         (true, Some("Hub listener failed")),
@@ -2167,6 +2172,58 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     assert!(s.settings("host_hub_guidance").is_null());
     capture("settings", "settings_add_hub");
+    let scroll_to_top = || f.send(p, json!({"op":"test_settings_scroll","offset":10000}));
+    let coord = |view: &Value, key: &str| view[key].as_f64().unwrap();
+    let assert_action_bar_visible = |s: &Value, height| {
+        let form = s.settings("add_hub_form");
+        let scroll = s.settings("settings_hubs_tab");
+        let bottom = coord(&form, "y");
+        let clip_bottom = coord(&scroll, "content_y");
+        assert_eq!(coord(&form, "height"), height);
+        assert!(clip_bottom <= bottom && clip_bottom + coord(&scroll, "height") >= bottom + 44.0);
+    };
+    scroll_to_top();
+    control(&f, p, "settings_hub_auth:oidc");
+    let collapsed = inspect(&f, p);
+    assert_action_bar_visible(&collapsed, 252.0);
+    assert_eq!(
+        collapsed.settings("manual_hub_oidc")["text"],
+        "▸ Configure OIDC settings manually…"
+    );
+    assert_eq!(
+        collapsed.settings("hub_oidc_discovery_summary")["text"],
+        "Sign-in settings (issuer, client ID, port) are auto-discovered from the Hub URL."
+    );
+    assert!(collapsed.settings("settings_hub_issuer").is_null());
+    scroll_to_top();
+    control(&f, p, "manual_hub_oidc");
+    let expanded = inspect(&f, p);
+    assert_action_bar_visible(&expanded, 298.0);
+    assert!(expanded.settings("hub_oidc_discovery_summary").is_null());
+    let caption = expanded.settings("hub_visibility_caption");
+    assert_eq!(caption["y"], 40);
+    assert_eq!(caption["height"], 32);
+    let form = expanded.settings("add_hub_form");
+    let children = form["children"].as_array().unwrap();
+    for (i, child) in children.iter().enumerate() {
+        let (x, y) = (coord(child, "x"), coord(child, "y"));
+        let (right, top) = (x + coord(child, "width"), y + coord(child, "height"));
+        assert!(
+            x >= 6.0 && y >= 6.0 && right <= 474.0 && top <= 292.0,
+            "{child}"
+        );
+        for other in &children[i + 1..] {
+            let (ox, oy) = (coord(other, "x"), coord(other, "y"));
+            assert!(
+                right <= ox
+                    || top <= oy
+                    || ox + coord(other, "width") <= x
+                    || oy + coord(other, "height") <= y,
+                "{child} overlaps {other}"
+            );
+        }
+    }
+    capture("settings", "settings_add_hub_manual_oidc");
     control(&f, p, "cancel_add_hub");
     control(&f, p, "edit_hub:local");
     assert!(!inspect(&f, p).settings("settings_hub_user").is_null());
@@ -2187,11 +2244,13 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     control(&f, p, "cancel_add_hub");
     control(&f, p, "edit_hub:work");
+    let remote = inspect(&f, p);
+    assert_action_bar_visible(&remote, 252.0);
     assert_eq!(
-        inspect(&f, p).settings("settings_hub_issuer")["text"],
-        "https://id.example.com"
+        remote.settings("hub_oidc_discovery_summary")["text"],
+        "OIDC: id.example.com · Auto-discovered"
     );
-    assert_eq!(inspect(&f, p).settings("add_hub_form")["y"], 8);
+    assert_eq!(remote.settings("add_hub_form")["y"], 8);
     capture("settings", "settings_edit_remote");
     control(&f, p, "cancel_add_hub");
     control(&f, p, "open_uninstall_confirm");

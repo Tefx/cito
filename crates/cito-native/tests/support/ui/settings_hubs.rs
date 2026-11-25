@@ -393,6 +393,35 @@ fn v39_invite_parse_receipts_stay_in_the_form_and_modal_return_cannot_submit() {
 }
 
 #[test]
+fn automatic_hub_name_treats_idna_full_stops_like_ascii_dots() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "hubs");
+    for url in [
+        "http://10.1。。:4291",
+        "http://10.1．｡:4291",
+        "http://10.1%E3%80%82.:4291",
+        "http://10.1..:4291",
+    ] {
+        control(&f, p, "open_add_hub");
+        input(&f, p, "settings_hub_url", url);
+        assert_eq!(
+            inspect(&f, p).settings("settings_hub_name")["placeholder"],
+            "Default: 10",
+            "{url}"
+        );
+        let before = f.frames_for(p, "setup_save_hub").count();
+        control(&f, p, "submit_add_hub");
+        wait(|| f.frames_for(p, "setup_save_hub").count() > before);
+        let action = latest(&f, p, "setup_save_hub");
+        assert_eq!(action["name"], "10", "{url}");
+        assert_eq!(action["url"], url);
+        assert!(action.get("name_explicit").is_none());
+        control(&f, p, "cancel_add_hub");
+    }
+}
+
+#[test]
 fn new_automatic_hub_name_stays_in_create_mode_after_previous_draft_commits() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -448,8 +477,14 @@ fn receipt_without_inventory_keeps_an_automatic_name_under_daemon_ownership() {
         control(&f, p, "submit_add_hub");
         latest(&f, p, "setup_save_hub")
     };
-    input(&f, p, "settings_hub_url", "http://127.0.0.1:1");
+    input(&f, p, "settings_hub_url", "http://127.1:1");
+    assert_eq!(
+        inspect(&f, p).settings("settings_hub_name")["placeholder"],
+        "Default: remote"
+    );
     let first = submit();
+    assert_eq!(first["name"], "remote");
+    assert!(first.get("name_explicit").is_none());
     assert_eq!(f.action(first.clone()).0, 200);
     input(&f, p, "settings_hub_url", "http://127.0.0.1:2");
     f.send(p, json!({"op":"settings","source_op":"setup_save_hub","request_id":first["request_id"],"ok":true,"committed":true}));
@@ -479,20 +514,24 @@ fn hub_save_preserves_newer_drafts_and_rejects_a_late_error_on_retry() {
         latest(&f, p, "setup_save_hub")
     };
     let first = submit();
+    assert_eq!(first["name"], "studio");
+    assert!(first.get("name_explicit").is_none());
     input(&f, p, "settings_hub_token", "new-token");
-    cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"studio","url":first["url"],"auth_mode":"token","enabled":true,"is_default":false,"status":"connected"}));
+    cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"studio","url":first["url"],"user":"bob","auth_mode":"token","enabled":true,"is_default":false,"status":"disconnected","error":"Other profile failed"}));
+    cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"advertised_team","url":format!("{}/", first["url"].as_str().unwrap()),"auth_mode":"token","enabled":true,"is_default":false,"status":"connected"}));
     f.send(
         p,
         json!({"op":"settings","source_op":"setup_save_hub","ok":true,"settings":cfg}),
     );
     assert_eq!(inspect(&f, p)["pending_hub_save"], first["request_id"]);
     let ack = |id: &Value| {
-        f.send(p,json!({"op":"settings","source_op":"setup_save_hub","ok":true,"request_id":id,"settings":cfg}))
+        f.send(p,json!({"op":"settings","source_op":"setup_save_hub","ok":true,"request_id":id,"hub":"advertised_team","settings":cfg}))
     };
     ack(&first["request_id"]);
     let second = submit();
     assert_eq!(second["edit"], true);
-    assert_eq!(second["original_name"], "studio");
+    assert_eq!(second["original_name"], "advertised_team");
+    assert_eq!(second["name"], "advertised_team");
     assert_eq!(second["token"], "new-token");
     assert_ne!(second["request_id"], first["request_id"]);
     f.send(p,json!({"op":"error","source_op":"setup_save_hub","request_id":first["request_id"],"error":"Late error"}));
@@ -585,7 +624,15 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
             .any(|v| v["op"] == "set_host_hub" && v["port"] == 5300 && v["auth_mode"] == "token")
     });
     control(&f, p, "edit_hub:work");
+    let collapsed = inspect(&f, p);
+    assert_eq!(collapsed.settings("add_hub_form")["height"], 252);
+    assert_eq!(
+        collapsed.settings("hub_oidc_discovery_summary")["text"],
+        "OIDC: id.example.com · Auto-discovered"
+    );
+    control(&f, p, "manual_hub_oidc");
     let s = inspect(&f, p);
+    assert_eq!(s.settings("add_hub_form")["height"], 298);
     assert_eq!(
         s.settings("settings_hub_issuer")["text"],
         "https://id.example.com"
@@ -610,8 +657,25 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
         ("", "http://192.168.1.10:4291", "lan"),
         ("", "http://10.1.2.3:4291", "lan-2"),
         ("", "http://172.31.0.1:4291", "lan-3"),
+        ("", "http://10.1..:4291", "10"),
+        ("", "http://10.1.2.3..:4291", "10-2"),
+        ("", "http://127.1", "remote-2"),
+        ("", "http://010.1.2.3", "remote-3"),
+        ("", "http://0x", "remote-4"),
+        ("", "http://10.16777216", "remote-5"),
+        ("", "http://10.1", "lan-4"),
+        ("", "http://10.1.", "lan-5"),
+        ("", "http://alice@0XAC.04000000.:4291", "lan-6"),
         ("", "http://100.100.0.1:4291", "tailscale"),
+        ("", "http://0x64400000", "tailscale-2"),
         ("", "  https://studio.example.com/  ", "studio"),
+        ("", "https://cito.internal.acme.example", "acme"),
+        ("   ", "https://auth.login.acme.example", "acme-2"),
+        ("", "https://cito.example", "cito"),
+        ("", "https://sso.studio.local", "sso"),
+        ("", "https://www.studio.ts.net", "www"),
+        ("", "https://id.sso.example", "sso-2"),
+        ("", "https://login.node.ts.net./", "login"),
     ] {
         control(&f, p, "open_add_hub");
         f.send(
@@ -622,11 +686,22 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
             p,
             json!({"op":"test_settings_input","id":"settings_hub_url","value":url}),
         );
+        let explicit = !requested.trim().is_empty();
+        if !explicit {
+            assert_eq!(
+                inspect(&f, p).settings("settings_hub_name")["placeholder"],
+                format!("Default: {expected}")
+            );
+        }
         let before = f.frames_for(p, "setup_save_hub").count();
         control(&f, p, "submit_add_hub");
         wait(|| f.frames_for(p, "setup_save_hub").count() > before);
         let action = f.frames_for(p, "setup_save_hub").next_back().unwrap();
         assert_eq!(action["name"], expected);
+        assert_eq!(
+            action.get("name_explicit"),
+            explicit.then_some(&Value::Bool(true))
+        );
         let canonical_url = url.trim().trim_end_matches('/');
         assert_eq!(action["url"], canonical_url);
         let saved = json!({"name":expected,"url":canonical_url,"auth_mode":action.get("auth_mode").cloned().unwrap_or(json!("none")),"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});

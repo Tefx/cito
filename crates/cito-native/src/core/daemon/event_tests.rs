@@ -178,7 +178,7 @@ fn save_hub_honors_outer_default_selection_before_nested_config() -> Result<(), 
         ("cloud", Some(false), true, "personal"),
         ("shared", None, true, "shared"),
     ] {
-        let mut action = json!({"op":"setup_save_hub","name":name,"config":{"url":"local://","set_default":nested}});
+        let mut action = json!({"op":"setup_save_hub","name":name,"name_explicit":true,"config":{"url":"local://","set_default":nested}});
         if let Some(outer) = outer {
             action["set_default"] = json!(outer);
         }
@@ -192,7 +192,7 @@ fn save_hub_honors_outer_default_selection_before_nested_config() -> Result<(), 
 fn hub_saves_cancel_only_the_edited_and_saved_profiles() -> Result<(), String> {
     let mut f = Fixture::new()?;
     let s = &mut f.service;
-    s.action(&json!({"op":"setup_save_hub","name":"work","url":"local://","set_default":true}))?;
+    s.action(&json!({"op":"setup_save_hub","name":"work","name_explicit":true,"url":"local://","set_default":true}))?;
     let login = |s: &mut DaemonService, hub: &str| {
         s.hub_controls
             .entry(hub.into())
@@ -204,7 +204,7 @@ fn hub_saves_cancel_only_the_edited_and_saved_profiles() -> Result<(), String> {
     let work = login(s, "work");
     s.active_settings_hub = Some("work".into());
     for action in [
-        json!({"op":"setup_save_hub","name":"personal","url":"local://","user":"bob"}),
+        json!({"op":"setup_save_hub","name":"personal","name_explicit":true,"url":"local://","user":"bob"}),
         json!({"op":"setup_save_hub","edit":true,"original_name":"","name":"personal","hub":"work","autoListen":false}),
     ] {
         let personal = login(s, "personal");

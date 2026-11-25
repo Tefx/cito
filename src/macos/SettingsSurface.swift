@@ -103,18 +103,21 @@ extension Companion {
             channelUiStates[key, default: ChannelUiState()].drafts.removeValue(forKey: field.key)
         }
     }
-    func finishHubSave(_ pending: PendingHubSave, projected: HubConfigItem? = nil) {
+    func finishHubSave(_ pending: PendingHubSave, savedName: String?) {
         hubForm.pendingSave = nil
         if hubForm.generation == pending.generation {
             hubForm = HubFormState()
         } else {
             var profile = pending.profile
-            if let projected { profile.name = projected.name }
-            let name = proposedHubName(hubForm.name, url: hubForm.url, existing: settings?.hubs ?? [], creating: true)
-            let sameDestination = !hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || normalizedHubURL(hubForm.url) == profile.url
-            if hubForm.isEditing || (name == profile.name && sameDestination) {
+            if let savedName { profile.name = savedName }
+            let name = hubNameProposal(hubForm.name, url: hubForm.url, existing: settings?.hubs ?? [], creating: true)
+            let automaticDraft = hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let sameURL = normalizedHubURL(hubForm.url) == profile.url
+            let identityKnown = savedName != nil || pending.nameExplicit || hubForm.isEditing
+            let sameAutomaticHub = automaticDraft && !pending.nameExplicit && sameURL
+            if identityKnown && (hubForm.isEditing || sameAutomaticHub || (name == profile.name && (!automaticDraft || sameURL))) {
                 hubForm.mode = .edit(profile)
-            } else if projected == nil {
+            } else if savedName == nil {
                 // The daemon can still allocate an automatic name against its full inventory.
                 hubForm.mode = .addWithIncompleteInventory
             }
@@ -122,7 +125,7 @@ extension Companion {
     }
 
     @discardableResult
-    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, channelSave: PendingControl? = nil, savedRequest: String? = nil, sourceOp: String? = nil, confirmHubSave: Bool = false, truncated: Bool = false) -> Bool {
+    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, channelSave: PendingControl? = nil, savedRequest: String? = nil, sourceOp: String? = nil, confirmHubSave: Bool = false, savedHub: String? = nil, truncated: Bool = false) -> Bool {
         let previousUi = channelUiStates
         let target = settingsHub(value, hub: hub)
         for old in settings?.hubs ?? [] where !old.sharesChannelAuthority(with: value.hubs.first { $0.name == old.name }) {
@@ -149,12 +152,15 @@ extension Companion {
         }
         if confirmHubSave, let pending = hubForm.pendingSave, savedRequest == pending.requestId {
             let profile = pending.profile
-            let name = profile.name.isEmpty ? proposedHubName("", url: profile.url, existing: value.hubs, creating: true) : profile.name
-            let saved = value.hubs.first(where: { $0.name == name })
-            hubForm.pendingSave = nil
-            hubForm.error = saved?.error
-            if saved?.error == nil {
-                finishHubSave(pending, projected: saved.flatMap { normalizedHubURL($0.url) == profile.url ? $0 : nil })
+            let candidates = value.hubs.filter { normalizedHubURL($0.url) == profile.url }
+            let saved: HubConfigItem?
+            if let savedHub { saved = candidates.first { $0.name == savedHub } }
+            else if pending.nameExplicit || hubForm.isEditing { saved = candidates.first { $0.name == profile.name } }
+            else { saved = candidates.count == 1 && candidates[0].is_builtin != true ? candidates[0] : nil }
+            if let error = saved?.error { hubForm.failSave(error) }
+            else {
+                hubForm.error = nil
+                finishHubSave(pending, savedName: savedHub ?? saved?.name)
             }
         }
         var reconciledHub = false
@@ -579,11 +585,16 @@ extension Companion {
         }
 
         window.invalidateShadow()
-        if revealAddHub && hubForm.isOpen, let form=root.subviews.compactMap({($0 as? NSScrollView)?.documentView}).flatMap({$0.subviews}).first(where:{$0.identifier?.rawValue=="add_hub_form"}) { form.scrollToVisible(form.bounds) }
         if !uninstallConfirmOpen, let id = focusedId, let field = settingsFieldControls[id],
            !(id.hasPrefix("channel_field:") || id.hasPrefix("pairing_instruction:")) || previousChannelHub == renderedHub {
             window.makeFirstResponder(field)
             if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }
+        }
+        if revealAddHub && hubForm.isOpen,
+           let scroll: NSScrollView = findView(in: root, id: "settings_hubs_tab"),
+           let form: NSView = findView(in: scroll, id: "add_hub_form") {
+            form.scrollToVisible(NSRect(x: 0, y: 0, width: form.bounds.width, height: 44))
+            scroll.reflectScrolledClipView(scroll.contentView)
         }
     }
 
@@ -1274,7 +1285,9 @@ extension Companion {
             let errorText = hubForm.error.map(presentationError)
             let errorHeight = errorText.map { measureWrappedHeight($0, width: 452, font: .systemFont(ofSize: 10)) + 4 } ?? 0
             let errorSpace: CGFloat = errorText == nil ? 0 : errorHeight + 6
-            let formHeight: CGFloat = (editingBuiltinHub ? 124 : hubForm.auth == "oidc" ? 298 : 252) + errorSpace
+            let isOIDC = !editingBuiltinHub && hubForm.auth == "oidc"
+            let oidcExpanded = isOIDC && hubForm.oidcExpanded
+            let formHeight: CGFloat = (editingBuiltinHub ? 124 : oidcExpanded ? 298 : 252) + errorSpace
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
@@ -1290,7 +1303,9 @@ extension Companion {
                 fieldLabel("Hub URL",NSRect(x:14,y:179,width:298,height:13))
                 fieldLabel("Hub Name (Optional)",NSRect(x:320,y:179,width:146,height:13))
                 form.addSubview(makeEditableField("settings_hub_url",frame:NSRect(x:14,y:153,width:298,height:24),placeholder:"http://192.168.1.10:4291",value:hubForm.url,accessibilityLabel:"Hub URL"))
-                form.addSubview(makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:hubForm.name,accessibilityLabel:"Hub name"))
+                let nameField = makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:hubForm.name,accessibilityLabel:"Hub name")
+                if hubForm.isEditing { nameField.toolTip = hubForm.originalName }
+                form.addSubview(nameField)
                 fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14))
                 let authOptions = [("none","Trusted Network"),("token","Shared Token"),("oidc","Team Sign-In")]
                 let authTrack = makePillTrack(NSRect(x:68,y:118,width:398,height:26),radius:13,bordered:false)
@@ -1303,7 +1318,7 @@ extension Companion {
                     pill.pressed={ [weak self] in
                         guard let self=self else{return}
                         if self.hubForm.auth != mode { self.hubForm.generation += 1 }
-                        self.hubForm.auth=mode; self.hubForm.authExplicit=true; self.rebuildSettingsPanel()
+                        self.hubForm.auth=mode; self.hubForm.authExplicit=true; self.rebuildSettingsPanel(revealAddHub: true)
                     }
                     authTrack.addSubview(pill); authPills.append(pill)
                 }
@@ -1318,20 +1333,46 @@ extension Companion {
                     fieldLabel("Username (Optional)",NSRect(x:296,y:97,width:170,height:14))
                     form.addSubview(makeEditableField("settings_hub_token",frame:NSRect(x:14,y:71,width:274,height:24),placeholder:hubForm.isEditing ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac",value:hubForm.token,secret:true,accessibilityLabel:"Hub token"))
                     form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:296,y:71,width:170,height:24),placeholder:"e.g. alice",value:hubForm.user,accessibilityLabel:"Hub username"))
-                } else if hubForm.auth == "oidc" {
-                    for control in form.subviews { control.frame.origin.y += 46 }
-                    fieldLabel("OIDC Issuer URL",NSRect(x:14,y:143,width:452,height:14))
-                    form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:117,width:452,height:24),placeholder:"Auto-discovered",value:hubForm.issuer,accessibilityLabel:"OIDC issuer URL"))
-                    fieldLabel("OIDC Client ID",NSRect(x:14,y:97,width:222,height:14))
-                    fieldLabel("Redirect Port",NSRect(x:244,y:97,width:222,height:14))
-                    form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:14,y:71,width:222,height:24),placeholder:"Auto-discovered",value:hubForm.clientId,accessibilityLabel:"OIDC client ID"))
-                    form.addSubview(makeEditableField("settings_hub_redirect_port",frame:NSRect(x:244,y:71,width:222,height:24),placeholder:"Auto-discovered",value:hubForm.redirectPort,accessibilityLabel:"OIDC redirect port"))
+                } else if isOIDC {
+                    if oidcExpanded {
+                        for control in form.subviews { control.frame.origin.y += 62 }
+                        fieldLabel("OIDC Issuer URL",NSRect(x:14,y:118,width:452,height:14))
+                        form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:92,width:452,height:24),placeholder:"Auto-discovered",value:hubForm.issuer,accessibilityLabel:"OIDC issuer URL"))
+                        fieldLabel("OIDC Client ID",NSRect(x:14,y:70,width:222,height:14))
+                        fieldLabel("Redirect Port",NSRect(x:244,y:70,width:222,height:14))
+                        form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:14,y:44,width:222,height:24),placeholder:"Auto-discovered",value:hubForm.clientId,accessibilityLabel:"OIDC client ID"))
+                        form.addSubview(makeEditableField("settings_hub_redirect_port",frame:NSRect(x:244,y:44,width:222,height:24),placeholder:"Auto-discovered",value:hubForm.redirectPort,accessibilityLabel:"OIDC redirect port"))
+                    } else {
+                        let hasIssuer = hubForm.isEditing && !hubForm.issuer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        let issuer = hubForm.issuer.replacingOccurrences(of: "^https?://", with: "", options: .regularExpression)
+                        let title = hasIssuer ? "OIDC: \(issuer) · Auto-discovered" : "Sign-in settings (issuer, client ID, port) are auto-discovered from the Hub URL."
+                        let summary = textLabel(title, NSRect(x:14,y:92,width:452,height:15), size:10.5, color:CitoPalette.secondaryText)
+                        summary.identifier = NSUserInterfaceItemIdentifier("hub_oidc_discovery_summary")
+                        summary.maximumNumberOfLines = 1
+                        summary.lineBreakMode = .byTruncatingMiddle
+                        summary.toolTip = hasIssuer ? "Issuer: \(hubForm.issuer)\nClient ID: \(hubForm.clientId)\nRedirect port: \(hubForm.redirectPort)" : title
+                        form.addSubview(summary)
+                    }
+                    let title = oidcExpanded ? "▾ Hide manual OIDC settings" :
+                        hubForm.isEditing ? "▸ Edit OIDC settings manually…" : "▸ Configure OIDC settings manually…"
+                    let manual = MenuControl(title, frame: NSRect(x:14,y:oidcExpanded ? 148 : 68,width:MenuControl.intrinsicWidth(title,paddingX:4),height:22), paddingX:0)
+                    manual.identifier = NSUserInterfaceItemIdentifier("manual_hub_oidc")
+                    manual.style = .subtleHeader
+                    manual.label.alignment = .left
+                    manual.layoutContents()
+                    manual.pressed = { [weak self] in
+                        guard let self else { return }
+                        self.hubForm.oidcManualExpanded.toggle()
+                        self.rebuildSettingsPanel(revealAddHub: true)
+                    }
+                    form.addSubview(manual)
                 }
             }
 
             if !editingBuiltinHub {
-                for control in form.subviews { control.frame.origin.y += 48 }
-                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.", NSRect(x: 14, y: 60, width: 452, height: 48), size: 11, color: CitoPalette.secondaryText)
+                let captionHeight: CGFloat = oidcExpanded ? 32 : 48
+                for control in form.subviews { control.frame.origin.y += captionHeight }
+                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.", NSRect(x: 14, y: oidcExpanded ? 40 : 60, width: 452, height: captionHeight), size: 11, color: CitoPalette.secondaryText)
                 visibility.identifier = NSUserInterfaceItemIdentifier("hub_visibility_caption")
                 visibility.maximumNumberOfLines = 3
                 visibility.cell?.wraps = true
@@ -1363,15 +1404,18 @@ extension Companion {
                 self.syncAddHubFieldsFromControls()
                 let url = normalizedHubURL(self.hubForm.url)
                 let knownHubs = self.settings?.hubs ?? []
-                let name = proposedHubName(self.hubForm.name,url:url,existing:knownHubs,creating:!self.hubForm.isEditing,original:self.hubForm.originalName)
+                let name = self.hubNameProposal(self.hubForm.name,url:url,existing:knownHubs,creating:!self.hubForm.isEditing,original:self.hubForm.originalName)
+                let nameExplicit = !self.hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let validation: String?
                 if name.isEmpty { validation="Hub name must contain a letter or number." }
                 else if !self.hubForm.isEditing && knownHubs.contains(where:{$0.name == name && ($0.is_builtin == true || normalizedHubURL($0.url) != url)}) { validation="Hub name already exists. Choose a different name." }
                 else if !["http://","https://","local://"].contains(where:{url.hasPrefix($0)}) { validation="Hub URL must start with http:// or https://." }
                 else if !self.hubForm.isEditing && self.hubForm.auth == "token" && self.hubForm.token.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { validation="Shared access token is required." }
-                else if self.hubForm.auth == "oidc" && !self.hubForm.redirectPort.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !(Int(self.hubForm.redirectPort.trimmingCharacters(in:.whitespacesAndNewlines)).map { (0...65535).contains($0) } ?? false) { validation="Redirect port must be an integer from 0 to 65535." }
-                else { validation=nil }
-                if let error=validation { self.hubForm.error=error; self.rebuildSettingsPanel(); return }
+                else if self.hubForm.auth == "oidc" && !self.hubForm.redirectPort.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !(Int(self.hubForm.redirectPort.trimmingCharacters(in:.whitespacesAndNewlines)).map { (0...65535).contains($0) } ?? false) {
+                    validation="Redirect port must be an integer from 0 to 65535."
+                    self.hubForm.oidcManualExpanded = true
+                } else { validation=nil }
+                if let error=validation { self.hubForm.error=error; self.rebuildSettingsPanel(revealAddHub: true); return }
                 var action: [String: Any] = [
                     "op": "setup_save_hub",
                     "name": name,
@@ -1379,6 +1423,7 @@ extension Companion {
                     "auth_mode": self.hubForm.auth,
                     "set_default": !self.hubForm.isEditing
                 ]
+                if nameExplicit { action["name_explicit"] = true }
                 if !self.hubForm.isEditing && !self.hubForm.authExplicit && self.hubForm.auth == "none" { action.removeValue(forKey:"auth_mode") }
                 if self.hubForm.isEditing { action["edit"]=true; action["original_name"]=self.hubForm.originalName; action.removeValue(forKey:"set_default") }
                 let tok = self.hubForm.token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1401,17 +1446,17 @@ extension Companion {
                     }
                 }
                 var submittedName = name
-                if case .addWithIncompleteInventory = self.hubForm.mode, self.hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if case .addWithIncompleteInventory = self.hubForm.mode, !nameExplicit {
                     submittedName = ""
                     action.removeValue(forKey: "name")
                 }
                 let profile = HubFormProfile(name: submittedName, url: url, issuer: self.hubForm.issuer,
                     clientId: self.hubForm.clientId, redirectPort: self.hubForm.redirectPort)
-                let pending = PendingHubSave(profile: profile, requestId: UUID().uuidString, generation: self.hubForm.generation)
+                let pending = PendingHubSave(profile: profile, requestId: UUID().uuidString, generation: self.hubForm.generation, nameExplicit: nameExplicit)
                 self.hubForm.pendingSave=pending; self.hubForm.error=nil
                 action["request_id"]=pending.requestId
                 self.emit(action)
-                self.rebuildSettingsPanel()
+                self.rebuildSettingsPanel(revealAddHub: self.hubForm.error != nil)
             }
             form.addSubview(submitBtn)
             layoutBar(in: form, insetRight: 14, y: 10, height: 24, trailing: [cancelBtn,submitBtn])
@@ -1543,6 +1588,7 @@ extension Companion {
 
     var hubNamePlaceholder: String {
         if case .addWithIncompleteInventory = hubForm.mode { return "Assigned automatically" }
-        return hubForm.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "e.g. studio or work" : "Default: " + proposedHubName("", url:hubForm.url, existing:settings?.hubs ?? [], creating:!hubForm.isEditing, original:hubForm.originalName)
+        if hubForm.isEditing { return "Keep current name" }
+        return hubForm.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "e.g. studio or work" : "Default: " + hubNameProposal("", url:hubForm.url, existing:settings?.hubs ?? [], creating:!hubForm.isEditing, original:hubForm.originalName)
     }
 }

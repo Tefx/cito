@@ -639,41 +639,33 @@ fn callback(
     stream
         .set_nonblocking(false)
         .map_err(|error| error.to_string())?;
-    stream
-        .set_read_timeout(Some(deadline.remaining()?.min(Duration::from_millis(100))))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(deadline.remaining()?.min(Duration::from_millis(100))))
-        .map_err(|e| e.to_string())?;
-    let mut line = Vec::new();
-    loop {
-        deadline.remaining()?;
-        let mut byte = [0u8; 1];
+    let mut headers = Vec::new();
+    let mut chunk = [0; 1024];
+    let line = loop {
+        let room = (16 * 1024 - headers.len()).min(chunk.len());
+        if room == 0 {
+            break None;
+        }
         stream
             .set_read_timeout(Some(deadline.remaining()?.min(Duration::from_millis(100))))
             .map_err(|e| e.to_string())?;
-        match stream.read(&mut byte) {
-            Ok(0) => break,
-            Ok(_) => {
-                line.push(byte[0]);
-                if byte[0] == b'\n' || line.len() > 8192 {
-                    break;
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                return Ok(None)
-            }
-            Err(_) => return Ok(None),
+        let count = match stream.read(&mut chunk[..room]) {
+            Ok(0) | Err(_) if headers.is_empty() => return Ok(None),
+            Ok(0) | Err(_) => break None,
+            Ok(count) => count,
+        };
+        let start = headers.len().saturating_sub(3);
+        headers.extend_from_slice(&chunk[..count]);
+        let tail = &headers[start..];
+        if tail.windows(4).any(|w| w == b"\r\n\r\n") || tail.windows(2).any(|w| w == b"\n\n") {
+            break headers
+                .split_inclusive(|b| *b == b'\n')
+                .next()
+                .filter(|line| line.len() <= 8192);
         }
-    }
-    let parsed = std::str::from_utf8(&line)
-        .ok()
-        .filter(|_| line.len() <= 8192)
+    };
+    let parsed = line
+        .and_then(|line| std::str::from_utf8(line).ok())
         .and_then(|line| {
             let mut words = line.split_whitespace();
             if words.next()? != "GET" {
@@ -699,24 +691,65 @@ fn callback(
         }
         url.path() == "/callback" && states.len() == 1 && states[0] == state
     });
-    let message = if valid && code.is_some() {
-        "Cito login complete. You may close this window."
-    } else {
-        "Invalid callback"
+    let (status, title, heading, message, icon) = match (valid, &code) {
+        (true, Some(_)) => (
+            "200 OK",
+            "Signed In",
+            "Signed in to Cito",
+            "Cito login complete. You may close this window.",
+            "M12 22l7 7 13-15",
+        ),
+        (true, None) => (
+            "400 Bad Request",
+            "Sign-In Cancelled",
+            "Sign-in was cancelled",
+            "Return to Cito and choose Sign In… to try again.",
+            "M15 15l14 14m0-14L15 29",
+        ),
+        (false, _) => (
+            "400 Bad Request",
+            "Invalid Callback",
+            "Sign-in link is no longer valid",
+            "Invalid callback. Start a new sign-in from Cito.",
+            "M22 12v13m0 5v1",
+        ),
     };
-    let status = if valid && code.is_some() {
-        "200 OK"
-    } else {
-        "400 Bad Request"
-    };
+    let body = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cito — {title}</title><style>
+:root {{ color-scheme: light dark; --bg:#ECEFF3; --card:#FFFFFF; --ink:#20252B; --accent:#315EA6 }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#1E2024; --card:#26292E; --ink:#ECEFF3; --accent:#A2C6FF }} }}
+body {{ margin:0; padding:20px; box-sizing:border-box; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif }}
+main {{ box-sizing:border-box; width:min(100%,420px); padding:32px; border-radius:14px; text-align:center; background:var(--card) }}
+svg {{ color:var(--accent) }} h1 {{ font-size:1.4rem; margin:12px 0 8px }} p {{ margin:0 }}
+</style></head><body><main><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="3"><circle cx="22" cy="22" r="20"/><path d="{icon}" stroke-linecap="round" stroke-linejoin="round"/></svg><h1>{heading}</h1><p>{message}</p></main></body></html>"#
+    );
     stream
         .set_write_timeout(Some(deadline.remaining()?.min(Duration::from_millis(100))))
         .map_err(|e| e.to_string())?;
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{message}",
-        message.len()
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
     );
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let drain_until = Instant::now() + deadline.remaining()?.min(Duration::from_millis(50));
+    // Darwin can reject socket-option changes after the half-close. Poll the
+    // sole reader against one absolute deadline instead of resetting its timeout.
+    let mut socket = [libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    while Instant::now() < drain_until
+        && crate::support::poll_until(&mut socket, Some(drain_until)) == Ok(true)
+    {
+        if !matches!(stream.read(&mut chunk), Ok(n) if n > 0) {
+            break;
+        }
+    }
     if valid && code.is_none() {
         return Err("UNAUTHORIZED: OIDC login cancelled".into());
     }

@@ -1,8 +1,7 @@
 use super::{
     channels::{channel_action_kind, dispatch_channel_action},
     host_hub::{
-        host_hub_server_config, hub_name_from_url, parse_hub_invite, prepare_host_hub_server,
-        validate_hub_endpoints,
+        host_hub_server_config, parse_hub_invite, prepare_host_hub_server, validate_hub_endpoints,
     },
     mcp::{run_captured, validate_tool_input, Detaches, ToolCall},
     request_shutdown, shutdown_requested,
@@ -10,7 +9,7 @@ use super::{
     wake_daemon, ConfigSnapshot, DaemonService, SHUTDOWN_REQUESTED,
 };
 use crate::core::{
-    config::{apply_host_hub_patch, repair_default_hub},
+    config::{apply_host_hub_patch, available_hub_name, hub_enabled, repair_default_hub},
     identity::{listener_id, normalize_slug, string},
 };
 use crate::plugins::now_ms;
@@ -58,29 +57,6 @@ fn login_cache_snapshot(path: &std::path::Path) -> Option<(Value, Value)> {
 mod transport;
 pub(super) use transport::{handle_http, respond};
 
-fn available_hub_name(base: String, hubs: &Value, url: &Value, original: Option<&str>) -> String {
-    let mut name = base.clone();
-    let mut suffix = 2;
-    while name == "local"
-        || (Some(name.as_str()) != original
-            && hubs
-                .get(&name)
-                .is_some_and(|existing| existing["url"] != *url))
-    {
-        let ending = format!("-{suffix}");
-        name = format!(
-            "{}{}",
-            base.chars()
-                .take(32 - ending.len())
-                .collect::<String>()
-                .trim_end_matches('-'),
-            ending
-        );
-        suffix += 1;
-    }
-    name
-}
-
 fn edited_hub(action: &Value) -> Option<String> {
     if action["edit"] != true {
         return None;
@@ -91,19 +67,26 @@ fn edited_hub(action: &Value) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| {
             let name = string(action, "name");
-            name.bytes()
-                .any(|b| b.is_ascii_alphanumeric())
-                .then(|| normalize_slug(name))
+            if crate::plugins::validate_hub_name(name) {
+                Some(name.to_owned())
+            } else {
+                name.bytes()
+                    .any(|b| b.is_ascii_alphanumeric())
+                    .then(|| normalize_slug(name))
+            }
         })
 }
 
-fn invite_hub_name(invite: &Value, raw: &Value) -> String {
-    let base = if string(invite, "name").is_empty() {
-        hub_name_from_url(string(invite, "url"))
-    } else {
-        normalize_slug(string(invite, "name"))
-    };
-    available_hub_name(base, &raw["hubs"], &invite["url"], None)
+fn invite_hub_name(invite: &Value, discovered: Option<&Value>, raw: &Value) -> String {
+    let requested = string(invite, "name");
+    let base = (!requested.is_empty())
+        .then(|| normalize_slug(requested))
+        .or_else(|| discovered?["discovered_name"].as_str().map(str::to_owned));
+    available_hub_name(
+        base,
+        raw["hubs"].as_object(),
+        &discovered.unwrap_or(invite)["url"],
+    )
 }
 
 fn configured_hubs(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, String> {
@@ -267,7 +250,7 @@ pub(super) fn dispatch_action(
         }
     }
     if refreshes_setup(action) && result.is_ok() {
-        s.emit_settings_receipt(action, &result);
+        s.emit_settings_receipt(action, &result, None);
         s.push_ui_result(Some(action));
     } else {
         s.push_ui();
@@ -505,8 +488,7 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
         let merged = crate::core::config::merge_hub_config(base, patch);
         // Refuse a self-invite before contacting its discovery endpoint. The
         // locked save rechecks the entire profile with the then-current port.
-        let own = merged["enabled"] != false
-            && merged["disabled"] != true
+        let own = hub_enabled(&merged)
             && super::host_hub::is_own_host_hub_url(
                 string(&merged, "url"),
                 s.host_server.as_ref().map(|server| server.address),
@@ -524,10 +506,10 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
             // Discovery may normalize the URL. Resolve collisions against the same
             // config snapshot that the save will check under its publication lock.
             resolved = Some(invite_hub_name(
-                discovered.as_ref().unwrap_or(&submitted),
+                &submitted,
+                discovered.as_ref().ok(),
                 &before,
             ));
-            submitted["name"] = json!(resolved);
         }
         let result = discovered.and_then(|config| {
             submitted["config"] = config;
@@ -884,13 +866,18 @@ impl DaemonService {
         resolved_hub: &mut Option<String>,
         before: &Value,
     ) -> Result<(), String> {
-        let requested_name = string(action, "name").trim();
+        let editing = action["edit"] == true;
+        let requested_name = if editing || action["name_explicit"] == true || resolved_hub.is_some()
+        {
+            string(action, "name").trim()
+        } else {
+            ""
+        };
         if !requested_name.is_empty() && !requested_name.chars().any(|c| c.is_ascii_alphanumeric())
         {
             return Err("INVALID_INPUT: Invalid hub name".into());
         }
         let mut cfg = action["config"].clone();
-        let editing = action["edit"] == true;
         let original = edited_hub(action).unwrap_or_default();
         if editing && original.is_empty() {
             return Err("INVALID_INPUT: Unknown hub to edit".into());
@@ -913,26 +900,25 @@ impl DaemonService {
             if editing && !v["hubs"][&original].is_object() {
                 return Err("INVALID_INPUT: Unknown hub to edit".into());
             }
-            let base_name = if requested_name.is_empty() {
-                hub_name_from_url(string(&cfg, "url"))
-            } else {
+            let replayable_invite = resolved_hub.is_some() && requested_name.is_empty();
+            let mut name = if let Some(invited) = resolved_hub.take() {
+                invited
+            } else if editing && (requested_name.is_empty() || requested_name == original) {
+                original.clone()
+            } else if !requested_name.is_empty() {
                 normalize_slug(requested_name)
-            };
-            let name = if requested_name.is_empty() {
-                available_hub_name(
-                    base_name,
-                    &v["hubs"],
-                    &cfg["url"],
-                    editing.then_some(original.as_str()),
-                )
             } else {
-                base_name
+                available_hub_name(
+                    cfg["discovered_name"].as_str().map(str::to_owned),
+                    v["hubs"].as_object(),
+                    &cfg["url"],
+                )
             };
             *resolved_hub = Some(name.clone());
             if !crate::plugins::validate_hub_name(&name) {
                 return Err("INVALID_INPUT: Invalid hub name".into());
             }
-            if name == "local" && cfg["url"] != "local://" {
+            if (requested_name == "local" || name == "local") && cfg["url"] != "local://" {
                 return Err("INVALID_INPUT: The local hub must use local://".into());
             }
             if editing && original == "local" && name != "local" {
@@ -955,10 +941,9 @@ impl DaemonService {
                 .as_bool()
                 .or_else(|| cfg["set_default"].as_bool())
                 .unwrap_or(false);
+            let enabled = hub_enabled(&cfg);
             if let Some(m) = cfg.as_object_mut() {
-                if let Some(disabled) = m.remove("disabled") {
-                    let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
-                        && disabled.as_bool() != Some(true);
+                if m.remove("disabled").is_some() {
                     m.insert("enabled".to_string(), json!(enabled));
                 }
                 for k in [
@@ -968,9 +953,22 @@ impl DaemonService {
                     "set_default",
                     "edit",
                     "original_name",
+                    "name_explicit",
+                    "discovered_name",
                     "request_id",
                 ] {
                     m.remove(k);
+                }
+            }
+            // An unnamed re-import of the identical saved remote profile is a
+            // rejoin, even if the server now advertises a different name.
+            if replayable_invite && cfg["url"] != "local://" && v["hubs"][&name].is_null() {
+                if let Some((alias, _)) = v["hubs"]
+                    .as_object()
+                    .and_then(|hubs| hubs.iter().find(|(_, saved)| **saved == cfg))
+                {
+                    name = alias.clone();
+                    *resolved_hub = Some(name.clone());
                 }
             }
             if editing && original != name {
@@ -1202,7 +1200,7 @@ impl DaemonService {
         s.record_hub_result(operation, &result, resolved_hub);
         if action["op"] == "set_host_hub" || (operation["op"] == "setup_save_hub" && result.is_ok())
         {
-            s.emit_settings_receipt(action, &result);
+            s.emit_settings_receipt(action, &result, resolved_hub);
         }
         if action["op"] != "paste_hub_invite" && !refreshes_setup(action) {
             if let Some(warning) = result
@@ -1231,12 +1229,20 @@ impl DaemonService {
         result
     }
 
-    fn emit_settings_receipt(&self, action: &Value, result: &Result<Value, String>) {
+    fn emit_settings_receipt(
+        &self,
+        action: &Value,
+        result: &Result<Value, String>,
+        saved_hub: Option<&str>,
+    ) {
         let mut frame = json!({"op":"settings", "ok":result.is_ok(), "source_op":action["op"], "request_id":action["request_id"], "settings":self.settings()});
         match result {
             Ok(value) => {
                 frame["committed"] = json!(true);
                 frame["warning"] = value["warning"].clone();
+                if let Some(name) = saved_hub {
+                    frame["hub"] = json!(name);
+                }
             }
             Err(error) => frame["error"] = json!(error),
         }
@@ -1274,7 +1280,7 @@ impl DaemonService {
                 }
                 hubs.extend(edited_hub(action));
                 let requested = string(action, "name").trim();
-                if requested.chars().any(|c| c.is_ascii_alphanumeric()) {
+                if resolved_hub.is_none() && requested.chars().any(|c| c.is_ascii_alphanumeric()) {
                     hubs.push(normalize_slug(requested));
                 }
             } else {

@@ -259,6 +259,7 @@ These are production environment controls read by the native runtime, macOS UI, 
 | Variable | Default / behavior |
 | --- | --- |
 | `CITO_HUB_PORT` | `4291`; standalone `--port` (`0` requests an ephemeral port). |
+| `CITO_HUB_NAME` | Optional advertised name; standalone `--name` overrides it. Compose forwards this variable. |
 | `CITO_HUB_BIND` | `127.0.0.1` with `none`, `0.0.0.0` with `token`/`oidc`; standalone `--bind`, an IP address. |
 | `CITO_HUB_DATA_DIR` | `~/.cito/hub`; standalone `--data-dir`. Docker uses `/data`. |
 | `CITO_AUTH_MODE` | `none`; standalone `--auth`: `none`, `token`, or `oidc`. Client config validation also recognizes this variable; configure per-Hub client authentication in `config.json`. |

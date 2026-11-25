@@ -149,6 +149,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let profile: HubFormProfile
         let requestId: String
         let generation: Int
+        let nameExplicit: Bool
     }
     struct HubFormState {
         enum Mode {
@@ -175,6 +176,22 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         var issuer = ""
         var clientId = ""
         var redirectPort = ""
+        var oidcManualExpanded = false
+
+        var hasOIDCDraft: Bool { !issuer.isEmpty || !clientId.isEmpty || !redirectPort.isEmpty }
+        var oidcExpanded: Bool {
+            if oidcManualExpanded { return true }
+            if let initial = initialHub {
+                return issuer != initial.issuer || clientId != initial.clientId || redirectPort != initial.redirectPort
+            }
+            return hasOIDCDraft
+        }
+
+        mutating func failSave(_ message: String) {
+            pendingSave = nil
+            error = message
+            if isOpen && auth == "oidc" { oidcManualExpanded = true }
+        }
 
         init(mode: Mode = .closed) { self.mode = mode }
         init(editing hub: HubConfigItem) {
@@ -190,6 +207,110 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
     }
     var hubForm = HubFormState()
+
+    private func rawHTTPHost(_ url: String) -> String? {
+        // Do not let Foundation or Network reinterpret an ASCII IPv4 spelling.
+        let input = url.unicodeScalars.filter { $0 != "\t" && $0 != "\r" && $0 != "\n" }
+        guard let schemeEnd = input.firstIndex(of: ":"),
+              ["http", "https"].contains(String(input[..<schemeEnd]).lowercased()) else { return nil }
+        let authority = input[input.index(after: schemeEnd)...]
+            .drop(while: { $0 == "/" || $0 == "\\" })
+            .prefix(while: { $0 != "/" && $0 != "\\" && $0 != "?" && $0 != "#" })
+        let hostPort = authority.lastIndex(of: "@").map { authority[authority.index(after: $0)...] } ?? authority
+        guard hostPort.first != "[" else { return nil } // IPv6 has no name category.
+        let parts = hostPort.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        if parts.count == 2, !parts[1].isEmpty {
+            let port = String(parts[1])
+            guard port.utf8.allSatisfy({ (48...57).contains($0) }), UInt16(port) != nil else { return nil }
+        }
+        guard let rawHost = parts.first, let decoded = String(rawHost).removingPercentEncoding, !decoded.isEmpty,
+              !decoded.unicodeScalars.contains(where: { $0.value <= 32 || $0.value == 127 || "%#/:<>?@[\\]^|".unicodeScalars.contains($0) }) else { return nil }
+        if decoded.utf8.allSatisfy({ $0 < 128 }) { return decoded.lowercased() }
+        // Map IDNA label separators in the raw host before Foundation can reinterpret it.
+        let host = String(String.UnicodeScalarView(decoded.unicodeScalars.map { scalar in
+            switch scalar {
+            case "\u{3002}", "\u{FF0E}", "\u{FF61}": return "."
+            default: return scalar
+            }
+        }))
+        if host.utf8.allSatisfy({ $0 < 128 }) { return host.lowercased() }
+        // Foundation supplies IDNA conversion for non-ASCII domains only.
+        return URL(string: "http://\(host)")?.host?.lowercased()
+    }
+
+    private func whatwgIPv4(_ parts: [Substring]) -> UInt32? {
+        guard (1...4).contains(parts.count) else { return nil }
+        var address: UInt32 = 0
+        for (index, part) in parts.enumerated() {
+            guard !part.isEmpty else { return nil }
+            let hex = part.hasPrefix("0x")
+            let digits = hex ? part.dropFirst(2) : part
+            let radix = hex ? 16 : part.hasPrefix("0") ? 8 : 10
+            guard digits.first != "+", digits.first != "-",
+                  let number = digits.isEmpty ? 0 : UInt32(digits, radix: radix) else { return nil }
+            if index == parts.count - 1 {
+                guard number <= UInt32.max >> (8 * index) else { return nil }
+                return address | number
+            }
+            guard number <= 255 else { return nil }
+            address |= number << (8 * (3 - index))
+        }
+        return nil
+    }
+
+    private func automaticHubName(_ url: String) -> String {
+        guard let host = rawHTTPHost(url) else { return "remote" }
+        var parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        // Ignore exactly one final dot before checking whether this is a numeric host.
+        if parts.last == "" { parts.removeLast() }
+        if let last = parts.last, !last.isEmpty,
+           last.utf8.allSatisfy({ (48...57).contains($0) }) ||
+           (last.hasPrefix("0x") && last.utf8.dropFirst(2).allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })) {
+            // Invalid numeric hosts are not domains (including on overflow).
+            guard let ip = whatwgIPv4(parts) else { return "remote" }
+            let first = ip >> 24, second = (ip >> 16) & 255
+            if first == 10 || (first == 172 && (16...31).contains(second)) || (first == 192 && second == 168) { return "lan" }
+            if first == 100 && (64...127).contains(second) { return "tailscale" }
+            return "remote"
+        }
+        let domain = host.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let labels = domain.split(separator: ".").filter { $0.unicodeScalars.contains { $0.isASCII && CharacterSet.alphanumerics.contains($0) } }
+        let genericPrefixes: Set<String> = ["cito", "auth", "sso", "id", "login", "internal", "corp", "www"]
+        let label = !domain.hasSuffix(".local") && !domain.hasSuffix(".ts.net") && labels.count >= 3
+            ? labels.dropLast().first(where: { !genericPrefixes.contains(String($0)) }) ?? labels[labels.count - 2]
+            : labels.first
+        return String(label ?? "remote")
+    }
+
+    private func normalizeHubName(_ raw: String) -> String {
+        var slug = ""
+        for scalar in raw.unicodeScalars {
+            if scalar.isASCII && CharacterSet.alphanumerics.contains(scalar) {
+                if slug.count < 32 { slug += String(scalar).lowercased() }
+            } else if !slug.isEmpty && !slug.hasSuffix("-") && slug.count < 32 {
+                slug += "-"
+            }
+        }
+        return slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    func hubNameProposal(_ raw: String, url: String, existing: [HubConfigItem], creating: Bool, original: String = "") -> String {
+        let automatic = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !creating && (automatic || raw == original) { return original }
+        if !automatic { return normalizeHubName(raw) }
+
+        let url = normalizedHubURL(url)
+        let base = normalizeHubName(automaticHubName(url))
+        var name = base
+        var suffix = 2
+        while name == "local" || existing.contains(where: { $0.name == name && ($0.is_builtin == true || normalizedHubURL($0.url) != url) }) {
+            let ending = "-\(suffix)"
+            name = String(base.prefix(32 - ending.count)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) + ending
+            suffix += 1
+        }
+        return name
+    }
+
     struct HostHubPortState {
         var pending = false
         var savedUntil: Date?
@@ -524,11 +645,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let message = frame.warning ?? frame.error
         if let pending = hubForm.pendingSave, request == pending.requestId,
            operation.isEmpty || ["setup_save_hub", "paste_hub_invite"].contains(operation) {
-            hubForm.pendingSave = nil
-            if failed { hubForm.error = message ?? "Hub save failed."; routedToForm = true }
+            if failed { hubForm.failSave(message ?? "Hub save failed."); routedToForm = true }
             else if frame.authority_changed != true && (frame.committed == true || frame.ok == true) {
-                finishHubSave(pending)
-            }
+                finishHubSave(pending, savedName: frame.hub)
+            } else { hubForm.pendingSave = nil }
             settled = true
         }
         if !hubInviteRequest.isEmpty && request == hubInviteRequest && (operation.isEmpty || ["setup_save_hub", "paste_hub_invite"].contains(operation)) {
@@ -556,17 +676,20 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             hubForm.issuer=cfg.issuer ?? cfg.oidcIssuer ?? ""
             hubForm.clientId=cfg.clientId ?? cfg.client_id ?? cfg.oidcClientId ?? ""
             hubForm.redirectPort=(cfg.redirect_port ?? cfg.redirectPort ?? cfg.oidcRedirectPort)?.text ?? ""
-            rebuildSettingsPanel(syncFields: false); return
+            if hubForm.hasOIDCDraft { hubForm.oidcManualExpanded = true }
+            rebuildSettingsPanel(revealAddHub: true, syncFields: false); return
         }
         // Receipt-only settlements never project settings or results from an
         // obsolete authority. They still own the matching request's pending UI.
         if (frame.op == "settings" && frame.settings == nil) ||
            (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
+            let hubSaveRequest = hubForm.pendingSave?.requestId
             let settled = settleReceiptOnly(frame)
             if settled {
                 rebuild(preservingEditor: true)
                 refreshDirectoryViews()
-                if settingsVisible { rebuildSettingsPanel() }
+                let hubSaveFailed = frame.ok == false && hubSaveRequest != nil && hubForm.pendingSave == nil
+                if settingsPanel != nil { rebuildSettingsPanel(revealAddHub: hubSaveFailed) }
             }
             return
         }
@@ -680,13 +803,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if (sourceOp.isEmpty || ["paste_hub_invite", "setup_save_hub"].contains(sourceOp)) && (frame.request_id == nil || clipboardJoin) {
                 hubInviteRequest=""; hubInvitePastedUntil = .distantPast
             }
-            if isAddHubError { hubForm.pendingSave = nil }
+            if isAddHubError { hubForm.failSave(error.isEmpty ? "Hub save failed." : error) }
             let isComposerError = (sourceOp.isEmpty || sourceOp == "send_signal") &&
                 pendingComposer != nil && frame.request_id == pendingComposer?.requestId
             if isComposerError { pendingComposer = nil }
-            if error.isEmpty { }
+            if error.isEmpty || isAddHubError { }
             else if isComposerError { showComposerFailure(error) }
-            else if isAddHubError { hubForm.error = error }
             else if ["query_directory", "open_directory", "directory"].contains(sourceOp) || (frame.op == "directory" && sourceOp.isEmpty) {
                 if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
             }
@@ -698,7 +820,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild(preservingEditor: true)
-            if settingsPanel != nil { rebuildSettingsPanel() }
+            if settingsPanel != nil { rebuildSettingsPanel(revealAddHub: isAddHubError) }
             return
         }
         // State receipts still pass through normal failure and Directory action
@@ -719,10 +841,13 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if hubInvitePending && frame.request_id == hubInviteRequest && hubSaveSucceeded {
                 hubInviteRequest=""; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
-            let uiChanged = acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: hubSaveSucceeded, truncated: preserveSettingsChannels)
+            let matchingHubSave = hubSaveSucceeded && hubForm.pendingSave.map { $0.requestId == frame.request_id } == true
+            let uiChanged = acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: hubSaveSucceeded, savedHub: frame.hub, truncated: preserveSettingsChannels)
             if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
                !(frame.source_op == "set_host_hub" && presentationError(value.host_hub.error ?? "") == presentationError(warning)) { settingsBannerError = warning }
-            if changed || receipt || uiChanged || frame.request_id == hostPort.requestId || settingsBannerError != previousSettingsBanner { rebuildSettingsPanel(preservingEditor: !receipt) }
+            if changed || receipt || uiChanged || frame.request_id == hostPort.requestId || settingsBannerError != previousSettingsBanner {
+                rebuildSettingsPanel(preservingEditor: !receipt, revealAddHub: matchingHubSave && hubForm.error != nil)
+            }
             return
         }
         if frame.op == "pair_code", frame.authority_changed != true, let id = frame.channel_id {
@@ -849,7 +974,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: outgoing, options: [.sortedKeys]), data.count <= 1_048_576 else {
             let message = "This action is too large to send. Shorten the input and try again."
-            if operation == "setup_save_hub" { hubForm.pendingSave = nil; hubForm.error = message }
+            if operation == "setup_save_hub" { hubForm.failSave(message) }
             else if operation == "set_host_hub" { hostPort.pending = false; hostPort.error = message }
             else if operation == "paste_hub_invite" { hubInviteRequest = ""; hubForm.parseRequest = ""; settingsBannerError = message }
             else if operation == "send_signal" { pendingComposer = nil; setComposerStatus(message) }
