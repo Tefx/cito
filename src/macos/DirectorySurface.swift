@@ -92,7 +92,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func ensureDirectoryPanel() {
         ensureEditMainMenu()
         if directoryPanel != nil { return }
-        let window = makeFloatingKeyPanel(width: 560, height: 440, appearance: testAppearance)
+        let window = makeFloatingKeyPanel(width: 560, height: 440, headerHeight: 46, appearance: testAppearance)
+        window.delegate = self
 
         let root = SurfaceView(frame: NSRect(x: 0, y: 0, width: 560, height: 440), radius: 14,
             color: .clear, border: .labelColor.withAppearanceAlpha(0.15))
@@ -110,7 +111,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         // Top Search Bar (560 × 46 pt, y: 394)
         let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
         searchBar.identifier = NSUserInterfaceItemIdentifier("directory_search_bar")
-        let modeTrack = makePillTrack(NSRect(x:14,y:9,width:174,height:28),radius:8)
+        let modeTrack = makePillTrack(NSRect(x:78,y:9,width:174,height:28),radius:8)
         modeTrack.identifier = NSUserInterfaceItemIdentifier("directory_mode_track")
         searchBar.addSubview(modeTrack)
 
@@ -137,7 +138,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         modeTrack.addSubview(actPill)
         directoryModeActPill = actPill
 
-        let searchField = NSSearchField(frame: NSRect(x: 192, y: 9, width: 324, height: 28))
+        let searchField = NSSearchField(frame: NSRect(x: 256, y: 9, width: 290, height: 28))
         searchField.identifier = NSUserInterfaceItemIdentifier("directory_search")
         searchField.setAccessibilityLabel("Search directory and activity")
         searchField.placeholderString = "Search by user, repo, title, host, or #id…"
@@ -145,12 +146,6 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         searchBar.addSubview(searchField)
         directorySearchField = searchField
 
-        let closeBtn = MenuControl("Close", frame: NSRect(x: 524, y: 11, width: 24, height: 24), symbol: "xmark")
-        closeBtn.identifier = NSUserInterfaceItemIdentifier("close_directory")
-        closeBtn.style = .subtleHeader
-        closeBtn.toolTip = "Close Directory"
-        closeBtn.pressed = { [weak self] in self?.closeDirectoryPanel(emitAction: true) }
-        searchBar.addSubview(closeBtn)
         searchBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         root.addSubview(searchBar)
 
@@ -342,6 +337,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         root.addSubview(footerBar)
 
         window.contentView = root
+        window.layoutWindowButtons()
         directoryPanel = window
         updateDirectoryFacetStyles()
     }
@@ -362,12 +358,12 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let actTitle = unreadCount > 0 ? "Activity · \(unreadCount)" : "Activity"
         directoryModeActPill?.label.stringValue = actTitle
         directoryModeActPill?.setAccessibilityLabel(actTitle)
-        if let act = directoryModeActPill, let dir = directoryModeDirPill, let search = directorySearchField, let track = act.superview, let bar = track.superview, let close = bar.subviews.first(where: { $0.identifier?.rawValue == "close_directory" }) {
+        if let act = directoryModeActPill, let dir = directoryModeDirPill, let search = directorySearchField, let track = act.superview, let bar = track.superview {
             dir.frame.size.width = MenuControl.intrinsicWidth("Directory", font:dir.label.font ?? .systemFont(ofSize:11.5))
             act.frame.size.width = MenuControl.intrinsicWidth(actTitle, font:act.label.font ?? .systemFont(ofSize:11.5))
-            track.frame.size.width = dir.frame.width + act.frame.width + 8
+            track.frame.size.width = max(174, dir.frame.width + act.frame.width + 8)
             layoutBar(in:track,insetLeft:2,insetRight:2,y:2,height:24,spacing:4,leading:[dir,act])
-            layoutBar(in: bar, insetLeft: 14, y: 9, height: 28, leading: [track], flexible: search, trailing: [close])
+            layoutBar(in: bar, insetLeft: 78, insetRight: 14, y: 9, height: 28, spacing: 4, leading: [track], flexible: search)
         }
     }
 
@@ -702,17 +698,14 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         refreshDirectoryViews(revealSelection: true)
         updateDirectoryFacetStyles()
         if !headless, let window = directoryPanel {
-            NSApp.setActivationPolicy(.regular)
-            if let screen = NSScreen.main {
+            if let screen = NSScreen.main, !window.isMiniaturized {
                 let area = screen.visibleFrame
                 window.setFrameOrigin(NSPoint(x: area.midX - 280, y: area.midY - 180))
             }
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            if !(directoryComposerBar?.isHidden ?? true), let field = composerInputField {
-                window.makeFirstResponder(field)
-            } else if let field = directorySearchField {
-                window.makeFirstResponder(field)
+            presentPanel(window) { [weak self] in
+                guard let self else { return nil }
+                if self.directoryComposerBar?.isHidden == false, let field = self.composerInputField { return field }
+                return self.directorySearchField
             }
         }
     }
@@ -772,9 +765,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func handleDirectoryKey(_ key: String) {
-        if (directoryPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
-        if handleTextEditShortcut(key, in: directoryPanel) { return }
         let key = key.lowercased()
+        guard allowPanelKey(key, in: directoryPanel), !handleTextEditShortcut(key, in: directoryPanel) else { return }
         if (key == "up" || key == "down"), let editor = composerInputField?.currentEditor(),
            directoryPanel?.firstResponder === editor { return }
         switch key {
@@ -816,6 +808,11 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             let peer=directoryFilteredPeers[directorySelectedIndex]
             openComposer(target:peer.display_address,hub:peer.hub ?? "")
         case "command-comma": openSettingsPanel()
+        case "command-m": if !headless { directoryPanel?.miniaturize(nil) }
+        case "command-k":
+            if let field = directorySearchField, directoryPanel?.makeFirstResponder(field) == true { field.selectText(nil) }
+        case "command-1": switchDirectoryMode("directory")
+        case "command-2": switchDirectoryMode("activity")
         case "delete":
             guard directoryMode == "activity", !activityClearConfirm, !(directoryPanel?.firstResponder is NSTextView),
                   activityFilteredItems.indices.contains(directorySelectedIndex) else { return }

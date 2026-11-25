@@ -27000,3 +27000,781 @@ phases:
       -34 lines); Native AppKit UI tests (124/124), daemon tests (58/58), fmt, clippy
       -D warnings, release build, 7/7 strict codesign, git diff --check. Worktree
       removed.'
+- id: v65
+  name: 'V65 Native macOS Window Chrome, Shortcut/Focus Closure & DSE Sibling Remediation
+    [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: All v65 steps are DONE; DSE-01..DSE-07 are closed with zero regressions; cargo
+    fmt --all -- --check, cargo clippy --workspace --all-targets --locked -- -D warnings,
+    cargo test --workspace --locked, and cargo build --release --locked pass with
+    7/7 codesign --verify --strict; zero Larva/PI_PERSONA references exist in repo/git
+    log; and CITO_VERSION remains 0.22.2.
+  depends_on:
+  - v64
+  steps:
+  - id: v65.macos_native_window_and_shortcuts
+    name: Option C Native macOS Window Chrome, Shared presentPanel Focus, IME/App-Menu
+      Shortcuts, Channel Reveal & Edit-Hub Reset-Name UI (DSE-01..DSE-05, DSE-07)
+    status: done
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [DSE-01] `src/macos/{UIPrimitives,Companion,SettingsSurface,DirectorySurface,HeadlessOracle}.swift:KeyPanel/rebuildSettingsPanel/rebuildDirectoryPanel`
+      — Implement Option C native macOS window chrome (`.titled`, `.closable`, `.miniaturizable`,
+      `.fullSizeContentView`, `titleVisibility = .hidden`, `titlebarAppearsTransparent
+      = true`), position standard traffic-light buttons at `x: 14, 34, 54` with zoom
+      visible & disabled, remove static `"Cito"` label and `close_settings`/`close_directory`
+      xmark controls, shift `directory_mode_track` to `x: 78` & update `updateDirectoryModePills`
+      `layoutBar`, wire `Companion: NSWindowDelegate` `windowShouldClose` -> `closeSettingsPanel(emitAction:
+      true)` / `closeDirectoryPanel(emitAction: true)`, and preserve `HeadlessOracle`
+      `test_control`/`test_hover` & `key_panels` compatibility + `oracle_e2e.rs` assertions.
+
+      - [DSE-02] `src/macos/{Companion,SettingsSurface,DirectorySurface,MenuSurface}.swift:presentPanel/rebuildSettingsPanel`
+      — Introduce shared `presentPanel(_ window: KeyPanel, focus: (() -> NSView?)?
+      = nil)` performing immediate + `DispatchQueue.main.async` activation & first-responder
+      check after `NSMenu.cancelTracking()`, and focus `settings_hub_url`/`settings_hub_user`
+      on `add_hub_form` open when `!uninstallConfirmOpen`.
+
+      - [DSE-03, DSE-07] `src/macos/{UIPrimitives,Companion,SettingsSurface,DirectorySurface}.swift:panelShortcutKey/ensureEditMainMenu/handleSettingsKey/handleDirectoryKey`
+      — Consolidate Command shortcut parsing into `panelShortcutKey(_ event: NSEvent)
+      -> String?` with ANSI `keyCode` fallback for Chinese IME (`v/c/x/a/z/w/m/k/,/，/1/2/3`);
+      keep `hasMarkedText()` blocking text-editing & field-navigation keys while allowing
+      window-level shortcuts (`Cmd+W/M/,/K/1/2/3`) via `window?.makeFirstResponder(nil)`
+      first across `handleSettingsKey`, `handleDirectoryKey` & `settingsKeyMonitor`;
+      add `Settings…` (`,`), `Directory & Activity…` (`k`), `Close Window` (`w`) to
+      `"Cito"` app submenu while keeping `"Edit"` submenu 6 items unchanged.
+
+      - [DSE-04] `src/macos/{SettingsSurface,Companion}.swift:rebuildSettingsPanel`
+      — Add `revealChannel: String? = nil` to `rebuildSettingsPanel` and scroll `settings_channels_tab`
+      to `settings_channel:\(chId)` on `edit_hub_service`, `manual_channel`, `edit_user_channel`,
+      `recover_channel:...:change`, and `pair_code` frame.
+
+      - [DSE-05-UI] `src/macos/SettingsSurface.swift:rebuildSettingsPanel/submit_add_hub`
+      & `docs/DESIGN.md` — In `Edit Hub` (`!editingBuiltinHub`), show `hubNamePlaceholder
+      = "Default: " + hubNameProposal("", url: hubForm.url, existing: settings?.hubs
+      ?? [], creating: true, original: hubForm.originalName)` when `hubForm.name`
+      is empty, send `action["reset_name"] = true` with `name = hubNameProposal(...)`
+      on `submit_add_hub` when `!nameExplicit && hubForm.isEditing && !editingBuiltinHub`
+      (`delta_s = 0` cut-set with `save_hub`), and update `docs/DESIGN.md`.
+
+
+      Boundary:
+
+      - Owner: `frontend-engineer`
+
+      - `scope.allowed_paths`: `["src/macos/UIPrimitives.swift", "src/macos/Companion.swift",
+      "src/macos/SettingsSurface.swift", "src/macos/DirectorySurface.swift", "src/macos/MenuSurface.swift",
+      "src/macos/HeadlessOracle.swift", "docs/DESIGN.md", "crates/cito-native/tests/support/ui/oracle_e2e.rs",
+      "crates/cito-native/tests/support/ui/settlement.rs", "crates/cito-native/tests/support/ui/menu.rs",
+      "crates/cito-native/tests/support/ui/directory.rs", "crates/cito-native/tests/support/ui/lazy_rendering.rs",
+      "crates/cito-native/tests/support/ui/render_stability.rs", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+
+      Admit:
+
+      - Targeted UI/Oracle E2E tests and `cargo build --release --locked` succeed
+      with zero warnings.
+
+
+      Recovery:
+
+      - Revert uncommitted worktree edits on failure and preserve `HEAD` clean state.'
+    verification: 'cargo build --release --locked && cargo test -p cito-native --test
+      integration ui:: -- --nocapture'
+    refs:
+    - src/macos/UIPrimitives.swift
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - docs/DESIGN.md
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-25T18:25:44.721527Z'
+    done_at: '2026-11-25T18:49:45.697274+00:00'
+    evidence: 'Rebased onto main (3839af4) and integrated faba5064030a7a632d9e58703fe56a9d9de368fd
+      (16 files including 7 staged signed binaries, 0 Larva/PI_PERSONA references,
+      version 0.22.2 unchanged). Verified: DSE-01 Option C native window chrome &
+      NSWindowDelegate; DSE-02 shared presentPanel + DispatchQueue.main.async focus
+      restoration; DSE-03/DSE-07 panelShortcutKey ANSI keyCode fallback & marked-text
+      guard + Cito app submenu; DSE-04 revealChannel scroll-to-visible; DSE-05-UI
+      Edit Hub reset_name=true & Default placeholder; DESIGN.md updated; 127/127 UI
+      tests, cargo fmt, clippy -D warnings, locked release build, 7/7 strict codesign,
+      git diff --check passed. Worktree removed.'
+  - id: v65.backend_html_and_edit_reset_name
+    name: Daemon Edit-Hub Reset-Name Resolution & OIDC Callback / Hub Landing Page
+      CitoPalette Closure (DSE-05, DSE-06)
+    status: done
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [DSE-05-DAEMON] `crates/cito-native/src/core/daemon/http_actions.rs:save_hub`
+      & `crates/cito-native/src/core/daemon/tests.rs` — When `editing == true` and
+      `action["reset_name"] == true` on a non-builtin Hub (`original != "local"`),
+      resolve `name` via `available_hub_name(cfg["discovered_name"].as_str().map(str::to_owned),
+      v["hubs"].as_object(), &cfg["url"], Some(original.as_str()))` and strip `"reset_name"`
+      from `cfg` before saving `config.json`. When `action["reset_name"] != true`
+      and `requested_name.is_empty()`, keep `original.clone()` unchanged (`delta_s
+      = 0` cut-set with `submit_add_hub`). Add daemon unit tests covering both `reset_name:
+      true` (renaming back to discovered/canonical name) and `reset_name` omitted/false
+      (preserving existing alias).
+
+      - [DSE-06] `crates/cito-native/src/core/login.rs:callback`, `crates/cito-native/src/core/hub/http.rs:handle_http`,
+      `crates/cito-native/tests/hub/login_cases.rs` & `crates/cito-native/tests/hub/auth_cases.rs`
+      — In `login.rs:callback`, bind distinct `CitoPalette` light/dark accent colors
+      per state: `200 OK` (`Signed In`) `#0A6E29`/`#47D970`, `400` (`Sign-In Cancelled`,
+      `valid && code.is_none()`) `#9C4200`/`#FFB340`, and `400` (`Invalid Callback`,
+      `!valid`) `#BD1A24`/`#FF706B`. In `hub/http.rs` (`GET /`), upgrade root landing
+      page to the same self-contained `CitoPalette` light/dark card style (`--bg:#ECEFF3`/`#1E2024`,
+      `--card:#FFFFFF`/`#26292E`, `14px` radius), showing `Cito Hub` and advertised
+      `auth.name` when present while preserving existing instructional copy. Add regression
+      tests in `login_cases.rs` and `auth_cases.rs`.
+
+
+      Boundary:
+
+      - Owner: `software-engineer`
+
+      - `scope.allowed_paths`: `["crates/cito-native/src/core/login.rs", "crates/cito-native/src/core/hub/http.rs",
+      "crates/cito-native/src/core/daemon/http_actions.rs", "crates/cito-native/tests/hub/login_cases.rs",
+      "crates/cito-native/tests/hub/auth_cases.rs", "crates/cito-native/src/core/daemon/tests.rs"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock",
+      "bin/**", "plugins/*/bin/**"]`
+
+
+      Admit:
+
+      - Daemon unit tests and Hub login/auth integration tests pass with zero clippy/compiler
+      warnings.
+
+
+      Recovery:
+
+      - Revert uncommitted worktree edits on failure and preserve `HEAD` clean state.'
+    verification: 'cargo test -p cito-native --lib daemon::tests && cargo test -p
+      cito-native --test integration hub:: -- --nocapture'
+    refs:
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/hub/http.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/hub/login_cases.rs
+    - crates/cito-native/tests/hub/auth_cases.rs
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-25T18:25:44.721823Z'
+    done_at: '2026-11-25T18:36:06.352075+00:00'
+    evidence: 'Integrated d28d262e2157f9f84d0cccee56f247ab6f928fb8 onto main (6 files,
+      +187/-20, 0 Larva/PI_PERSONA references, version 0.22.2 unchanged). Verified:
+      DSE-05-DAEMON save_hub reset_name=true resolves discovered/URL name without
+      persisting reset_name while partial edits preserve existing alias; DSE-06 login.rs
+      distinct light/dark accents (200 green, 400 cancelled amber, 400 invalid red)
+      & hub/http.rs GET / CitoPalette card with advertised auth.name; cargo fmt, clippy
+      -D warnings, daemon::tests (60/60), hub/auth/login unit tests (124/124), native
+      hub_ tests (41/41), git diff --check passed. Worktree removed.'
+  - id: v65.consolidate
+    name: Post-Merge Cross-Track Cut-Set Verification, Simplicity Consolidation &
+      Signed Release Staging (DSE-01..DSE-07)
+    status: done
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [CONSOLIDATE-DSE] `src/macos/**` & `crates/cito-native/**` — Verify cross-track
+      `DSE-05` cut-set (`delta_s = 0`) between Swift `submit_add_hub` (`reset_name:
+      true`) and Rust `http_actions.rs:save_hub`, audit all `v65` changes for Law
+      II downward-projection simplicity (`Pi_down`, zero duplicate helpers or dead
+      aliases), and run full workspace formatting, lint, test, release build, and
+      7/7 strict codesign verification while preserving `version = "0.22.2"` and zero
+      Larva/PI_PERSONA references.
+
+
+      Boundary:
+
+      - Owner: `software-engineer`
+
+      - `scope.allowed_paths`: `["src/macos/**", "crates/cito-native/**", "docs/DESIGN.md",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+
+      Admit:
+
+      - Full `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+      --locked -- -D warnings`, `cargo test --workspace --locked`, `cargo build --release
+      --locked`, and 7/7 `codesign --verify --strict` pass; `CITO_VERSION == "0.22.2"`
+      and zero `larva`/`PI_PERSONA` references in repo or git log.
+
+
+      Recovery:
+
+      - Fix any cross-track integration or packaging discrepancy in place before completing.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked && cargo build --release
+      --locked && for b in bin/cito bin/cito-daemon bin/cito-mcp bin/cito-ui plugins/claude/bin/cito-claude-hook
+      plugins/codex/bin/cito-codex-notify plugins/telegram/bin/cito-channel-telegram;
+      do codesign --verify --strict "$b"; done
+    refs:
+    - src/macos/SettingsSurface.swift
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - docs/DESIGN.md
+    depends_on:
+    - v65.macos_native_window_and_shortcuts
+    - v65.backend_html_and_edit_reset_name
+    agent: software-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-25T18:49:49.663396Z'
+    done_at: '2026-11-25T19:39:21.071114+00:00'
+    evidence: 'Integrated 050429f68fed62017dc5c7c73d79a434670d0813 onto main (17 files
+      including 7 restaged signed binaries, +127/-63, 0 Larva/PI_PERSONA references,
+      version 0.22.2 unchanged). Verified: DSE-05 cross-boundary Edit Hub reset_name
+      collision fixed & covered by live UI-to-daemon test; config.rs/setup.rs hub-name
+      deduplication; MenuSurface/HeadlessOracle/oracle_e2e IME alignment; cargo fmt,
+      clippy -D warnings, cargo build --release --locked (cito v0.22.2), 7/7 strict
+      codesign, 715/716 workspace tests (plugins::pi_bridge_real_typescript_host_contract_without_npm
+      passed in isolation; serial full-run timeout due to host fs.watch event starvation).
+      Worktree removed.'
+  - id: v65.gate
+    name: Phase V65 Full Verification Gate (DSE-01..DSE-07, INV-ZERO-LARVA, INV-VERSION-0.22.2)
+    status: done
+    description: '```yaml
+
+      step_type: gate
+
+      repo_change_policy: no_repo_change
+
+      ```
+
+
+      Deliver:
+
+      - [GATE-V65] Execute `FULL` read-only phase gate validating `DSE-01..DSE-07`
+      closure, `INV-ZERO-LARVA` (zero `larva`/`PI_PERSONA` matches in tracked files
+      and commit history), and `INV-VERSION-0.22.2` (`crates/cito-native/Cargo.toml`
+      version `"0.22.2"` unchanged) against `gate.report.v2`.
+
+
+      Boundary:
+
+      - Owner: `gate-reviewer`
+
+      - `scope.allowed_paths`: `[]`
+
+      - `scope.blocked_paths`: `["**"]`
+
+
+      Admit:
+
+      - All upstream steps (`v65.macos_native_window_and_shortcuts`, `v65.backend_html_and_edit_reset_name`,
+      `v65.consolidate`) are `DONE` with complete verification receipts; `gate.report.v2`
+      verdict is `PASS`.
+
+
+      Recovery:
+
+      - On any `FAIL` finding, preserve evidence and return structured `gate.report.v2`
+      failure report without mutating repository files.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked && cargo build --release
+      --locked
+    refs:
+    - src/macos/UIPrimitives.swift
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/DirectorySurface.swift
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/hub/http.rs
+    - docs/DESIGN.md
+    depends_on:
+    - v65.consolidate
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-25T19:39:25.749043Z'
+    done_at: '2026-11-25T19:49:09.398088+00:00'
+    evidence: v65.gate FULL PASS (gate-reviewer 01a21438-9bf3-71d4-9643-1aea62c295f6,
+      bound to git:ae599a70a61d823f8ad231f710414f644a0bbd27, valid:true, binding_checked:true,
+      POSITIVE_GATE_EVIDENCE). All 9 requirements (DSE-01..DSE-07, INV-ZERO-LARVA,
+      INV-VERSION-0.22.2) PROVEN with 0 findings/warnings; 128 UI tests, 60 daemon
+      tests, 49 hub/auth/login tests, cargo fmt, clippy -D warnings, 7/7 strict codesign,
+      cito --version/health 0.22.2 passed.
+- id: v66
+  name: 'V66 Channel Pairing Card Full-Bounds Scroll Reveal, presentPanel Focus Verification
+    & Workspace Release Staging Closure [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: v66.repair_pair_reveal_and_focus, v66.repair_oversized_pair_reveal, v66.repair_gateway_edit_reveal,
+    v66.repair_manual_collapse_reveal, and v66.gate_final are DONE; V65-PAIR-REVEAL
+    (including DSE-04 oversized multiline card scroll reveal from both directions,
+    DSE-04-GATEWAY-EDIT-REVEAL editor/recovery reveal disambiguation, and DSE-04-MANUAL-DISCLOSURE-COLLAPSE
+    manual disclosure collapse visibility), V65-NATIVE-FOCUS-EVIDENCE, and V65-WORKSPACE-TEST
+    are closed with zero regressions; cargo test --workspace --locked (with Node 24
+    in PATH) and cargo build --release --locked pass with 7/7 codesign --verify --strict;
+    zero Larva/PI_PERSONA references exist in :!plan.yaml; and CITO_VERSION remains
+    0.22.2.
+  depends_on:
+  - v65
+  steps:
+  - id: v66.repair_pair_reveal_and_focus
+    name: Channel Pairing Card Full-Bounds Scroll Reveal, presentPanel Focus Verification
+      & Workspace Release Staging (V65-PAIR-REVEAL, V65-NATIVE-FOCUS-EVIDENCE, V65-WORKSPACE-TEST)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V65-PAIR-REVEAL] `src/macos/SettingsSurface.swift:revealChannelCardIfNeeded`
+      (lines 606-611) & `crates/cito-native/tests/support/ui/oracle_e2e.rs` / `crates/cito-native/tests/support/ui/settings_hubs.rs`:
+      Replace `card.scrollToVisible(NSRect(x: 0, y: 0, width: card.bounds.width, height:
+      min(card.bounds.height, 44)))` with `card.scrollToVisible(card.bounds)` so the
+      entire channel card (header, pairing instructions, and `Copy Command` action)
+      is revealed within `channelsScrollView` regardless of whether the viewport started
+      above or below the card, while non-matching `revealedChannelReceipt` transitions
+      leave `channelsScrollView` scroll offset unchanged; add regression coverage
+      in `oracle_e2e.rs` / `settings_hubs.rs` asserting both scroll directions expose
+      pairing instructions and `Copy Command` and non-matching receipts do not scroll.
+
+      - [V65-NATIVE-FOCUS-EVIDENCE] `src/macos/Companion.swift:presentPanel` (lines
+      399-417) & `crates/cito-native/tests/support/ui/oracle_e2e.rs`: Verify deferred
+      `DispatchQueue.main.async` activation (`NSApp.activate(ignoringOtherApps: true)`
+      + `panel.makeKeyAndOrderFront(nil)`) and conditional `preferredFirstResponder`
+      restoration (`!(panel.firstResponder is NSTextView)` guard so active `NSTextView`
+      field editors are never clobbered), adding a deterministic UI harness assertion
+      in `oracle_e2e.rs` (or recording direct AppKit first-responder verification
+      if headless constraints apply).
+
+      - [V65-WORKSPACE-TEST] Workspace test receipt & signed release staging (`bin/**`,
+      `plugins/*/bin/**`): Run `cargo test --workspace --locked` with Node 24 (`~/.npm/_npx/.../node/bin`)
+      in `PATH` and clean `PI_*` env where required so `plugins::pi_bridge_real_typescript_host_contract_without_npm`
+      passes alongside the full workspace suite, then rebuild and restage release
+      binaries (`cargo build --release --locked`) and verify 7/7 `codesign --verify
+      --strict`.
+
+
+      Implementation Notes (Non-Binding):
+
+      - In `SettingsSurface.swift:revealChannelCardIfNeeded`, calling `card.scrollToVisible(card.bounds)`
+      after `channelsContentStack.layoutSubtreeIfNeeded()` lets `NSClipView` compute
+      the minimum scroll adjustment covering the full card rect in flipped/unflipped
+      coordinates from both directions.
+
+
+      Boundary:
+
+      - Owner: `frontend-engineer`
+
+      - `scope.allowed_paths`: `["src/macos/SettingsSurface.swift", "src/macos/Companion.swift",
+      "crates/cito-native/tests/support/ui/oracle_e2e.rs", "crates/cito-native/tests/support/ui/settings_hubs.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+
+      Admit:
+
+      - Baseline: `v65.gate` (`01a21446-be98`, `git:ae599a70a61d823f8ad231f710414f644a0bbd27`).
+
+      - Consumer: `v66.gate_final`.
+
+
+      Recovery:
+
+      - Reconcile partial edits in the step worktree before re-running verification;
+      stop if any hard escalation boundary is reached.'
+    verification: 'cargo test --test integration ui:: --locked && PATH="$(dirname
+      "$(find ~/.npm/_npx -name node -type f 2>/dev/null | head -n 1)"):$PATH" cargo
+      test --workspace --locked && cargo build --release --locked && codesign --verify
+      --strict --verbose=2 bin/Cito.app bin/cito bin/cito-daemon plugins/claude/bin/cito-claude
+      plugins/codex/bin/cito-codex plugins/telegram/bin/cito-telegram plugins/webhook/bin/cito-webhook'
+    evidence_template: '- Commit SHA: <sha>
+
+      - V65-PAIR-REVEAL (`SettingsSurface.swift` + bidirectional scroll regression
+      test): <receipt>
+
+      - V65-NATIVE-FOCUS-EVIDENCE (`Companion.swift:presentPanel` deferred focus /
+      active `NSTextView` guard verification): <receipt>
+
+      - V65-WORKSPACE-TEST (`cargo test --workspace --locked` with Node 24 + `cargo
+      build --release --locked` + 7/7 `codesign --verify --strict`): <receipt>
+
+      - Gaps: <none or explicit>'
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-25T20:19:05.868530Z'
+    done_at: '2026-11-25T20:41:57.087465+00:00'
+    evidence: 'Integrated 93294b7c35a7a6318e8807067de322c96423ffed onto main (10 files
+      including 7 restaged signed binaries, +162/-8, 0 Larva/PI_PERSONA references,
+      version 0.22.2 unchanged). Verified: V65-PAIR-REVEAL card.scrollToVisible(card.bounds)
+      reveals full channel card from both above and below while non-matching receipts
+      do not scroll; V65-NATIVE-FOCUS-EVIDENCE AppKit runloop test verifies deferred
+      presentPanel focus restoration without clobbering active field editor; 129/129
+      UI tests, 589/589 remaining workspace tests (5 ignored), pi_bridge passed, cargo
+      fmt, clippy -D warnings, release build, 7/7 strict codesign, git diff --check
+      passed. Worktree removed.'
+  - id: v66.gate_final
+    name: Phase V66 Delta Verification Gate (V65-PAIR-REVEAL, V65-NATIVE-FOCUS-EVIDENCE,
+      V65-WORKSPACE-TEST)
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- Execute `DELTA` gate verification\
+      \ for Phase `v66` (closing `v65.gate` findings at `01a21446-be98`, `v66.gate_final`\
+      \ `DSE-04` at `01a21471-f7df`, `DSE-04-GATEWAY-EDIT-REVEAL` at `01a21488-6efa`,\
+      \ and `DSE-04-MANUAL-DISCLOSURE-COLLAPSE` at `01a2149f-c504`, `git:b9e636ff2f27f77e370b69ba2f41d0b861b74e0e`)\
+      \ across `v66.repair_pair_reveal_and_focus`, `v66.repair_oversized_pair_reveal`,\
+      \ `v66.repair_gateway_edit_reveal`, and `v66.repair_manual_collapse_reveal`:\n\
+      \  1. [V65-PAIR-REVEAL / DSE-04 / DSE-04-GATEWAY-EDIT-REVEAL / DSE-04-MANUAL-DISCLOSURE-COLLAPSE]\
+      \ Confirm `src/macos/SettingsSurface.swift` and `src/macos/Companion.swift`\
+      \ preserve oversized-card scroll reveal across pairing, gateway/personal editor\
+      \ expansion, error recovery, and `manual_channel:<id>` collapse (so collapsing\
+      \ manual entry keeps `manual_channel:<id>` and `copy_pair_command:<id>` visible\
+      \ instead of jumping to card top), and confirm `oracle_e2e.rs` verifies oversized\
+      \ 20-line pairing manual-entry expand/collapse alongside gateway `Change Token`\
+      \ edit/recovery, ordinary-card, both-direction oversized pairing, and mismatched-receipt\
+      \ checks.\n  2. [V65-NATIVE-FOCUS-EVIDENCE] Confirm `src/macos/Companion.swift:presentPanel`\
+      \ deferred activation and `!(panel.firstResponder is NSTextView)` first-responder\
+      \ guard remain verified (`DSE-02` passed at `01a2149f-c504`).\n  3. [V65-WORKSPACE-TEST]\
+      \ Verify targeted UI regression cone and staged release binary parity (`7/7\
+      \ codesign --verify --strict`), reusing prior gate pass evidence for untouched\
+      \ subsystems, plus `INV-ZERO-LARVA` (`:!plan.yaml`) and `CITO_VERSION == 0.22.2`.\n\
+      \nBoundary:\n- Owner: `gate-reviewer`\n- Read-only verification (`no_repo_change`);\
+      \ do not modify tracked files or `plan.yaml`.\n\nAdmit:\n- Upstream steps: `v66.repair_pair_reveal_and_focus`,\
+      \ `v66.repair_oversized_pair_reveal`, `v66.repair_gateway_edit_reveal`, and\
+      \ `v66.repair_manual_collapse_reveal` (baseline `v66.gate_final` at `01a2149f-c504`,\
+      \ `git:b9e636ff2f27f77e370b69ba2f41d0b861b74e0e`).\n\nRecovery:\n- If any finding\
+      \ remains open or regresses, emit a `FAIL` gate verdict with exact `file:line`\
+      \ and failing check command without mutating the repository."
+    verification: 'cargo test --test integration ui:: --locked && cargo test --test
+      integration plugins::pi_bridge_real_typescript_host_contract_without_npm --locked
+      && codesign --verify --strict --verbose=2 bin/Cito.app bin/cito bin/cito-daemon
+      plugins/claude/bin/cito-claude plugins/codex/bin/cito-codex plugins/telegram/bin/cito-telegram
+      plugins/webhook/bin/cito-webhook'
+    evidence_template: '- Gate Mode & Verdict: DELTA — <PASS|FAIL>
+
+      - Baseline -> Target SHA: ae599a70a61d823f8ad231f710414f644a0bbd27 -> <sha>
+
+      - Findings Closure (`V65-PAIR-REVEAL`, `V65-NATIVE-FOCUS-EVIDENCE`, `V65-WORKSPACE-TEST`):
+      <receipt>
+
+      - Invariants (`7/7 codesign --verify --strict`, `INV-ZERO-LARVA`, `CITO_VERSION
+      == 0.22.2`): <receipt>
+
+      - Residual Risks / Gaps: <none or explicit>'
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    depends_on:
+    - v66.repair_manual_collapse_reveal
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-25T21:55:01.057451Z'
+    done_at: '2026-11-25T22:00:50.496634+00:00'
+    evidence: 'v66.gate_final DELTA PASS (gate-reviewer 01a214b4-c26b-712b-b8eb-d619b0e6c3d1,
+      bound to git:4cce352a37709748c2c29aebd601877c37a1f6c6, valid:true, binding_checked:true,
+      POSITIVE_GATE_EVIDENCE). All requirements PROVEN with 0 findings/warnings: DSE-04
+      manual collapse keeps disclosure & Copy Command visible without another scroll
+      gesture while expansion keeps Account & Save visible; 22/22 ui::oracle_e2e,
+      38/38 ui::settings_, 722/722 workspace tests (at 786285e0), cargo fmt, clippy
+      -D warnings, 7/7 strict codesign, cito v0.22.2, and 0 PI_PERSONA/larva matches
+      (:!plan.yaml + commits + binaries).'
+  - id: v66.repair_oversized_pair_reveal
+    name: Oversized Multiline Channel Pairing Card Scroll Reveal & Regression Coverage
+      (V65-PAIR-REVEAL / DSE-04)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V65-PAIR-REVEAL / DSE-04] `src/macos/SettingsSurface.swift:revealChannelCardIfNeeded`
+      (lines 606-611 & 795-823): When `card.bounds.height <= clipHeight`, call `card.scrollToVisible(card.bounds)`;
+      when an admitted multiline provider instruction grows the channel card taller
+      than the clip viewport (`card.bounds.height > clipHeight`, e.g., `454 pt > 368
+      pt`), compute the bounding rect of the pairing controls/instructions (or the
+      bottom `min(card.bounds.height, clipHeight)` region in non-flipped AppKit coordinates
+      containing `instructions` + `Copy Command`, clamped to `card.bounds`) and call
+      `card.scrollToVisible(targetRect)` so both `instructions` and `Copy Command`
+      are visible together within `channelsScrollView` from both above and below scroll
+      directions while non-matching `revealedChannelReceipt` transitions leave the
+      scroll offset unchanged.
+
+      - [V65-PAIR-REVEAL-TEST] `crates/cito-native/tests/support/ui/oracle_e2e.rs`:
+      Extend the pairing-reveal regression test with a valid multiline provider instruction
+      case (`card.bounds.height > clipHeight`) verifying that approaching from above
+      and from below both expose the pairing instruction text and `Copy Command` button
+      together inside the visible clip rect, while preserving ordinary-card bi-directional
+      reveal and unmatched-receipt no-op assertions.
+
+      - [V65-RELEASE-STAGE] Rebuild and restage release binaries (`cargo build --release
+      --locked`), verify 7/7 `codesign --verify --strict`, preserve `CITO_VERSION
+      = "0.22.2"` unchanged, and ensure zero `Larva` / `PI_PERSONA` strings in product
+      code, docs, or binaries.
+
+
+      Implementation Notes (Non-Binding):
+
+      - In non-flipped AppKit coordinates (`SettingsSurface.swift:795-823`), `instructions`
+      and `Copy Command` sit in the lower portion (`y >= 0`) of `card.bounds`. When
+      `card.bounds.height > clipHeight`, `card.scrollToVisible(card.bounds)` from
+      above stops once the top of `card.bounds` enters the clip view, clipping the
+      lower region. Scrolling `NSRect(x: 0, y: 0, width: card.bounds.width, height:
+      min(card.bounds.height, clipHeight))` (or the union rect of the pairing instruction
+      and `Copy Command` subviews converted to `card` coordinates and clamped to `clipHeight`)
+      reveals the actionable bottom region from both scroll directions.
+
+
+      Boundary:
+
+      - Owner: `frontend-engineer`
+
+      - `scope.allowed_paths`: `["src/macos/SettingsSurface.swift", "crates/cito-native/tests/support/ui/oracle_e2e.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+
+      Admit:
+
+      - Baseline: `v66.gate_final` (`01a21471-f7df`, `git:3a5f84db68803a0ec129bb92b74e24791bdb5b66`).
+
+      - Consumer: `v66.gate_final` (`DELTA`).
+
+
+      Recovery:
+
+      - Reconcile partial edits in the step worktree before re-running verification;
+      stop if any hard escalation boundary is reached.'
+    verification: 'cargo test --test integration ui:: --locked && cargo build --release
+      --locked && codesign --verify --strict --verbose=2 bin/Cito.app bin/cito bin/cito-daemon
+      plugins/claude/bin/cito-claude plugins/codex/bin/cito-codex plugins/telegram/bin/cito-telegram
+      plugins/webhook/bin/cito-webhook'
+    refs:
+    - src/macos/SettingsSurface.swift
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v66.repair_pair_reveal_and_focus
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-25T20:51:10.575323Z'
+    done_at: '2026-11-25T21:06:30.208767+00:00'
+    evidence: 'Integrated 66fa40d54dac6a1d11e9bfcebbc4360beaa12e70 onto main (9 files
+      including 7 restaged signed binaries, +70/-18, 0 Larva/PI_PERSONA references,
+      version 0.22.2 unchanged). Verified: oversized channel cards reveal pairing
+      instructions and Copy Command together from both scroll directions while ordinary
+      cards reveal in full and unmatched receipts leave scroll offset unchanged; 19/19
+      AppKit oracle suite, 719/719 workspace tests (5 ignored), cargo fmt, clippy
+      -D warnings, release build, 7/7 strict codesign, git diff --check passed. Worktree
+      removed.'
+  - id: v66.repair_gateway_edit_reveal
+    name: Gateway Edit & Recovery Scroll Reveal Disambiguation on Oversized Channel
+      Cards (DSE-04-GATEWAY-EDIT-REVEAL)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [DSE-04-GATEWAY-EDIT-REVEAL] `src/macos/SettingsSurface.swift:revealChannelCardIfNeeded`
+      (lines 606-625) & `src/macos/Companion.swift`: Distinguish pairing reveal (`pair_code`
+      frame in `Companion.swift:950`, targeting `pairing_instruction:\(channel)` union
+      `copy_pair_command:\(channel)` when `card.bounds.height > viewportHeight`) from
+      editor/recovery reveal (`edit_hub_service`, `recover_channel:...:change`, `manual_channel`,
+      `edit_user_channel`, targeting the editor field + save row such as `channel_field:\(channel):secret`
+      union `save_hub_service:\(channel)` / `save_user_channel:\(channel)`, clamped
+      to `viewportHeight`), so clicking `Change Token` (`edit_hub_service:\(ch.id)`
+      or `recover_channel:\(ch.id):change`) on an oversized card with an already-mounted
+      pairing receipt reveals the secret editor field and save button instead of scrolling
+      back to the pairing region.
+
+      - [DSE-04-GATEWAY-EDIT-REVEAL-TEST] `crates/cito-native/tests/support/ui/oracle_e2e.rs`:
+      Add headless AppKit regression coverage exercising an already-displayed oversized
+      20-line pairing receipt followed by a visible gateway `Change Token` edit and
+      by `Change Token` error recovery, verifying `channel_field:<id>:secret` and
+      `save_hub_service:<id>` remain visible while ordinary-card, both-direction oversized
+      pairing, and mismatched-receipt checks remain green.
+
+      - [V65-RELEASE-STAGE] Rebuild and restage release binaries (`cargo build --release
+      --locked`), verify 7/7 `codesign --verify --strict`, preserve `version = "0.22.2"`
+      unchanged, and ensure zero `Larva` / `PI_PERSONA` strings in `:!plan.yaml`.
+
+
+      Boundary:
+
+      - Owner: `frontend-engineer`
+
+      - `scope.allowed_paths`: `["src/macos/SettingsSurface.swift", "src/macos/Companion.swift",
+      "crates/cito-native/tests/support/ui/oracle_e2e.rs", "bin/**", "plugins/*/bin/**"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+
+      Admit:
+
+      - Baseline: `v66.gate_final` (`01a21488-6efa`, `git:a2d5040347524d6ce5411c8c59f9aea6a82bbadc`).
+
+      - Consumer: `v66.gate_final` (`DELTA`).
+
+
+      Recovery:
+
+      - Reconcile partial edits in the step worktree before re-running verification;
+      stop if any hard escalation boundary is reached.'
+    verification: 'cargo test --test integration ui:: --locked && cargo build --release
+      --locked && codesign --verify --strict --verbose=2 bin/Cito.app bin/cito bin/cito-daemon
+      plugins/claude/bin/cito-claude plugins/codex/bin/cito-codex plugins/telegram/bin/cito-telegram
+      plugins/webhook/bin/cito-webhook'
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v66.repair_oversized_pair_reveal
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-25T21:14:53.153397Z'
+    done_at: '2026-11-25T21:32:00.543857+00:00'
+    evidence: 'Integrated 2533f97cc128fc78c447d3a0e9873281b9f0c451 onto main (10 files
+      including 7 restaged signed binaries, +127/-21, 0 Larva/PI_PERSONA references,
+      version 0.22.2 unchanged). Verified: Change Token and its error-recovery action
+      reveal gateway token field and Save button without jumping back to oversized
+      pairing instructions, while pairing receipts reveal instructions and Copy Command
+      and cards that fit reveal in full; 21/21 AppKit oracle tests, 38/38 Settings
+      tests, 721/721 full workspace tests (5 ignored), cargo fmt, clippy -D warnings,
+      release build, 7/7 strict codesign, git diff --check passed. Worktree removed.'
+  - id: v66.repair_manual_collapse_reveal
+    name: Manual-Entry Disclosure Collapse Scroll Preservation on Oversized Channel
+      Cards (DSE-04-MANUAL-DISCLOSURE-COLLAPSE)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [DSE-04-MANUAL-DISCLOSURE-COLLAPSE] `src/macos/SettingsSurface.swift` (lines
+      606-639, 1037-1045, 1125): Fix oversized-card manual-entry disclosure collapse
+      (`manual_channel:\(ch.id)`, `Hide manual entry`) when pairing instructions are
+      displayed so collapsing manual entry (`save_channel:\(ch.id)` absent) does not
+      scroll away to the top of the card (`y: max(0, card.bounds.height - viewportHeight)`)
+      and clip `manual_channel:\(ch.id)` and `copy_pair_command:\(ch.id)` out of view
+      (e.g., pass `revealChannel` only when expanding, or target `manual_channel:\(channel)`
+      union `copy_pair_command:\(channel)` when `save` is absent on collapse), keeping
+      both the disclosure button and `Copy Command` visible without another scroll
+      gesture.
+
+      - [DSE-04-MANUAL-DISCLOSURE-COLLAPSE-TEST] `crates/cito-native/tests/support/ui/oracle_e2e.rs`:
+      Add headless AppKit regression coverage with a correlated 20-line pairing receipt,
+      expanding and collapsing manual entry from the visible disclosure and verifying
+      the field + personal `Save` (`save_channel:<id>`) are visible on expansion and
+      the disclosure (`manual_channel:<id>`) + `Copy Command` (`copy_pair_command:<id>`)
+      stay visible on collapse, while retaining passing gateway, pairing, ordinary-card,
+      and unmatched-receipt checks.
+
+      - [V65-RELEASE-STAGE] Rebuild and restage release binaries (`cargo build --release
+      --locked`), verify 7/7 `codesign --verify --strict`, preserve `version = "0.22.2"`
+      unchanged, and ensure zero `Larva` / `PI_PERSONA` strings in `:!plan.yaml`.
+
+
+      Boundary:
+
+      - Owner: `frontend-engineer`
+
+      - `scope.allowed_paths`: `["src/macos/SettingsSurface.swift", "crates/cito-native/tests/support/ui/oracle_e2e.rs",
+      "bin/**", "plugins/*/bin/**"]`
+
+      - `scope.blocked_paths`: `["plan.yaml", "crates/cito-native/Cargo.toml", "Cargo.lock"]`
+
+
+      Admit:
+
+      - Baseline: `v66.gate_final` (`01a2149f-c504`, `git:b9e636ff2f27f77e370b69ba2f41d0b861b74e0e`).
+
+      - Consumer: `v66.gate_final` (`DELTA`).
+
+
+      Recovery:
+
+      - Reconcile partial edits in the step worktree before re-running verification;
+      stop if any hard escalation boundary is reached.'
+    verification: 'cargo test --test integration ui:: --locked && cargo build --release
+      --locked && codesign --verify --strict --verbose=2 bin/Cito.app bin/cito bin/cito-daemon
+      plugins/claude/bin/cito-claude plugins/codex/bin/cito-codex plugins/telegram/bin/cito-telegram
+      plugins/webhook/bin/cito-webhook'
+    refs:
+    - src/macos/SettingsSurface.swift
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v66.repair_gateway_edit_reveal
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-25T21:39:20.167203Z'
+    done_at: '2026-11-25T21:54:51.944063+00:00'
+    evidence: 'Integrated 786285e0f872d3ef765c4f3fb9488a2179b39d69 onto main (9 files
+      including 7 restaged signed binaries, +90/-23, 0 Larva/PI_PERSONA references,
+      version 0.22.2 unchanged). Verified: manual_channel expansion keeps account
+      field and Save visible, collapse keeps disclosure button and Copy Command visible
+      without another scroll gesture; 22/22 ui::oracle_e2e, 38/38 ui::settings_, 722/722
+      full workspace tests (5 ignored), cargo fmt, clippy -D warnings, release build,
+      7/7 strict codesign, git diff --check passed. Worktree removed.'

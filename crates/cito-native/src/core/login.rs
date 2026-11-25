@@ -630,6 +630,15 @@ fn recover_inner(
     Ok((token.to_owned(), identity))
 }
 
+// Shared by the browser callback and the Hub landing page.
+pub(super) const CITO_CARD_STYLE: &str = r#"
+:root { color-scheme: light dark; --bg:#ECEFF3; --card:#FFFFFF; --ink:#20252B }
+@media (prefers-color-scheme: dark) { :root { --bg:#1E2024; --card:#26292E; --ink:#ECEFF3 } }
+body { margin:0; padding:20px; box-sizing:border-box; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif }
+main { box-sizing:border-box; width:min(100%,420px); padding:32px; border-radius:14px; text-align:center; background:var(--card) }
+h1 { font-size:1.4rem; margin:12px 0 8px } p { margin:0 } p + p { margin-top:12px }
+"#;
+
 fn callback(
     stream: &mut TcpStream,
     state: &str,
@@ -691,13 +700,15 @@ fn callback(
         }
         url.path() == "/callback" && states.len() == 1 && states[0] == state
     });
-    let (status, title, heading, message, icon) = match (valid, &code) {
+    let (status, title, heading, message, icon, light_accent, dark_accent) = match (valid, &code) {
         (true, Some(_)) => (
             "200 OK",
             "Signed In",
             "Signed in to Cito",
             "Cito login complete. You may close this window.",
             "M12 22l7 7 13-15",
+            "#0A6E29",
+            "#47D970",
         ),
         (true, None) => (
             "400 Bad Request",
@@ -705,6 +716,8 @@ fn callback(
             "Sign-in was cancelled",
             "Return to Cito and choose Sign In… to try again.",
             "M15 15l14 14m0-14L15 29",
+            "#9C4200",
+            "#FFB340",
         ),
         (false, _) => (
             "400 Bad Request",
@@ -712,17 +725,17 @@ fn callback(
             "Sign-in link is no longer valid",
             "Invalid callback. Start a new sign-in from Cito.",
             "M22 12v13m0 5v1",
+            "#BD1A24",
+            "#FF706B",
         ),
     };
     let body = format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cito — {title}</title><style>
-:root {{ color-scheme: light dark; --bg:#ECEFF3; --card:#FFFFFF; --ink:#20252B; --accent:#315EA6 }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg:#1E2024; --card:#26292E; --ink:#ECEFF3; --accent:#A2C6FF }} }}
-body {{ margin:0; padding:20px; box-sizing:border-box; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif }}
-main {{ box-sizing:border-box; width:min(100%,420px); padding:32px; border-radius:14px; text-align:center; background:var(--card) }}
-svg {{ color:var(--accent) }} h1 {{ font-size:1.4rem; margin:12px 0 8px }} p {{ margin:0 }}
+<title>Cito — {title}</title><style>{CITO_CARD_STYLE}
+:root {{ --accent:{light_accent} }}
+@media (prefers-color-scheme: dark) {{ :root {{ --accent:{dark_accent} }} }}
+svg {{ color:var(--accent) }}
 </style></head><body><main><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="3"><circle cx="22" cy="22" r="20"/><path d="{icon}" stroke-linecap="round" stroke-linejoin="round"/></svg><h1>{heading}</h1><p>{message}</p></main></body></html>"#
     );
     stream

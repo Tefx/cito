@@ -1694,6 +1694,7 @@ pub fn run_setup_cli(args: &[String]) {
                     super::config::advertised_name(&health).map(str::to_owned),
                     Some(&existing_hubs),
                     &entry["url"],
+                    None,
                 )
             });
             let base = existing_hubs.get(&name).unwrap_or(&Value::Null);

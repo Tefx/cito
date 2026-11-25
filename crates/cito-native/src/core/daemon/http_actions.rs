@@ -86,6 +86,7 @@ fn invite_hub_name(invite: &Value, discovered: Option<&Value>, raw: &Value) -> S
         base,
         raw["hubs"].as_object(),
         &discovered.unwrap_or(invite)["url"],
+        None,
     )
 }
 
@@ -867,7 +868,13 @@ impl DaemonService {
         before: &Value,
     ) -> Result<(), String> {
         let editing = action["edit"] == true;
-        let requested_name = if editing || action["name_explicit"] == true || resolved_hub.is_some()
+        let original = edited_hub(action).unwrap_or_default();
+        let reset_requested = editing && action["reset_name"] == true;
+        let reset_name = reset_requested
+            && original != "local"
+            && crate::core::config::configured_hub_url(&before["hubs"][&original]) != "local://";
+        let requested_name = if !reset_requested
+            && (editing || action["name_explicit"] == true || resolved_hub.is_some())
         {
             string(action, "name").trim()
         } else {
@@ -878,7 +885,6 @@ impl DaemonService {
             return Err("INVALID_INPUT: Invalid hub name".into());
         }
         let mut cfg = action["config"].clone();
-        let original = edited_hub(action).unwrap_or_default();
         if editing && original.is_empty() {
             return Err("INVALID_INPUT: Unknown hub to edit".into());
         }
@@ -894,24 +900,28 @@ impl DaemonService {
             if v["hubs"].is_null() {
                 v["hubs"] = json!({"local":{"url":"local://"}});
             }
-            if !v["hubs"].is_object() {
-                return Err("INVALID_INPUT: Hubs must be an object".into());
-            }
-            if editing && !v["hubs"][&original].is_object() {
+            let hubs = v["hubs"]
+                .as_object()
+                .ok_or("INVALID_INPUT: Hubs must be an object")?;
+            if editing && !hubs.get(&original).is_some_and(Value::is_object) {
                 return Err("INVALID_INPUT: Unknown hub to edit".into());
             }
             let replayable_invite = resolved_hub.is_some() && requested_name.is_empty();
             let mut name = if let Some(invited) = resolved_hub.take() {
                 invited
-            } else if editing && (requested_name.is_empty() || requested_name == original) {
+            } else if editing
+                && !reset_name
+                && (requested_name.is_empty() || requested_name == original)
+            {
                 original.clone()
             } else if !requested_name.is_empty() {
                 normalize_slug(requested_name)
             } else {
                 available_hub_name(
                     cfg["discovered_name"].as_str().map(str::to_owned),
-                    v["hubs"].as_object(),
+                    Some(hubs),
                     &cfg["url"],
+                    reset_name.then_some(original.as_str()),
                 )
             };
             *resolved_hub = Some(name.clone());
@@ -953,6 +963,7 @@ impl DaemonService {
                     "set_default",
                     "edit",
                     "original_name",
+                    "reset_name",
                     "name_explicit",
                     "discovered_name",
                     "request_id",
@@ -1275,13 +1286,17 @@ impl DaemonService {
             let saving = action["op"] == "setup_save_hub";
             let mut hubs = Vec::new();
             if saving {
-                if let Some(hub) = resolved_hub {
-                    hubs.push(hub.to_owned());
-                }
                 hubs.extend(edited_hub(action));
-                let requested = string(action, "name").trim();
-                if resolved_hub.is_none() && requested.chars().any(|c| c.is_ascii_alphanumeric()) {
-                    hubs.push(normalize_slug(requested));
+                // A failed edit belongs to its source, not to the proposed destination.
+                if result.is_ok() || hubs.is_empty() {
+                    if let Some(hub) = resolved_hub {
+                        hubs.push(hub.to_owned());
+                    } else {
+                        let requested = string(action, "name").trim();
+                        if requested.chars().any(|c| c.is_ascii_alphanumeric()) {
+                            hubs.push(normalize_slug(requested));
+                        }
+                    }
                 }
             } else {
                 hubs.push(

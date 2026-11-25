@@ -110,12 +110,17 @@ extension Companion {
         } else {
             var profile = pending.profile
             if let savedName { profile.name = savedName }
-            let name = hubNameProposal(hubForm.name, url: hubForm.url, existing: settings?.hubs ?? [], creating: true)
+            let name = hubNameProposal(hubForm.name, url: hubForm.url, existing: settings?.hubs ?? [])
             let automaticDraft = hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let sameURL = normalizedHubURL(hubForm.url) == profile.url
             let identityKnown = savedName != nil || pending.nameExplicit || hubForm.isEditing
             let sameAutomaticHub = automaticDraft && !pending.nameExplicit && sameURL
             if identityKnown && (hubForm.isEditing || sameAutomaticHub || (name == profile.name && (!automaticDraft || sameURL))) {
+                if sameAutomaticHub {
+                    // The daemon has consumed the blank-name request; retain its chosen identity.
+                    hubForm.name = profile.name
+                    settingsFieldControls["settings_hub_name"]?.stringValue = profile.name
+                }
                 hubForm.mode = .edit(profile)
             } else if savedName == nil {
                 // The daemon can still allocate an automatic name against its full inventory.
@@ -259,24 +264,32 @@ extension Companion {
     func ensureSettingsPanel() {
         ensureEditMainMenu()
         if settingsPanel == nil {
-            let window = makeFloatingKeyPanel(width: 520, height: 460, appearance: testAppearance)
+            let window = makeFloatingKeyPanel(width: 520, height: 460, headerHeight: 48, appearance: testAppearance)
+            window.delegate = self
             window.onKey = { [weak self] key in self?.handleSettingsKey(key) }
             let root = SurfaceView(frame:NSRect(x:0,y:0,width:520,height:460),radius:14,color:.clear,border:.labelColor.withAppearanceAlpha(0.15))
             root.identifier=NSUserInterfaceItemIdentifier("settings_panel"); root.layer?.masksToBounds=true
             let effect=NSVisualEffectView(frame:root.bounds)
             effect.material = .popover; effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState
             root.addSubview(effect); window.contentView=root
+            window.layoutWindowButtons()
             settingsPanel = window
         }
         rebuildSettingsPanel()
     }
 
     func handleSettingsKey(_ key: String) {
-        if (settingsPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
-        if handleTextEditShortcut(key, in: settingsPanel) { return }
-        switch key.lowercased() {
+        let key = key.lowercased()
+        guard allowPanelKey(key, in: settingsPanel), !handleTextEditShortcut(key, in: settingsPanel) else { return }
+        switch key {
         case "command-comma": openSettingsPanel()
-        case "command-w": closeSettingsPanel(emitAction:true)
+        case "command-w": closeSettingsPanel(emitAction: true)
+        case "command-m": if !headless { settingsPanel?.miniaturize(nil) }
+        case "command-k": if !uninstallConfirmOpen { openDirectoryPanel(mode: "directory") }
+        case "command-1", "command-2", "command-3":
+            guard !uninstallConfirmOpen, let tab = ["command-1": "apps", "command-2": "channels", "command-3": "hubs"][key] else { return }
+            settingsActiveTab = tab
+            rebuildSettingsPanel()
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
             else if settingsActiveTab == "hubs" && hubForm.isOpen { hubForm = HubFormState(); rebuildSettingsPanel() }
@@ -393,7 +406,7 @@ extension Companion {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false, syncFields: Bool = true) {
+    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false, revealChannel: String? = nil, revealPairing: Bool = false, revealEditorScope: String = "hub", syncFields: Bool = true) {
         settingsDirty = true
         guard settingsVisible || renderingForInspection, let window = settingsPanel else { return }
         if uninstallConfirmOpen { window.makeFirstResponder(nil) }
@@ -425,16 +438,16 @@ extension Companion {
         let header = NSView(frame: NSRect(x: 0, y: 412, width: 520, height: 48))
         header.identifier = NSUserInterfaceItemIdentifier("settings_header")
         header.alphaValue = uninstallConfirmOpen ? 0.35 : 1
-        header.addSubview(textLabel("Cito", NSRect(x: 16, y: 15, width: 38, height: 18), size: 13, weight: .bold))
 
+        let tabPadding: CGFloat = 8
         let tabWidths = [("Agent Apps","square.grid.2x2"),("Human Channels","bubble.left.and.bubble.right"),("Hubs & Network","network")].map {
-            MenuControl.intrinsicWidth($0.0, leadingSymbol:$0.1, paddingX:12)
+            MenuControl.intrinsicWidth($0.0, leadingSymbol:$0.1, paddingX:tabPadding)
         }
         let tabsWidth = tabWidths.reduce(0,+) + 12
-        let tabsTrack = makePillTrack(NSRect(x:62+floor((400-tabsWidth)/2),y:10,width:tabsWidth,height:28),radius:9)
+        let tabsTrack = makePillTrack(NSRect(x:max(78,floor((520-tabsWidth)/2)),y:10,width:tabsWidth,height:28),radius:9)
         tabsTrack.identifier = NSUserInterfaceItemIdentifier("settings_tab_track")
         header.addSubview(tabsTrack)
-        let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: tabWidths[0], height: 24), leadingSymbol: "square.grid.2x2", radius: 7)
+        let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: tabWidths[0], height: 24), leadingSymbol: "square.grid.2x2", radius: 7, paddingX: tabPadding)
         appsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:apps")
         appsTab.style = settingsActiveTab == "apps" ? .prominent : .subtleHeader
         appsTab.pressed = { [weak self] in
@@ -445,7 +458,7 @@ extension Companion {
         }
         tabsTrack.addSubview(appsTab)
 
-        let channelsTab = MenuControl("Human Channels", frame: NSRect(x: tabWidths[0]+6, y: 2, width: tabWidths[1], height: 24), leadingSymbol: "bubble.left.and.bubble.right", radius: 7)
+        let channelsTab = MenuControl("Human Channels", frame: NSRect(x: tabWidths[0]+6, y: 2, width: tabWidths[1], height: 24), leadingSymbol: "bubble.left.and.bubble.right", radius: 7, paddingX: tabPadding)
         channelsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:channels")
         channelsTab.style = settingsActiveTab == "channels" ? .prominent : .subtleHeader
         channelsTab.pressed = { [weak self] in
@@ -456,7 +469,7 @@ extension Companion {
         }
         tabsTrack.addSubview(channelsTab)
 
-        let hubsTab = MenuControl("Hubs & Network", frame: NSRect(x: tabWidths[0]+tabWidths[1]+10, y: 2, width: tabWidths[2], height: 24), leadingSymbol: "network", radius: 7)
+        let hubsTab = MenuControl("Hubs & Network", frame: NSRect(x: tabWidths[0]+tabWidths[1]+10, y: 2, width: tabWidths[2], height: 24), leadingSymbol: "network", radius: 7, paddingX: tabPadding)
         hubsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:hubs")
         hubsTab.style = settingsActiveTab == "hubs" ? .prominent : .subtleHeader
         hubsTab.pressed = { [weak self] in
@@ -467,12 +480,6 @@ extension Companion {
         }
         tabsTrack.addSubview(hubsTab)
 
-        let closeBtn = MenuControl("Close", frame: NSRect(x: CitoMetrics.settingsWidth - CitoMetrics.settingsInset - 24, y: 12, width: 24, height: 24), symbol: "xmark")
-        closeBtn.identifier = NSUserInterfaceItemIdentifier("close_settings")
-        closeBtn.style = .subtleHeader
-        closeBtn.toolTip = "Close Settings"
-        closeBtn.pressed = { [weak self] in self?.closeSettingsPanel(emitAction: true) }
-        header.addSubview(closeBtn)
         header.addSubview(roundedView(NSRect(x: 0, y: 0, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         root.addSubview(header)
         if let error = settingsBannerError, !uninstallConfirmOpen {
@@ -594,6 +601,47 @@ extension Companion {
            let scroll: NSScrollView = findView(in: root, id: "settings_hubs_tab"),
            let form: NSView = findView(in: scroll, id: "add_hub_form") {
             form.scrollToVisible(NSRect(x: 0, y: 0, width: form.bounds.width, height: 44))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        if let channel = revealChannel,
+           let scroll: NSScrollView = findView(in: root, id: "settings_channels_tab"),
+           let card: NSView = findView(in: scroll, id: "settings_channel:\(channel)") {
+            root.layoutSubtreeIfNeeded()
+            let viewportHeight = scroll.contentView.bounds.height
+            var target = card.bounds
+            if target.height > viewportHeight {
+                target.origin.y = max(0, card.bounds.height - viewportHeight)
+                target.size.height = viewportHeight
+                if revealPairing {
+                    if let instruction: NSTextField = findView(in: card, id: "pairing_instruction:\(channel)"),
+                       let copy: MenuControl = findView(in: card, id: "copy_pair_command:\(channel)") {
+                        target = card.convert(instruction.bounds, from: instruction)
+                            .union(card.convert(copy.bounds, from: copy))
+                    }
+                } else {
+                    let saveId = (revealEditorScope == "hub" ? "save_hub_service:" : "save_channel:") + channel
+                    if let save: MenuControl = findView(in: card, id: saveId), !save.isHidden,
+                       let editor = save.superview {
+                        let fields = editor.subviews.compactMap { $0 as? NSTextField }
+                            .filter { $0.isEditable && !$0.isHidden }
+                        if !fields.isEmpty {
+                            target = fields.reduce(card.convert(save.bounds, from: save)) { rect, field in
+                                rect.union(card.convert(field.bounds, from: field))
+                            }
+                        }
+                    } else if revealEditorScope == "user",
+                              let manual: MenuControl = findView(in: card, id: "manual_channel:\(channel)"),
+                              let copy: MenuControl = findView(in: card, id: "copy_pair_command:\(channel)") {
+                        // Collapsing manual entry removes Save, not the pairing actions.
+                        target = card.convert(manual.bounds, from: manual)
+                            .union(card.convert(copy.bounds, from: copy))
+                    }
+                }
+                target = target.intersection(card.bounds)
+                // The card is non-flipped: keep the action row if the region exceeds the viewport.
+                target.size.height = min(target.height, viewportHeight)
+            }
+            card.scrollToVisible(target)
             scroll.reflectScrolledClipView(scroll.contentView)
         }
     }
@@ -879,7 +927,10 @@ extension Companion {
                     case "clear": self.emit(["op":"disconnect_human_channel","hub":renderedHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false])
                     case "test": self.emit(["op":"channel_test","hub":renderedHub,"channel_id":ch.id,"values":collectValues("user").merging(collectValues("hub")) { _, new in new }])
                     case "unpair": self.emit(["op":"channel_unpair","hub":renderedHub,"channel_id":ch.id,"reset_user":true])
-                    default: self.channelUiStates[channelKey,default:ChannelUiState()].editingGateway = id == "change"; self.emit(["op":"open_settings","hub":renderedHub])
+                    default:
+                        self.channelUiStates[channelKey, default: ChannelUiState()].editingGateway = id == "change"
+                        self.emit(["op":"open_settings","hub":renderedHub])
+                        if id == "change" { self.rebuildSettingsPanel(revealChannel: ch.id, revealPairing: false) }
                     } }
                     recoveryBar.addSubview(button); recovery.append(button)
                 }
@@ -985,7 +1036,7 @@ extension Companion {
                     edit.style = .neutral
                     edit.label.font = .systemFont(ofSize:10.5)
                     edit.identifier=NSUserInterfaceItemIdentifier("edit_hub_service:\(ch.id)")
-                    edit.pressed={ [weak self] in self?.channelUiStates[channelKey, default: ChannelUiState()].editingGateway = true; self?.rebuildSettingsPanel() }
+                    edit.pressed={ [weak self] in self?.channelUiStates[channelKey, default: ChannelUiState()].editingGateway = true; self?.rebuildSettingsPanel(revealChannel: ch.id, revealPairing: false) }
                     hubStratum.addSubview(edit); gatewayTop.insert(edit, at: 0)
                 }
             }
@@ -995,7 +1046,7 @@ extension Companion {
                 let manual = MenuControl(title,frame:NSRect(x:12,y:instruction.isEmpty ? 38 : 66,width:width,height:22),paddingX:0)
                 manual.label.alignment = .left; manual.layoutContents()
                 manual.style = .subtleHeader; manual.identifier=NSUserInterfaceItemIdentifier("manual_channel:\(ch.id)")
-                manual.pressed={ [weak self] in guard let self=self else{return}; self.channelUiStates[channelKey, default: ChannelUiState()].manualEntry.toggle(); self.rebuildSettingsPanel() }
+                manual.pressed={ [weak self] in guard let self=self else{return}; self.channelUiStates[channelKey, default: ChannelUiState()].manualEntry.toggle(); self.rebuildSettingsPanel(revealChannel: ch.id, revealPairing: false, revealEditorScope: "user") }
                 userStratum.addSubview(manual)
             }
             if ch.can_pair == true && (!personalCollapsed || ch.can_edit_personal != true) && gatewayActive && instruction.isEmpty {
@@ -1090,7 +1141,7 @@ extension Companion {
                 userStratum.addSubview(summary)
                 let edit = MenuControl("Edit…",frame:NSRect(x:0,y:6,width:MenuControl.intrinsicWidth("Edit…"),height:24))
                 edit.identifier = NSUserInterfaceItemIdentifier("edit_user_channel:\(ch.id)"); edit.style = .neutral
-                edit.pressed = { [weak self] in self?.channelUiStates[channelKey, default: ChannelUiState()].editingPersonal = true; self?.channelUiStates[channelKey, default: ChannelUiState()].manualEntry = true; self?.rebuildSettingsPanel() }
+                edit.pressed = { [weak self] in self?.channelUiStates[channelKey, default: ChannelUiState()].editingPersonal = true; self?.channelUiStates[channelKey, default: ChannelUiState()].manualEntry = true; self?.rebuildSettingsPanel(revealChannel: ch.id, revealPairing: false, revealEditorScope: "user") }
                 edit.isHidden = ch.can_edit_personal != true
                 userStratum.addSubview(edit)
                 for case let button as MenuControl in [testBtn, edit] + personalActions {
@@ -1276,6 +1327,7 @@ extension Companion {
             let open = self.hubForm.isEditing || !self.hubForm.isOpen
             self.hubForm = HubFormState(mode: open ? .add : .closed)
             self.rebuildSettingsPanel(revealAddHub: open, syncFields: false)
+            if let field = self.hubFormFocusTarget() { self.settingsPanel?.makeFirstResponder(field) }
         }
         addBtn.isEnabled = hubForm.pendingSave == nil
         hubsView.addSubview(addBtn)
@@ -1404,8 +1456,10 @@ extension Companion {
                 self.syncAddHubFieldsFromControls()
                 let url = normalizedHubURL(self.hubForm.url)
                 let knownHubs = self.settings?.hubs ?? []
-                let name = self.hubNameProposal(self.hubForm.name,url:url,existing:knownHubs,creating:!self.hubForm.isEditing,original:self.hubForm.originalName)
                 let nameExplicit = !self.hubForm.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let resetName = !nameExplicit && self.hubForm.isEditing && !self.editingBuiltinHub
+                let name = self.hubNameProposal(self.hubForm.name, url: url, existing: knownHubs,
+                    original: self.hubForm.originalName)
                 let validation: String?
                 if name.isEmpty { validation="Hub name must contain a letter or number." }
                 else if !self.hubForm.isEditing && knownHubs.contains(where:{$0.name == name && ($0.is_builtin == true || normalizedHubURL($0.url) != url)}) { validation="Hub name already exists. Choose a different name." }
@@ -1424,6 +1478,7 @@ extension Companion {
                     "set_default": !self.hubForm.isEditing
                 ]
                 if nameExplicit { action["name_explicit"] = true }
+                if resetName { action["reset_name"] = true }
                 if !self.hubForm.isEditing && !self.hubForm.authExplicit && self.hubForm.auth == "none" { action.removeValue(forKey:"auth_mode") }
                 if self.hubForm.isEditing { action["edit"]=true; action["original_name"]=self.hubForm.originalName; action.removeValue(forKey:"set_default") }
                 let tok = self.hubForm.token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1498,6 +1553,7 @@ extension Companion {
                     guard let self=self else{return}
                     self.hubForm = HubFormState(editing: hub)
                     self.rebuildSettingsPanel(revealAddHub: true, syncFields: false)
+                    if let field = self.hubFormFocusTarget() { self.settingsPanel?.makeFirstResponder(field) }
                 }
                 row.addSubview(edit)
                 if needsSignIn {
@@ -1555,18 +1611,21 @@ extension Companion {
 
     }
 
+    private func hubFormFocusTarget() -> NSTextField? {
+        guard settingsActiveTab == "hubs", hubForm.isOpen, !uninstallConfirmOpen else { return nil }
+        return settingsFieldControls[editingBuiltinHub ? "settings_hub_user" : "settings_hub_url"]
+    }
+
     func openSettingsPanel() {
         settingsVisible = true
         ensureSettingsPanel()
         emit(["op": "open_settings", "hub": effectiveChannelHub])
         if !headless, let window = settingsPanel {
-            NSApp.setActivationPolicy(.regular)
-            if let screen = NSScreen.main {
+            if let screen = NSScreen.main, !window.isMiniaturized {
                 let area = screen.visibleFrame
                 window.setFrameOrigin(NSPoint(x: area.midX - 260, y: area.midY - 200))
             }
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
+            presentPanel(window) { [weak self] in self?.hubFormFocusTarget() }
             if window.isVisible, let markerPath = pendingOnboardingMarker {
                 try? FileManager.default.createDirectory(atPath: (markerPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
                 try? "1\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
@@ -1588,7 +1647,7 @@ extension Companion {
 
     var hubNamePlaceholder: String {
         if case .addWithIncompleteInventory = hubForm.mode { return "Assigned automatically" }
-        if hubForm.isEditing { return "Keep current name" }
-        return hubForm.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "e.g. studio or work" : "Default: " + hubNameProposal("", url:hubForm.url, existing:settings?.hubs ?? [], creating:!hubForm.isEditing, original:hubForm.originalName)
+        if !hubForm.isEditing && hubForm.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "e.g. studio or work" }
+        return "Default: " + hubNameProposal("", url: hubForm.url, existing: settings?.hubs ?? [], original: hubForm.originalName)
     }
 }

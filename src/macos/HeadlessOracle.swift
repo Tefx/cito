@@ -36,7 +36,7 @@ extension Companion {
                 let modifiers = object["modifiers"] as? [String] ?? []
                 var flags: NSEvent.ModifierFlags = []
                 for (name, flag) in [("command", NSEvent.ModifierFlags.command), ("shift", .shift), ("option", .option), ("control", .control), ("capsLock", .capsLock)] where modifiers.contains(name) { flags.insert(flag) }
-                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0) {
+                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: (object["key_code"] as? UInt16) ?? UInt16.max) {
                     NSApp.sendEvent(event)
                 }
                 return true
@@ -157,7 +157,12 @@ extension Companion {
                 return true
             }
             if op == "test_editor_marked", let value = object["value"] as? String {
-                let window = object["surface"] as? String == "menu" ? headlessMenuPanel : settingsPanel
+                let window: KeyPanel?
+                switch object["surface"] as? String {
+                case "menu": window = headlessMenuPanel
+                case "directory": window = directoryPanel
+                default: window = settingsPanel
+                }
                 if let editor = window?.firstResponder as? NSTextView {
                     editor.setMarkedText(value, selectedRange:NSRange(location:value.utf16.count,length:0), replacementRange:editor.selectedRange())
                 }
@@ -262,9 +267,10 @@ extension Companion {
                     return true
                 }
                 if object["via"] as? String == "panel" {
-                    let character = key.hasSuffix("comma") ? "," : String(key.suffix(1))
+                    let character = object["characters"] as? String ?? (key.hasSuffix("comma") ? "," : String(key.suffix(1)))
                     let flags: NSEvent.ModifierFlags = key.hasPrefix("shift-") ? [.command, .shift] : [.command]
-                    if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0) {
+                    let keyCode = (object["key_code"] as? UInt16) ?? UInt16.max
+                    if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: keyCode) {
                         _ = window?.performKeyEquivalent(with: event)
                     }
                     return true
@@ -283,6 +289,14 @@ extension Companion {
                 return true
             }
             if op == "test_control", let requestedId = object["id"] as? String {
+                if requestedId == "close_settings" {
+                    if settingsVisible { settingsPanel?.performClose(nil) }
+                    return true
+                }
+                if requestedId == "close_directory" {
+                    if directoryVisible { directoryPanel?.performClose(nil) }
+                    return true
+                }
                 let id = requestedId.hasPrefix("target_hub:") ? "hub:" + requestedId.dropFirst("target_hub:".count) : requestedId
                 let roots = cardMenu.items.compactMap { $0.view } + [directoryPanel?.contentView, settingsPanel?.contentView].compactMap { $0 }
                 if let control = roots.lazy.compactMap({ self.findView(in: $0, id: id, as: MenuControl.self) }).first {
@@ -891,7 +905,21 @@ extension Companion {
                 return ["titled": window.styleMask.contains(.titled), "full_size_content": window.styleMask.contains(.fullSizeContentView),
                     "automatic_key_view_loop": window.autorecalculatesKeyViewLoop,
                     "hidden_title": window.titleVisibility == .hidden, "transparent_titlebar": window.titlebarAppearsTransparent,
-                    "hidden_window_buttons": [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].allSatisfy { window.standardWindowButton($0)?.isHidden != false }]
+                    "closable": window.styleMask.contains(.closable), "miniaturizable": window.styleMask.contains(.miniaturizable),
+                    "visible_window_buttons": KeyPanel.chromeButtons.allSatisfy { window.standardWindowButton($0)?.isHidden == false },
+                    "close_enabled": window.standardWindowButton(.closeButton)?.isEnabled == true,
+                    "miniaturize_enabled": window.standardWindowButton(.miniaturizeButton)?.isEnabled == true,
+                    "zoom_disabled": window.standardWindowButton(.zoomButton)?.isEnabled == false,
+                    "close_and_minimize_hit_test": [NSWindow.ButtonType.closeButton, .miniaturizeButton].allSatisfy { type in
+                        guard let frame = window.contentView?.superview, let button = window.standardWindowButton(type) else { return false }
+                        let center = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: frame.superview)
+                        return frame.hitTest(center) === button
+                    },
+                    "window_button_positions": KeyPanel.chromeButtons.compactMap { type -> [CGFloat]? in
+                        guard let content = window.contentView, let button = window.standardWindowButton(type) else { return nil }
+                        let rect = content.convert(button.bounds, from: button)
+                        return [rect.minX, content.bounds.maxY - rect.midY]
+                    }]
             },
             "field_editors": [settingsPanel, directoryPanel, headlessMenuPanel].compactMap { window -> [String: Any]? in
                 guard let editor = window?.firstResponder as? NSTextView else { return nil }

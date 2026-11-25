@@ -1,7 +1,7 @@
 import AppKit
 import Darwin
 
-final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
+final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSWindowDelegate {
     let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1"
     var status: NSStatusItem?
     var headlessStatusButton: NSButton?
@@ -294,16 +294,19 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         return slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    func hubNameProposal(_ raw: String, url: String, existing: [HubConfigItem], creating: Bool, original: String = "") -> String {
-        let automatic = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if !creating && (automatic || raw == original) { return original }
-        if !automatic { return normalizeHubName(raw) }
+    func hubNameProposal(_ raw: String, url: String, existing: [HubConfigItem], original: String = "") -> String {
+        if !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return raw == original ? original : normalizeHubName(raw)
+        }
 
         let url = normalizedHubURL(url)
         let base = normalizeHubName(automaticHubName(url))
         var name = base
         var suffix = 2
-        while name == "local" || existing.contains(where: { $0.name == name && ($0.is_builtin == true || normalizedHubURL($0.url) != url) }) {
+        while name == "local" || existing.contains(where: { hub in
+            hub.name == name && (hub.is_builtin == true ||
+                (original.isEmpty ? normalizedHubURL(hub.url) != url : hub.name != original))
+        }) {
             let ending = "-\(suffix)"
             name = String(base.prefix(32 - ending.count)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) + ending
             suffix += 1
@@ -367,8 +370,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if main.items.isEmpty {
             let appItem = NSMenuItem()
             let appMenu = NSMenu(title: "Cito")
-            let quit = NSMenuItem(title: "Quit Cito", action: #selector(quitMenu), keyEquivalent: "q")
-            quit.target = self; appMenu.addItem(quit)
+            for (title, action, key) in [
+                ("Settings…", #selector(openSettingsShortcut), ","),
+                ("Directory & Activity…", #selector(openDirectoryShortcut), "k"),
+                ("Close Window", #selector(closeActiveWindowShortcut), "w"),
+                ("Quit Cito", #selector(quitMenu), "q")
+            ] {
+                let command = NSMenuItem(title: title, action: action, keyEquivalent: key)
+                command.target = self
+                appMenu.addItem(command)
+            }
             appItem.submenu = appMenu; main.addItem(appItem)
         }
         if !main.items.contains(where: { $0.submenu?.title == "Edit" }) {
@@ -383,6 +394,49 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             item.submenu = edit; main.addItem(item)
         }
         if NSApp.mainMenu == nil { NSApp.mainMenu = main }
+    }
+
+    func presentPanel(_ window: KeyPanel, focus: (() -> NSView?)? = nil) {
+        if !headless && window.isMiniaturized { window.deminiaturize(nil) }
+        func orderFront() {
+            // Headless panels use the same focus passes without taking over the desktop.
+            if !headless {
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+                window.layoutWindowButtons()
+            }
+            if !(window.firstResponder is NSTextView), let view = focus?() { window.makeFirstResponder(view) }
+        }
+        orderFront()
+        // Status-menu tracking can reclaim key focus as it finishes closing.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  (window === self.settingsPanel && self.settingsVisible) ||
+                  (window === self.directoryPanel && self.directoryVisible) else { return }
+            orderFront()
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === settingsPanel { handleSettingsKey("command-w"); return false }
+        if sender === directoryPanel { handleDirectoryKey("command-w"); return false }
+        return true
+    }
+
+    @objc func closeActiveWindowShortcut() {
+        if NSApp.keyWindow === settingsPanel && settingsVisible { handleSettingsKey("command-w") }
+        else if NSApp.keyWindow === directoryPanel && directoryVisible { handleDirectoryKey("command-w") }
+    }
+
+    func allowPanelKey(_ key: String, in window: KeyPanel?) -> Bool {
+        guard let window, (window.firstResponder as? NSTextInputClient)?.hasMarkedText() == true else { return true }
+        switch key {
+        case "command-3" where window !== settingsPanel: return false
+        case "command-w", "command-m", "command-comma", "command-k", "command-1", "command-2", "command-3":
+            return window.makeFirstResponder(nil)
+        default: return false
+        }
     }
 
     func handleTextEditShortcut(_ key: String, in window: NSWindow?) -> Bool {
@@ -444,22 +498,26 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             guard let self = self else { return event }
             let window = event.window ?? NSApp.keyWindow
             if self.uninstallConfirmOpen && window === self.settingsPanel && event.keyCode == 48 { return nil }
-            if (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return event }
-            if let key = panelShortcutKey(event), self.handleTextEditShortcut(key, in: window) { return nil }
-            // Text Services must see navigation and commit keys before our shortcuts.
-            if window?.firstResponder is NSTextView && [126,125,36,76,53,51,117].contains(Int(event.keyCode)) { return event }
-            let command = event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
-            if command && event.charactersIgnoringModifiers == "," { self.openSettingsShortcut(); return nil }
-            if command && event.charactersIgnoringModifiers == "k" { self.openDirectoryShortcut(); return nil }
-            let key: String?
-            if command && event.charactersIgnoringModifiers == "w" { key = "command-w" }
-            else if [36,76].contains(Int(event.keyCode)) && event.modifierFlags.contains(.shift) { key="shift-return" }
-            else { key = [53:"escape",126:"up",125:"down",36:"return",76:"return",51:"delete",117:"delete"][Int(event.keyCode)] }
-            if let key = key {
-                if self.directoryVisible && window === self.directoryPanel { self.handleDirectoryKey(key); return nil }
-                if self.settingsVisible && window === self.settingsPanel { self.handleSettingsKey(key); return nil }
+            let onPanelKey: ((String) -> Void)?
+            if self.directoryVisible && window === self.directoryPanel { onPanelKey = self.handleDirectoryKey }
+            else if self.settingsVisible && window === self.settingsPanel { onPanelKey = self.handleSettingsKey }
+            else { onPanelKey = nil }
+            if let key = panelShortcutKey(event) {
+                if let onPanelKey { onPanelKey(key); return nil }
+                if self.handleTextEditShortcut(key, in: window) { return nil }
+                if key == "command-comma" { self.openSettingsShortcut(); return nil }
+                if key == "command-k" { self.openDirectoryShortcut(); return nil }
+                return event
             }
-            return event
+            // AppKit can match punctuation key equivalents with an extra Shift.
+            // Do not let a rejected window shortcut fall through to the application menu.
+            if event.modifierFlags.contains(.command), let character = panelShortcutCharacter(event),
+               [",", "k", "w"].contains(character) { return nil }
+            // Text Services owns navigation and commit keys while the field editor is active.
+            guard let onPanelKey, !(window?.firstResponder is NSTextView),
+                  let key = [53:"escape",126:"up",125:"down",36:"return",76:"return",51:"delete",117:"delete"][event.keyCode] else { return event }
+            onPanelKey(key == "return" && event.modifierFlags.contains(.shift) ? "shift-return" : key)
+            return nil
         }
         MenuControl.tracksPhysicalPointer = !headless
         if headless { headlessStatusButton = NSButton(frame: .zero) }
@@ -663,8 +721,38 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         return settled
     }
 
+    private func testPanelFocus(_ data: Data) -> Bool {
+        guard headless, let command = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              command["op"] as? String == "test_present_panel_focus" else { return false }
+        guard settingsVisible, let panel = settingsPanel,
+              let target = settingsFieldControls["settings_hub_url"],
+              let alternate = settingsFieldControls["settings_hub_name"] else {
+            diagnostic("present-panel-focus missing settings form")
+            return true
+        }
+        panel.recalculateKeyViewLoop()
+        panel.makeFirstResponder(nil)
+        presentPanel(panel) { target }
+        let initialFocus = target.currentEditor() != nil && panel.firstResponder === target.currentEditor()
+
+        // Change the responder in the same turn, before the deferred presentation pass.
+        let preserveEditor = command["preserve_editor"] as? Bool == true
+        panel.makeFirstResponder(preserveEditor ? alternate : nil)
+        let editor = alternate.currentEditor() as? NSTextView
+        let selection = NSRange(location: 0, length: 1)
+        editor?.setSelectedRange(selection)
+        let prepared = preserveEditor ? editor != nil && panel.firstResponder === editor : panel.firstResponder === panel
+        DispatchQueue.main.async {
+            let deferredFocus = preserveEditor
+                ? editor != nil && panel.firstResponder === editor && alternate.currentEditor() === editor && editor?.selectedRange() == selection
+                : target.currentEditor() != nil && panel.firstResponder === target.currentEditor()
+            diagnostic("present-panel-focus \(preserveEditor) \(initialFocus) \(prepared) \(deferredFocus)")
+        }
+        return true
+    }
+
     func receive(_ data: Data) {
-        if handleHeadlessTestCommand(data) { return }
+        if handleHeadlessTestCommand(data) || testPanelFocus(data) { return }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.op == "hub_invite" {
             guard !hubForm.parseRequest.isEmpty, frame.request_id == hubForm.parseRequest, let cfg = frame.config else { return }
@@ -862,7 +950,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             ui.pairingURL = frame.pairing_url
             if let command = frame.pairing_command { copyText(command); ui.pairCopiedUntil = Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2) }
             channelUiStates[key] = ui
-            if settingsPanel != nil { rebuildSettingsPanel() }
+            if settingsPanel != nil { rebuildSettingsPanel(revealChannel: hub == effectiveChannelHub ? id : nil, revealPairing: true) }
             return
         }
         if frame.op == "channel_test_result", frame.authority_changed != true, let id = frame.channel_id {

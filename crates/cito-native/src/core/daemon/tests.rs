@@ -995,6 +995,95 @@ fn invite_join_settles_each_request_and_records_its_saved_hub() -> Result<(), St
 }
 
 #[test]
+fn hub_edit_reset_name_restores_the_advertised_name() -> Result<(), String> {
+    use crate::core::auth::HubAuth;
+
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-hub-name-{}", random_uuid_v4())));
+    let engine = TestEngine(HubEngine::open(&dir.join("hub"))?);
+    let mut auth = HubAuth::new("none", None, None, None)?;
+    auth.advertise_name(Some("Office Mac"))?;
+    let auth = Arc::new(auth);
+    let server = engine.start_server("127.0.0.1", 0, auth.clone())?;
+    let url = format!("http://{}", server.address);
+    let config = profile_config(
+        &dir,
+        json!({"default_hub":"work","hubs":{"local":{"url":"local://"},"work":{"url":url}}}),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    let receipt = service.action(&json!({
+        "op":"setup_save_hub","edit":true,"original_name":"work","reset_name":true,
+    }))?;
+    assert_eq!(receipt["committed"], true);
+    let raw = service.raw_config()?;
+    assert_eq!(raw["default_hub"], "office-mac");
+    assert!(raw["hubs"].get("work").is_none());
+    assert_eq!(raw["hubs"]["office-mac"]["url"], url);
+    assert!(raw["hubs"]["office-mac"].get("reset_name").is_none());
+
+    // A simultaneous endpoint change is not a collision with the edited profile.
+    let replacement = engine.start_server("127.0.0.1", 0, auth)?;
+    let next_url = format!("http://{}", replacement.address);
+    assert_eq!(
+        service.action(&json!({
+            "op":"setup_save_hub","edit":true,"original_name":"office-mac","reset_name":true,
+            "config":{"url":next_url},
+        }))?["committed"],
+        true
+    );
+    let raw = service.raw_config()?;
+    assert_eq!(raw["hubs"]["office-mac"]["url"], next_url);
+    assert!(raw["hubs"].get("office-mac-2").is_none());
+    // An explicit rename to an occupied name still fails, without marking its owner as failed.
+    assert!(service
+        .action(&json!({
+            "op":"setup_save_hub","edit":true,"original_name":"office-mac","name":"local"
+        }))
+        .is_err());
+    assert_eq!(service.raw_config()?, raw);
+    let settings = service.settings();
+    let hubs = settings["hubs"].as_array().unwrap();
+    assert!(hubs.iter().find(|h| h["name"] == "office-mac").unwrap()["error"].is_string());
+    assert!(hubs.iter().find(|h| h["name"] == "local").unwrap()["error"].is_null());
+    Ok(())
+}
+
+#[test]
+fn hub_edit_without_name_reset_preserves_the_existing_alias() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-hub-alias-{}", random_uuid_v4())));
+    let url = "https://canonical.example.com";
+    let config = profile_config(
+        &dir,
+        json!({"default_hub":"personal","hubs":{"personal":{"natsUrl":"local://"},"work":{"url":url,"enabled":false,"autoListen":true}}}),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    for auto_listen in [false, true] {
+        let mut action = json!({
+            "op":"setup_save_hub","edit":true,"original_name":"work","autoListen":auto_listen,
+        });
+        if auto_listen {
+            action["reset_name"] = json!(false);
+        }
+        assert_eq!(service.action(&action)?["committed"], true);
+        let raw = service.raw_config()?;
+        let saved = &raw["hubs"]["work"];
+        assert_eq!(saved["url"], url);
+        assert_eq!(saved["autoListen"], auto_listen);
+        assert!(saved.get("reset_name").is_none());
+        assert!(raw["hubs"].get("canonical").is_none());
+    }
+    service.action(
+        &json!({"op":"setup_save_hub","edit":true,"original_name":"personal","reset_name":true,"name":"remote","url":"local://"}),
+    )?;
+    let raw = service.raw_config()?;
+    assert_eq!(raw["default_hub"], "personal");
+    assert_eq!(raw["hubs"]["personal"]["url"], "local://");
+    assert!(raw["hubs"]["personal"].get("reset_name").is_none());
+    Ok(())
+}
+
+#[test]
 fn disabled_hub_does_not_probe_or_trust_a_submitted_discovery_name() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

@@ -811,7 +811,10 @@ extension Companion: NSMenuDelegate {
         directoryShortcut.isHidden = true; directoryShortcut.allowsKeyEquivalentWhenHidden = true
         menu.addItem(directoryShortcut)
     }
-    @objc func openDirectoryShortcut() { cardMenu.cancelTracking(); openDirectoryPanel(mode:"directory") }
+    @objc func openDirectoryShortcut() {
+        cardMenu.cancelTracking()
+        if !(settingsVisible && uninstallConfirmOpen) { openDirectoryPanel(mode:"directory") }
+    }
     @objc func openSettingsShortcut() { cardMenu.cancelTracking(); openSettingsPanel() }
     @objc func quitMenu() { emit(["op": "quit"]) }
 }

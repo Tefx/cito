@@ -296,8 +296,8 @@ fn panel_hover_uses_exit_and_resign_events_and_menu_fallback_is_tracking_only() 
     let panels = render_state(&f, p);
     assert_eq!(panels["panel_effect_states"], json!([0, 0]));
     for (surface, id) in [
-        ("settings", "close_settings"),
-        ("directory", "close_directory"),
+        ("settings", "settings_tab:apps"),
+        ("directory", "dir_mode:directory"),
     ] {
         f.send(p, json!({"op":"test_hover","id":id,"hovered":true}));
         let hovered = render_state(&f, p);
@@ -315,6 +315,13 @@ fn panel_hover_uses_exit_and_resign_events_and_menu_fallback_is_tracking_only() 
     f.send(
         p,
         json!({"op":"test_hover","id":"close_settings","hovered":true}),
+    );
+    let unchanged = render_state(&f, p);
+    assert_eq!(unchanged["hover_watch_active"], true);
+    assert_eq!(unchanged["hovered"], "quit");
+    f.send(
+        p,
+        json!({"op":"test_hover","id":"settings_tab:apps","hovered":true}),
     );
     assert_eq!(render_state(&f, p)["hover_watch_active"], false);
     f.send(p, json!({"op":"test_hover","id":"quit","hovered":true}));

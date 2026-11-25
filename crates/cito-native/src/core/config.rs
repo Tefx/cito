@@ -10,6 +10,13 @@ pub(super) fn hub_enabled(cfg: &Value) -> bool {
     cfg["enabled"] != false && cfg["disabled"] != true
 }
 
+pub(super) fn configured_hub_url(cfg: &Value) -> &str {
+    cfg.get("url")
+        .or_else(|| cfg.get("natsUrl"))
+        .and_then(Value::as_str)
+        .unwrap_or("local://")
+}
+
 fn complete_hub_profiles(hubs: &mut Map<String, Value>, requested: Option<&str>) -> String {
     let default = requested
         .filter(|name| hubs.get(*name).is_some_and(hub_enabled))
@@ -26,12 +33,9 @@ fn complete_hub_profiles(hubs: &mut Map<String, Value>, requested: Option<&str>)
     // local endpoint to standalone configurations that use a local alias.
     if !hubs.contains_key("local")
         && (hubs.is_empty()
-            || hubs.values().any(|hub| {
-                hub.get("url")
-                    .or_else(|| hub.get("natsUrl"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|url| url != "local://")
-            }))
+            || hubs
+                .values()
+                .any(|hub| configured_hub_url(hub) != "local://"))
     {
         hubs.insert("local".into(), json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true, "defaultScope":"workspace"}));
         if requested == Some("local") || !hub_enabled(&hubs[&default]) {
@@ -292,15 +296,10 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
     for (name, value) in &mut hubs {
         canonicalize_hub_aliases(value);
         let enabled = hub_enabled(value);
+        let url = configured_hub_url(value).to_owned();
         let hm = value
             .as_object_mut()
             .ok_or_else(|| format!("Expected object for hub {name}"))?;
-        let url = hm
-            .get("url")
-            .or_else(|| hm.get("natsUrl"))
-            .and_then(Value::as_str)
-            .unwrap_or("local://")
-            .to_string();
         let auth =
             canonical_auth_mode(hm.get("authMode").and_then(Value::as_str).unwrap_or("none"))?;
         if hm
@@ -434,6 +433,7 @@ pub(super) fn available_hub_name(
     base: Option<String>,
     hubs: Option<&Map<String, Value>>,
     url: &Value,
+    editing: Option<&str>,
 ) -> String {
     let base = base.unwrap_or_else(|| {
         super::daemon::host_hub::hub_name_from_url(url.as_str().unwrap_or_default())
@@ -443,7 +443,10 @@ pub(super) fn available_hub_name(
     while name == "local"
         || hubs
             .and_then(|h| h.get(&name))
-            .is_some_and(|existing| existing["url"] != *url)
+            .is_some_and(|existing| match editing {
+                Some(original) => name != original,
+                None => existing["url"] != *url,
+            })
     {
         let ending = format!("-{suffix}");
         name = format!(

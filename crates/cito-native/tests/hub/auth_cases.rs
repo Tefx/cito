@@ -84,6 +84,49 @@ fn health_advertises_names_without_disclosing_credentials() {
     assert_eq!(auth.health()["oidc"]["redirect_port"], 65535);
 }
 
+#[test]
+fn hub_landing_page_displays_the_advertised_name_in_an_adaptive_card() {
+    use crate::core::hub::{HubEngine, TestDirectory, TestEngine};
+    use std::{io::Write, net::TcpStream};
+
+    let dir = TestDirectory(std::env::temp_dir().join(format!(
+        "cito-hub-landing-{}",
+        crate::plugins::random_uuid_v4()
+    )));
+    let engine = TestEngine(HubEngine::open(&dir).unwrap());
+    for advertised in [None, Some("Office Mac")] {
+        let mut auth = HubAuth::new("token", Some("private-token".into()), None, None).unwrap();
+        if let Some(name) = advertised {
+            auth.advertise_name(Some(name)).unwrap();
+        }
+        let server = engine.start_server("127.0.0.1", 0, auth).unwrap();
+        let mut stream = TcpStream::connect(server.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(stream, "GET / HTTP/1.1\r\nHost: {}\r\n\r\n", server.address).unwrap();
+        let response = crate::plugins::read_http_response(&mut stream).unwrap();
+        assert_eq!(response.status, 200);
+        let body = response.body;
+        for part in [
+            "<main><h1>Cito Hub</h1>",
+            "--bg:#ECEFF3; --card:#FFFFFF",
+            "@media (prefers-color-scheme: dark) { :root { --bg:#1E2024; --card:#26292E",
+            "place-items:center",
+            "border-radius:14px",
+            "This Hub is running.",
+            "Your shared inbox connects all attached Macs and channels.",
+        ] {
+            assert!(body.contains(part), "missing {part}");
+        }
+        assert_eq!(
+            body.contains("<strong>office-mac</strong>"),
+            advertised.is_some()
+        );
+        assert!(!body.contains("private-token"));
+    }
+}
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use std::sync::{

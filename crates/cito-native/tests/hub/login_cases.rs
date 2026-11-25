@@ -701,13 +701,15 @@ fn scopes_and_cache_identity_validation_are_hub_local() {
 }
 #[test]
 fn callback_drains_browser_headers_and_delivers_each_status_card_to_eof() {
-    for (query, status, title, heading, detail) in [
+    for (query, status, title, heading, detail, light_accent, dark_accent) in [
         (
             "state=expected&code=ok",
             200,
             "Signed In",
             "Signed in to Cito",
             "Cito login complete. You may close this window.",
+            "#0A6E29",
+            "#47D970",
         ),
         (
             "state=expected&error=access_denied",
@@ -715,6 +717,8 @@ fn callback_drains_browser_headers_and_delivers_each_status_card_to_eof() {
             "Sign-In Cancelled",
             "Sign-in was cancelled",
             "Sign In…",
+            "#9C4200",
+            "#FFB340",
         ),
         (
             "state=stale&code=ok",
@@ -722,6 +726,8 @@ fn callback_drains_browser_headers_and_delivers_each_status_card_to_eof() {
             "Invalid Callback",
             "Sign-in link is no longer valid",
             "Invalid callback",
+            "#BD1A24",
+            "#FF706B",
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -773,7 +779,11 @@ fn callback_drains_browser_headers_and_delivers_each_status_card_to_eof() {
             &format!("<title>Cito — {title}</title>"),
             heading,
             detail,
-            "prefers-color-scheme: dark",
+            &format!(":root {{ --accent:{light_accent} }}"),
+            &format!(
+                "@media (prefers-color-scheme: dark) {{ :root {{ --accent:{dark_accent} }} }}"
+            ),
+            "svg { color:var(--accent) }",
             "<svg",
         ] {
             assert!(body.contains(part), "missing {part}");

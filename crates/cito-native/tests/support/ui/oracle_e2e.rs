@@ -1,5 +1,317 @@
-use super::settlement::latest;
+use super::settlement::{latest, open_settings};
 use super::*;
+
+#[test]
+fn pair_code_reveals_the_whole_card_from_either_scroll_direction() {
+    assert_pair_code_reveal(
+        "Send /start cito-abc123def4 to your account provider.",
+        false,
+    );
+}
+
+#[test]
+fn pair_code_reveals_instructions_and_copy_on_an_oversized_card() {
+    assert_pair_code_reveal(&oversized_pairing_instruction(), true);
+}
+
+fn oversized_pairing_instruction() -> String {
+    let steps = (1..=19)
+        .map(|i| format!("Step {i}: Follow the prompts in your account provider."))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Send /start cito-abc123def4 to your account provider.\n{steps}")
+}
+
+#[test]
+fn change_token_reveals_gateway_editor_over_an_oversized_pairing_receipt() {
+    assert_gateway_editor_reveal("edit_hub_service:channel", "stratum_hub:channel");
+}
+
+#[test]
+fn recovery_change_token_reveals_gateway_editor_over_an_oversized_pairing_receipt() {
+    assert_gateway_editor_reveal(
+        "recover_channel:channel:change",
+        "channel_recovery_bar:channel",
+    );
+}
+
+fn assert_gateway_editor_reveal(change: &str, parent: &str) {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    open_settings(&f, p, &cfg, "channels");
+    control(&f, p, "pair_channel:channel");
+    let request = latest(&f, p, "channel_pair");
+    let instruction = oversized_pairing_instruction();
+    f.send(
+        p,
+        json!({"op":"pair_code","source_op":"channel_pair","hub":request["hub"],
+        "channel_id":request["channel_id"],"request_id":request["request_id"],
+        "instruction":instruction}),
+    );
+    assert_eq!(
+        inspect(&f, p).settings("pairing_instruction:channel")["text"],
+        instruction
+    );
+    if parent == "channel_recovery_bar:channel" {
+        // A hub error projection can still carry an active pairing instruction.
+        cfg["channels"][0]["configured"] = json!(true);
+        cfg["channels"][0]["status"] = json!("error");
+        cfg["channels"][0]["error_origin"] = json!("hub");
+        cfg["channels"][0]["detail"] = json!("Gateway token needs attention.");
+        cfg["channels"][0]["pairing_instruction"] = json!(instruction);
+        f.send(
+            p,
+            json!({"op":"settings","hub":request["hub"],"settings":cfg}),
+        );
+    }
+    f.send(p, json!({"op":"test_settings_scroll","offset":100_000}));
+    let before = inspect(&f, p);
+    let number = |node: &Value, key: &str| node[key].as_f64().unwrap();
+    assert!(
+        number(&before.settings("settings_channel:channel"), "height")
+            > number(&before.settings("settings_channels_tab"), "height")
+    );
+    assert_eq!(
+        before.settings("pairing_instruction:channel")["text"],
+        instruction
+    );
+    assert!(before.settings("channel_field:channel:secret").is_null());
+    assert_eq!(before.settings(change)["enabled"], true);
+    assert_channel_view_visible(&before, parent, change);
+
+    control(&f, p, change);
+    let after = inspect(&f, p);
+    assert_eq!(
+        after.settings("pairing_instruction:channel")["text"],
+        instruction
+    );
+    for id in ["channel_field:channel:secret", "save_hub_service:channel"] {
+        assert_channel_view_visible(&after, "stratum_hub:channel", id);
+    }
+}
+
+#[test]
+fn manual_disclosure_keeps_pairing_actions_visible_on_collapse() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
+    open_settings(&f, p, &cfg, "channels");
+    control(&f, p, "pair_channel:channel");
+    let request = latest(&f, p, "channel_pair");
+    assert!(request["request_id"].is_string());
+    let instruction = oversized_pairing_instruction();
+    f.send(
+        p,
+        json!({"op":"pair_code","source_op":"channel_pair","hub":request["hub"],
+            "channel_id":request["channel_id"],"request_id":request["request_id"],
+            "instruction":instruction,"pairing_command":"/start cito-abc123def4"}),
+    );
+
+    let manual = "manual_channel:channel";
+    let user = "stratum_user:channel";
+    let field = "channel_field:channel:account";
+    let save = "save_channel:channel";
+    let before = inspect(&f, p);
+    assert_eq!(
+        before.settings("pairing_instruction:channel")["text"],
+        instruction
+    );
+    assert!(
+        before.settings("settings_channel:channel")["height"]
+            .as_f64()
+            .unwrap()
+            > before.settings("settings_channels_tab")["height"]
+                .as_f64()
+                .unwrap()
+    );
+    assert!(before.settings(field).is_null());
+    assert!(before.settings(save).is_null());
+    assert_channel_view_visible(&before, user, manual);
+
+    control(&f, p, manual);
+    let expanded = inspect(&f, p);
+    for id in [field, save, manual] {
+        assert_channel_view_visible(&expanded, user, id);
+    }
+
+    control(&f, p, manual);
+    let collapsed = inspect(&f, p);
+    assert!(collapsed.settings(field).is_null());
+    assert!(collapsed.settings(save).is_null());
+    for id in [manual, "copy_pair_command:channel"] {
+        assert_eq!(collapsed.settings(id)["enabled"], true);
+        assert_channel_view_visible(&collapsed, user, id);
+    }
+}
+
+#[track_caller]
+fn assert_channel_view_visible(s: &Value, parent: &str, id: &str) {
+    let number = |node: &Value, key: &str| node[key].as_f64().unwrap();
+    let clip = s.settings("settings_channels_tab");
+    let card = s.settings("settings_channel:channel");
+    let container = s.settings(parent);
+    let view = s.settings(id);
+    for (node, name) in [
+        (&clip, "channels tab"),
+        (&card, "channel card"),
+        (&container, parent),
+        (&view, id),
+    ] {
+        assert_eq!(node["hidden"], false, "{name} must be mounted and visible");
+    }
+    for (axis, origin, length) in [("x", "content_x", "width"), ("y", "content_y", "height")] {
+        let start = number(&card, axis) + number(&container, axis) + number(&view, axis);
+        let end = start + number(&view, length);
+        let clip_start = number(&clip, origin);
+        let clip_end = clip_start + number(&clip, length);
+        assert!(
+            clip_start <= start && end <= clip_end,
+            "{id} is clipped on {axis}: {start}..{end}, viewport {clip_start}..{clip_end}"
+        );
+    }
+}
+
+fn assert_pair_code_reveal(instruction: &str, oversized: bool) {
+    let _lock = serial();
+    let mut cfg = settings();
+    let target = cfg["channels"][0].clone();
+    cfg["channels"] = json!((0..7)
+        .map(|i| {
+            let mut channel = target.clone();
+            if i != 3 {
+                channel["id"] = json!(format!("neighbor-{i}"));
+                channel["configured"] = json!(true);
+                channel["status"] = json!("ready");
+            }
+            channel
+        })
+        .collect::<Vec<_>>());
+    let number = |node: &Value, key: &str| node[key].as_f64().unwrap();
+    let viewport = |s: &Value| {
+        let scroll = s.settings("settings_channels_tab");
+        let bottom = number(&scroll, "content_y");
+        (bottom, bottom + number(&scroll, "height"))
+    };
+    for (direction, offset) in [("above", 100_000.0), ("below", 0.0)] {
+        let (f, p) = ui_fixture();
+        open_settings(&f, p, &cfg, "channels");
+        let scroll_to = |offset| f.send(p, json!({"op":"test_settings_scroll","offset":offset}));
+        let card = inspect(&f, p).settings("settings_channel:channel");
+        let card_y = number(&card, "y");
+        scroll_to(card_y);
+        control(&f, p, "pair_channel:channel");
+        let request = latest(&f, p, "channel_pair");
+        assert!(request["request_id"].is_string());
+        let receipt = json!({"op":"pair_code","source_op":"channel_pair","hub":request["hub"],
+            "channel_id":request["channel_id"],"request_id":request["request_id"],
+            "instruction":instruction,
+            "pairing_command":"/start cito-abc123def4"});
+
+        scroll_to(offset);
+        let before = inspect(&f, p);
+        let clip = viewport(&before);
+        assert!(
+            if direction == "above" {
+                card_y + number(&card, "height") <= clip.0
+            } else {
+                clip.1 <= card_y
+            },
+            "Fixture must start with the viewport {direction} the card: {clip:?}, card y={card_y}"
+        );
+        for (key, value) in [
+            ("request_id", "unrelated-request"),
+            ("hub", "work"),
+            ("channel_id", "neighbor-2"),
+        ] {
+            assert_ne!(receipt[key], value);
+            let mut mismatched = receipt.clone();
+            mismatched[key] = json!(value);
+            f.send(p, mismatched);
+            let ignored = inspect(&f, p);
+            assert_eq!(
+                viewport(&ignored),
+                clip,
+                "Receipt with mismatched {key} scrolled from {direction}"
+            );
+            assert!(ignored.settings("pairing_instruction:channel").is_null());
+        }
+
+        f.send(p, receipt);
+        let revealed = inspect(&f, p);
+        let (bottom, top) = viewport(&revealed);
+        let card = revealed.settings("settings_channel:channel");
+        let card_y = number(&card, "y");
+        let card_height = number(&card, "height");
+        assert_eq!(
+            card_height > top - bottom,
+            oversized,
+            "Unexpected card size: card height {card_height}, viewport height {}",
+            top - bottom
+        );
+        if !oversized {
+            assert!(
+                card_y >= bottom && card_y + card_height <= top,
+                "Receipt from {direction} must reveal the entire card: viewport {bottom}..{top}, card {card_y}..{}",
+                card_y + card_height
+            );
+        }
+        let user_y = card_y + number(&revealed.settings("stratum_user:channel"), "y");
+        let instructions = revealed.settings("pairing_instruction:channel");
+        assert_eq!(instructions["text"], instruction);
+        let copy = revealed.settings("copy_pair_command:channel");
+        assert_eq!(copy["enabled"], true);
+        for view in [instructions, copy] {
+            let y = user_y + number(&view, "y");
+            assert_eq!(view["hidden"], false);
+            assert!(
+                y >= bottom && y + number(&view, "height") <= top,
+                "{} is clipped after pairing from {direction}: viewport {bottom}..{top}, view {y}..{}",
+                view["id"],
+                y + number(&view, "height")
+            );
+        }
+    }
+}
+
+#[test]
+fn panel_presentation_restores_missing_focus_and_preserves_an_active_field_editor() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "hubs");
+    control(&f, p, "open_add_hub");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"settings_hub_name","value":"work"}),
+    );
+    assert_eq!(inspect(&f, p).settings("settings_hub_name")["text"], "work");
+    let prefix = "cito-ui: present-panel-focus ";
+    for (i, preserve_editor) in [false, true].into_iter().enumerate() {
+        f.send(
+            p,
+            json!({"op":"test_present_panel_focus","preserve_editor":preserve_editor}),
+        );
+        wait(|| {
+            f.output(p, true)
+                .lines()
+                .filter(|line| line.starts_with(prefix))
+                .count()
+                > i
+        });
+        let output = f.output(p, true);
+        let observed = output
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .nth(i)
+            .unwrap();
+        assert_eq!(
+            observed,
+            format!("{preserve_editor} true true true"),
+            "Expected initial focus, prepared responder, and deferred focus postcondition"
+        );
+    }
+}
 
 #[test]
 fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
@@ -349,6 +661,142 @@ fn activity_clear_confirmation_and_dynamic_accessibility() {
 }
 
 #[test]
+fn expanding_channel_gateway_reveals_the_card_action_edge() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    let mut first = cfg["channels"][0].clone();
+    first["id"] = json!("other");
+    first["hub_ready"] = json!(false);
+    first["setup_guide"] =
+        json!(["Read the service setup instructions before entering a token. ".repeat(25)]);
+    cfg["channels"].as_array_mut().unwrap().insert(0, first);
+    open_settings(&f, p, &cfg, "channels");
+    f.send(p, json!({"op":"test_settings_scroll","offset":100000}));
+    let before = inspect(&f, p);
+    assert!(
+        before.settings("settings_channel:channel")["y"]
+            .as_f64()
+            .unwrap()
+            < before.settings("settings_channels_tab")["content_y"]
+                .as_f64()
+                .unwrap()
+    );
+    control(&f, p, "edit_hub_service:channel");
+    let after = inspect(&f, p);
+    assert_eq!(after.settings("save_hub_service:channel")["enabled"], true);
+    let viewport = after.settings("settings_channels_tab");
+    let bottom = viewport["content_y"].as_f64().unwrap();
+    let card_bottom = after.settings("settings_channel:channel")["y"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        bottom <= card_bottom
+            && card_bottom + 44.0 <= bottom + viewport["height"].as_f64().unwrap()
+    );
+}
+
+#[test]
+fn native_panel_navigation_accepts_ime_keys_without_editing_marked_text() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state_with_settings(settings()));
+    control(&f, p, "open_settings");
+    let key = |surface: &str, command: &str, characters: &str, code: u16| {
+        f.send(
+            p,
+            json!({"op":format!("test_{surface}_key"),"key":command,"via":"panel",
+            "characters":characters,"key_code":code}),
+        );
+        inspect(&f, p)
+    };
+    assert_eq!(
+        key("settings", "command-3", "界", 20)["settings_tab"],
+        "hubs"
+    );
+    control(&f, p, "open_add_hub");
+    assert_eq!(inspect(&f, p)["field_editors"][0]["id"], "settings_hub_url");
+    f.send(p, json!({"op":"test_clipboard","text":"must not paste"}));
+    f.send(p, json!({"op":"test_editor_marked","value":"中"}));
+    assert_eq!(
+        key("settings", "command-v", "界", 9)["field_editors"][0]["marked"],
+        true
+    );
+    assert_eq!(
+        key("settings", "command-1", "界", 18)["settings_tab"],
+        "apps"
+    );
+    control(&f, p, "open_uninstall_confirm");
+    assert_eq!(
+        key("settings", "command-2", "界", 19)["settings_tab"],
+        "apps"
+    );
+    assert_eq!(
+        key("settings", "command-k", "界", 40)["directory_open"],
+        false
+    );
+    f.send(
+        p,
+        json!({"op":"test_key_event","character":"界","key_code":40,"modifiers":["command"]}),
+    );
+    assert_eq!(inspect(&f, p)["directory_open"], false);
+    control(&f, p, "cancel_uninstall_all");
+    assert_eq!(
+        key("settings", "command-2", "界", 19)["settings_tab"],
+        "channels"
+    );
+    assert_eq!(
+        key("settings", "command-k", "界", 40)["directory_open"],
+        true
+    );
+    f.send(
+        p,
+        json!({"op":"test_directory_query","query":"select this"}),
+    );
+    let directory = key("directory", "command-k", "界", 40);
+    let search = directory["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|editor| editor["id"] == "directory_search")
+        .unwrap();
+    assert_eq!(search["selection_length"], "select this".len());
+    f.send(
+        p,
+        json!({"op":"test_editor_marked","surface":"directory","value":"中"}),
+    );
+    let unchanged = key("directory", "command-3", "界", 20);
+    assert!(unchanged["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|editor| editor["id"] == "directory_search" && editor["marked"] == true));
+    assert_eq!(
+        key("directory", "command-2", "界", 19)["directory_mode"],
+        "activity"
+    );
+    assert_eq!(
+        key("directory", "command-1", "界", 18)["directory_mode"],
+        "directory"
+    );
+    control(&f, p, "close_settings");
+    assert_eq!(
+        key("directory", "command-comma", "，", u16::MAX)["settings_open"],
+        true
+    );
+    assert_eq!(
+        key("directory", "command-w", "界", 13)["directory_open"],
+        false
+    );
+    assert_eq!(
+        key("settings", "command-w", "界", 13)["settings_open"],
+        false
+    );
+    assert_eq!(f.frames_for(p, "close_settings").count(), 2);
+    assert_eq!(f.frames_for(p, "close_directory").count(), 1);
+}
+
+#[test]
 fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_composer() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -377,11 +825,24 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     assert_eq!(
         s["key_panels"],
         json!([{
-            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true,"automatic_key_view_loop":true
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"automatic_key_view_loop":true,
+            "closable":true,"miniaturizable":true,"visible_window_buttons":true,"close_enabled":true,"miniaturize_enabled":true,"zoom_disabled":true,
+            "close_and_minimize_hit_test":true,"window_button_positions":[[14,24],[34,24],[54,24]]
         }, {
-            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true,"automatic_key_view_loop":true
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"automatic_key_view_loop":true,
+            "closable":true,"miniaturizable":true,"visible_window_buttons":true,"close_enabled":true,"miniaturize_enabled":true,"zoom_disabled":true,
+            "close_and_minimize_hit_test":true,"window_button_positions":[[14,23],[34,23],[54,23]]
         }])
     );
+    assert!(s.settings("close_settings").is_null());
+    assert!(s.directory("close_directory").is_null());
+    let tabs = s.settings("settings_tab_track");
+    let x = tabs["x"].as_f64().unwrap();
+    assert!(x >= 78.0);
+    assert!((2.0 * x + tabs["width"].as_f64().unwrap() - 520.0).abs() <= 2.0);
+    assert_eq!(s.directory("directory_mode_track")["x"], 78);
+    assert_eq!(s.directory("directory_search")["x"], 256);
+    assert_eq!(s.directory("directory_search")["width"], 290);
     assert_eq!(s.directory("directory_scroll")["scroller_style"], 1);
     assert_eq!(s.settings("settings_channels_tab")["scroller_style"], 1);
     assert_eq!(

@@ -1,5 +1,6 @@
 //! HTTP/SSE serving and listener lifetime for the shared engine.
 use super::*;
+use crate::core::{config::advertised_name, login::CITO_CARD_STYLE};
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 
@@ -281,7 +282,20 @@ fn handle_http(
             return Ok(());
         }
         if path == "/" && method == "GET" {
-            let body = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Cito Hub</title><style>body{background:#12151c;color:#f3f4f6;font:18px system-ui;max-width:42rem;margin:12vh auto;padding:2rem}h1{color:#7dd3fc}code{color:#7dd3fc}</style><body><h1>Cito Hub</h1><p>This Hub is running. On another Mac, open Cito → Settings… → Hubs &amp; Network → Join from Clipboard to connect using a copied invite.</p><p>Your shared inbox connects all attached Macs and channels. Incoming messages appear in the menu bar unread badge and Activity, where you can reply in one line.</p></body></html>";
+            let health = auth.health();
+            // Advertised names are validated slugs, safe to render as HTML text.
+            let name = advertised_name(&health)
+                .map(|name| format!("<p><strong>{name}</strong></p>"))
+                .unwrap_or_default();
+            let body = format!(
+                r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cito Hub</title><style>{CITO_CARD_STYLE}</style></head>
+<body><main><h1>Cito Hub</h1>{name}
+<p>This Hub is running. On another Mac, open Cito → Settings… → Hubs &amp; Network → Join from Clipboard to connect using a copied invite.</p>
+<p>Your shared inbox connects all attached Macs and channels. Incoming messages appear in the menu bar unread badge and Activity, where you can reply in one line.</p>
+</main></body></html>"#
+            );
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
                 .map_err(|e| e.to_string())?;
             return Ok(());

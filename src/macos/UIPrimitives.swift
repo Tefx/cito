@@ -249,21 +249,34 @@ func makePillBadge(_ text: String, id: String, height: CGFloat = 20,
     return pill
 }
 
-func panelShortcutKey(_ event: NSEvent) -> String? {
-    let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
-    guard let character = event.charactersIgnoringModifiers?.lowercased(),
-          flags == [.command] || (flags == [.command, .shift] && character == "z"),
-          ["v", "c", "x", "a", "z", "w", ","].contains(character) else { return nil }
-    return (flags.contains(.shift) ? "shift-command-" : "command-") + (character == "," ? "comma" : character)
+private let panelShortcutKeys: [UInt16: String] = [
+    9: "v", 8: "c", 7: "x", 0: "a", 6: "z", 13: "w", 46: "m", 40: "k",
+    43: ",", 18: "1", 19: "2", 20: "3"
+]
+private let panelShortcutCharacters = Set(panelShortcutKeys.values)
+
+func panelShortcutCharacter(_ event: NSEvent) -> String? {
+    let raw = event.charactersIgnoringModifiers?.lowercased()
+    let character = raw == "，" ? "," : raw
+    return character.flatMap { panelShortcutCharacters.contains($0) ? $0 : nil } ?? panelShortcutKeys[event.keyCode]
 }
 
-func makeFloatingKeyPanel(width: CGFloat, height: CGFloat, appearance: NSAppearance?) -> KeyPanel {
+func panelShortcutKey(_ event: NSEvent) -> String? {
+    let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+    guard flags == [.command] || flags == [.command, .shift], let key = panelShortcutCharacter(event) else { return nil }
+    if flags.contains(.shift) { return key == "z" ? "shift-command-z" : nil }
+    return key == "," ? "command-comma" : "command-" + key
+}
+
+func makeFloatingKeyPanel(width: CGFloat, height: CGFloat, headerHeight: CGFloat, appearance: NSAppearance?) -> KeyPanel {
     let panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-                         styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+                         styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    panel.headerHeight = headerHeight
     panel.titleVisibility = .hidden
     panel.titlebarAppearsTransparent = true
-    for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-        panel.standardWindowButton(button)?.isHidden = true
+    for type in KeyPanel.chromeButtons {
+        panel.standardWindowButton(type)?.isHidden = false
+        panel.standardWindowButton(type)?.isEnabled = type != .zoomButton
     }
     panel.appearance = appearance
     panel.level = .floating
@@ -278,7 +291,25 @@ func makeFloatingKeyPanel(width: CGFloat, height: CGFloat, appearance: NSAppeara
 }
 
 final class KeyPanel: NSPanel {
+    static let chromeButtons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+    var headerHeight: CGFloat?
     var onKey: ((String) -> Void)?
+
+    func layoutWindowButtons() {
+        guard let headerHeight, let content = contentView else { return }
+        for (index, type) in Self.chromeButtons.enumerated() {
+            guard let button = standardWindowButton(type), let parent = button.superview else { continue }
+            let center = NSPoint(x: 14 + CGFloat(index) * 20 + button.frame.width / 2,
+                                 y: content.bounds.maxY - headerHeight / 2)
+            let point = parent.convert(center, from: content)
+            button.setFrameOrigin(NSPoint(x: point.x - button.frame.width / 2, y: point.y - button.frame.height / 2))
+        }
+    }
+
+    override func becomeKey() {
+        super.becomeKey()
+        layoutWindowButtons()
+    }
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
         autorecalculatesKeyViewLoop = true
@@ -299,8 +330,7 @@ final class KeyPanel: NSPanel {
         return accepted
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if (firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return super.performKeyEquivalent(with: event) }
-        if let key = panelShortcutKey(event), let onKey = onKey { onKey(key); return true }
+        if let key = panelShortcutKey(event), let onKey { onKey(key); return true }
         return super.performKeyEquivalent(with: event)
     }
 }

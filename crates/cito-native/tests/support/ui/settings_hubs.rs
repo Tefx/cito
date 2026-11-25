@@ -2,6 +2,70 @@ use super::settlement::{input, latest, open_settings};
 use super::*;
 
 #[test]
+fn edit_hub_focus_and_blank_name_match_the_url_derived_save() {
+    let _lock = serial();
+    // Disabled remote profiles exercise URL fallback without network discovery.
+    let url = "https://studio.example.com";
+    let f = Fixture::new(json!({"hubs":{
+        "local":{"url":"local://"},
+        "work":{"url":"https://work.example.com","enabled":false},
+        "studio":{"url":url,"enabled":false,"user":"alice"}
+    }}));
+    f.recording_daemon();
+    let p = start(&f);
+    f.send(p, f.snapshot());
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "edit_hub:local");
+    assert_eq!(
+        inspect(&f, p)["field_editors"][0]["id"],
+        "settings_hub_user"
+    );
+    control(&f, p, "open_add_hub");
+    assert_eq!(inspect(&f, p)["field_editors"][0]["id"], "settings_hub_url");
+    control(&f, p, "cancel_add_hub");
+    control(&f, p, "edit_hub:work");
+    let editing = inspect(&f, p);
+    assert_eq!(editing["field_editors"][0]["id"], "settings_hub_url");
+    assert_eq!(editing.settings("settings_hub_name")["text"], "work");
+    input(&f, p, "settings_hub_url", url);
+    input(&f, p, "settings_hub_name", "");
+    assert_eq!(
+        inspect(&f, p).settings("settings_hub_name")["placeholder"],
+        "Default: studio-2"
+    );
+    control(&f, p, "submit_add_hub");
+    let save = latest(&f, p, "setup_save_hub");
+    assert_eq!(save["original_name"], "work");
+    assert_eq!(save["name"], "studio-2");
+    assert_eq!(save["reset_name"], true);
+    assert!(save.get("name_explicit").is_none());
+    input(&f, p, "settings_hub_user", "bob");
+    let id = save["request_id"].clone();
+    assert_eq!(f.action_ok(save)["committed"], true);
+    let hubs = &read_json(&f.config)["hubs"];
+    assert!(hubs.get("work").is_none());
+    assert_eq!(hubs["studio"]["user"], "alice");
+    assert_eq!(hubs["studio-2"]["url"], url);
+    assert!(hubs["studio-2"].get("reset_name").is_none());
+    let receipt = || {
+        ui_frames(&f)
+            .into_iter()
+            .find(|frame| frame["op"] == "settings" && frame["request_id"] == id)
+    };
+    wait(|| receipt().is_some());
+    let receipt = receipt().unwrap();
+    assert_eq!(receipt["hub"], "studio-2");
+    f.send(p, receipt);
+    control(&f, p, "submit_add_hub");
+    let follow_up = latest(&f, p, "setup_save_hub");
+    assert_eq!(follow_up["original_name"], "studio-2");
+    assert_eq!(follow_up["name"], "studio-2");
+    assert_eq!(follow_up["user"], "bob");
+    assert!(follow_up.get("reset_name").is_none());
+}
+
+#[test]
 fn deferred_sharing_controls_send_partial_updates_while_stop_is_pending() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -532,6 +596,7 @@ fn hub_save_preserves_newer_drafts_and_rejects_a_late_error_on_retry() {
     assert_eq!(second["edit"], true);
     assert_eq!(second["original_name"], "advertised_team");
     assert_eq!(second["name"], "advertised_team");
+    assert!(second.get("reset_name").is_none());
     assert_eq!(second["token"], "new-token");
     assert_ne!(second["request_id"], first["request_id"]);
     f.send(p,json!({"op":"error","source_op":"setup_save_hub","request_id":first["request_id"],"error":"Late error"}));
