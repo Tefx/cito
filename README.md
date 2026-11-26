@@ -52,7 +52,7 @@ Cito is distributed as a Homebrew cask only. This installs `Cito.app` in
 
 ```sh
 cito --version
-# -> cito v0.22.2
+# -> cito v0.22.3
 ```
 
 To uninstall the app and both command symlinks while keeping your settings:

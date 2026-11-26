@@ -12,7 +12,7 @@
   "command": [
     "./bin/cito-plugin-pi"
   ],
-  "version": "0.22.2",
+  "version": "0.22.3",
   "postSetupHint": "Connected · Run /reload in open Pi sessions, then click + Listen",
   "postDisconnectHint": "Disconnected · Active Pi listeners stopped"
 }
