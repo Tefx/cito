@@ -508,6 +508,54 @@ fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
 }
 
 #[test]
+fn inbox_and_channel_diagnostics_wrap_without_displacing_or_clipping_controls() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["hubs"][0]["human_state_status"] = json!("current");
+    cfg["hubs"][0]["attachments"] = json!((0..8).map(|index| json!({
+        "channel_id":format!("channel-{index}"),"location":"hub",
+        "display_name":format!("Alerts for the engineering workgroup {index}"),"availability":"ACTIVE","is_local":false
+    })).collect::<Vec<_>>());
+    let detail =
+        "Please check the account and review the delivery settings before trying again. ".repeat(4);
+    f.send(p, state_with_settings(cfg.clone()));
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    let ready = inspect(&f, p);
+    assert!(
+        ready.settings("inbox_control_bar")["height"]
+            .as_f64()
+            .unwrap()
+            > 48.0
+    );
+    cfg["channels"][0]["warning"] = json!(true);
+    cfg["channels"][0]["detail"] = json!(detail.trim());
+    f.send(p, state_with_settings(cfg));
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, p, Some(appearance));
+        let bar = s.settings("inbox_control_bar");
+        let height = bar["height"].as_f64().unwrap();
+        let action = s.settings("toggle_inbox");
+        let summary = s.settings("inbox_control_summary");
+        assert!(height > 48.0);
+        assert_eq!(action["y"].as_f64().unwrap(), (height - 22.0) / 2.0);
+        assert_eq!(summary["wraps"], true);
+        assert!(summary["height"].as_f64().unwrap() > 24.0);
+        assert!(summary["text"].as_str().unwrap().contains("workgroup 7"));
+        let selector = s.settings("channel_hub_strip");
+        assert!(
+            selector["y"].as_f64().unwrap() + selector["height"].as_f64().unwrap()
+                < bar["y"].as_f64().unwrap()
+        );
+        let diagnostic = s.settings("settings_channel_detail:channel");
+        assert_eq!(diagnostic["wraps"], true);
+        assert!(diagnostic["height"].as_f64().unwrap() > 24.0);
+        assert_eq!(diagnostic["text"], detail.trim());
+    }
+}
+
+#[test]
 fn add_hub_errors_wrap_below_fields_and_above_actions() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -1455,7 +1503,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, frame.clone());
     control(&f, p, "inbox_paused_notice");
     let s = inspect(&f, p);
-    assert_eq!(s.settings("inbox_control_bar")["height"], 48);
+    assert!(s.settings("inbox_control_bar")["height"].as_f64().unwrap() >= 48.0);
     assert_eq!(s.settings("toggle_inbox")["text"], "Resume Inbox");
     assert_eq!(s.settings("toggle_inbox")["enabled"], true);
     if std::env::var_os("CITO_TEST_SNAPSHOT_DIR").is_some() {
@@ -1518,7 +1566,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         paused["source_op"] = json!("human_inbox_update");
         paused["request_id"] = resume["request_id"].clone();
         f.send(p, paused);
-        assert_eq!(inspect(&f, p).settings("inbox_control_bar")["height"], 48);
+        assert!(
+            inspect(&f, p).settings("inbox_control_bar")["height"]
+                .as_f64()
+                .unwrap()
+                >= 48.0
+        );
     }
     f.send(p, frame.clone());
     control(&f, p, "open_settings");

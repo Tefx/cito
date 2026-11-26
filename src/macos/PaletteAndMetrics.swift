@@ -120,7 +120,7 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
 }
 
 func measureWrappedHeight(_ text: String, width: CGFloat, font: NSFont) -> CGFloat {
-    ceil((text as NSString).boundingRect(with: NSSize(width: max(0, width), height: .greatestFiniteMagnitude),
+    ceil((text as NSString).boundingRect(with: NSSize(width: max(1, width - 4), height: .greatestFiniteMagnitude),
         options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font]).height)
 }
 

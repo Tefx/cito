@@ -1008,7 +1008,7 @@ fn hub_edit_reset_name_restores_the_advertised_name() -> Result<(), String> {
     let url = format!("http://{}", server.address);
     let config = profile_config(
         &dir,
-        json!({"default_hub":"work","hubs":{"local":{"url":"local://"},"work":{"url":url}}}),
+        json!({"default_hub":"work","hub_order":["office-mac","local","work"],"hubs":{"local":{"url":"local://"},"work":{"url":url}}}),
     );
     let mut service = TestService::open(&config, &test_plugins(vec![]))?;
     let receipt = service.action(&json!({
@@ -1017,6 +1017,7 @@ fn hub_edit_reset_name_restores_the_advertised_name() -> Result<(), String> {
     assert_eq!(receipt["committed"], true);
     let raw = service.raw_config()?;
     assert_eq!(raw["default_hub"], "office-mac");
+    assert_eq!(raw["hub_order"], json!(["local", "office-mac"]));
     assert!(raw["hubs"].get("work").is_none());
     assert_eq!(raw["hubs"]["office-mac"]["url"], url);
     assert!(raw["hubs"]["office-mac"].get("reset_name").is_none());
@@ -1332,7 +1333,7 @@ fn background_push_projects_current_human_channels_and_complete_ordered_hubs() -
     };
     assert_eq!(
         names(&initial["settings"]["hubs"]),
-        ["archive", "local", "work"]
+        ["local", "work", "archive"]
     );
     assert_eq!(names(&initial["hubs"]), ["local", "work"]);
     assert_eq!(initial["hubs"][1]["redirect_port"], 4321);
@@ -1358,8 +1359,122 @@ fn background_push_projects_current_human_channels_and_complete_ordered_hubs() -
     assert_eq!(status["hubs"], full["hubs"]);
     assert_eq!(
         status["hubs"].as_array().unwrap(),
-        &full["settings"]["hubs"].as_array().unwrap()[1..]
+        &full["settings"]["hubs"].as_array().unwrap()[..2]
     );
+    Ok(())
+}
+
+#[test]
+fn hub_order_actions_include_implicit_local_and_keep_default_independent() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let raw = json!({"defaultHub":"work","hubs":{"work":{"url":"local://"},"archive":{"url":"https://hub.example.com","enabled":false}}});
+    for (action, default, order) in [
+        (
+            json!({"op":"setup_set_default_hub","hub":"local"}),
+            "local",
+            json!(["work", "local", "archive"]),
+        ),
+        (
+            json!({"op":"setup_reorder_hub","hub":"local","direction":"up"}),
+            "work",
+            json!(["local", "work", "archive"]),
+        ),
+    ] {
+        service.mutate_config(|v| {
+            *v = raw.clone();
+            Ok(())
+        })?;
+        service.reload_slots()?;
+        service.action(&action)?;
+        assert_eq!(service.snapshot()?["hub"], default);
+        assert_eq!(service.raw_config()?["hub_order"], order);
+    }
+    Ok(())
+}
+
+#[test]
+fn hub_order_actions_persist_and_rank_settings_directory_and_mcp() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-hub-order-{}", random_uuid_v4())));
+    let config = profile_config(
+        &dir,
+        json!({"defaultHub":"local","hubs":{
+            "local":{"url":"local://"},"work":{"url":"local://"},"archive":{"url":"local://","enabled":false}
+        }}),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    let ui = Arc::new(UiMailbox::default());
+    service.ui = Some(ui.clone());
+    service.push_ui();
+    assert_eq!(take_state_frame(&ui)["hubs"][0]["name"], "local");
+    let receipt = service.action(
+        &json!({"op":"setup_reorder_hub","hub":"work","direction":"up","request_id":"reorder"}),
+    )?;
+    assert_eq!(receipt["committed"], true);
+    let reorder = take_state_frame(&ui);
+    assert_eq!(reorder["request_id"], "reorder");
+    assert_eq!(reorder["settings"]["hubs"][0]["name"], "work");
+    assert_eq!(
+        service.raw_config()?["hub_order"],
+        json!(["work", "local", "archive"])
+    );
+
+    let before = service.raw_config()?;
+    for invalid in [
+        json!({"op":"setup_reorder_hub","hub":"work","direction":"left"}),
+        json!({"op":"setup_reorder_hub","hub":"missing","direction":"down"}),
+        json!({"op":"setup_set_default_hub","hub":"archive"}),
+        json!({"op":"setup_set_default_hub","hub":1}),
+    ] {
+        assert!(service
+            .action(&invalid)
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+    }
+    assert_eq!(service.raw_config()?, before);
+    for (hub, direction) in [("work", "up"), ("archive", "down")] {
+        service.action(&json!({"op":"setup_reorder_hub","hub":hub,"direction":direction}))?;
+        assert_eq!(service.raw_config()?, before);
+    }
+    service.action(&json!({"op":"setup_reorder_hub","hub":"local","direction":"down"}))?;
+    assert_eq!(
+        service.raw_config()?["hub_order"],
+        json!(["work", "archive", "local"])
+    );
+    let directory = service.action(&json!({"op":"query_directory"}))?;
+    assert_eq!(directory["peers"][0]["hub"], "work");
+    let find = service.tool("cito_find", &json!({"limit":1}), &json!({}))?;
+    assert_eq!(find["listeners"][0]["hub"], "local");
+    assert_eq!(
+        service.action(&json!({"op":"setup_set_default_hub","hub":"work"}))?["committed"],
+        true
+    );
+    let raw = service.raw_config()?;
+    assert!(raw.get("defaultHub").is_none());
+    assert_eq!(raw["default_hub"], "work");
+    assert_eq!(service.settings()["settings_hub"], "work");
+    let find = service.tool("cito_find", &json!({"limit":1}), &json!({}))?;
+    assert_eq!(find["listeners"][0]["hub"], "work");
+
+    // Out-of-band order changes must invalidate the background status frame too.
+    service.action(&json!({"op":"close_directory"}))?;
+    take_state_frame(&ui);
+    service.mutate_config(|v| {
+        v["hub_order"] = json!(["local", "work", "archive"]);
+        Ok(())
+    })?;
+    service.push_ui();
+    let reordered = take_state_frame(&ui);
+    assert!(reordered.get("settings").is_none());
+    assert_eq!(reordered["hubs"][0]["name"], "local");
+    service.action(&json!({"op":"setup_remove_hub","hub":"work"}))?;
+    assert_eq!(
+        service.raw_config()?["hub_order"],
+        json!(["local", "archive"])
+    );
+    assert_eq!(service.snapshot()?["hub"], "local");
+    service.action(&json!({"op":"setup_disconnect_all","purge_data":true}))?;
+    assert!(service.raw_config()?.get("hub_order").is_none());
     Ok(())
 }
 
@@ -2217,6 +2332,462 @@ fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), Str
         assert_eq!(cached.completed_gen, generation + 1);
     }
     server.join().unwrap()
+}
+
+#[test]
+fn channel_settings_offer_ordered_reuse_only_for_matching_services() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let fields = |destination| {
+        json!([
+            {"key":"destination","scope":"user","value":destination},
+            {"key":"routing","scope":"hub","value":"shared"},
+            {"key":"different_scope","scope":"user","value":"not-a-service-credential"},
+            {"key":"redacted","scope":"user","redacted":true,"value":"hidden"},
+            {"key":"credential","scope":"user","type":"secret","value":"hidden"},
+            {"key":"empty","scope":"user","value":""}
+        ])
+    };
+    let preferred = json!({"id":"fixture","configured":true,"service_identity":"shared-service",
+        "display_label":"  Preferred Account ","fields":fields("preferred")});
+    let mut backup_listener = None;
+    for (name, channels) in [
+        (
+            "incomplete",
+            json!([{"id":"fixture","configured":true,"service_identity":"shared-service","fields":[{"key":"note","scope":"user","value":"optional"}]}]),
+        ),
+        (
+            "first",
+            json!([
+                preferred,
+                {"id":"different","configured":true,"service_identity":"other-service","fields":fields("wrong")},
+                {"id":"already-configured","configured":true,"service_identity":"shared-service","fields":fields("wrong")},
+                {"id":"not-ready","configured":true,"service_identity":"shared-service","fields":fields("wrong")}
+            ]),
+        ),
+        (
+            "backup",
+            json!([{"id":"fixture","configured":true,"service_identity":"shared-service","display_label":" ","fields":fields("backup")} ]),
+        ),
+        (
+            "target",
+            json!([
+                {"id":"fixture","configured":false,"hub_ready":true,"service_identity":"shared-service","fields":[{"scope":"user","key":"destination","required":true},{"scope":"user","key":"note"},{"scope":"hub","key":"different_scope"}]},
+                {"id":"different","configured":false,"hub_ready":true,"service_identity":"shared-service","reusable_binding":{"source_hub":"unverified"}},
+                {"id":"already-configured","configured":true,"hub_ready":true,"service_identity":"shared-service"},
+                {"id":"not-ready","configured":false,"hub_ready":false,"service_identity":"shared-service"}
+            ]),
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let slot = HubClient::new(
+            name.into(),
+            json!({"url":format!("http://{}", listener.local_addr().unwrap())}),
+            "alice",
+            None,
+        );
+        service.replace_slot(slot.clone());
+        if name == "backup" {
+            backup_listener = Some(listener.try_clone().unwrap());
+        }
+        let server = serve_responses(
+            listener,
+            [(200, json!({"ok":true,"result":{"channels":channels}}))],
+        );
+        let result = service.channel_inventory(&slot).refresh(&slot, 0);
+        server.join().unwrap()?;
+        result?;
+    }
+    for (first, second, label, destination) in [
+        ("first", "backup", "Preferred Account", "preferred"),
+        ("backup", "first", "Account", "backup"),
+    ] {
+        service.mutate_config(|v| {
+            v["hub_order"] = json!(["incomplete", first, second]);
+            Ok(())
+        })?;
+        let settings = service.settings_for_hub("target");
+        let channels = settings["channels"].as_array().unwrap();
+        assert_eq!(
+            channels[0]["reusable_binding"],
+            json!({"source_hub":first,"display_label":label,"values":{"destination":destination}})
+        );
+        assert!(channels[1..]
+            .iter()
+            .all(|channel| channel.get("reusable_binding").is_none()));
+    }
+    // A reachable source with a failed list retains its rows for diagnostics,
+    // but the next healthy source must win even when its order is lower.
+    let server = serve_responses(
+        backup_listener.unwrap(),
+        [(503, json!({"message":"Unavailable"}))],
+    );
+    let backup = service.slot("backup")?.clone();
+    assert!(service
+        .channel_inventory(&backup)
+        .refresh(&backup, 1)
+        .is_err());
+    server.join().unwrap()?;
+    assert_eq!(backup.connection_status(), "connected");
+    assert_eq!(
+        service.settings_for_hub("backup")["channels"][0]["configured"],
+        true
+    );
+    assert_eq!(
+        service.settings_for_hub("target")["channels"][0]["reusable_binding"]["source_hub"],
+        "first"
+    );
+    Ok(())
+}
+
+fn install_inventory_channel(dir: &TestDirectory, engine: &HubEngine) -> Result<(), String> {
+    let plugin_root = dir.join("channel-plugins");
+    let plugin_dir = plugin_root.join("fixture");
+    fs::create_dir_all(&plugin_dir).map_err(|e| e.to_string())?;
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hub/channel.py");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        json!({
+            "id": "fixture",
+            "kind": "human-channel",
+            "displayName": "Fixture",
+            "supportsOutboundOnly": true,
+            "serviceIdentity": { "field": "credential", "separator": ":" },
+            "command": ["python3", script],
+            "fields": [
+                { "key": "credential", "scope": "hub", "label": "Credential", "type": "secret", "required": true },
+                { "key": "destination", "scope": "user", "label": "Destination", "type": "text", "required": true },
+                { "key": "secret_note", "scope": "user", "label": "Secret", "type": "secret", "required": false }
+            ]
+        })
+        .to_string(),
+    )
+    .map_err(|e| e.to_string())?;
+    engine.set_plugin_roots(&[plugin_root])
+}
+
+#[test]
+fn local_channel_activity_follows_slot_and_host_lifetimes_before_reload() -> Result<(), String> {
+    let (dir, mut service) = TestService::local()?;
+    let engine = service.local.clone();
+    install_inventory_channel(&dir, &engine)?;
+    let owner = crate::core::identity::principal("alice");
+    let test = || {
+        engine.rpc(
+            "human_channels_test",
+            &json!({"plugin_id":"fixture"}),
+            Some(&owner),
+        )
+    };
+    engine.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"shared:secret"}}),
+        Some(&owner),
+    )?;
+    assert_eq!(test()?["ok"], true);
+    service.purge_hub_state("local")?;
+    assert!(test().unwrap_err().starts_with("HUB_DISABLED:"));
+    service.sync_host_hub(&json!({"enabled":true,"bind":"127.0.0.1","port":0}))?;
+    assert_eq!(test()?["ok"], true);
+    service.install_host_server(None);
+    assert!(test().unwrap_err().starts_with("HUB_DISABLED:"));
+    Ok(())
+}
+
+#[test]
+fn open_settings_tracks_remote_binding_after_failed_read_update_and_unpair() -> Result<(), String> {
+    use crate::core::auth::HubAuth;
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-remote-reuse-{}", random_uuid_v4())));
+    let engine = TestEngine(HubEngine::open(&dir.join("remote"))?);
+    let auth = Arc::new(HubAuth::new("none", None, None, None)?);
+    let server = engine.start_server("127.0.0.1", 0, auth.clone())?;
+    let port = server.port();
+    let config = profile_config(
+        &dir,
+        json!({"user":"alice","hubs":{"local":{"url":"local://"},"work":{"url":format!("http://{}", server.address)}}}),
+    );
+    let daemon = TestService::open(&config, &test_plugins(vec![]))?;
+    install_inventory_channel(&dir, &engine)?;
+    install_inventory_channel(&dir, &daemon.local)?;
+    let owner = crate::core::identity::principal("alice");
+    let configure = |engine: &HubEngine, patch: Value| {
+        engine.rpc("human_channels_configure", &patch, Some(&owner))
+    };
+    configure(
+        &daemon.local,
+        json!({"plugin_id":"fixture","hub_config":{"credential":"shared:target"}}),
+    )?;
+    configure(
+        &engine,
+        json!({"plugin_id":"fixture","hub_config":{"credential":"shared:source"},"user_config":{"destination":"first"}}),
+    )?;
+    let service = Arc::new(Mutex::new(daemon.into_inner()));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+    };
+    http_actions::dispatch_action(&service, &json!({"op":"open_settings","hub":"local"}), None)?;
+    let mut daemon = service.lock().unwrap();
+    let source = daemon.slot("work")?.clone();
+    drop(server);
+    assert!(daemon
+        .channel_inventory(&source)
+        .refresh(&source, 0)
+        .is_err());
+    assert!(daemon.settings()["channels"][0]["reusable_binding"].is_null());
+    let _server = engine.start_server("127.0.0.1", port, auth)?;
+    source.directory()?;
+    let ui = Arc::new(UiMailbox::default());
+    daemon.ui = Some(ui.clone());
+    for destination in [Some("first"), Some("second"), None] {
+        match destination {
+            Some("first") => (), // Recovery without opening the source's Settings.
+            Some(value) => {
+                configure(
+                    &engine,
+                    json!({"plugin_id":"fixture","user_config":{"destination":value}}),
+                )?;
+            }
+            None => {
+                configure(&engine, json!({"plugin_id":"fixture","reset_user":true}))?;
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut frame = Value::Null;
+        loop {
+            daemon.poll()?;
+            if !ui.pending.lock().unwrap().is_empty() {
+                frame = take_state_frame(&ui);
+            }
+            let target = &frame["settings"];
+            let link = &target["channels"][0]["reusable_binding"];
+            // A temporarily ineligible source during the unpair read is not proof
+            // that its inventory observed the actual unpair.
+            let source_configured = &daemon.settings_for_hub("work")["channels"][0]["configured"];
+            if source_configured == &json!(destination.is_some())
+                && target["settings_hub"] == "local"
+                && match destination {
+                    Some(value) => {
+                        link["source_hub"] == "work" && link["values"]["destination"] == value
+                    }
+                    None => link.is_null(),
+                }
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Remote binding did not converge to {destination:?}: {link}; source configured={source_configured}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn open_settings_does_not_link_a_retained_or_rotated_target() -> Result<(), String> {
+    use crate::core::{auth::HubAuth, database::Database};
+    let dir = TestDirectory(std::env::temp_dir().join(format!("cito-link-{}", random_uuid_v4())));
+    let remote = dir.join("remote");
+    let target = TestEngine(HubEngine::open(&remote)?);
+    let server = target.start_server(
+        "127.0.0.1",
+        0,
+        Arc::new(HubAuth::new("none", None, None, None)?),
+    )?;
+    let config = profile_config(
+        &dir,
+        json!({"user":"alice","hubs":{"local":{"url":"local://"},"work":{"url":format!("http://{}", server.address)}}}),
+    );
+    let daemon = TestService::open(&config, &test_plugins(vec![]))?;
+    install_inventory_channel(&dir, &daemon.local)?;
+    install_inventory_channel(&dir, &target)?;
+    let owner = crate::core::identity::principal("alice");
+    let configure = |engine: &HubEngine, patch: Value| {
+        engine.rpc("human_channels_configure", &patch, Some(&owner))
+    };
+    configure(
+        &daemon.local,
+        json!({"plugin_id":"fixture","hub_config":{"credential":"shared:source"},"user_config":{"destination":"source-room"}}),
+    )?;
+    configure(
+        &target,
+        json!({"plugin_id":"fixture","hub_config":{"credential":"shared:target"}}),
+    )?;
+    let service = Arc::new(Mutex::new(daemon.into_inner()));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+    };
+    let dispatch = |action: &Value| http_actions::dispatch_action(&service, action, None);
+    let open = json!({"op":"open_settings","hub":"work"});
+    dispatch(&open)?;
+    let settings = || service.lock().unwrap().settings();
+    let initial = &settings()["channels"][0];
+    assert_eq!(initial["configured"], false);
+    assert_eq!(initial["service_identity"], "shared");
+    let binding = &initial["reusable_binding"];
+    assert_eq!(binding["values"]["destination"], "source-room");
+    let mut link = json!({"op":"channel_save","hub":"work","channel_id":"fixture","scope":"user","enabled":true,"values":binding["values"],"expected_service_identity":initial["service_identity"]});
+
+    configure(
+        &target,
+        json!({"plugin_id":"fixture","hub_config":{"credential":"rotated:target"}}),
+    )?;
+    let db = Database::open(&remote.join("hub.sqlite"))?;
+    db.execute(
+        "ALTER TABLE hub_pairing_codes RENAME TO unavailable_codes",
+        &[],
+    )?;
+    assert!(dispatch(&open).is_err());
+    let failed = settings();
+    assert_eq!(failed["settings_hub"], "work");
+    assert!(failed["channel_inventory_error"].is_string());
+    let retained = &failed["channels"][0];
+    assert_eq!(retained["service_identity"], "shared");
+    assert_eq!(retained["configured"], false);
+    assert!(retained.get("reusable_binding").is_none());
+    db.execute(
+        "ALTER TABLE unavailable_codes RENAME TO hub_pairing_codes",
+        &[],
+    )?;
+
+    assert!(dispatch(&link).unwrap_err().starts_with("CONFLICT:"));
+    for invalid in [Value::Null, json!("")] {
+        link["expected_service_identity"] = invalid;
+        assert!(dispatch(&link)
+            .unwrap_err()
+            .contains("CONFLICT: expected_service_identity must be a non-empty string"));
+    }
+    let hub_save = json!({"op":"channel_save","scope":"hub","hub":"work","channel_id":"fixture","values":{"credential":"old:target"},"expected_service_identity":"shared"});
+    assert!(dispatch(&hub_save).unwrap_err().starts_with("CONFLICT:"));
+    let current = &settings()["channels"][0];
+    assert_eq!(current["service_identity"], "rotated");
+    assert_eq!(current["configured"], false);
+    assert_eq!(current["fields"][1]["value"], "");
+    link["expected_service_identity"] = current["service_identity"].clone();
+    assert_eq!(dispatch(&link)?["committed"], true);
+    assert_eq!(
+        settings()["channels"][0]["fields"][1]["value"],
+        "source-room"
+    );
+    let manual = json!({"op":"channel_save","hub":"work","channel_id":"fixture","values":{"destination":"manual-room"}});
+    assert_eq!(dispatch(&manual)?["committed"], true);
+    assert_eq!(
+        settings()["channels"][0]["fields"][1]["value"],
+        "manual-room"
+    );
+    Ok(())
+}
+
+#[test]
+fn builtin_channel_inventory_drives_reuse_and_ui_revisions() -> Result<(), String> {
+    let dir = TestDirectory(
+        std::env::temp_dir().join(format!("cito-builtin-channel-{}", random_uuid_v4())),
+    );
+    let config = profile_config(
+        &dir,
+        json!({
+            "default_hub": "local",
+            "hub_order": ["local", "work"],
+            "hubs": {
+                "local": { "url": "local://", "user": "alice" },
+                "work": { "url": "local://", "user": "bob" }
+            }
+        }),
+    );
+    let mut daemon = TestService::open(&config, &test_plugins(vec![]))?;
+    install_inventory_channel(&dir, &daemon.local)?;
+    // Isolate inventory-driven invalidation: a delayed event-stream notification
+    // must not independently advance the revision during the assertion.
+    for (name, user) in [("local", "alice"), ("work", "bob")] {
+        let slot = daemon.slot(name)?;
+        let client = HubClient::new(name.into(), slot.config.clone(), user, slot.local.clone());
+        daemon.replace_slot(client);
+    }
+    let service = Arc::new(Mutex::new(daemon.into_inner()));
+    let _cleanup = ServiceCleanup {
+        service: service.clone(),
+    };
+    let destination = "d".repeat(5 * 1024);
+    for action in [
+        json!({
+            "op": "channel_save", "hub": "local", "channel_id": "fixture",
+            "display_label": "Preferred Account",
+            "values": { "credential": "shared-service:secret", "destination": destination, "secret_note": "hidden" }
+        }),
+        json!({ "op": "open_settings", "hub": "work" }),
+    ] {
+        http_actions::dispatch_action(&service, &action, None)?;
+    }
+
+    let ui = Arc::new(UiMailbox::default());
+    let push_expecting_frame = |ui: &Arc<UiMailbox>| -> Value {
+        service.lock().unwrap().push_ui();
+        let frame = take_state_frame(ui);
+        service.lock().unwrap().push_ui();
+        assert!(ui.pending.lock().unwrap().is_empty());
+        frame
+    };
+    service.lock().unwrap().ui = Some(ui.clone());
+    let initial = push_expecting_frame(&ui);
+    let ch = &initial["settings"]["channels"][0];
+    assert_eq!(initial["settings"]["settings_hub"], "work");
+    assert_eq!(ch["configured"], false);
+    assert_eq!(ch["hub_ready"], true);
+    assert_eq!(ch["supports_outbound_only"], true);
+    assert_eq!(ch["service_identity"], "shared-service");
+    assert_eq!(ch["service_label"], Value::Null);
+    assert_eq!(ch["inbound_mode"], "primary");
+    assert_eq!(
+        ch["reusable_binding"],
+        json!({ "source_hub": "local", "display_label": "Preferred Account", "values": { "destination": destination } })
+    );
+
+    service.lock().unwrap().ui = None;
+    http_actions::dispatch_action(
+        &service,
+        &json!({"op": "setup_reorder_hub", "hub": "work", "direction": "up"}),
+        None,
+    )?;
+    service.lock().unwrap().ui = Some(ui.clone());
+    assert_eq!(
+        push_expecting_frame(&ui)["settings"]["hubs"][0]["name"],
+        "work"
+    );
+
+    service
+        .lock()
+        .unwrap()
+        .slot("work")?
+        .rpc("human_channels_test", &json!({"plugin_id": "fixture"}))?;
+    assert_eq!(
+        push_expecting_frame(&ui)["settings"]["channels"][0]["service_label"],
+        "@shared-service"
+    );
+
+    service.lock().unwrap().slot("work")?.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id": "fixture", "inbound_mode": "outbound_only"}),
+    )?;
+    assert_eq!(
+        push_expecting_frame(&ui)["settings"]["channels"][0]["inbound_mode"],
+        "outbound_only"
+    );
+    let link = &ch["reusable_binding"];
+    http_actions::dispatch_action(
+        &service,
+        &json!({"op":"channel_save","hub":"work","channel_id":"fixture","enabled":true,"scope":"user","values":link["values"],"display_label":link["display_label"]}),
+        None,
+    )?;
+    let linked = &service.lock().unwrap().settings_for_hub("work")["channels"][0];
+    assert_eq!(linked["configured"], true);
+    assert_eq!(linked["fields"][1]["value"], destination);
+    let wrong_scope = json!({"op":"channel_save","hub":"work","channel_id":"fixture","scope":"user","values":{"credential":"different:service"}});
+    assert!(http_actions::dispatch_action(&service, &wrong_scope, None)
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    assert_eq!(
+        service.lock().unwrap().settings_for_hub("work")["channels"][0]["service_identity"],
+        "shared-service"
+    );
+    Ok(())
 }
 
 #[test]

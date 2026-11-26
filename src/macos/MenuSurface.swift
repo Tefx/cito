@@ -14,9 +14,9 @@ extension Companion: NSMenuDelegate {
         if !selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub }) {
             return selectedTargetHub
         }
-        if let defaultHub = settings?.hubs.first(where: { $0.is_default && $0.enabled && $0.status == "connected" }),
-           hubs.contains(where: { $0.name == defaultHub.name }) { return defaultHub.name }
-        return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
+        return resolvedDefaultHub(requireEnabled: true, requireConnected: true)
+            ?? hubs.first(where: { $0.status == "connected" })?.name
+            ?? hubs.first?.name ?? ""
     }
 
     func updateMenuErrorRow() {
@@ -195,8 +195,8 @@ extension Companion: NSMenuDelegate {
         else if humanHub?.human_paused == true { subtitleText = "Inbox paused" }
         else if humanListening { subtitleText = "Personal inbox active" }
         else { subtitleText = "Not listening" }
-        let totalHubPillsWidth = hubs.reduce(CGFloat(0)) { $0 + min(180, measureTextWidth($1.name, font: btnFont) + 26) }
-            + CGFloat(max(0, hubs.count - 1)) * 4
+        let hubPillNaturalWidths = hubs.map { min(180, ceil(measureTextWidth($0.name, font: btnFont)) + 26) }
+        let totalHubPillsWidth = hubPillNaturalWidths.reduce(0, +) + CGFloat(max(0, hubs.count - 1)) * 4
         let subtitleLimit: CGFloat = hubs.count > 1 ? min(246, 368 - 54 - min(144, totalHubPillsWidth)) : 246
         let subWidth = min(subtitleLimit, ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8)
         let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: CitoPalette.secondaryText)
@@ -269,8 +269,12 @@ extension Companion: NSMenuDelegate {
         }
         let stripX = max(138, 54 + subWidth)
         let stripWidth = max(44, 368 - stripX)
+        let compactChips = totalHubPillsWidth + 4 > stripWidth
+        let fullCap = stripWidth - 4
+        let pairBudget = stripWidth - 8 // Track insets and the gap between adjacent pills.
+        let halfBudget = floor(pairBudget / 2)
         var hubPills: [NSView] = []
-        for hub in hubs where showHubControls {
+        for (index, hub) in hubs.enumerated() where showHubControls {
             let color = hub.name == effectiveTargetHub && hub.status == "connected" && hub.error == nil ? NSColor.white : statusColor(hub.status)
             let isSingleDefault = hubs.count == 1 && hub.is_builtin == true
             let title: String
@@ -284,10 +288,15 @@ extension Companion: NSMenuDelegate {
             } else {
                 title = hub.name
             }
-            let compactChips = totalHubPillsWidth + 4 > stripWidth
-            let fullCap = stripWidth - 4
-            let chipCap = hubs.count > 1 && stripWidth >= 92 ? floor((stripWidth-8)/2) : fullCap
-            let width: CGFloat = min(compactChips ? chipCap : fullCap, 180, measureTextWidth(title, font: btnFont) + 26)
+            let natural = isSingleDefault ? min(180, ceil(measureTextWidth(title, font: btnFont)) + 26) : hubPillNaturalWidths[index]
+            let cap: CGFloat
+            if hubs.count == 2 {
+                let siblingShare = index == 0 ? pairBudget - halfBudget : halfBudget
+                cap = pairBudget - min(siblingShare, hubPillNaturalWidths[1 - index])
+            } else {
+                cap = hubs.count > 2 && compactChips && stripWidth >= 92 ? halfBudget : fullCap
+            }
+            let width = min(natural, cap)
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
             pill.style = hub.name == effectiveTargetHub

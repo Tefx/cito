@@ -334,6 +334,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     static let channelResetOps = ["channel_cancel_pair", "channel_unpair", "disconnect_human_channel"]
     static let channelSaveOps = ["channel_save", "save_hub_service"]
     static let channelControlOps = channelResetOps + channelSaveOps + ["channel_pair", "channel_test", "channel_toggle"]
+    static let hubOrderOps = ["setup_reorder_hub", "setup_set_default_hub"]
     struct PendingControl {
         struct ChannelSave {
             let scope: String
@@ -352,6 +353,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     }
     var hostHubAddress = "tailscale"
     var selectedChannelHub = ""
+    var subscribedChannelHub = ""
     var channelSettingsByHub: [String: [ChannelSetupItem]] = [:]
     var channelInventoryErrorsByHub: [String: String] = [:]
     var settingsScrollOffsets: [String: CGFloat] = [:]
@@ -564,12 +566,35 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         let children = (view as? NSScrollView)?.documentView.map { [$0] } ?? view.subviews
         return children.lazy.compactMap { self.findView(in: $0, id: id, as: type) }.first
     }
+    func resolvedDefaultHub(requireEnabled: Bool = false, requireConnected: Bool = false) -> String? {
+        if hubs.contains(where: { $0.is_default != nil }) {
+            return hubs.first(where: {
+                $0.is_default == true &&
+                (!requireEnabled || $0.enabled != false) &&
+                (!requireConnected || $0.status == "connected")
+            })?.name
+        }
+        return settings?.hubs.first(where: {
+            $0.is_default &&
+            (!requireEnabled || $0.enabled) &&
+            (!requireConnected || $0.status == "connected")
+        }).flatMap { item in
+            (!requireConnected || hubs.contains(where: { $0.name == item.name })) ? item.name : nil
+        }
+    }
+    func refreshChannelSettingsIfNeeded() {
+        let target = effectiveChannelHub
+        guard settingsVisible, settingsActiveTab == "channels", !target.isEmpty,
+              subscribedChannelHub != target else { return }
+        subscribedChannelHub = target
+        emit(["op": "open_settings", "hub": target], userInitiated: false)
+    }
     func settingsHub(_ value: SettingsPayload, hub: String?) -> String {
         value.settings_hub ?? hub ?? effectiveChannelHub
     }
 
     private func settingsFrameHub(_ frame: Frame, pending: PendingControl?) -> String? {
-        frame.hub ?? pending.map(\.hub) ?? (frame.op == "state" ? frame.settings?.hubs.first(where: { $0.is_default })?.name ?? frame.hubs?.first?.name : nil)
+        frame.hub ?? pending.map(\.hub) ?? (frame.op == "state" ? frame.settings?.hubs.first(where: { $0.is_default })?.name ?? frame.hubs?.first(where: { $0.is_default == true })?.name ?? frame.hubs?.first?.name : nil)
     }
 
     private func channelSaveProjection(_ frame: Frame, for pending: PendingControl) -> PendingControl? {
@@ -580,14 +605,28 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         return pending
     }
 
+    private func mergeShedCollection<Item>(_ incoming: [Item], existing: [Item], key: (Item) -> String,
+                                           preserve: (Item, Item) -> Item) -> [Item] {
+        let existingByKey = Dictionary(existing.map { (key($0), $0) }, uniquingKeysWith: { first, _ in first })
+        let incomingKeys = Set(incoming.map(key))
+        return incoming.map { item in existingByKey[key(item)].map { preserve(item, $0) } ?? item }
+            + existing.filter { !incomingKeys.contains(key($0)) }
+    }
+
     private func mergedSettings(_ observed: SettingsPayload, hub: String?, frame: Frame, preserveChannels: Bool) -> SettingsPayload {
         var merged = observed
         if frame.preservesCollection("apps") || frame.preservesCollection("settings.apps"), let current = settings { merged.apps = current.apps }
         if frame.preservesCollection("settings.hubs") || (frame.hubs == nil && frame.preservesCollection("hubs")), let current = settings {
-            merged.hubs = current.hubs.map { old in
-                guard var updated = observed.hubs.first(where: { $0.name == old.name }) else { return old }
-                updated.attachments = old.attachments ?? updated.attachments
+            merged.hubs = mergeShedCollection(observed.hubs, existing: current.hubs, key: { $0.name }) { incoming, old in
+                var updated = incoming
+                updated.attachments = old.attachments ?? incoming.attachments
                 return updated
+            }
+        }
+        if frame.op == "state", let defaultHub = frame.hub, !defaultHub.isEmpty,
+           merged.hubs.contains(where: { $0.name == defaultHub }) {
+            for index in merged.hubs.indices {
+                merged.hubs[index].is_default = (merged.hubs[index].name == defaultHub)
             }
         }
         let target = settingsHub(merged, hub: hub)
@@ -930,7 +969,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 hubInviteRequest=""; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
             let matchingHubSave = hubSaveSucceeded && hubForm.pendingSave.map { $0.requestId == frame.request_id } == true
+            let previousChannelHub = effectiveChannelHub
             let uiChanged = acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: hubSaveSucceeded, savedHub: frame.hub, truncated: preserveSettingsChannels)
+            let nextChannelHub = effectiveChannelHub
+            if selectedChannelHub.isEmpty && nextChannelHub != previousChannelHub {
+                refreshChannelSettingsIfNeeded()
+            }
             if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
                !(frame.source_op == "set_host_hub" && presentationError(value.host_hub.error ?? "") == presentationError(warning)) { settingsBannerError = warning }
             if changed || receipt || uiChanged || frame.request_id == hostPort.requestId || settingsBannerError != previousSettingsBanner {
@@ -962,11 +1006,17 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             return
         }
         if frame.op == "state", let observedHubs = frame.hubs, let observedListeners = frame.listeners {
-            let h = hasRenderedState && frame.preservesCollection("hubs") ? hubs.map { old in
-                guard var updated = observedHubs.first(where: { $0.name == old.name }) else { return old }
-                updated.attachments = old.attachments ?? updated.attachments
+            var h = hasRenderedState && frame.preservesCollection("hubs") ? mergeShedCollection(observedHubs, existing: hubs, key: { $0.name }) { incoming, old in
+                var updated = incoming
+                updated.is_default = incoming.is_default ?? old.is_default
+                updated.attachments = old.attachments ?? incoming.attachments
                 return updated
             } : observedHubs
+            if let defaultHub = frame.hub, !defaultHub.isEmpty, h.contains(where: { $0.name == defaultHub }) {
+                for index in h.indices {
+                    h[index].is_default = (h[index].name == defaultHub)
+                }
+            }
             let l = hasRenderedState && frame.preservesCollection("listeners") ? listeners : observedListeners
             if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
             let a = hasRenderedState && frame.preservesCollection("available") ? available : frame.available ?? []
@@ -987,13 +1037,18 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings.map { settingsProjectionChanged($0, hub: settingsHubHint) } ?? false
             let settingsReceipt = (hostPort.pending && frame.request_id == hostPort.requestId) || (settledControl && projectedSave != nil)
-            if (settingsChanged || settingsReceipt), let value = nextSettings ?? settings {
-                acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: preserveSettingsChannels)
-            }
             if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !settingsReceipt && !menuBannerChanged && !settingsBannerChanged && !activityChanged && !directoryMembershipChanged && a == available && !directoryRemoteChanged {
                 updateStatusItem()
             } else {
+                let previousChannelHub = effectiveChannelHub
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
+                if (settingsChanged || settingsReceipt), let value = nextSettings ?? settings {
+                    acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: preserveSettingsChannels)
+                }
+                let nextChannelHub = effectiveChannelHub
+                if selectedChannelHub.isEmpty && nextChannelHub != previousChannelHub {
+                    refreshChannelSettingsIfNeeded()
+                }
                 seedDirectoryPeersIfEmpty()
                 hasRenderedState = true; pendingMutation = false
                 rebuild(preservingEditor: true)
@@ -1056,7 +1111,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         let passive = ["query_directory", "refresh_available"].contains(operation)
         if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild(preservingEditor: true) }
         var outgoing = action
-        let tracked = Self.channelControlOps + ["set_host_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "setup_remove_hub", "set_scope", "set_auto_listen", "unlisten_session", "set_listen_mode", "rename_session", "hub_action", "setup_toggle_hub", "set_launch_at_login", "setup_disconnect_all", "listen_session"]
+        let tracked = Self.channelControlOps + Self.hubOrderOps + ["set_host_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "setup_remove_hub", "set_scope", "set_auto_listen", "unlisten_session", "set_listen_mode", "rename_session", "hub_action", "setup_toggle_hub", "set_launch_at_login", "setup_disconnect_all", "listen_session"]
         if tracked.contains(operation) || directoryActionOps.contains(operation) {
             outgoing["request_id"] = (action["request_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
         }
@@ -1112,15 +1167,20 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 removedTestResult = channelUiStates[key]?.testResult != nil
                 channelUiStates[key, default: ChannelUiState()].testResult = nil
             }
+            let saveControl = operation == "channel_save" ? "save_channel" : "save_hub_service"
             if !removedTestResult && Self.channelSaveOps.contains(operation),
+               outgoing["inbound_mode"] == nil, outgoing["display_label"] == nil,
                let root = settingsPanel?.contentView,
-               let save: MenuControl = findView(in:root,id:operation == "channel_save" ? "save_channel:\(id)" : "save_hub_service:\(id)") {
+               let save: MenuControl = findView(in:root,id:"\(saveControl):\(id)") {
                 // Pending feedback changes no fields; retain the editor's undo stack.
                 pendingLabel(save,true,"Saving…"); save.layoutContents()
             } else if settingsPanel != nil { rebuildSettingsPanel() }
         }
-        if ["set_host_hub", "hub_action", "setup_toggle_hub", "setup_remove_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "listen_session"].contains(operation) {
+        if (Self.hubOrderOps + ["set_host_hub", "hub_action", "setup_toggle_hub", "setup_remove_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "listen_session"]).contains(operation) {
             rebuild(preservingEditor: true); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+        }
+        if operation == "open_settings", let hub = outgoing["hub"] as? String {
+            subscribedChannelHub = hub
         }
         FileHandle.standardOutput.write(data + Data([10]))
     }

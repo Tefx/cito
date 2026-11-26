@@ -77,7 +77,9 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
             }
         }
         Value::Object(m) => {
-            if m.get("op").is_some_and(|op| op == "hub_invite") {
+            // Link values are editable data, not previews. Shed the enclosing channel
+            // if the frame is too large rather than changing a destination in transit.
+            if key == "reusable_binding" || m.get("op").is_some_and(|op| op == "hub_invite") {
                 return;
             }
             for (k, v) in m {

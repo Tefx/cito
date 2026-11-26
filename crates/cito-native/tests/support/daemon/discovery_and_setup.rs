@@ -454,7 +454,7 @@ fn assert_initial_fixture_setup(f: &Fixture, configured: bool) {
 fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     let _lock = serial();
     let f = Fixture::new(
-        json!({"hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":false}}}),
+        json!({"hub_order":["work","local","blocked"],"hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":false}}}),
     );
     f.provider("delivered");
     f.daemon(&[]);
@@ -512,6 +512,7 @@ fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     let config: Value = read_json(&f.config);
     assert!(config["hubs"]["cloud"].is_object());
     assert!(config["hubs"].get("blocked").is_none());
+    assert_eq!(config["hub_order"], json!(["cloud", "local", "blocked"]));
     assert!(f.state.join("oidc-token-cloud.json").exists());
     assert!(!f.state.join("oidc-token-blocked.json").exists());
     assert_eq!(

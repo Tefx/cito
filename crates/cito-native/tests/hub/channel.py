@@ -23,7 +23,8 @@ for line in sys.stdin:
                  "external_msg_id": sid + "-2", "external_msg_ids": [sid + "-1", sid + "-2"]}
     elif op == "format_pair":
         reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True,
-                 "instruction": "Send " + request["code"] + " to fixture-account"}
+                 "instruction": "Send " + request["code"] + " to fixture-account",
+                 "bot_username": "fixture-account"}
     elif op == "test":
         address = request.get("user_config", {}).get("address", "")
         if address.startswith("redeem:"):
@@ -34,7 +35,9 @@ for line in sys.stdin:
         if request.get("hub_config", {}).get("credential") == "invalid":
             reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": False, "error": "Invalid token"}
         else:
-            reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True, "detail": "Fixture test succeeded"}
+            label = request.get("hub_config", {}).get("credential", "").split(":")[0]
+            reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True,
+                     "detail": "Fixture test succeeded", "service_label": "@" + label}
     else:
         continue
     print(json.dumps(reply), flush=True)

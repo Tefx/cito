@@ -37,16 +37,16 @@ fn bot_identity_rotation_preserves_same_account_and_fences_replacement() {
     let plugin = f.plugin();
     f.hub.inner.db.transaction(|c| {
         save_channel_service(c, &plugin, &json!({"credential":"123:first"}))?;
-        c.execute("UPDATE hub_plugin_services SET service_state_json=?", &[json!(json!({"cursor":42,"reply_floor":40}).to_string())])?;
+        c.execute("UPDATE hub_plugin_services SET service_state_json=?", &[json!(json!({"cursor":42,"reply_floor":40,"inbound_mode":"outbound_only","service_label":"@sample"}).to_string())])?;
         c.execute("INSERT INTO hub_processed_replies VALUES('sample','41',1)", &[])?;
         c.execute("INSERT INTO hub_channel_delivery_msgs VALUES('sample','none#alice','1','signal','sender')", &[])?;
         c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,external_msg_id,from_listener_id,delivered_ms,reservation_id) VALUES('sample','none#alice','signal',1,'in_flight','1','sender',1,'old')", &[])?;
         save_channel_service(c, &plugin, &json!({"credential":"123:rotated"}))?;
-        assert_eq!(service(c,"sample")?.1["cursor"],42);
+        assert_eq!(service(c,"sample")?.1,json!({"cursor":42,"reply_floor":40,"inbound_mode":"outbound_only","service_label":"@sample"}));
         assert_eq!(c.query("SELECT * FROM hub_processed_replies", &[])?.len(),1);
         assert_eq!(c.query("SELECT * FROM hub_channel_delivery_msgs", &[])?.len(),1);
         save_channel_service(c, &plugin, &json!({"credential":"456:new"}))?;
-        assert_eq!(service(c,"sample")?.1,json!({}));
+        assert_eq!(service(c,"sample")?.1,json!({"inbound_mode":"outbound_only"}));
         assert!(c.query("SELECT * FROM hub_processed_replies", &[])?.is_empty());
         assert!(c.query("SELECT * FROM hub_channel_delivery_msgs", &[])?.is_empty());
         let row = c.query("SELECT * FROM hub_channel_deliveries", &[])?.remove(0);
@@ -68,6 +68,129 @@ fn bot_identity_rotation_preserves_same_account_and_fences_replacement() {
         .query("SELECT * FROM hub_channel_delivery_msgs", &[])
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn channel_save_compares_the_persisted_service_before_writing_the_binding() -> Result<(), String> {
+    let f = Fixture::new();
+    let root = f.dir.join("plugins");
+    let dir = root.join("sample");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Commit a competing rotation on a second SQLite connection during reader shutdown,
+    // after the save's preparation transaction and before its binding transaction.
+    let reader = r#"
+import json, sqlite3, sys
+for line in sys.stdin:
+    frame = json.loads(line)
+    if frame['op'] == 'test':
+        print(json.dumps(dict(op='rpc_result', req_id=frame['req_id'], ok=True)), flush=True)
+    if frame['op'] == 'shutdown':
+        with sqlite3.connect(sys.argv[1]) as db:
+            db.execute("UPDATE hub_plugin_services SET config_json=? WHERE plugin_id='sample'",
+                       (json.dumps(dict(credential='second:secret')),))
+        break
+"#;
+    std::fs::write(
+        dir.join("plugin.json"),
+        json!({
+            "id":"sample", "displayName":"Sample", "kind":"human-channel",
+            "command":["python3","-c",reader,f.dir.join("hub.sqlite")],
+            "fields":[{"key":"credential","scope":"hub","type":"secret"}],
+            "serviceIdentity":{"field":"credential","separator":":"}
+        })
+        .to_string(),
+    )
+    .map_err(|e| e.to_string())?;
+    f.hub.set_plugin_roots(&[root])?;
+    let owner = principal("alice");
+    let configure = |p| f.hub.rpc("human_channels_configure", &p, Some(&owner));
+    let manual = configure(
+        json!({"plugin_id":"sample","hub_config":{"credential":"first:secret"},"display_label":"Manual"}),
+    )?;
+    let observed = &manual["channels"][0]["service_identity"];
+    assert_eq!(observed, "first");
+    assert_eq!(
+        f.hub.rpc(
+            "human_channels_test",
+            &json!({"plugin_id":"sample"}),
+            Some(&owner)
+        )?["ok"],
+        true
+    );
+
+    // A same-account secret change requires reaping the reader, but not a new identity.
+    let mut link = json!({"plugin_id":"sample","hub_config":{"credential":"first:renewed"},"display_label":"Linked","expected_service_identity":observed});
+    assert_eq!(
+        configure(link.clone()).unwrap_err(),
+        "CONFLICT: Channel service identity changed before Link completed; refresh and try again."
+    );
+    for invalid in [Value::Null, json!(""), json!(" \t"), json!(17)] {
+        link["expected_service_identity"] = invalid;
+        assert_eq!(
+            configure(link.clone()).unwrap_err(),
+            "CONFLICT: expected_service_identity must be a non-empty string"
+        );
+    }
+    let inventory = f.hub.rpc("human_channels_list", &json!({}), Some(&owner))?;
+    let live = &inventory["channels"][0];
+    assert_eq!(live["display_label"], "Manual");
+    assert_eq!(live["service_identity"], "second");
+    let matched = configure(
+        json!({"plugin_id":"sample","expected_service_identity":live["service_identity"],"display_label":"Linked"}),
+    )?;
+    assert_eq!(matched["committed"], true);
+    assert_eq!(matched["channels"][0]["display_label"], "Linked");
+    Ok(())
+}
+
+#[test]
+fn public_identity_does_not_fall_back_to_credentials() {
+    let f = Fixture::new();
+    let mut plugin = f.plugin();
+    let project = |plugin: &ChannelPlugin, value| {
+        public_service_identity(plugin, &json!({"credential":value}))
+    };
+    assert_eq!(project(&plugin, "123:secret"), "123");
+    for malformed in ["secret", ":secret", "123:", ""] {
+        assert!(project(&plugin, malformed).is_null());
+    }
+    plugin.manifest["serviceIdentity"]["separator"] = json!("");
+    assert!(project(&plugin, "123:secret").is_null());
+    plugin.manifest = json!({});
+    assert!(project(&plugin, "123:secret").is_null());
+}
+
+#[test]
+fn label_only_health_preserves_poll_error_and_notifies_on_changes() {
+    let f = Fixture::new();
+    let sub = f.hub.subscribe(None).unwrap();
+    let health = |frame| {
+        f.hub.plugin_frame("sample", &frame);
+        f.hub
+            .inner
+            .db
+            .transaction(|c| service(c, "sample"))
+            .unwrap()
+            .1
+    };
+    assert_eq!(
+        health(json!({"op":"health","error":"Conflict"}))["poll_error"],
+        "Conflict"
+    );
+    assert_eq!(sub.try_recv().unwrap(), json!({"type":"kv"}));
+    let label = json!({"op":"health","service_label":"@sample"});
+    assert_eq!(
+        health(label.clone()),
+        json!({"poll_error":"Conflict","service_label":"@sample"})
+    );
+    assert_eq!(sub.try_recv().unwrap(), json!({"type":"kv"}));
+    health(label);
+    assert!(sub.try_recv().is_err());
+    assert_eq!(
+        health(json!({"op":"health","error":null})),
+        json!({"service_label":"@sample"})
+    );
+    assert_eq!(sub.try_recv().unwrap(), json!({"type":"kv"}));
 }
 
 #[test]

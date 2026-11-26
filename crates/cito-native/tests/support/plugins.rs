@@ -4785,49 +4785,87 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
     wait(|| !f.frames(server).is_empty());
     let port = f.frames(server)[0]["port"].as_u64().unwrap();
     let p = f.spawn(TELEGRAM, &[], &[]);
-    for (token, expected) in [("poll409", "webhook"), ("poll401", "replace the Bot Token")] {
-        let before = fs::read_to_string(f.home.join("api-methods.jsonl"))
+    let config =
+        |token: &str| json!({"botToken":token,"apiBaseUrl":format!("http://127.0.0.1:{port}")});
+    let update_calls = || {
+        fs::read_to_string(f.home.join("api-methods.jsonl"))
             .unwrap_or_default()
             .lines()
-            .count();
-        f.send(p,json!({"op":"configure","hub_config":{"botToken":token,"apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
-        wait(|| {
-            f.frames(p).iter().any(|v| {
-                v["op"] == "health" && v["error"].as_str().is_some_and(|e| e.contains(expected))
-            })
-        });
-        let calls = fs::read_to_string(f.home.join("api-methods.jsonl"))
-            .unwrap()
-            .lines()
+            .filter(|line| line.trim() == "\"getUpdates\"")
             .count()
-            - before;
-        assert_eq!(calls, 1, "Auth and polling-conflict failures surface immediately and pause until reconfiguration");
-        // Exercise a command barrier while polling is paused, then cross the minimum
-        // retry interval: no additional getUpdates request may run without configure.
-        f.send(p, json!({"op":"on_acked"}));
-        let quiet_until = Instant::now() + Duration::from_millis(1100);
-        wait(|| {
-            let count = fs::read_to_string(f.home.join("api-methods.jsonl"))
-                .unwrap()
-                .lines()
-                .count();
-            count != before + 1 || Instant::now() >= quiet_until
-        });
-        let after = fs::read_to_string(f.home.join("api-methods.jsonl"))
-            .unwrap()
-            .lines()
-            .count();
-        assert_eq!(
-            after,
-            before + 1,
-            "Permanent failures must suspend background polling"
-        );
-    }
-    f.send(p,json!({"op":"configure","hub_config":{"botToken":"healthy","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+    };
+
+    // 409 conflict surfaces immediately, retries via PollBackoff, self-heals when
+    // the duplicate poller stops, and delivers both inbound updates and outbound alerts.
+    let conflict = f.home.join("poll-conflict");
+    fs::write(&conflict, "").unwrap();
+    f.send(p, json!({"op":"configure","hub_config":config("poll409")}));
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "health" && v["error"].as_str().is_some_and(|e| e.contains("webhook"))
+        })
+    });
+    wait(|| update_calls() >= 2);
+    let after_conflict = f.frames(p).len();
+    fs::remove_file(&conflict).unwrap();
     wait(|| {
         f.frames(p)
             .iter()
-            .any(|v| v["op"] == "health" && v["error"].is_null())
+            .skip(after_conflict)
+            .any(|v| v["op"] == "health" && v.get("error").is_some_and(Value::is_null))
+            && f.frames(p).iter().skip(after_conflict).any(|v| {
+                v["op"] == "inbound_reply" && v["update_id"] == "15" && v["text"] == "ship"
+            })
+    });
+    f.send(
+        p,
+        json!({
+            "op":"deliver",
+            "delivery_id":"after-conflict",
+            "claim_until_ms":cito_native::plugins::now_ms()+60_000,
+            "config":{"chatId":"9"},
+            "signal":{"message":"Recovered delivery"}
+        }),
+    );
+    wait(|| {
+        f.frames(p).iter().skip(after_conflict).any(|v| {
+            v["op"] == "delivered" && v["delivery_id"] == "after-conflict" && v["ok"] == true
+        })
+    });
+    assert!(fs::read_to_string(f.home.join("api-sends.jsonl"))
+        .unwrap()
+        .contains("Recovered delivery"));
+
+    // 401 remains a permanent poll error that suspends background polling until reconfiguration.
+    let before_401 = update_calls();
+    f.send(p, json!({"op":"configure","hub_config":config("poll401")}));
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "health"
+                && v["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("replace the Bot Token"))
+        })
+    });
+    assert_eq!(update_calls() - before_401, 1);
+    f.send(p, json!({"op":"on_acked"}));
+    let quiet_until = Instant::now() + Duration::from_millis(1100);
+    wait(|| update_calls() != before_401 + 1 || Instant::now() >= quiet_until);
+    assert_eq!(
+        update_calls(),
+        before_401 + 1,
+        "Permanent failures must suspend background polling"
+    );
+
+    // Reconfiguring to a healthy token restores polling without mutating webhooks,
+    // and EOF interrupts an outstanding network poll.
+    let before_healthy = f.frames(p).len();
+    f.send(p, json!({"op":"configure","hub_config":config("healthy")}));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .skip(before_healthy)
+            .any(|v| v["op"] == "health" && v.get("error").is_some_and(Value::is_null))
     });
     let methods = fs::read_to_string(f.home.join("api-methods.jsonl")).unwrap();
     assert!(!methods.contains("deleteWebhook"));
@@ -4930,7 +4968,7 @@ server.serve_forever()
     assert_eq!(
         f.frames(plugin)
             .iter()
-            .filter(|row| row["op"] == "health" && row["error"].is_null())
+            .filter(|row| row["op"] == "health" && row.get("error").is_some_and(Value::is_null))
             .count(),
         1
     );

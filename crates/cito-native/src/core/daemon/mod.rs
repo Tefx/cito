@@ -495,7 +495,11 @@ impl DaemonService {
         state.db.set_commit_notifier(wake_daemon)?;
         // Daemon construction runs only after acquiring the exclusive owner lock.
         state.recover_dispatch_leases()?;
-        let local = Arc::new(HubEngine::open(&config.state_dir)?);
+        let local = Arc::new(HubEngine::open_with_channels(
+            &config.state_dir,
+            "none",
+            false,
+        )?);
         let host_path = config.state_dir.join("host-id");
         let host_id = match fs::read_to_string(&host_path) {
             Ok(s) => s.trim().to_string(),
@@ -653,11 +657,19 @@ impl DaemonService {
         Ok(user.to_ascii_lowercase())
     }
 
+    fn remove_slot(&mut self, name: &str) -> Result<(), String> {
+        if let Some(slot) = self.slots.remove(name) {
+            if slot.local.is_some() {
+                self.reconcile_local_channels_active();
+            }
+            slot.close_and_drain()?;
+        }
+        Ok(())
+    }
+
     fn reject_slot_authority(&mut self, name: &str, error: String) -> Result<(), String> {
         self.last_hub_errors.insert(name.to_owned(), (error, false));
-        if let Some(old) = self.slots.remove(name) {
-            old.close_and_drain()?;
-        }
+        self.remove_slot(name)?;
         self.channel_inventories.remove(name);
         for row in self.state.db.query(
             "SELECT * FROM local_listeners WHERE hub=? AND status='ACTIVE'",
@@ -669,7 +681,22 @@ impl DaemonService {
         Ok(())
     }
 
+    pub(super) fn reconcile_local_channels_active(&self) {
+        let active = self.slots.values().any(|slot| slot.local.is_some())
+            || self
+                .host_server
+                .as_ref()
+                .is_some_and(super::hub::HubServer::is_running);
+        self.local.set_channels_active(active);
+    }
+
     pub fn reload_slots(&mut self) -> Result<(), String> {
+        let result = self.reload_slot_authorities();
+        self.reconcile_local_channels_active();
+        result
+    }
+
+    fn reload_slot_authorities(&mut self) -> Result<(), String> {
         if self.purging {
             return Err("STATE_ERROR: Local data reset in progress".into());
         }
@@ -711,9 +738,7 @@ impl DaemonService {
             .collect();
         for name in inactive {
             self.channel_inventories.remove(&name);
-            if let Some(slot) = self.slots.remove(&name) {
-                slot.close_and_drain()?;
-            }
+            self.remove_slot(&name)?;
         }
         let mut keep = HashSet::new();
         for (name, mut hub) in hubs {
@@ -1024,8 +1049,7 @@ impl DaemonService {
         {
             self.active_settings_hub = None;
         }
-        self.ensure_human_nodes()?;
-        Ok(())
+        self.ensure_human_nodes()
     }
 
     pub(super) fn reconcile_unlistened(
@@ -1247,6 +1271,7 @@ impl DaemonService {
             .filter(|(_, t)| t.is_finished())
             .map(|(k, _)| k.clone())
             .collect();
+        let inventory_finished = finished.iter().any(|key| key.starts_with("channels:"));
         for key in finished {
             if let Some(thread) = self.receivers.remove(&key) {
                 let _ = thread.join();
@@ -1254,32 +1279,34 @@ impl DaemonService {
         }
         // The registry owns background tasks; the per-hub owner serializes these
         // tasks with explicit reads and mutations outside the service mutex.
-        if let Some(slot) = self
-            .active_settings_hub
-            .as_ref()
-            .and_then(|hub| self.slots.get(hub))
-            .filter(|slot| slot.local.is_none())
-            .cloned()
-        {
-            let key = format!("channels:{}", slot.name);
-            let inventory = self.channel_inventory(&slot);
-            let (due, observed_gen) = {
-                let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
-                (
-                    cached.authorized_for_retry(&slot)
-                        && (cached.value["status"] == "loading"
-                            || cached.retry_at <= Instant::now()),
-                    cached.completed_gen,
-                )
-            };
-            if due && !self.receivers.contains_key(&key) {
-                self.receivers.insert(
-                    key,
-                    thread::spawn(move || {
-                        let _ = inventory.refresh(&slot, observed_gen);
-                        wake_daemon();
-                    }),
-                );
+        if let Some(selected) = &self.active_settings_hub {
+            let slots: Vec<_> = self
+                .slots
+                .values()
+                .filter_map(|slot| {
+                    let selected = &slot.name == selected;
+                    let key = format!("channels:{}", slot.name);
+                    (slot.local.is_none()
+                        && (selected || slot.connection_status() == "connected")
+                        && !self.receivers.contains_key(&key))
+                    .then(|| (key, slot.clone(), selected))
+                })
+                .collect();
+            for (key, slot, selected) in slots {
+                let inventory = self.channel_inventory(&slot);
+                let (due, observed_gen) = {
+                    let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
+                    (cached.refresh_due(&slot, selected), cached.completed_gen)
+                };
+                if due {
+                    self.receivers.insert(
+                        key,
+                        thread::spawn(move || {
+                            let _ = inventory.refresh(&slot, observed_gen);
+                            wake_daemon();
+                        }),
+                    );
+                }
             }
         }
         for (hub, slot) in &self.access.slots {
@@ -1411,7 +1438,7 @@ impl DaemonService {
             .transpose()?
             .unwrap_or(false);
         self.auto_listen()?;
-        if changed || self.last_ui.elapsed() >= Duration::from_secs(1) {
+        if changed || inventory_finished || self.last_ui.elapsed() >= Duration::from_secs(1) {
             self.push_ui();
             self.last_ui = Instant::now();
         }

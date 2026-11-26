@@ -1166,6 +1166,136 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
         .all(|r| r["reservation_id"].is_null() && r["from_listener_id"].is_null()));
 }
 #[test]
+fn channel_worker_quiesces_and_resumes_without_reconfiguring() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let hub = test_engine(&dir);
+    hub.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    let owner = principal("alice");
+    let test = || {
+        hub.rpc(
+            "human_channels_test",
+            &json!({"plugin_id":"fixture"}),
+            Some(&owner),
+        )
+    };
+    let count = |op: &str| {
+        std::fs::read_to_string(root.join("fixture/frames.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["op"] == op)
+            .count()
+    };
+    hub.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"}}),
+        Some(&owner),
+    )
+    .unwrap();
+    assert_eq!(test().unwrap()["ok"], true);
+    assert_eq!(count("configure"), 1);
+    hub.set_channels_active(false);
+    wait_for(|| count("shutdown") == 1);
+    assert_eq!(test().unwrap_err(), "HUB_DISABLED: Local Hub is disabled");
+    assert_eq!(count("configure"), 1);
+    hub.set_channels_active(true);
+    wait_for(|| count("configure") == 2);
+    assert_eq!(test().unwrap()["ok"], true);
+}
+
+#[test]
+fn outbound_only_keeps_delivery_and_identity_while_fencing_pairing() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let path = root.join("fixture/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["supportsOutboundOnly"] = json!(true);
+    manifest["serviceIdentity"] = json!({"field":"credential","separator":":"});
+    std::fs::write(path, manifest.to_string()).unwrap();
+    let hub = test_engine(&dir);
+    hub.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    let owner = principal("alice");
+    let rpc = |op, mut params: Value| {
+        params["plugin_id"] = json!("fixture");
+        hub.rpc(op, &params, Some(&owner))
+    };
+    let list = || rpc("human_channels_list", json!({})).unwrap()["channels"][0].clone();
+    let configure = |params| rpc("human_channels_configure", params);
+    let pair = || rpc("human_channel_pair_start", json!({}));
+    configure(json!({"hub_config":{"credential":"123:private"},"user_config":{"address":"room"},"display_label":"  Test Room  "})).unwrap();
+    assert_eq!(list()["display_label"], "Test Room");
+    for invalid in [json!(true), json!("  "), json!("é".repeat(65))] {
+        assert!(configure(json!({"display_label":invalid}))
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+    }
+    assert!(configure(json!({"inbound_mode":null}))
+        .unwrap_err()
+        .starts_with("INVALID_INPUT:"));
+    let remote = json!({"principal_id":"oidc:https://id.example.com|guest","owner_user":"guest","oidc":true});
+    assert!(hub
+        .rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","inbound_mode":"outbound_only"}),
+            Some(&remote)
+        )
+        .unwrap_err()
+        .starts_with("FORBIDDEN:"));
+    assert!(pair().unwrap()["code"].is_string());
+    assert_eq!(list()["service_label"], "fixture-account");
+    assert_eq!(list()["pairing_pending"], true);
+    hub.plugin_frame(
+        "fixture",
+        &json!({"op":"health","error":"Inbound polling conflict"}),
+    );
+    assert_eq!(list()["warning"], true);
+
+    configure(json!({"inbound_mode":"outbound_only"})).unwrap();
+    let channel = list();
+    assert_eq!(channel["supports_outbound_only"], true);
+    assert_eq!(channel["inbound_mode"], "outbound_only");
+    assert_eq!(channel["service_identity"], "123");
+    assert_eq!(channel["service_label"], "fixture-account");
+    assert_eq!(channel["pairing_pending"], false);
+    assert_eq!(channel["can_pair"], false);
+    assert_eq!(channel["warning"], false);
+    assert!(!channel.to_string().contains("123:private"));
+    assert!(pair().unwrap_err().contains("requires Replies enabled"));
+    assert_eq!(
+        rpc("human_channels_test", json!({})).unwrap()["service_label"],
+        "@123"
+    );
+    assert_eq!(list()["service_label"], "@123");
+    rpc(
+        "human_channels_test",
+        json!({"hub_config":{"credential":"999:preview"}}),
+    )
+    .unwrap();
+    assert_eq!(list()["service_label"], "@123");
+    send(
+        &hub,
+        &listener_id("none#alice", "human", "default"),
+        "outbound-notice",
+    );
+    wait_for(|| {
+        !hub.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='outbound-notice' AND status='delivered'", &[]).unwrap().is_empty()
+    });
+    let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
+    assert!(frames
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|frame| frame["op"] == "configure" && frame["inbound_mode"] == "outbound_only"));
+
+    configure(json!({"inbound_mode":"primary"})).unwrap();
+    assert_eq!(list()["can_pair"], true);
+    assert_eq!(list()["pairing_pending"], false);
+    configure(json!({"reset_hub":true})).unwrap();
+    assert!(list()["service_label"].is_null());
+    assert!(list()["service_identity"].is_null());
+}
+
+#[test]
 fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labels() {
     let dir = temp();
     let root = fixture(&dir);

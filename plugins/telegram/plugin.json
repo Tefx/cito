@@ -10,6 +10,7 @@
   "command": [
     "./bin/cito-plugin-telegram"
   ],
+  "supportsOutboundOnly": true,
   "serviceIdentity": { "field": "botToken", "separator": ":" },
   "fields": [
     {

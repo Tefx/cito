@@ -301,7 +301,8 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
         control(&f, ui, "settings_tab:channels");
         let s = inspect(&f, ui);
         let bar = s.settings("inbox_control_bar");
-        assert_eq!(bar["height"], 48);
+        let height = bar["height"].as_f64().unwrap();
+        assert!(height >= 48.0);
         assert_eq!(bar["border_width"], 0);
         assert_eq!(bar["radius"], 10);
         let mid_y = |n: &Value| n["y"].as_f64().unwrap() + n["height"].as_f64().unwrap() / 2.0;
@@ -314,11 +315,11 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
             .map(|n| n["x"].as_f64().unwrap())
             .fold(f64::INFINITY, f64::min);
         for action in trailing {
-            assert!((mid_y(&action) - 24.0).abs() <= 1.5);
+            assert!((mid_y(&action) - height / 2.0).abs() <= 1.5);
         }
         let inbox_summary = s.settings("inbox_control_summary");
         assert_eq!(inbox_summary["wraps"], true);
-        assert_eq!(inbox_summary["maximum_lines"], 2);
+        assert_eq!(inbox_summary["maximum_lines"], 0);
         for id in ["inbox_control_title", "inbox_control_summary"] {
             let label = s.settings(id);
             assert!(

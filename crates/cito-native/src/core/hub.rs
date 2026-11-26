@@ -298,8 +298,9 @@ fn admin(p: Option<&Value>) -> Result<(), String> {
     }
 }
 fn hub_patch_guard(p: &Value, caller: Option<&Value>) -> Result<(), String> {
-    if p.get("hub_config")
-        .is_some_and(|v| v.as_object().is_none_or(|m| !m.is_empty()))
+    if p.get("inbound_mode").is_some()
+        || p.get("hub_config")
+            .is_some_and(|v| v.as_object().is_none_or(|m| !m.is_empty()))
     {
         admin(caller)?;
     }
@@ -347,6 +348,7 @@ struct Inner {
     db: Database,
     user_plugins_dir: PathBuf,
     closed: AtomicBool,
+    channels_active: AtomicBool,
     subscribers: Mutex<Vec<Subscriber>>,
     plugins: Mutex<Vec<ChannelPlugin>>,
     processes: Mutex<HashMap<String, Arc<ChannelProcess>>>,
@@ -442,6 +444,14 @@ impl HubEngine {
     }
 
     pub fn open_with_auth_mode(data_dir: &Path, auth_mode: &str) -> Result<Self, String> {
+        Self::open_with_channels(data_dir, auth_mode, true)
+    }
+
+    pub(super) fn open_with_channels(
+        data_dir: &Path,
+        auth_mode: &str,
+        channels_active: bool,
+    ) -> Result<Self, String> {
         if !matches!(auth_mode, "none" | "token" | "oidc") {
             return Err("INVALID_INPUT: Unknown Hub auth mode".into());
         }
@@ -450,6 +460,7 @@ impl HubEngine {
                 db: Self::open_database(data_dir)?,
                 user_plugins_dir: data_dir.join("plugins"),
                 closed: AtomicBool::new(false),
+                channels_active: AtomicBool::new(channels_active),
                 subscribers: Mutex::new(Vec::new()),
                 plugins: Mutex::new(hub_plugins::discover(
                     &super::plugins::plugin_roots_for_executable(
@@ -594,6 +605,12 @@ impl HubEngine {
             worker.join().unwrap();
         }
         self.inner.closed.store(false, Ordering::SeqCst);
+    }
+
+    pub fn set_channels_active(&self, active: bool) {
+        if self.inner.channels_active.swap(active, Ordering::SeqCst) != active {
+            self.wake_worker();
+        }
     }
 
     fn wake_worker(&self) {
@@ -1281,6 +1298,9 @@ impl HubEngine {
         })
     }
     fn ensure_process(&self, plugin: &ChannelPlugin) -> Result<Arc<ChannelProcess>, String> {
+        if !self.inner.channels_active.load(Ordering::SeqCst) {
+            return Err("HUB_DISABLED: Local Hub is disabled".into());
+        }
         let mut processes = self
             .inner
             .processes
@@ -1309,6 +1329,9 @@ impl HubEngine {
         }
         if let Some(process) = processes.get(&plugin.id).filter(|process| process.alive()) {
             return Ok(process.clone());
+        }
+        if !self.inner.channels_active.load(Ordering::SeqCst) {
+            return Err("HUB_DISABLED: Local Hub is disabled".into());
         }
         // Every replacement owns recovery, including a replacement requested by Send Test.
         self.inner.db.execute(
@@ -1358,25 +1381,21 @@ impl HubEngine {
     }
     fn persist_poll_error(c: &Connection, id: &str, error: Option<&str>) -> Result<(), String> {
         let (cfg, mut state) = service(c, id)?;
-        save_service(c, id, &cfg)?;
-        let previous = state.to_string();
+        let previous = state.clone();
         if let Some(error) = error {
             state["poll_error"] = json!(error);
         } else if let Some(state) = state.as_object_mut() {
             state.remove("poll_error");
             state.remove("process_retry_at_ms");
         }
-        let serialized = state.to_string();
-        if serialized != previous {
-            c.execute(
-                "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
-                &[json!(serialized), json!(id)],
-            )?;
+        if state != previous {
+            save_service(c, id, &cfg)?;
+            write_service_state(c, id, &state)?;
         }
         Ok(())
     }
     fn configure_process(&self, id: &str, process: &ChannelProcess) -> Result<(), String> {
-        let frame=self.inner.db.transaction(|c|{let(cfg,state)=service(c,id)?;let bindings=c.query("SELECT principal_id,owner_user,user_config_json FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?.iter().map(|b|json!({"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(b,"user_config_json")})).collect::<Vec<_>>();Ok(json!({"op":"configure","hub_config":cfg,"bindings":bindings,"cursor":state["cursor"]}))})?;
+        let frame=self.inner.db.transaction(|c|{let(cfg,state)=service(c,id)?;save_service(c,id,&cfg)?;let bindings=c.query("SELECT principal_id,owner_user,user_config_json FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?.iter().map(|b|json!({"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(b,"user_config_json")})).collect::<Vec<_>>();Ok(json!({"op":"configure","hub_config":cfg,"bindings":bindings,"cursor":state["cursor"],"inbound_mode":inbound_mode(&state)}))})?;
         process.send(&frame)?;
         self.inner.db.diagnostic_transaction(|c| {
             // Serialize with the reader's terminal health update. An exit after this
@@ -1384,7 +1403,10 @@ impl HubEngine {
             if !process.alive() {
                 return Err("PLUGIN_EXEC_FAILED: Plugin subprocess exited".into());
             }
-            Self::persist_poll_error(c, id, None)
+            if service(c, id)?.1.get("process_retry_at_ms").is_some() {
+                Self::persist_poll_error(c, id, None)?;
+            }
+            Ok(())
         })
     }
     fn human_rpc(&self, op: &str, p: &Value, caller: Option<&Value>) -> Result<Value, String> {
@@ -1452,6 +1474,29 @@ impl HubEngine {
             Ok(())
         };
         if op == "human_channels_configure" {
+            let mode = p
+                .get("inbound_mode")
+                .map(|mode| match mode.as_str() {
+                    Some("primary") => Ok("primary"),
+                    Some("outbound_only") if plugin.manifest["supportsOutboundOnly"] == true => {
+                        Ok("outbound_only")
+                    }
+                    _ => Err("INVALID_INPUT: Unsupported inbound_mode"),
+                })
+                .transpose()?;
+            let display_label = p
+                .get("display_label")
+                .map(|label| {
+                    if label.is_null() {
+                        return Ok(Value::Null);
+                    }
+                    channel_display_label(label)
+                        .map(|label| json!(label))
+                        .ok_or(
+                        "INVALID_INPUT: display_label must contain 1 to 128 bytes after trimming",
+                    )
+                })
+                .transpose()?;
             let edit_user = reset_user
                 || ["user_config", "enabled", "display_label"]
                     .iter()
@@ -1513,14 +1558,21 @@ impl HubEngine {
                     }
                 }
                 let serialized = channel_config_json(&config)?;
-                Ok((
-                    config,
-                    serialized,
-                    p.get("display_label").cloned().unwrap_or(label),
-                ))
+                Ok((config, serialized, display_label.clone().unwrap_or(label)))
             };
-            let (cfg, changed) = self.inner.db.transaction(|c| {
-                let (old, _) = service(c, id)?;
+            let expected = p.get("expected_service_identity");
+            let check_identity = |expected: &Value, cfg: &Value| -> Result<(), String> {
+                let expected = expected
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or("CONFLICT: expected_service_identity must be a non-empty string")?;
+                if public_service_identity(&plugin, cfg).as_str() != Some(expected) {
+                    return Err("CONFLICT: Channel service identity changed before Link completed; refresh and try again.".into());
+                }
+                Ok(())
+            };
+            let (cfg, changed, mode_changed) = self.inner.db.transaction(|c| {
+                let (old, state) = service(c, id)?;
                 let mut cfg = if reset_hub { json!({}) } else { old.clone() };
                 if !reset_hub {
                     if let Some(patch) = p.get("hub_config") {
@@ -1532,17 +1584,42 @@ impl HubEngine {
                 if changed && edit_user {
                     destination(channel_binding(c, id, pid)?.as_ref())?;
                 }
-                Ok((cfg, changed))
+                let mode_changed = mode.is_some_and(|mode| mode != inbound_mode(&state));
+                if changed || mode_changed {
+                    // A stale save must not stop the current account's reader.
+                    if let Some(expected) = expected {
+                        check_identity(expected, &old)?;
+                    }
+                }
+                Ok((cfg, changed, mode_changed))
             })?;
-            // Reap the previous reader before resetting persistent cursor/mapping state.
-            if changed {
+            // Reap the previous reader (and any outstanding poll) before switching modes or credentials.
+            if changed || mode_changed {
                 self.stop_process(id)?;
+                // Reconcile the live service even if the subsequent transaction conflicts.
+                self.wake_worker();
             }
             self.inner.db.transaction(|c| {
+                if let Some(expected) = expected {
+                    check_identity(expected, &service(c, id)?.0)?;
+                }
                 if changed { save_channel_service(c, &plugin, &cfg)?; }
                 if reset_hub {
                     c.execute("UPDATE hub_plugin_services SET service_state_json='{}' WHERE plugin_id=?", &[json!(id)])?;
                     c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE plugin_id=? AND consumed_ms IS NULL", &[json!(now_ms()), json!(id)])?;
+                }
+                if let Some(mode) = mode {
+                    save_service(c, id, &cfg)?;
+                    let (_, mut state) = service(c, id)?;
+                    state["inbound_mode"] = json!(mode);
+                    if mode == "outbound_only" {
+                        if let Some(fields) = state.as_object_mut() {
+                            fields.remove("poll_error");
+                            fields.remove("process_retry_at_ms");
+                        }
+                        c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE plugin_id=? AND consumed_ms IS NULL", &[json!(now_ms()), json!(id)])?;
+                    }
+                    write_service_state(c, id, &state)?;
                 }
                 if reset_user || p["cancel_pair"] == true { cancel_pair(c, id, pid)?; }
                 if reset_hub {
@@ -1600,7 +1677,10 @@ impl HubEngine {
             return Err("INVALID_INPUT: pairing is not supported".into());
         }
         let (cfg, user, changed) = self.inner.db.transaction(|c| {
-            let (old, _) = service(c, id)?;
+            let (old, state) = service(c, id)?;
+            if op == "human_channel_pair_start" && inbound_mode(&state) == "outbound_only" {
+                return Err("INVALID_INPUT: Pairing requires Replies enabled (Primary mode); link an existing account or enter your destination manually".into());
+            }
             let mut cfg = old.clone();
             if let Some(patch) = p.get("hub_config") {
                 merge_channel_config(&plugin, "hub", &mut cfg, patch, clear_secret);
@@ -1620,7 +1700,20 @@ impl HubEngine {
         })?;
         if op == "human_channels_test" {
             let process = self.ensure_process(&plugin)?;
-            return process.request(json!({"op":"test","user":caller["owner_user"],"hub_config":cfg,"user_config":user}));
+            let mut result = process.request(json!({"op":"test","user":caller["owner_user"],"hub_config":cfg,"user_config":user}))?;
+            // A test can preview unsaved credentials; do not label the saved service with their identity.
+            if !changed && result["ok"] == true {
+                match self
+                    .inner
+                    .db
+                    .diagnostic_transaction(|c| persist_service_label(c, id, &result))
+                {
+                    Ok(true) => self.emit(json!({"type":"kv"})),
+                    Ok(false) => {}
+                    Err(error) => result["maintenance_warning"] = json!(error),
+                }
+            }
+            return Ok(result);
         }
         if changed {
             self.stop_process(id)?;
@@ -1645,15 +1738,14 @@ impl HubEngine {
                 save_channel_service(c, &plugin, &cfg)?;
                 reconcile_bindings(c, &cfg, true)?;
             }
+            persist_service_label(c, id, &result)?;
             cancel_pair(c,id,pid)?;
             c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username,initial_human_scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(initial_human_scope(caller, self.inner.default_human_scope))])?;
             Ok(())
         })?;
-        if changed {
-            self.emit(json!({"type":"kv"}));
-        }
-        let mut result = json!({"ok":true,"committed":true,"code":code,"instruction":instruction,"pairing_command":result["pairing_command"],"pairing_url":result["pairing_url"],"bot_username":result["bot_username"],"expires_at_ms":expires});
+        self.emit(json!({"type":"kv"}));
+        let mut result = json!({"ok":true,"committed":true,"code":code,"instruction":instruction,"pairing_command":result["pairing_command"],"pairing_url":result["pairing_url"],"bot_username":result["bot_username"],"service_label":result_service_label(&result),"expires_at_ms":expires});
         if let Err(error) = self.ensure_process(&plugin) {
             result["maintenance_warning"] = json!(error);
         }
@@ -1669,19 +1761,7 @@ impl HubEngine {
         if let Some(process) = old {
             process.shutdown();
         }
-        self.inner.db.transaction(|c| {
-            let (_, mut state) = service(c, id)?;
-            if state.as_object_mut().is_some_and(|fields| {
-                fields.remove("process_retry_at_ms");
-                fields.remove("poll_error").is_some()
-            }) {
-                c.execute(
-                    "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
-                    &[json!(state.to_string()), json!(id)],
-                )?;
-            }
-            Ok(())
-        })
+        Ok(())
     }
     fn channel_list(&self, caller: &Value) -> Result<Value, String> {
         let plugins = self
@@ -1705,6 +1785,8 @@ impl HubEngine {
                 let hub_configured_any=fields(&plugin).iter().any(|f|s(f,"scope")=="hub" && configured(&cfg[s(f,"key")]));
                 let can_edit_personal=fields(&plugin).iter().any(|f|s(f,"scope")=="user");
                 let pairing_supported=plugin.manifest["pairing"]["supported"]==true;
+                let mode=inbound_mode(&health);
+                let pairing_enabled=pairing_supported && mode != "outbound_only";
                 let hub_ready=ready(&plugin,&cfg,"hub");
                 let user_ready=ready(&plugin,&user,"user");
                 let enabled=!binding.is_null() && n(&binding,"enabled")==1 && user_ready;
@@ -1719,7 +1801,7 @@ impl HubEngine {
                     "ready"=>label.map(|l|format!("Connected as {l} · Ready for notifications")).unwrap_or("Connected and ready for notifications".into()),
                     "paused"=>label.map(|l|format!("Paused ({l}) · Enable to resume notifications")).unwrap_or("Paused · Enable to resume notifications".into()),
                     "pairing_pending"=>"Pairing in progress · Send the pairing command below to finish linking".into(),
-                    "hub_ready" if pairing_supported=>"Service ready · Pair your account with one click".into(),
+                    "hub_ready" if pairing_enabled=>"Service ready · Pair your account with one click".into(),
                     "hub_ready"=>"Service ready · Enter your personal destination fields below".into(),
                     _ if !can_configure_hub=>"Shared service credentials must be configured by the Hub administrator".into(),
                     _=>"Configure service credentials and pair your account".into(),
@@ -1745,7 +1827,9 @@ impl HubEngine {
                     "sf_symbol":plugin.manifest["sfSymbol"].as_str().unwrap_or("paperplane.fill"),"tint":plugin.manifest["tint"].as_str().unwrap_or("blue"),
                     "has_hub_service":has_hub_service,"hub_ready":hub_ready,"can_configure_hub":can_configure_hub,
                     "can_clear_hub":can_configure_hub&&hub_configured_any,"can_edit_personal":can_edit_personal,
-                    "can_pair":pairing_supported&&(hub_ready||can_configure_hub),
+                    "can_pair":pairing_enabled&&(hub_ready||can_configure_hub),
+                    "supports_outbound_only":plugin.manifest["supportsOutboundOnly"]==true,
+                    "inbound_mode":mode,"service_label":health["service_label"],"service_identity":public_service_identity(&plugin,&cfg),
                     "can_test":((hub_ready&&user_ready)||can_edit_personal)&&(hub_ready||can_configure_hub),
                     "can_unpair":(hub_ready&&user_ready)||!pair.is_null(),"error_origin":error_origin,
                     "enabled":enabled,"configured":hub_ready&&user_ready,"inbox_paused":inbox_paused,"delivery_enabled":enabled&&hub_ready&&user_ready&&!inbox_paused,"status":status,"detail":detail,"display_label":binding["display_label"],
@@ -1778,18 +1862,29 @@ impl HubEngine {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.inner.db.transaction(maintain)?;
         let plugins = self
             .inner
             .plugins
             .lock()
             .map_err(|_| "Registry lock poisoned")?
             .clone();
+        let active = self.inner.channels_active.load(Ordering::SeqCst);
+        if !active {
+            // Quiesce children before any fallible SQLite maintenance.
+            for plugin in &plugins {
+                self.stop_process(&plugin.id)?;
+            }
+        }
+        self.inner.db.transaction(maintain)?;
+        if !active {
+            return Ok(());
+        }
         let mut first_error = None;
         for plugin in plugins {
             let (should_run,retry_at)=self.inner.db.transaction(|c|{let(cfg,state)=service(c,&plugin.id)?;let bound=one(c,"SELECT 1 AS n FROM hub_human_channels WHERE plugin_id=? AND enabled=1 LIMIT 1",&[json!(plugin.id)])?.is_some();let pairing=one(c,"SELECT 1 AS n FROM hub_pairing_codes WHERE plugin_id=? AND consumed_ms IS NULL AND expires_ms>? LIMIT 1",&[json!(plugin.id),json!(now_ms())])?.is_some();Ok((ready(&plugin,&cfg,"hub")&&(cfg.as_object().is_some_and(|m|m.values().any(configured))||bound||pairing),n(&state,"process_retry_at_ms")))})?;
             if !should_run {
                 self.stop_process(&plugin.id)?;
+                self.set_poll_error(&plugin.id, None)?;
                 continue;
             }
             if (1..=CHANNEL_RETRY_DELAY.as_millis() as i64)
@@ -1803,6 +1898,9 @@ impl HubEngine {
                 .ensure_process(&plugin)
                 .and_then(|process| self.replay(&plugin, &process))
             {
+                if !self.inner.channels_active.load(Ordering::SeqCst) {
+                    break;
+                }
                 self.set_poll_error(&plugin.id, Some(&error))?;
                 first_error.get_or_insert(error);
             }
@@ -1842,14 +1940,35 @@ impl HubEngine {
             c.execute("UPDATE hub_plugin_services SET service_state_json=?,updated_ms=? WHERE plugin_id=?",&[json!(state.to_string()),json!(now_ms()),json!(id)])?;Ok(Value::Null)}),
         "health" | "process_exit" => self.inner.db.diagnostic_transaction(|c| {
             let (cfg,mut state)=service(c,id)?;
-            save_service(c,id,&cfg)?;
+            let previous = state.clone();
             if frame["op"] == "process_exit" {
                 let retry = n(frame,"retry_ms").clamp(0,CHANNEL_RETRY_DELAY.as_millis() as i64);
                 state["process_retry_at_ms"] = json!(now_ms()+retry);
             }
-            state["poll_error"] = frame["error"].clone();
-            c.execute("UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?", &[json!(state.to_string()),json!(id)])?;
-            Ok(Value::Null)
+            if let Some(error) = frame.get("error") {
+                if error.is_null() {
+                    if let Some(fields) = state.as_object_mut() {
+                        fields.remove("poll_error");
+                        fields.remove("process_retry_at_ms");
+                    }
+                } else if error.is_string() {
+                    state["poll_error"] = error.clone();
+                }
+            }
+            if let Some(label) = frame["service_label"].as_str().filter(|s| !s.is_empty()) {
+                state["service_label"] = json!(label);
+            }
+            let changed = previous != state;
+            if changed {
+                save_service(c,id,&cfg)?;
+                write_service_state(c,id,&state)?;
+            }
+            Ok(changed)
+        }).map(|changed| {
+            if changed {
+                self.emit(json!({"type":"kv"}));
+            }
+            Value::Null
         }),
         "delivered"=>self.delivery_result(id,frame),
         "pair_redeem"=>self.redeem(id,frame),
@@ -2005,6 +2124,7 @@ impl HubEngine {
         let result=self.inner.db.transaction(|c|{
         let update=required(f,"update_id")?;
         let (_,state) = service(c,id)?;
+        if inbound_mode(&state) == "outbound_only" { return Err("INVALID_INPUT: Replies are disabled for this channel".into()); }
         if update.parse::<u64>().ok().is_some_and(|n|n < state["reply_floor"].as_u64().unwrap_or(0)) { return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null})); }
         if one(c,"SELECT 1 AS n FROM hub_processed_replies WHERE plugin_id=? AND update_id=?",&[json!(id),json!(update)])?.is_some(){return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null}))}
         let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;
@@ -2613,6 +2733,56 @@ fn service_identity(plugin: &ChannelPlugin, cfg: &Value) -> Value {
         .filter(|prefix| !prefix.is_empty())
         .unwrap_or(value))
 }
+fn public_service_identity(plugin: &ChannelPlugin, cfg: &Value) -> Value {
+    let identity = &plugin.manifest["serviceIdentity"];
+    let prefix = identity["field"].as_str().and_then(|field| {
+        let separator = identity["separator"].as_str().filter(|s| !s.is_empty())?;
+        let (prefix, rest) = cfg[field].as_str()?.split_once(separator)?;
+        (!prefix.is_empty() && !rest.is_empty()).then_some(prefix)
+    });
+    json!(prefix)
+}
+
+fn inbound_mode(state: &Value) -> &str {
+    state["inbound_mode"].as_str().unwrap_or("primary")
+}
+
+pub(super) fn channel_display_label(label: &Value) -> Option<&str> {
+    label
+        .as_str()
+        .map(str::trim)
+        .filter(|s| (1..=128).contains(&s.len()))
+}
+
+fn result_service_label(result: &Value) -> Option<&str> {
+    ["service_label", "bot_username"]
+        .into_iter()
+        .filter_map(|key| result[key].as_str())
+        .find(|label| !label.is_empty())
+}
+
+fn write_service_state(c: &Connection, id: &str, state: &Value) -> Result<(), String> {
+    c.execute(
+        "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
+        &[json!(state.to_string()), json!(id)],
+    )?;
+    Ok(())
+}
+
+fn persist_service_label(c: &Connection, id: &str, result: &Value) -> Result<bool, String> {
+    let Some(label) = result_service_label(result) else {
+        return Ok(false);
+    };
+    let (cfg, mut state) = service(c, id)?;
+    if state["service_label"] == label {
+        return Ok(false);
+    }
+    save_service(c, id, &cfg)?;
+    state["service_label"] = json!(label);
+    write_service_state(c, id, &state)?;
+    Ok(true)
+}
+
 fn save_channel_service(
     c: &Connection,
     plugin: &ChannelPlugin,
@@ -2646,7 +2816,7 @@ fn save_service_state(
     cfg: &Value,
     change: ServiceChange,
 ) -> Result<bool, String> {
-    let (old, _) = service(c, id)?;
+    let (old, state) = service(c, id)?;
     let changed = old != *cfg;
     if !changed
         && one(
@@ -2658,7 +2828,15 @@ fn save_service_state(
     {
         return Ok(false);
     }
-    c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES(?,?,'{}',?) ON CONFLICT(plugin_id) DO UPDATE SET config_json=excluded.config_json,service_state_json=CASE WHEN ? THEN '{}' ELSE service_state_json END,updated_ms=excluded.updated_ms", &[json!(id),json!(channel_config_json(cfg)?),json!(now_ms()),json!(!matches!(change, ServiceChange::SameIdentity))])?;
+    let state = match change {
+        ServiceChange::SameIdentity => state,
+        // Keep the inbound role when replacing credentials, too: otherwise a
+        // credential edit could silently start a duplicate poller.
+        _ => state
+            .get("inbound_mode")
+            .map_or_else(|| json!({}), |mode| json!({"inbound_mode":mode})),
+    };
+    c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES(?,?,?,?) ON CONFLICT(plugin_id) DO UPDATE SET config_json=excluded.config_json,service_state_json=excluded.service_state_json,updated_ms=excluded.updated_ms", &[json!(id),json!(channel_config_json(cfg)?),json!(state.to_string()),json!(now_ms())])?;
     if matches!(change, ServiceChange::Identity) {
         c.execute(
             "DELETE FROM hub_channel_delivery_msgs WHERE plugin_id=?",

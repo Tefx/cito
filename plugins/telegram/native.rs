@@ -306,7 +306,7 @@ fn rpc(config: &Value, req: &Value) -> Value {
         let username = str_at(&me, "username").ok_or("Bot username is unavailable")?;
         if req["op"] == "format_pair" {
             return Ok(
-                json!({"pairing_command":format!("/start {}",str_at(req,"code").ok_or("Pairing code is required")?),"instruction":format!("Send \"/start {}\" to @{username}",str_at(req,"code").ok_or("Pairing code is required")?),"bot_username":username,"pairing_url":format!("https://t.me/{username}?start={}",str_at(req,"code").ok_or("Pairing code is required")?)}),
+                json!({"pairing_command":format!("/start {}",str_at(req,"code").ok_or("Pairing code is required")?),"instruction":format!("Send \"/start {}\" to @{username}",str_at(req,"code").ok_or("Pairing code is required")?),"bot_username":username,"service_label":format!("@{username}"),"pairing_url":format!("https://t.me/{username}?start={}",str_at(req,"code").ok_or("Pairing code is required")?)}),
             );
         }
         let detail = if let Some(chat) = str_at(&req["user_config"], "chatId") {
@@ -323,7 +323,7 @@ fn rpc(config: &Value, req: &Value) -> Value {
         } else {
             format!("Bot @{username} verified")
         };
-        Ok(json!({"detail":detail,"bot_username":username}))
+        Ok(json!({"detail":detail,"bot_username":username,"service_label":format!("@{username}")}))
     })();
     match result {
         Ok(mut v) => {
@@ -478,12 +478,19 @@ impl Outbound {
 struct Runtime {
     outbound: Outbound,
     config: Value,
+    inbound_mode: String,
     cursor: u64,
     pending: VecDeque<Pending>,
     reply_chats: HashMap<String, String>,
     pair_chats: HashMap<String, (String, String)>,
 }
 impl Runtime {
+    fn can_poll(&self) -> bool {
+        self.inbound_mode != "outbound_only"
+            && self.pending.is_empty()
+            && str_at(&self.config, "botToken").is_some()
+    }
+
     fn save(&mut self) {
         let mut cursor = self.cursor;
         while self.pending.front().map(|p| p.done).unwrap_or(false) {
@@ -594,15 +601,21 @@ impl Runtime {
                 let token_changed =
                     old_identity.is_some() && old_identity != identity(&r["hub_config"]);
                 self.config = r["hub_config"].clone();
+                let old_mode = std::mem::replace(
+                    &mut self.inbound_mode,
+                    r["inbound_mode"].as_str().unwrap_or("primary").into(),
+                );
                 if token_changed {
                     self.cursor = 0;
-                    self.pending.clear();
-                    self.reply_chats.clear();
-                    self.pair_chats.clear();
                 } else {
                     self.cursor = self
                         .cursor
                         .max(id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0));
+                }
+                if token_changed || old_mode != self.inbound_mode {
+                    self.pending.clear();
+                    self.reply_chats.clear();
+                    self.pair_chats.clear();
                 }
             }
             "format_pair" | "test" | "deliver" => self.outbound.submit(&self.config, r.clone()),
@@ -654,18 +667,15 @@ impl Runtime {
         true
     }
 }
-const PERMANENT_POLL_ERRORS: [&str; 6] = [
-    "HTTP 401:",
-    "HTTP 403:",
-    "HTTP 409:",
-    "API 401:",
-    "API 403:",
-    "API 409:",
-];
+const PERMANENT_POLL_ERRORS: [&str; 4] = ["HTTP 401:", "HTTP 403:", "API 401:", "API 403:"];
+fn poll_error_matches(error: &ApiFailure, codes: &[&str]) -> bool {
+    error
+        .message
+        .strip_prefix("Telegram getUpdates ")
+        .is_some_and(|status| codes.iter().any(|code| status.starts_with(code)))
+}
 fn permanent_poll_error(error: &ApiFailure) -> bool {
-    PERMANENT_POLL_ERRORS
-        .iter()
-        .any(|code| error.message.contains(code))
+    poll_error_matches(error, &PERMANENT_POLL_ERRORS)
 }
 #[derive(Default)]
 struct PollBackoff {
@@ -688,7 +698,8 @@ impl PollBackoff {
 
 enum Event {
     Request(Value),
-    Poll(Value, std::result::Result<Value, ApiFailure>),
+    Poll(u64, std::result::Result<Value, ApiFailure>),
+    ServiceLabel(Value, Option<String>),
 }
 pub fn main() {
     let (tx, rx) = mpsc::channel::<Event>();
@@ -696,6 +707,7 @@ pub fn main() {
     let mut runtime = Runtime {
         outbound: Outbound::new(),
         config: json!({}),
+        inbound_mode: "primary".into(),
         cursor: 0,
         pending: VecDeque::new(),
         reply_chats: HashMap::new(),
@@ -706,11 +718,12 @@ pub fn main() {
     let mut next_poll = std::time::Instant::now();
     let mut healthy_reported = false;
     let mut paused = false;
+    let mut poll_generation = 0u64;
+    let mut label_emitted = false;
+    let mut label_pending = false;
+    let mut label_requested = false;
     loop {
-        let can_poll = !polling
-            && !paused
-            && runtime.pending.is_empty()
-            && str_at(&runtime.config, "botToken").is_some();
+        let can_poll = !polling && !paused && runtime.can_poll();
         let event = if can_poll {
             match rx.recv_timeout(next_poll.saturating_duration_since(std::time::Instant::now())) {
                 Ok(event) => Some(event),
@@ -723,61 +736,99 @@ pub fn main() {
                 Err(_) => return,
             }
         };
-        if let Some(Event::Request(req)) = event.as_ref() {
-            let configured = req["op"] == "configure";
-            if configured && req["hub_config"] != runtime.config {
-                healthy_reported = false;
+        match event {
+            Some(Event::Request(req)) => {
+                let configured = req["op"] == "configure";
+                let config_changed = configured && req["hub_config"] != runtime.config;
+                let mode_changed = configured
+                    && req["inbound_mode"].as_str().unwrap_or("primary") != runtime.inbound_mode;
+                if !runtime.request(req) {
+                    return;
+                }
+                if config_changed || mode_changed || (configured && paused) {
+                    poll_generation = poll_generation.wrapping_add(1);
+                    healthy_reported = false;
+                    paused = false;
+                    backoff.succeeded();
+                    next_poll = std::time::Instant::now();
+                }
+                if config_changed {
+                    label_emitted = false;
+                }
+                if configured {
+                    label_requested = str_at(&runtime.config, "botToken").is_some()
+                        && (!label_emitted || runtime.inbound_mode == "outbound_only");
+                }
             }
-            if !runtime.request(req.clone()) {
-                return;
-            }
-            if configured {
-                paused = false;
-                backoff.succeeded();
-                next_poll = std::time::Instant::now();
-            }
-        }
-        if let Some(Event::Poll(config, result)) = event {
-            polling = false;
-            if config == runtime.config {
-                match result {
-                    Ok(updates) => {
-                        backoff.succeeded();
-                        if !healthy_reported {
-                            emit(&json!({"op":"health","error":null}));
-                            healthy_reported = true;
+            Some(Event::ServiceLabel(config, label)) => {
+                label_pending = false;
+                if config == runtime.config {
+                    if let Some(label) = label {
+                        let mut health = json!({"op":"health","service_label":label});
+                        // Credential lookup cannot prove that inbound polling is healthy.
+                        if runtime.inbound_mode == "outbound_only" {
+                            health["error"] = Value::Null;
                         }
-                        runtime.updates(updates);
-                    }
-                    Err(e) => {
-                        eprintln!("Telegram polling: {e}");
-                        let guidance = if e.message.contains("409") {
-                            "Remove the external webhook yourself or use a dedicated bot token; stop other pollers."
-                        } else if e.message.contains("401") {
-                            "Check or replace the Bot Token in Human Channels Settings."
-                        } else {
-                            "Check the network, Bot Token, and bot permissions."
-                        };
-                        let (report, delay) = backoff.failed(&e, now_ms() % 500);
-                        paused = permanent_poll_error(&e);
-                        if paused || report {
-                            healthy_reported = false;
-                            emit(
-                                &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
-                            );
-                        }
-                        next_poll = std::time::Instant::now() + delay;
+                        emit(&health);
+                        label_emitted = true;
+                        label_requested = false;
                     }
                 }
             }
+            Some(Event::Poll(generation, result)) => {
+                polling = false;
+                if generation == poll_generation && runtime.inbound_mode != "outbound_only" {
+                    match result {
+                        Ok(updates) => {
+                            backoff.succeeded();
+                            if !healthy_reported {
+                                emit(&json!({"op":"health","error":null}));
+                                healthy_reported = true;
+                            }
+                            runtime.updates(updates);
+                        }
+                        Err(e) => {
+                            eprintln!("Telegram polling: {e}");
+                            let conflict = poll_error_matches(&e, &["HTTP 409:", "API 409:"]);
+                            let guidance = if conflict {
+                                "Inbound polling conflict: this bot is active on another Hub or webhook. Outbound alerts still work; switch to Outbound-Only or use a dedicated bot token."
+                            } else if poll_error_matches(&e, &["HTTP 401:", "API 401:"]) {
+                                "Check or replace the Bot Token in Human Channels Settings."
+                            } else {
+                                "Check the network, Bot Token, and bot permissions."
+                            };
+                            let (report, delay) = backoff.failed(&e, now_ms() % 500);
+                            paused = permanent_poll_error(&e);
+                            if paused || report || conflict {
+                                healthy_reported = false;
+                                emit(
+                                    &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
+                                );
+                            }
+                            next_poll = std::time::Instant::now() + delay;
+                        }
+                    }
+                }
+            }
+            None => {}
         }
-        if !polling
-            && !paused
-            && runtime.pending.is_empty()
-            && str_at(&runtime.config, "botToken").is_some()
-            && std::time::Instant::now() >= next_poll
-        {
+        // Single-flight identity lookup; configure frames remain responsive even
+        // when the network stalls or credentials change during a lookup.
+        if label_requested && !label_pending {
+            label_requested = false;
+            label_pending = true;
+            let config = runtime.config.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let label = api_with_timeout(&config, "getMe", json!({}), Duration::from_secs(8))
+                    .ok()
+                    .and_then(|me| str_at(&me, "username").map(|name| format!("@{name}")));
+                let _ = tx.send(Event::ServiceLabel(config, label));
+            });
+        }
+        if !polling && !paused && runtime.can_poll() && std::time::Instant::now() >= next_poll {
             polling = true;
+            let generation = poll_generation;
             let config = runtime.config.clone();
             let cursor = runtime.cursor;
             let tx = tx.clone();
@@ -787,7 +838,7 @@ pub fn main() {
                     "getUpdates",
                     json!({"offset":cursor,"timeout":25,"limit":25,"allowed_updates":["message"]}),
                 );
-                let _ = tx.send(Event::Poll(config, r));
+                let _ = tx.send(Event::Poll(generation, r));
             });
             next_poll = std::time::Instant::now() + Duration::from_millis(100);
         }
@@ -830,7 +881,10 @@ mod tests {
         for message in [
             "Telegram getUpdates request failed",
             "Telegram getUpdates HTTP 502: Bad gateway",
+            "Telegram getUpdates HTTP 409: Conflict",
+            "Telegram getUpdates API 409: Conflict",
         ] {
+            assert!(!permanent_poll_error(&failure(message)));
             let mut backoff = PollBackoff::default();
             assert_eq!(
                 backoff.failed(&failure(message), 0),
@@ -853,7 +907,6 @@ mod tests {
         for message in [
             "Telegram getUpdates HTTP 401: Unauthorized",
             "Telegram getUpdates API 403: Forbidden",
-            "Telegram getUpdates HTTP 409: Conflict",
         ] {
             assert!(permanent_poll_error(&failure(message)));
         }
@@ -863,6 +916,7 @@ mod tests {
         let mut runtime = Runtime {
             outbound: Outbound::new(),
             config: json!({"botToken":"first"}),
+            inbound_mode: "primary".into(),
             cursor: 20,
             pending: VecDeque::new(),
             reply_chats: HashMap::new(),
@@ -886,5 +940,12 @@ mod tests {
             json!({"op":"on_acked","user_config":{"chatId":"1"},"external_msg_ids":["7"]})
         ));
         assert_eq!(runtime.cursor, 0);
+        assert!(runtime.can_poll());
+        runtime.request(json!({"op":"configure","hub_config":{"botToken":"second"},"cursor":30,"inbound_mode":"outbound_only"}));
+        assert!(!runtime.can_poll());
+        assert_eq!(runtime.cursor, 30);
+        runtime.request(json!({"op":"configure","hub_config":{"botToken":"second"},"cursor":10}));
+        assert!(runtime.can_poll());
+        assert_eq!(runtime.cursor, 30);
     }
 }

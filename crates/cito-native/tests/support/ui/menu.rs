@@ -316,7 +316,8 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("settings_tab:channels");
     let s = inspect(&f, l.ui);
     let row_id = "inbox_control_bar";
-    assert_eq!(s.settings(row_id)["height"], 48);
+    let resting_height = s.settings(row_id)["height"].as_f64().unwrap();
+    assert!(resting_height >= 48.0);
     let ready = l.until(|s| s.settings("toggle_inbox")["enabled"] == true);
     let pause = ready.settings("toggle_inbox");
     assert_eq!(pause["text"], "Pause Inbox");
@@ -329,7 +330,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.until(|s| s.settings("toggle_inbox")["enabled"] == true);
     l.control("toggle_inbox");
     let s = l.until(|s| s.settings("toggle_inbox")["text"] == "Pause Inbox");
-    assert_eq!(s.settings(row_id)["height"], 48);
+    assert_eq!(s.settings(row_id)["height"], resting_height);
     assert!(nodes(&s["settings_items"])
         .iter()
         .any(|n| n["text"] == "You (@alice)"));
@@ -412,7 +413,11 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let paused_settings = l.until(|s| !s.settings("inbox_control_bar").is_null());
     assert_eq!(paused_settings["low_contrast_labels"], json!([]));
     l.control("toggle_inbox");
-    l.until(|s| s.settings(row_id)["height"] == 48);
+    let resumed = l.until(|s| {
+        let toggle = s.settings("toggle_inbox");
+        toggle["text"] == "Pause Inbox" && toggle["enabled"] == true
+    });
+    assert_eq!(resumed.settings(row_id)["height"], resting_height);
     l.control("close_settings");
     assert_eq!(f.snapshot()["hubs"][0]["human_about"], "Release approvals");
 }
@@ -454,7 +459,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         control(&f, p, "settings_tab:channels");
         let s = inspect(&f, p);
         let row = s.settings("inbox_control_bar");
-        assert_eq!(row["height"], 48);
+        assert!(row["height"].as_f64().unwrap() >= 48.0);
         let title = nodes(&row["children"])
             .into_iter()
             .find(|n| n["text"] == format!("You (@{user})"))
@@ -799,6 +804,30 @@ fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
         .unwrap();
     assert_eq!(label["wraps"], true);
     assert!(row["height"].as_f64().unwrap() > 36.0);
+}
+
+#[test]
+fn two_hub_pills_share_unused_width_in_either_order() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let long = "engineering-and-research-working-group";
+    for names in [["a", long], [long, "a"]] {
+        let mut frame = state();
+        frame["listeners"] = json!([]);
+        for (index, name) in names.iter().enumerate() {
+            frame["hubs"][index]["name"] = json!(name);
+        }
+        f.send(p, frame);
+        let s = inspect(&f, p);
+        let strip = s.menu("header_hub_strip");
+        assert_eq!(strip["content_x"], 0);
+        let wide = s.menu(&format!("hub:{long}"))["width"].as_f64().unwrap();
+        let narrow = s.menu("hub:a")["width"].as_f64().unwrap();
+        let budget = strip["width"].as_f64().unwrap() - 8.0;
+        assert!(wide > budget / 2.0);
+        assert!(wide + narrow <= budget);
+        assert!(wide <= 180.0);
+    }
 }
 
 #[test]
@@ -1301,4 +1330,93 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
             64
         );
     }
+}
+
+#[test]
+fn status_only_frame_uses_live_non_first_default_hub_without_refreshed_settings() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut work_listener = listener();
+    work_listener["hub"] = json!("work");
+    work_listener["scoped_id"] = json!("work:repo-abcdefghijkl");
+    work_listener["display_address"] = json!("alice/fixture#abcd");
+
+    let mut frame = state();
+    frame["hubs"][0]["is_default"] = json!(false);
+    frame["hubs"][1]["is_default"] = json!(true);
+    frame["listeners"] = json!([work_listener.clone()]);
+    f.send(p, frame.clone());
+
+    let s = inspect(&f, p);
+    assert!(!s.menu("session:work:repo-abcdefghijkl").is_null());
+    assert_eq!(s.menu("header_subtitle")["text"], "1 session listening");
+
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    let hubs_tab = inspect(&f, p);
+    assert!(!hubs_tab.settings("default_hub:work").is_null());
+    assert!(hubs_tab.settings("set_default_hub:work").is_null());
+    assert!(!hubs_tab.settings("set_default_hub:personal").is_null());
+    control(&f, p, "close_settings");
+
+    // Stale settings with personal as default must not override live status-only hubs.
+    let mut stale = state_with_settings(settings());
+    stale["hubs"][0]["is_default"] = json!(true);
+    stale["hubs"][1]["is_default"] = json!(false);
+    f.send(p, stale);
+    assert!(!inspect(&f, p)
+        .menu("session:personal:repo-abcdefghijkl")
+        .is_null());
+
+    f.send(p, frame.clone());
+    let updated = inspect(&f, p);
+    assert!(!updated.menu("session:work:repo-abcdefghijkl").is_null());
+    assert_eq!(
+        updated.menu("header_subtitle")["text"],
+        "1 session listening"
+    );
+
+    // Explicit user selection must still be preserved across status-only updates.
+    control(&f, p, "target_hub:personal");
+    f.send(p, frame);
+    let selected = inspect(&f, p);
+    assert!(selected.menu("session:work:repo-abcdefghijkl").is_null());
+    assert_eq!(selected.menu("header_subtitle")["text"], "Not listening");
+}
+
+#[test]
+fn shed_hubs_status_frame_reconciles_default_from_root_hub() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut initial = state();
+    initial["hub"] = json!("personal");
+    initial["hubs"][0]["is_default"] = json!(true);
+    initial["hubs"][1]["is_default"] = json!(false);
+    f.send(p, initial);
+    assert!(!inspect(&f, p)
+        .menu("session:personal:repo-abcdefghijkl")
+        .is_null());
+
+    // Simulate collection shedding dropping the tail hub ("work", cached with is_default: false)
+    // while root frame["hub"] advances to "work".
+    let mut work_listener = listener();
+    work_listener["hub"] = json!("work");
+    work_listener["scoped_id"] = json!("work:repo-abcdefghijkl");
+    work_listener["display_address"] = json!("alice/fixture#abcd");
+
+    let mut shed = state();
+    shed["hub"] = json!("work");
+    shed["hubs"] = json!([shed["hubs"][0].clone()]);
+    shed["hubs"][0]["is_default"] = json!(false);
+    shed["truncated"] = json!(true);
+    shed["truncated_collections"] = json!(["hubs"]);
+    shed["listeners"] = json!([work_listener]);
+    f.send(p, shed);
+
+    let updated = inspect(&f, p);
+    assert!(!updated.menu("session:work:repo-abcdefghijkl").is_null());
+    assert_eq!(
+        updated.menu("header_subtitle")["text"],
+        "1 session listening"
+    );
 }

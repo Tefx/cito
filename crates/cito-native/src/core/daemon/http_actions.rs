@@ -9,7 +9,10 @@ use super::{
     wake_daemon, ConfigSnapshot, DaemonService, SHUTDOWN_REQUESTED,
 };
 use crate::core::{
-    config::{apply_host_hub_patch, available_hub_name, hub_enabled, repair_default_hub},
+    config::{
+        apply_host_hub_patch, available_hub_name, hub_enabled, ordered_hub_names,
+        repair_default_hub,
+    },
     identity::{listener_id, normalize_slug, string},
 };
 use crate::plugins::now_ms;
@@ -428,9 +431,7 @@ fn dispatch_action_inner(
         return Err("OIDC_LOGIN_TIMEOUT: Hub changed during login".into());
     }
     let (token, identity) = result?;
-    if let Some(old) = s.slots.remove(&hub) {
-        old.close_and_drain()?;
-    }
+    s.remove_slot(&hub)?;
     for row in s.state.active()?.into_iter().filter(|row| {
         row["hub"] == hub
             && !crate::core::auth::principal_ids_equal(
@@ -622,6 +623,8 @@ pub(super) fn mutating_action(action: &Value) -> bool {
                 | "setup_remove_app"
                 | "setup_disconnect_all"
                 | "setup_remove_hub"
+                | "setup_reorder_hub"
+                | "setup_set_default_hub"
                 | "setup_toggle_hub"
                 | "hub_action"
                 | "set_user"
@@ -805,9 +808,7 @@ impl DaemonService {
     }
     fn teardown_hub_runtime(&mut self, hub: &str) -> Result<(), String> {
         self.cancel_hub_interaction(hub);
-        if let Some(slot) = self.slots.remove(hub) {
-            slot.close_and_drain()?;
-        }
+        self.remove_slot(hub)?;
         self.stop_hub_recovery(hub);
         let belongs = |key: &str| {
             key.starts_with(&format!("{hub}:"))
@@ -888,13 +889,12 @@ impl DaemonService {
         if editing && original.is_empty() {
             return Err("INVALID_INPUT: Unknown hub to edit".into());
         }
-        let mut rename_before = Value::Null;
+        let mut renamed_order = None;
         let mut renamed_config = Value::Null;
         self.mutate_config(|v| {
             if before != v {
                 return Err("INVALID_INPUT: Configuration changed during discovery; retry".into());
             }
-            rename_before = v.clone();
             // Materialize the implicit local Hub before saving/editing a
             // first explicit Hub, so first-run edits cannot discard it.
             if v["hubs"].is_null() {
@@ -1012,6 +1012,16 @@ impl DaemonService {
                 if let Some(h) = v["hubs"].as_object_mut() {
                     h.remove(&original);
                 }
+                if let Some(order) = v.get_mut("hub_order").and_then(Value::as_array_mut) {
+                    // The destination was not configured, so ignore any stale entry for it.
+                    order.retain(|entry| entry.as_str() != Some(name.as_str()));
+                    for entry in order.iter_mut() {
+                        if entry.as_str() == Some(original.as_str()) {
+                            *entry = json!(name);
+                        }
+                    }
+                    renamed_order = Some(order.clone());
+                }
                 let default = v
                     .get("default_hub")
                     .or_else(|| v.get("defaultHub"))
@@ -1082,14 +1092,24 @@ impl DaemonService {
                     }
                     if let Some(hubs) = v["hubs"].as_object_mut() {
                         hubs.remove(name);
-                        if !rename_before["hubs"][&original].is_null() {
-                            hubs.insert(original.clone(), rename_before["hubs"][&original].clone());
+                        hubs.insert(original.clone(), before["hubs"][&original].clone());
+                    }
+                    if let Some(order) = v.get_mut("hub_order").and_then(Value::as_array_mut) {
+                        if Some(&*order) == renamed_order.as_ref() {
+                            *order = before["hub_order"].as_array().unwrap().clone();
+                        } else {
+                            // Preserve a concurrent reorder, referring to the restored profile.
+                            for entry in order {
+                                if entry.as_str() == Some(name) {
+                                    *entry = json!(original);
+                                }
+                            }
                         }
                     }
                     if v["default_hub"] == *name {
-                        v["default_hub"] = rename_before
+                        v["default_hub"] = before
                             .get("default_hub")
-                            .or_else(|| rename_before.get("defaultHub"))
+                            .or_else(|| before.get("defaultHub"))
                             .cloned()
                             .unwrap_or(json!("local"));
                     }
@@ -1616,9 +1636,7 @@ impl DaemonService {
                     )
                 })?;
                 if op == "hub_action" && action["action"] == "reconnect" {
-                    if let Some(old) = self.slots.remove(&hub) {
-                        old.close_and_drain()?;
-                    }
+                    self.remove_slot(&hub)?;
                 }
             }
             "setup_remove_hub" => {
@@ -1629,6 +1647,9 @@ impl DaemonService {
                     if let Some(h) = v["hubs"].as_object_mut() {
                         h.remove(&hub);
                     }
+                    if let Some(order) = v.get_mut("hub_order").and_then(Value::as_array_mut) {
+                        order.retain(|entry| entry.as_str() != Some(hub.as_str()));
+                    }
                     repair_default_hub(v);
                     Ok(())
                 })?;
@@ -1637,6 +1658,41 @@ impl DaemonService {
                     json!({"ok":true}),
                     projection,
                 )));
+            }
+            "setup_reorder_hub" | "setup_set_default_hub" => {
+                let hub = action_hub(action)?;
+                self.mutate_config(|v| {
+                    let (_, hubs, _) =
+                        crate::plugins::try_normalize_existing_config(Some(&v.to_string()))?;
+                    // Use the inventory Settings displayed, including the implicit local Hub.
+                    let mut order =
+                        ordered_hub_names(&hubs, v.get("hub_order"), &self.config.default_hub);
+                    if op == "setup_set_default_hub" {
+                        if !hubs.get(hub).is_some_and(hub_enabled) {
+                            return Err(
+                                "INVALID_INPUT: Default Hub must be configured and enabled".into(),
+                            );
+                        }
+                        v["default_hub"] = json!(hub);
+                        repair_default_hub(v);
+                    } else {
+                        let idx = order
+                            .iter()
+                            .position(|name| name == hub)
+                            .ok_or("INVALID_INPUT: Unknown configured Hub")?;
+                        let neighbor = match action["direction"].as_str() {
+                            Some("up") => idx.checked_sub(1),
+                            Some("down") => (idx + 1 < order.len()).then_some(idx + 1),
+                            _ => return Err("INVALID_INPUT: direction must be up or down".into()),
+                        };
+                        if let Some(neighbor) = neighbor {
+                            order.swap(idx, neighbor);
+                        }
+                    }
+                    // Pin the pre-action order even when changing a default-derived rank.
+                    v["hub_order"] = json!(order);
+                    Ok(())
+                })?;
             }
             "paste_hub_invite" => {
                 let mut invite = parse_hub_invite(string(action, "invite"))?;
@@ -1839,7 +1895,11 @@ impl DaemonService {
         }
         if matches!(
             op,
-            "set_user" | "setup_toggle_hub" | "hub_action" | "set_host_hub"
+            "set_user"
+                | "setup_toggle_hub"
+                | "hub_action"
+                | "set_host_hub"
+                | "setup_set_default_hub"
         ) {
             let reload = self.reload_slots();
             return Ok(ToolCall::Ready(committed_projection(
@@ -2168,9 +2228,7 @@ impl DaemonService {
         self.slots.clear();
         self.channel_inventories.clear();
         self.active_settings_hub = None;
-        if let Some(server) = self.host_server.take() {
-            server.shutdown();
-        }
+        self.install_host_server(None);
         self.cancel_logins();
         self.join_recoveries();
         self.local.reset_data()?;

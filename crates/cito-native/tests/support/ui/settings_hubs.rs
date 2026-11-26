@@ -66,6 +66,74 @@ fn edit_hub_focus_and_blank_name_match_the_url_derived_save() {
 }
 
 #[test]
+fn hub_order_controls_follow_authoritative_partial_order_and_default_receipts() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    let mut relay = cfg["hubs"][1].clone();
+    relay["name"] = json!("relay");
+    relay["enabled"] = json!(false);
+    cfg["hubs"].as_array_mut().unwrap().push(relay);
+    let mut frame = state_with_settings(cfg.clone());
+    open_settings(&f, p, &cfg, "hubs");
+    let order = |s: &Value| {
+        nodes(&s["settings_items"])
+            .into_iter()
+            .filter_map(|row| {
+                Some(
+                    row["id"]
+                        .as_str()?
+                        .strip_prefix("settings_hub:")?
+                        .to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let s = inspect(&f, p);
+    assert_eq!(order(&s), ["personal", "work", "relay"]);
+    assert_eq!(s.settings("move_hub_up:personal")["enabled"], false);
+    assert_eq!(s.settings("move_hub_down:relay")["enabled"], false);
+    assert!(s.settings("set_default_hub:relay").is_null());
+    assert!(s.settings("set_default_hub:personal").is_null());
+    control(&f, p, "move_hub_up:work");
+    let s = inspect(&f, p);
+    assert_eq!(s.settings("move_hub_down:work")["enabled"], false);
+    assert_eq!(order(&s), ["personal", "work", "relay"]);
+    let reorder = latest(&f, p, "setup_reorder_hub");
+    assert_eq!(reorder["hub"], "work");
+    assert_eq!(reorder["direction"], "up");
+    frame["hubs"].as_array_mut().unwrap().swap(0, 1);
+    frame["settings"]["hubs"] = json!([cfg["hubs"][1], cfg["hubs"][0]]);
+    frame["source_op"] = json!("setup_reorder_hub");
+    frame["request_id"] = reorder["request_id"].clone();
+    frame["truncated"] = json!(true);
+    frame["truncated_collections"] = json!(["hubs", "settings.hubs"]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(order(&s), ["work", "personal", "relay"]);
+    assert_eq!(s.settings("move_hub_up:work")["enabled"], false);
+    assert_eq!(s.settings("move_hub_down:work")["enabled"], true);
+    assert_eq!(s.menu("hub:work")["x"], 2);
+    control(&f, p, "set_default_hub:work");
+    assert_eq!(
+        inspect(&f, p).settings("set_default_hub:work")["enabled"],
+        false
+    );
+    let set_default = latest(&f, p, "setup_set_default_hub");
+    assert_eq!(set_default["hub"], "work");
+    frame["settings"]["hubs"][0]["is_default"] = json!(true);
+    frame["settings"]["hubs"][1]["is_default"] = json!(false);
+    frame["source_op"] = json!("setup_set_default_hub");
+    frame["request_id"] = set_default["request_id"].clone();
+    f.send(p, frame);
+    let s = inspect(&f, p);
+    assert_eq!(order(&s), ["work", "personal", "relay"]);
+    assert_eq!(s.settings("default_hub:work")["text"], "Default");
+    assert!(s.settings("set_default_hub:work").is_null());
+    assert_eq!(s.settings("set_default_hub:personal")["enabled"], true);
+}
+
+#[test]
 fn deferred_sharing_controls_send_partial_updates_while_stop_is_pending() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -1212,4 +1280,68 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
             .is_some_and(|host| !host.is_empty() && host != "0.0.0.0" && host != "[::]"));
         assert_eq!(url.port(), Some(port));
     }
+}
+
+#[test]
+fn changing_default_in_open_settings_refreshes_implicit_channel_hub_without_looping() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let cfg = settings();
+    open_settings(&f, p, &cfg, "hubs");
+    assert_eq!(
+        f.frames_for(p, "open_settings")
+            .map(|frame| frame["hub"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("personal")]
+    );
+
+    control(&f, p, "set_default_hub:work");
+    let set_default = latest(&f, p, "setup_set_default_hub");
+    assert_eq!(set_default["hub"], "work");
+
+    let mut updated_cfg = cfg.clone();
+    updated_cfg["hubs"][0]["is_default"] = json!(false);
+    updated_cfg["hubs"][1]["is_default"] = json!(true);
+    updated_cfg["settings_hub"] = json!("personal");
+    let mut updated_state = state_with_settings(updated_cfg.clone());
+    updated_state["hub"] = json!("work");
+    updated_state["hubs"][0]["is_default"] = json!(false);
+    updated_state["hubs"][1]["is_default"] = json!(true);
+    updated_state["listeners"][0]["display_address"] = json!("personal:alice/fixture#abcd");
+    updated_state["ok"] = json!(true);
+    updated_state["committed"] = json!(true);
+    updated_state["source_op"] = json!("setup_set_default_hub");
+    updated_state["request_id"] = set_default["request_id"].clone();
+    f.send(p, updated_state);
+    inspect(&f, p);
+    assert_eq!(
+        f.frames_for(p, "open_settings")
+            .map(|frame| frame["hub"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("personal")],
+        "must not eagerly emit open_settings while Human Channels tab is offscreen"
+    );
+
+    control(&f, p, "settings_tab:channels");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames_for(p, "open_settings")
+            .map(|frame| frame["hub"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("personal"), json!("work")]
+    );
+
+    // Receiving the refreshed settings for "work" must not emit a duplicate open_settings.
+    updated_cfg["settings_hub"] = json!("work");
+    f.send(
+        p,
+        json!({"op": "settings", "hub": "work", "settings": updated_cfg}),
+    );
+    let channels = inspect(&f, p);
+    assert_eq!(channels["settings_channel_hub"], "work");
+    assert_eq!(
+        f.frames_for(p, "open_settings").count(),
+        2,
+        "refreshing implicit channel hub must not loop"
+    );
 }

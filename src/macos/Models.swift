@@ -67,6 +67,7 @@ struct Hub: Decodable, Equatable {
     var human_scope: String? = nil
     var human_state_status: String? = nil
     var attachments: [ChannelAttachment]? = nil
+    var is_default: Bool? = nil
     var is_builtin: Bool? = nil
     var supports_workspace_scope: Bool? = nil
     var can_login: Bool? = nil
@@ -142,6 +143,11 @@ struct ChannelFieldItem: Decodable, Equatable {
     let configured_placeholder: String?
     let help_text: String?
 }
+struct ReusableChannelBinding: Codable, Equatable {
+    let source_hub: String
+    let display_label: String
+    let values: [String: String]
+}
 struct ChannelSetupItem: Decodable, Equatable {
     let id: String
     let display_name: String
@@ -175,6 +181,11 @@ struct ChannelSetupItem: Decodable, Equatable {
     var can_test: Bool? = nil
     var can_unpair: Bool? = nil
     var error_origin: String? = nil
+    var supports_outbound_only: Bool? = nil
+    var inbound_mode: String? = nil
+    var service_label: String? = nil
+    var service_identity: String? = nil
+    var reusable_binding: ReusableChannelBinding? = nil
 
     func canSendTest(drafts: [String: String], visibleFields: [ChannelFieldItem]) -> Bool {
         guard can_test == true else { return false }
@@ -220,7 +231,7 @@ struct HubConfigItem: Decodable, Equatable {
     let url: String
     let auth_mode: String
     let enabled: Bool
-    let is_default: Bool
+    var is_default: Bool
     let status: String
     let user: String?
     let error: String?

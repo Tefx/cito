@@ -1072,6 +1072,14 @@ impl HubAccess {
         if !(1..=50).contains(&limit) {
             return Err("INVALID_INPUT: limit must be 1..50".into());
         }
+        let (order, _, _) = self.hub_projection_config();
+        let ranks: BTreeMap<_, _> = order
+            .iter()
+            .enumerate()
+            .map(|(rank, name)| (name.as_str(), rank))
+            .collect();
+        let hub_rank = |name: &str| ranks.get(name).copied().unwrap_or(usize::MAX);
+        let default_priority = |name: &str| ui_filters.is_none() && name != self.config.default_hub;
         let query = string(args, "query").to_lowercase();
         let mut groups = BTreeMap::new();
         let mut warnings = Vec::new();
@@ -1098,7 +1106,9 @@ impl HubAccess {
                 })
                 .collect::<Vec<_>>()
         });
-        snapshots.sort_by_key(|(name, _, _)| (name != &self.config.default_hub, name.clone()));
+        // MCP deduplication keeps the first row, so apply the same Hub priority
+        // before grouping as after it.
+        snapshots.sort_by_key(|(name, _, _)| (default_priority(name), hub_rank(name)));
         for (name, slot, snapshot) in snapshots {
             match snapshot {
                 Ok(directory) => {
@@ -1283,7 +1293,8 @@ impl HubAccess {
             .collect();
         rows.sort_by_key(|r| {
             (
-                ui_filters.is_none() && r["hub"] != self.config.default_hub,
+                default_priority(string(r, "hub")),
+                hub_rank(string(r, "hub")),
                 directory_identity(r),
             )
         });

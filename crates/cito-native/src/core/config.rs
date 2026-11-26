@@ -1,5 +1,5 @@
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -8,6 +8,36 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) fn hub_enabled(cfg: &Value) -> bool {
     cfg["enabled"] != false && cfg["disabled"] != true
+}
+
+pub fn ordered_hub_names(
+    hubs: &Map<String, Value>,
+    hub_order: Option<&Value>,
+    default_hub: &str,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut names: Vec<&str> = hub_order
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| hubs.contains_key(*name) && seen.insert(*name))
+        .collect();
+    let mut remaining: Vec<_> = hubs
+        .iter()
+        .filter(|(name, _)| !seen.contains(name.as_str()))
+        .collect();
+    remaining.sort_by_key(|(name, cfg)| {
+        let name = name.as_str();
+        (
+            !hub_enabled(cfg),
+            name != default_hub,
+            name != "local",
+            name,
+        )
+    });
+    names.extend(remaining.into_iter().map(|(name, _)| name.as_str()));
+    names.into_iter().map(str::to_owned).collect()
 }
 
 pub(super) fn configured_hub_url(cfg: &Value) -> &str {
@@ -193,6 +223,7 @@ impl ConfigSnapshot {
         let mut config = self.recovery_object();
         config.remove("defaultHub");
         config.remove("hostHub");
+        config.remove("hub_order");
         config.insert("default_hub".into(), json!("local"));
         config.insert("hubs".into(), json!({}));
         config.insert("host_hub".into(), json!({"enabled":false}));
@@ -326,6 +357,15 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         .and_then(Value::as_str)
         .or_else(|| camel.as_ref().and_then(Value::as_str));
     let default_hub = complete_hub_profiles(&mut hubs, requested);
+    if let Some(order) = obj.get_mut("hub_order") {
+        if !order
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_string))
+        {
+            return Err("Expected hub_order array of strings in config.json".into());
+        }
+        *order = json!(ordered_hub_names(&hubs, Some(order), &default_hub));
+    }
     Ok((default_hub, hubs, obj))
 }
 
@@ -553,6 +593,32 @@ pub(super) fn apply_hub_auth(mut config: Value, health: &Value) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_order_normalization_preserves_explicit_ranks_and_validates_type() {
+        let mut raw = json!({"default_hub":"work","hubs":{
+            "work":{"url":"https://hub.example.com"},"alpha":{},
+            "archive":{"disabled":true},"backup":{"enabled":false}
+        }});
+        let (default, hubs, rest) = try_normalize_existing_config(Some(&raw.to_string())).unwrap();
+        assert!(!rest.contains_key("hub_order"));
+        assert_eq!(
+            ordered_hub_names(&hubs, None, &default),
+            ["work", "local", "alpha", "archive", "backup"]
+        );
+        raw["hub_order"] = json!(["archive", "unknown", "archive", "alpha"]);
+        let (_, _, rest) = try_normalize_existing_config(Some(&raw.to_string())).unwrap();
+        assert_eq!(
+            rest["hub_order"],
+            json!(["archive", "alpha", "work", "local", "backup"])
+        );
+        for invalid in [Value::Null, json!("work"), json!(["work", 1])] {
+            raw["hub_order"] = invalid;
+            assert!(try_normalize_existing_config(Some(&raw.to_string()))
+                .unwrap_err()
+                .contains("hub_order"));
+        }
+    }
 
     #[test]
     fn discovery_preserves_overrides_and_rejects_incomplete_auth() {

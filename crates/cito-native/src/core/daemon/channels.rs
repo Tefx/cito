@@ -15,12 +15,30 @@ pub(super) struct ChannelInventory {
 pub(super) struct CachedChannelInventory {
     pub(super) value: Value,
     pub(super) completed_gen: u64,
-    pub(super) retry_at: Instant,
+    refreshed_at: Instant,
+    event_revision: u64,
     denied_token: Option<String>,
 }
 
 impl CachedChannelInventory {
-    pub(super) fn authorized_for_retry(&self, slot: &HubClient) -> bool {
+    pub(super) fn current_for(&self, slot: &HubClient) -> bool {
+        self.value["status"] != "error"
+            && self.event_revision == slot.event_revision()
+            && self.refreshed_at.elapsed() < Duration::from_secs(30)
+    }
+
+    pub(super) fn refresh_due(&self, slot: &HubClient, selected: bool) -> bool {
+        self.authorized_for_retry(slot)
+            && (self.completed_gen == 0
+                || if self.value["status"] == "error" {
+                    self.refreshed_at.elapsed() >= Duration::from_secs(1)
+                } else {
+                    !self.current_for(slot)
+                        || (selected && self.refreshed_at.elapsed() >= Duration::from_secs(1))
+                })
+    }
+
+    fn authorized_for_retry(&self, slot: &HubClient) -> bool {
         self.denied_token.as_ref().is_none_or(|denied| {
             *denied != crate::core::identity::hash(slot.bearer.as_deref().unwrap_or(""))
         })
@@ -35,7 +53,8 @@ impl ChannelInventory {
             cached: Mutex::new(CachedChannelInventory {
                 value: json!({"status":"loading"}),
                 completed_gen: 0,
-                retry_at: Instant::now(),
+                refreshed_at: Instant::now(),
+                event_revision: 0,
                 denied_token: None,
             }),
         }
@@ -77,6 +96,8 @@ impl ChannelInventory {
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
             return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
         }
+        // An event during the read belongs to the next refresh.
+        let event_revision = slot.event_revision();
         let result = channel_list(slot);
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
             return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
@@ -112,7 +133,8 @@ impl ChannelInventory {
                 value
             }
         };
-        cached.retry_at = Instant::now() + Duration::from_secs(1);
+        cached.refreshed_at = Instant::now();
+        cached.event_revision = event_revision;
         refresh_error.map_or(Ok(()), Err)
     }
 }
@@ -204,22 +226,25 @@ fn run_channel_action(
     let mut params = action.clone();
     params["plugin_id"] = json!(id);
     if let Some(values) = action["values"].as_object() {
-        // The selected Hub owns the schema, including remote-only plugins
-        // and remote schemas that differ from a locally installed plugin.
-        let schema = channel_list(slot)?;
-        let fields = schema["channels"]
+        let inventory = channel_list(slot)?;
+        let fields = inventory["channels"]
             .as_array()
             .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
             .and_then(|ch| ch["fields"].as_array())
-            .cloned()
-            .or_else(|| plugins.find_by_id(id).map(|p| p.fields.clone()))
+            .or_else(|| plugins.find_by_id(id).map(|p| &p.fields))
             .ok_or_else(|| format!("INVALID_INPUT: Unknown human channel plugin: {id}"))?;
         let mut hub_config = Map::new();
         let mut user_config = Map::new();
-        for field in &fields {
+        for field in fields {
             let key = string(field, "key");
             if let Some(value) = values.get(key) {
                 if field["scope"] == "hub" {
+                    if action["scope"] == "user" {
+                        return Err(
+                            "INVALID_INPUT: Personal values cannot change a Hub service field"
+                                .into(),
+                        );
+                    }
                     hub_config.insert(key.into(), value.clone());
                 } else {
                     user_config.insert(key.into(), value.clone());
@@ -246,6 +271,14 @@ fn run_channel_action(
             .cloned()
             .unwrap_or_else(|| json!({}));
         params = json!({"plugin_id":id,"hub_config":hub_config});
+        if op == "channel_save" {
+            if let Some(expected) = action.get("expected_service_identity") {
+                params["expected_service_identity"] = expected.clone();
+            }
+        }
+        if let Some(mode) = action.get("inbound_mode") {
+            params["inbound_mode"] = mode.clone();
+        }
     }
     let result = slot.rpc(rpc, &params)?;
     if !result.is_object() {

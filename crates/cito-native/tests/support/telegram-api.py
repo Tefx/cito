@@ -22,7 +22,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with (pathlib.Path(os.environ['HOME']) / 'api-methods.jsonl').open('a') as log:
             log.write(json.dumps(method) + '\n')
         token = self.path.split('/')[1]
-        if method == 'getUpdates' and token in ('botpoll409', 'botpoll401'):
+        if method == 'getUpdates' and (
+            token == 'botpoll401'
+            or (token == 'botpoll409' and (pathlib.Path(os.environ['HOME']) / 'poll-conflict').exists())
+        ):
             status = int(token[-3:])
             data = json.dumps(dict(ok=False, description='Polling rejected by fixture', error_code=status)).encode()
             self.send_response(status)
@@ -58,12 +61,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             polls += 1
             with (pathlib.Path(os.environ['HOME']) / 'api-polls.jsonl').open('a') as log:
                 log.write(json.dumps(dict(path=self.path, **body)) + '\n')
-            result = [dict(update_id=12, message=dict(chat=dict(id=9, type='private'), **{'from': dict(id=9)}, text='/start cito-abcdefghij')),dict(update_id=15,message=dict(chat=dict(id=9,type='private'),**{'from':dict(id=9)},text='ship',reply_to_message=dict(message_id=101)))] if polls == 1 else []
+            if polls == 1:
+                result = [dict(update_id=12, message=dict(chat=dict(id=9, type='private'), **{'from': dict(id=9)}, text='/start cito-abcdefghij')),dict(update_id=15,message=dict(chat=dict(id=9,type='private'),**{'from':dict(id=9)},text='ship',reply_to_message=dict(message_id=101)))]
+            else:
+                threading.Event().wait(0.5)
+                result = []
         data = json.dumps(dict(ok=True,result=result)).encode()
         self.send_response(200)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except OSError:
+            pass
 # A loopback fixture must not perform HTTPServer's reverse-DNS lookup at bind time.
 class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True

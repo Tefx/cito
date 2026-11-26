@@ -4,17 +4,18 @@ use super::{
         advertised_hub_host, host_hub_auth_mode, hub_name_from_url, lan_advertised_host,
         tailscale_advertised_host,
     },
-    DaemonService,
+    DaemonService, HubAccess,
 };
 use crate::core::{
-    hub::HubServer,
-    identity::{iso, string},
+    config::ordered_hub_names,
+    hub::{channel_display_label, HubServer},
+    identity::{hash, iso, string},
     state::LocalState,
     transport::HubClient,
 };
 use crate::plugins::now_ms;
 use crate::setup::inspect_launch_at_login;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
@@ -182,6 +183,23 @@ impl HubSample {
     }
 }
 
+impl HubAccess {
+    pub(super) fn hub_projection_config(&self) -> (Vec<String>, Map<String, Value>, Value) {
+        let raw = self.raw_config().unwrap_or_default();
+        let (_, mut hubs, mut rest) =
+            crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))
+                .unwrap_or_default();
+        // Keep the live projection available if the file cannot be read or normalized.
+        for (name, slot) in &self.slots {
+            if !hubs.contains_key(name) {
+                hubs.insert(name.clone(), slot.config.clone());
+            }
+        }
+        let order = ordered_hub_names(&hubs, raw.get("hub_order"), &self.config.default_hub);
+        (order, hubs, rest.remove("host_hub").unwrap_or_default())
+    }
+}
+
 impl DaemonService {
     pub fn settings(&self) -> Value {
         self.settings_for_hub(self.selected_settings_hub())
@@ -233,14 +251,12 @@ impl DaemonService {
         hub
     }
 
-    fn enabled_hubs<'a>(&'a self, samples: &HashMap<&str, HubSample>) -> BTreeMap<&'a str, Value> {
-        self.slots
+    fn enabled_hubs(&self, order: &[String], samples: &HashMap<&str, HubSample>) -> Vec<Value> {
+        order
             .iter()
-            .map(|(name, slot)| {
-                (
-                    name.as_str(),
-                    self.hub_dto(name, &slot.config, Some((slot, &samples[name.as_str()]))),
-                )
+            .filter_map(|name| {
+                let slot = self.slots.get(name)?;
+                Some(self.hub_dto(name, &slot.config, Some((slot, &samples[name.as_str()]))))
             })
             .collect()
     }
@@ -271,12 +287,8 @@ impl DaemonService {
         }).collect()
     }
 
-    fn channel_settings_snapshot(
-        &self,
-        hub: &str,
-        paused: Option<bool>,
-    ) -> (Vec<Value>, Option<String>) {
-        let inventory = if let Some(slot) = self.slots.get(hub) {
+    fn settings_channel_inventory(&self, hub: &str, require_current: bool) -> Value {
+        if let Some(slot) = self.slots.get(hub) {
             if slot.local.is_some() {
                 slot.rpc("human_channels_list", &json!({}))
                     .unwrap_or_else(|e| json!({"status":"error","detail":e}))
@@ -284,58 +296,147 @@ impl DaemonService {
                 self.channel_inventories
                     .get(hub)
                     .filter(|entry| entry.identity == remote_channels_identity(slot))
-                    .and_then(|entry| entry.cached.lock().ok().map(|cached| cached.value.clone()))
+                    .and_then(|entry| {
+                        entry.cached.lock().ok().and_then(|cached| {
+                            (!require_current || cached.current_for(slot))
+                                .then(|| cached.value.clone())
+                        })
+                    })
                     .unwrap_or_else(|| json!({"status":"loading"}))
             }
         } else if hub == "local" {
-            self.local
-                .rpc(
-                    "human_channels_list",
-                    &json!({}),
-                    Some(&crate::core::identity::principal(
-                        &self
-                            .config
-                            .effective_user("local")
-                            .unwrap_or_else(|_| "local".into()),
-                    )),
-                )
-                .unwrap_or_else(|e| json!({"status":"error","detail":e}))
+            self.builtin_channel_inventory()
         } else {
-            return (Vec::new(), None);
-        };
+            Value::Null
+        }
+    }
+
+    fn builtin_channel_inventory(&self) -> Value {
+        let user = self
+            .config
+            .effective_user("local")
+            .unwrap_or_else(|_| "local".into());
+        self.local
+            .rpc(
+                "human_channels_list",
+                &json!({}),
+                Some(&crate::core::identity::principal(&user)),
+            )
+            .unwrap_or_else(|e| json!({"status":"error","detail":e}))
+    }
+
+    fn channel_settings_snapshot(
+        &self,
+        hub: &str,
+        paused: Option<bool>,
+        order: &[String],
+    ) -> (Vec<Value>, Option<String>) {
+        let inventory = self.settings_channel_inventory(hub, false);
         let mut channels = inventory["channels"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        if let Some(inbox_paused) = paused {
-            for channel in &mut channels {
+        for channel in &mut channels {
+            // Suggestions are computed here, not accepted from the target Hub.
+            if let Some(fields) = channel.as_object_mut() {
+                fields.remove("reusable_binding");
+            }
+            if let Some(inbox_paused) = paused {
                 super::channels::overlay_inbox_state(channel, inbox_paused);
             }
         }
-        let error =
-            (inventory["status"] == "error").then(|| string(&inventory, "detail").to_owned());
-        (channels, error)
+        if inventory["status"] == "error" {
+            // Retained rows describe the last successful read, not the current service.
+            return (channels, Some(string(&inventory, "detail").to_owned()));
+        }
+        let mut targets = channels
+            .iter_mut()
+            .filter(|channel| {
+                channel["hub_ready"] == true
+                    && channel["configured"] != true
+                    && !string(channel, "service_identity").is_empty()
+                    && !string(channel, "id").is_empty()
+            })
+            .peekable();
+        if targets.peek().is_some() {
+            let sources: Vec<_> = order
+                .iter()
+                .filter(|name| {
+                    name.as_str() != hub
+                        && self
+                            .slots
+                            .get(*name)
+                            .is_some_and(|slot| slot.capabilities()["status"] == "connected")
+                })
+                .map(|name| (name, self.settings_channel_inventory(name, true)))
+                .collect();
+            for channel in targets {
+                let reusable_field = |f: &&Value| {
+                    f["scope"] == "user" && f["redacted"] != true && f["type"] != "secret"
+                };
+                let fields = channel["fields"].as_array().into_iter().flatten();
+                let keys: HashSet<_> = fields
+                    .clone()
+                    .filter(reusable_field)
+                    .map(|f| string(f, "key"))
+                    .collect();
+                let suggestion = sources.iter().find_map(|(name, inventory)| {
+                    let other = inventory["channels"]
+                        .as_array()?
+                        .iter()
+                        .find(|other| {
+                            other["id"] == channel["id"]
+                                && other["configured"] == true
+                                && other["service_identity"] == channel["service_identity"]
+                        })?;
+                    let values: Map<_, _> = other["fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(reusable_field)
+                        .filter_map(|field| {
+                            let key = string(field, "key");
+                            let value = string(field, "value");
+                            (!key.is_empty() && keys.contains(key) && !value.trim().is_empty())
+                                .then(|| (key.into(), json!(value)))
+                        })
+                        .collect();
+                    let ready = fields.clone().all(|f| f["scope"] != "user" || f["required"] != true || f["configured"] == true || values.contains_key(string(f, "key")));
+                    (ready && !values.is_empty()).then(|| json!({"source_hub":name,"display_label":channel_display_label(&other["display_label"]).unwrap_or("Account"),"values":values}))
+                });
+                if let Some(binding) = suggestion {
+                    channel["reusable_binding"] = binding;
+                }
+            }
+        }
+        (channels, None)
     }
 
     fn settings_snapshot(&self, hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
         let apps = self.app_settings_snapshot();
-        let mut hubs = self.enabled_hubs(samples);
-        let paused = hubs.get(hub).and_then(|row| row["human_paused"].as_bool());
-        let (channels, channel_inventory_error) = self.channel_settings_snapshot(hub, paused);
-        let raw = self.raw_config().unwrap_or_else(|_| json!({}));
-        let configured = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()));
-        if let Ok((_, configured, _)) = &configured {
-            for (name, cfg) in configured {
-                hubs.entry(name)
-                    .or_insert_with(|| self.hub_dto(name, cfg, None));
-            }
-        }
-        let hubs: Vec<_> = hubs.into_values().collect();
-        let host = configured
-            .as_ref()
-            .ok()
-            .and_then(|(_, _, rest)| rest.get("host_hub"))
-            .unwrap_or(&Value::Null);
+        let (order, configured, host) = self.hub_projection_config();
+        let hubs: Vec<_> = order
+            .iter()
+            .map(|name| {
+                if let Some(slot) = self.slots.get(name) {
+                    self.hub_dto(name, &slot.config, Some((slot, &samples[name.as_str()])))
+                } else {
+                    self.hub_dto(name, &configured[name], None)
+                }
+            })
+            .collect();
+        let paused = self
+            .slots
+            .contains_key(hub)
+            .then(|| {
+                hubs.iter()
+                    .find(|row| row["name"] == hub)
+                    .and_then(|row| row["human_paused"].as_bool())
+            })
+            .flatten();
+        let (channels, channel_inventory_error) =
+            self.channel_settings_snapshot(hub, paused, &order);
+        let host = &host;
         let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
         let host = if running {
             self.applied_host_config.as_ref().unwrap_or(host)
@@ -814,12 +915,39 @@ impl DaemonService {
                     .cached
                     .lock()
                     .map(|cached| {
-                        json!([name, crate::core::identity::hash(&cached.value.to_string())])
+                        let current = self
+                            .slots
+                            .get(name)
+                            .is_some_and(|slot| cached.current_for(slot));
+                        json!([name, current, hash(&cached.value.to_string())])
                     })
                     .map_err(|_| "Channel inventory lock poisoned")
             })
             .collect::<Result<_, _>>()?;
         inventories.sort_by_key(Value::to_string);
+        let (order, _, _) = self.hub_projection_config();
+        let mut local_inventories: Vec<_> = order
+            .iter()
+            .filter(|name| {
+                self.slots
+                    .get(*name)
+                    .is_some_and(|slot| slot.local.is_some())
+            })
+            .map(|name| {
+                (
+                    name.as_str(),
+                    hash(&self.settings_channel_inventory(name, false).to_string()),
+                )
+            })
+            .collect();
+        if self.active_settings_hub.as_deref() == Some("local")
+            && self
+                .slots
+                .get("local")
+                .is_none_or(|slot| slot.local.is_none())
+        {
+            local_inventories.push(("local", hash(&self.builtin_channel_inventory().to_string())));
+        }
         let inspections: BTreeMap<_, _> = self
             .setup_inspections
             .iter()
@@ -828,6 +956,8 @@ impl DaemonService {
         Ok(json!({"inspections": inspections, "state": [
             self.host_server.as_ref().is_some_and(HubServer::is_running),
             inventories,
+            local_inventories,
+            order,
             self.last_hub_errors,
             self.host_hub_error
                 .as_ref()
@@ -884,7 +1014,8 @@ impl DaemonService {
         frame["my_remote_listeners"] = json!(remote);
         frame["directory_online_count"] = json!(online);
         frame["listeners"] = json!(sessions);
-        let hubs: Vec<_> = self.enabled_hubs(&samples).into_values().collect();
+        let (order, _, _) = self.hub_projection_config();
+        let hubs = self.enabled_hubs(&order, &samples);
         frame["hubs"] = json!(hubs);
         frame["hub"] = json!(self.config.default_hub);
         Ok(frame)

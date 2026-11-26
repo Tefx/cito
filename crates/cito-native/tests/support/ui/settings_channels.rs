@@ -444,7 +444,14 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                 assert!(s.menu("human_inbox_card").is_null());
                 assert!(s.menu("inbox_header").is_null());
                 assert_eq!(s.menu("inbox_paused_notice").is_null(), !paused);
-                assert_eq!(s.settings("inbox_control_bar")["height"], 48);
+                let bar = s.settings("inbox_control_bar");
+                let bar_height = bar["height"].as_f64().unwrap();
+                assert!(bar_height >= 48.0);
+                let toggle = s.settings("toggle_inbox");
+                assert_eq!(
+                    toggle["y"].as_f64().unwrap() + toggle["height"].as_f64().unwrap() / 2.0,
+                    bar_height / 2.0
+                );
                 let scroll = s.settings("settings_channels_tab");
                 assert_eq!(scroll["height"], 368);
                 let summary = s.settings("inbox_control_summary");
@@ -501,6 +508,143 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     frame["request_id"] = action["request_id"].clone();
     f.send(p, frame);
     assert_eq!(inspect(&f, p).settings("toggle_inbox")["enabled"], true);
+}
+
+#[test]
+fn shared_service_mode_and_reuse_emit_scoped_actions_and_follow_projection() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    let reuse =
+        json!({"source_hub":"work","display_label":"@alice","values":{"account":"subscriber-42"}});
+    let channel = &mut cfg["channels"][0];
+    channel["supports_outbound_only"] = json!(true);
+    channel["inbound_mode"] = json!("primary");
+    channel["service_identity"] = json!("service-42");
+    channel["service_label"] = json!("@studio_bot");
+    channel["pairing_manual_disclosure"] = json!(true);
+    channel["reusable_binding"] = reuse.clone();
+    open_settings(&f, p, &cfg, "channels");
+    let s = inspect(&f, p);
+    assert_eq!(s.settings("stratum_hub:channel")["height"], 64);
+    assert_eq!(
+        s.settings("stratum_hub_title:channel")["text"],
+        "1. Shared Hub Service · @studio_bot"
+    );
+    assert_eq!(
+        s.settings("stratum_hub_status:channel")["text"],
+        "Service Ready"
+    );
+    let toggle = "toggle_channel_inbound_mode:channel";
+    let link = "reuse_channel_binding:channel";
+    assert_eq!(s.settings(toggle)["text"], "Use Outbound-Only");
+    assert_eq!(s.settings(link)["text"], "Link @alice (from 'work')");
+    control(&f, p, "manual_channel:channel");
+    assert!(inspect(&f, p).settings(link).is_null());
+    control(&f, p, "manual_channel:channel");
+    control(&f, p, link);
+    assert_eq!(inspect(&f, p).settings(link)["enabled"], false);
+    let save = latest(&f, p, "channel_save");
+    assert_eq!(save["hub"], "personal");
+    assert_eq!(save["channel_id"], "channel");
+    assert_eq!(
+        save["expected_service_identity"],
+        cfg["channels"][0]["service_identity"]
+    );
+    assert_eq!(save["values"], reuse["values"]);
+    assert_eq!(save["display_label"], reuse["display_label"]);
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["display_label"] = reuse["display_label"].clone();
+    cfg["channels"][0]["reusable_binding"] = Value::Null;
+    f.send(p, json!({"op":"settings","hub":"personal","request_id":save["request_id"],"source_op":"channel_save","ok":true,"settings":cfg}));
+    let s = inspect(&f, p);
+    assert!(s.settings(link).is_null());
+    assert_eq!(
+        s.settings("settings_channel_status:channel")["text"],
+        "Connected"
+    );
+    control(&f, p, toggle);
+    assert_eq!(inspect(&f, p).settings(toggle)["enabled"], false);
+    let change = latest(&f, p, "save_hub_service");
+    assert_eq!(change["hub"], "personal");
+    assert_eq!(change["channel_id"], "channel");
+    assert_eq!(change["inbound_mode"], "outbound_only");
+    assert!(change.get("values").is_none());
+    cfg["channels"][0]["inbound_mode"] = json!("outbound_only");
+    cfg["channels"][0]["can_pair"] = json!(false);
+    f.send(p, json!({"op":"settings","hub":"personal","request_id":change["request_id"],"source_op":"save_hub_service","ok":true,"settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        s.settings("settings_channel_status:channel")["text"],
+        "Outbound Only"
+    );
+    assert_eq!(
+        s.settings("stratum_hub_status:channel")["text"],
+        "Outbound Only (Shared Bot)"
+    );
+    assert_eq!(s.settings(toggle)["text"], "Enable Replies");
+    control(&f, p, toggle);
+    inspect(&f, p);
+    assert_eq!(latest(&f, p, "save_hub_service")["inbound_mode"], "primary");
+}
+
+#[test]
+fn long_reusable_binding_shares_the_visible_action_bar_with_manual_controls() {
+    let _lock = serial();
+    let source = "w".repeat(63);
+    let account = format!("@{}", "W".repeat(31));
+    let service = format!("@{}", "m".repeat(31));
+    for (mode, can_pair) in [("outbound_only", false), ("primary", true)] {
+        let (f, p) = ui_fixture();
+        let mut cfg = settings();
+        cfg["hubs"][1]["name"] = json!(source);
+        let ch = &mut cfg["channels"][0];
+        ch["hub_provided"] = json!(true);
+        ch["supports_outbound_only"] = json!(true);
+        ch["service_identity"] = json!("service-42");
+        ch["inbound_mode"] = json!(mode);
+        ch["can_pair"] = json!(can_pair);
+        ch["can_unpair"] = json!(false);
+        ch["pairing_manual_disclosure"] = json!(!can_pair);
+        ch["service_label"] = json!(service);
+        ch["reusable_binding"] = json!({"source_hub":source,"display_label":account,"values":{"account":"subscriber-42"}});
+        open_settings(&f, p, &cfg, "channels");
+        input(&f, p, "channel_field:channel:account", "typed-account");
+        let s = inspect(&f, p); // Includes AppKit hit-testing of enabled controls in the viewport.
+        let link = "reuse_channel_binding:channel";
+        assert_eq!(
+            s.settings(link)["tooltip"],
+            format!("Link {account} (from '{source}')")
+        );
+        assert_eq!(
+            s.settings("stratum_hub_title:channel")["text"],
+            format!("1. Shared Hub Service · {service}")
+        );
+        assert_eq!(s.settings("pair_channel:channel").is_null(), !can_pair);
+        let viewport = s.settings("settings_channels_tab");
+        let card = s.settings("settings_channel:channel");
+        let bar = s.settings("stratum_user:channel");
+        for id in [link, "test_channel:channel", "save_channel:channel"] {
+            let control = s.settings(id);
+            assert_eq!(control["hidden"], false, "{mode}: {id}");
+            assert_eq!(control["enabled"], true, "{mode}: {id}");
+            for (axis, extent, origin) in
+                [("x", "width", "content_x"), ("y", "height", "content_y")]
+            {
+                let start = card[axis].as_f64().unwrap()
+                    + bar[axis].as_f64().unwrap()
+                    + control[axis].as_f64().unwrap()
+                    - viewport[origin].as_f64().unwrap();
+                assert!(
+                    start >= 0.
+                        && start + control[extent].as_f64().unwrap()
+                            <= viewport[extent].as_f64().unwrap(),
+                    "{mode}: {id} outside {axis} viewport"
+                );
+            }
+        }
+    }
 }
 
 #[test]

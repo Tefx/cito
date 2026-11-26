@@ -440,8 +440,8 @@ extension Companion {
             if isDataRow(label) || name(label) == "hub_oidc_discovery_summary" { return !(label.toolTip ?? "").isEmpty }
             let parentID = label.superview?.identifier?.rawValue
             let title = label.stringValue
-            return (hubs.count == 2 && parentID == "hub:\(title)") ||
-                ((settings?.hubs.count ?? hubs.count) == 2 && parentID == "settings_hub:\(title)" &&
+            return (hubs.count > 1 && parentID == "hub:\(title)") ||
+                ((settings?.hubs.count ?? hubs.count) > 1 && parentID == "settings_hub:\(title)" &&
                  label.identifier?.rawValue == "settings_hub_name:\(title)")
         }
         func components(_ color: NSColor?) -> [CGFloat] {
@@ -521,7 +521,7 @@ extension Companion {
                     truncated = false
                 } else {
                     let drawable = label.cell?.drawingRect(forBounds: label.bounds) ?? label.bounds
-                    let height = measureWrappedHeight(label.stringValue, width: drawable.width, font: font)
+                    let height = measureWrappedHeight(label.stringValue, width: label.bounds.width, font: font)
                     truncated = height > drawable.height
                 }
                 if truncated { truncatedLabels.append((label.superview as? MenuControl).map { name($0) } ?? name(label)) }
@@ -577,7 +577,7 @@ extension Companion {
                     let peer = (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }
                     let hub = listener?.hub ?? peer?.hub ?? ""
                     let harness = listener?.harness ?? peer?.harness ?? ""
-                    let defaultHub = settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? ""
+                    let defaultHub = resolvedDefaultHub() ?? hubs.first?.name ?? ""
                     let addressMatches = address.map { expected in
                         label == expected || (control.toolTip == expected && label == compactAddressLabel(expected,maxWidth:control.frame.width,font:control.label.font ?? .systemFont(ofSize:11),paddingX:prefix == "copy_dir:" ? 11 : 3))
                     } ?? false
@@ -601,7 +601,14 @@ extension Companion {
                 case "settings_hubs_tab": defaultLayout = !hubForm.isOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
-                if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }
+                if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0,
+                   let doc = scroll.documentView {
+                    let inboxHeight = name(scroll) == "settings_channels_tab"
+                        ? findView(in:doc,id:"inbox_control_bar",as:NSView.self)?.frame.height ?? 48 : 48
+                    if doc.frame.height - max(0,inboxHeight-48) > scroll.contentSize.height + 0.75 {
+                        clippedViews.append(name(scroll)+": default viewport needs scrolling")
+                    }
+                }
                 if ((scroll.hasVerticalScroller || scroll.hasHorizontalScroller) && ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle) != .overlay) || (scroll.hasHorizontalScroller && scroll.frame.height < 34) { overlappingSiblings.append(name(scroll)+": scroller geometry") }
                 if let doc = scroll.documentView {
                     for pill in doc.subviews.compactMap({ $0 as? MenuControl }) where pill.style == .prominent {

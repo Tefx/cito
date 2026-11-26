@@ -1771,6 +1771,9 @@ pub fn run_setup_cli(args: &[String]) {
                     return Err(format!("Unknown hub: {n}"));
                 }
             }
+            if let Some(order) = rest.get_mut("hub_order").and_then(Value::as_array_mut) {
+                order.retain(|name| name.as_str().is_some_and(|name| hubs.contains_key(name)));
+            }
 
             if share_hub.is_some() || share_port.is_some() {
                 let mut patch = json!({});

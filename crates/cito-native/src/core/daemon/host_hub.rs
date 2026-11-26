@@ -485,6 +485,7 @@ impl DaemonService {
         // Finish all workers using old credentials before accepting on the new generation.
         self.host_server.take();
         self.host_server = prepared.map(|server| server.start(&self.local));
+        self.reconcile_local_channels_active();
     }
 
     pub(super) fn sync_host_hub(&mut self, host: &Value) -> Result<(), String> {
@@ -492,8 +493,8 @@ impl DaemonService {
             return Ok(());
         }
         let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
-        if !running {
-            self.host_server.take();
+        if !running && self.host_server.is_some() {
+            self.install_host_server(None);
         }
         if self.applied_host_config.as_ref() == Some(host) && (host["enabled"] != true || running) {
             // Restoring the applied config resolves reload errors, not rejected UI actions.
