@@ -344,13 +344,12 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
         assert!(trailing_top.is_finite());
         assert!(summary["y"].as_f64().unwrap() >= trailing_top + 6.0);
         assert_eq!(summary["x"], 12);
-        assert_eq!(summary["width"], 432);
-        assert!(
-            s.settings("stratum_user:channel")["height"]
-                .as_f64()
-                .unwrap()
-                < 368.0
+        let stratum = s.settings("stratum_user:channel");
+        assert_eq!(
+            summary["width"].as_f64().unwrap(),
+            stratum["width"].as_f64().unwrap() - 24.0
         );
+        assert!(stratum["height"].as_f64().unwrap() < 368.0);
     }
     // An open-settings receipt can observe a different inbox than the last state.
     cfg["hubs"][0]["user"] = json!("bob");

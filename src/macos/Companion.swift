@@ -1,7 +1,9 @@
 import AppKit
 import Darwin
 
-final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSWindowDelegate {
+final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSWindowDelegate, NSApplicationDelegate {
+    private enum QuitState { case running, awaitingDaemon, daemonClosedPipe }
+    private var quitState = QuitState.running
     let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1"
     var status: NSStatusItem?
     var headlessStatusButton: NSButton?
@@ -57,7 +59,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         var nextPart = 0
     }
     var pendingMessageCopy: PendingMessageCopy?
-    var activityTotal = 0
+    var activityTotal: Int?
     var activityHasAny = false
     var activityUnreadCount = 0
     var serverActivityFilter: String?
@@ -88,13 +90,14 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     var activityCopiedUntil: [String: Date] = [:]
     var settingsRebuildDeferred = false
     var menuRebuildDeferred = false
-    var headlessMenuPanel: KeyPanel?
+    var headlessMenuPanel: KeyWindow?
     var directoryVisible = false
     var directoryQuery = ""
     var directoryScopeFilter = "all" { didSet { if oldValue != directoryScopeFilter { clearDirectoryActionError() } } }
     var directoryHarnessFilter = "all" { didSet { if oldValue != directoryHarnessFilter { clearDirectoryActionError() } } }
     var directorySelectedIndex = 0
-    var directoryPanel: KeyPanel?
+    var restoringDirectorySelection = false
+    var directoryPanel: KeyWindow?
     var directorySearchField: NSSearchField?
     var directoryModeDirPill: MenuControl?
     var directoryModeActPill: MenuControl?
@@ -144,7 +147,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     var settingsActiveTab = "apps" { didSet {
         if oldValue != settingsActiveTab { settingsBannerError = nil; hostPort.error = nil }
     } }
-    var settingsPanel: KeyPanel?
+    var settingsPanel: KeyWindow?
     struct PendingHubSave {
         let profile: HubFormProfile
         let requestId: String
@@ -359,8 +362,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     var settingsScrollOffsets: [String: CGFloat] = [:]
     var pendingOnboardingMarker: String?
     var settingsKeyMonitor: Any?
-    var uninstallConfirmOpen = false
-    var uninstallPurgeData = false
+    var activeUninstallAlert: NSAlert?
     var hasCheckedFirstLaunchOnboarding = false
     var clipboardString = ""
     var hasRenderedState = false
@@ -372,16 +374,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         if main.items.isEmpty {
             let appItem = NSMenuItem()
             let appMenu = NSMenu(title: "Cito")
-            for (title, action, key) in [
-                ("Settings…", #selector(openSettingsShortcut), ","),
-                ("Directory & Activity…", #selector(openDirectoryShortcut), "k"),
-                ("Close Window", #selector(closeActiveWindowShortcut), "w"),
-                ("Quit Cito", #selector(quitMenu), "q")
-            ] {
-                let command = NSMenuItem(title: title, action: action, keyEquivalent: key)
-                command.target = self
-                appMenu.addItem(command)
-            }
+            appMenu.addItem(withTitle: "Settings…", action: #selector(openSettingsShortcut), keyEquivalent: ",").target = self
+            appMenu.addItem(withTitle: "Directory & Activity…", action: #selector(openDirectoryShortcut), keyEquivalent: "k").target = self
+            appMenu.addItem(.separator())
+            appMenu.addItem(withTitle: "Hide Cito", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h").target = NSApp
+            let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+            hideOthers.target = NSApp
+            hideOthers.keyEquivalentModifierMask = [.command, .option]
+            appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "").target = NSApp
+            appMenu.addItem(.separator())
+            appMenu.addItem(withTitle: "Quit Cito", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
             appItem.submenu = appMenu; main.addItem(appItem)
         }
         if !main.items.contains(where: { $0.submenu?.title == "Edit" }) {
@@ -395,10 +397,65 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             }
             item.submenu = edit; main.addItem(item)
         }
+        if NSApp.windowsMenu == nil {
+            let item = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+            let windows = NSMenu(title: "Window")
+            windows.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+            windows.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+            windows.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+            windows.addItem(.separator())
+            windows.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "").target = NSApp
+            item.submenu = windows; main.addItem(item)
+            NSApp.windowsMenu = windows
+        }
         if NSApp.mainMenu == nil { NSApp.mainMenu = main }
     }
 
-    func presentPanel(_ window: KeyPanel, focus: (() -> NSView?)? = nil) {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        switch quitState {
+        case .daemonClosedPipe: return .terminateNow
+        case .awaitingDaemon: return .terminateLater
+        case .running:
+            quitState = .awaitingDaemon
+            cardMenu.cancelTracking()
+            // Keep the fallback live even if the daemon stops reading stdout.
+            // This short pipe write is atomic; no other actions are sent while quitting.
+            DispatchQueue.global().async {
+                Array("{\"op\":\"quit\"}\n".utf8).withUnsafeBytes { frame in
+                    while Darwin.write(STDOUT_FILENO, frame.baseAddress, frame.count) < 0 && errno == EINTR {}
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard self?.quitState == .awaitingDaemon else { return }
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
+
+    private func finishAfterDaemonEOF() {
+        let wasWaiting = quitState == .awaitingDaemon
+        quitState = .daemonClosedPipe
+        if wasWaiting { NSApp.reply(toApplicationShouldTerminate: true) }
+        else { NSApp.terminate(nil) }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        let openWindows = [settingsVisible ? settingsPanel : nil, directoryVisible ? directoryPanel : nil].compactMap { $0 }
+        let ordered = [sender.keyWindow, sender.mainWindow].compactMap { $0 } + sender.orderedWindows
+        if let window = ordered.compactMap({ $0 as? KeyWindow }).first(where: { openWindows.contains($0) }) ?? openWindows.first {
+            presentPanel(window)
+        } else {
+            openSettingsPanel()
+        }
+        return false
+    }
+
+    func restoreAccessoryPolicyIfNoWindows() {
+        if !headless && !settingsVisible && !directoryVisible { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    func presentPanel(_ window: KeyWindow, focus: (() -> NSView?)? = nil) {
         if !headless && window.isMiniaturized { window.deminiaturize(nil) }
         func orderFront() {
             // Headless panels use the same focus passes without taking over the desktop.
@@ -408,7 +465,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 window.makeKeyAndOrderFront(nil)
                 window.layoutWindowButtons()
             }
-            if !(window.firstResponder is NSTextView), let view = focus?() { window.makeFirstResponder(view) }
+            if !(window.firstResponder is NSTextView),
+               let view = focus?() ?? (window === self.settingsPanel ? self.hubFormFocusTarget() : nil) {
+                window.makeFirstResponder(view)
+            }
         }
         orderFront()
         // Status-menu tracking can reclaim key focus as it finishes closing.
@@ -421,32 +481,29 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender === settingsPanel { handleSettingsKey("command-w"); return false }
-        if sender === directoryPanel { handleDirectoryKey("command-w"); return false }
-        return true
+        guard sender === settingsPanel || sender === directoryPanel else { return true }
+        sender.makeFirstResponder(nil)
+        if sender === settingsPanel { closeSettingsPanel() }
+        else { closeDirectoryPanel() }
+        return false
     }
 
-    @objc func closeActiveWindowShortcut() {
-        if NSApp.keyWindow === settingsPanel && settingsVisible { handleSettingsKey("command-w") }
-        else if NSApp.keyWindow === directoryPanel && directoryVisible { handleDirectoryKey("command-w") }
-    }
-
-    func allowPanelKey(_ key: String, in window: KeyPanel?) -> Bool {
+    func allowPanelKey(_ key: String, in window: NSWindow?) -> Bool {
         guard let window, (window.firstResponder as? NSTextInputClient)?.hasMarkedText() == true else { return true }
         switch key {
         case "command-3" where window !== settingsPanel: return false
-        case "command-w", "command-m", "command-comma", "command-k", "command-1", "command-2", "command-3":
+        case "command-w", "command-comma", "command-k", "command-1", "command-2", "command-3":
             return window.makeFirstResponder(nil)
         default: return false
         }
     }
 
     func handleTextEditShortcut(_ key: String, in window: NSWindow?) -> Bool {
-        guard !(uninstallConfirmOpen && window === settingsPanel),
-              let editor = window?.firstResponder as? NSTextView else { return false }
+        guard let editor = window?.firstResponder as? NSTextView else { return false }
+        let field = editor.delegate as? NSTextField
+        guard headless || (menuOpen && field != nil && field === renameField && field?.enclosingMenuItem?.menu === cardMenu) else { return false }
         let key = key.lowercased()
         guard !editor.hasMarkedText(), editor.isEditable || (editor.isSelectable && ["command-a", "command-c"].contains(key)) else { return false }
-        let field = editor.delegate as? NSTextField
         func changeText(_ change: () -> Void) {
             editor.allowsUndo = true
             editor.breakUndoCoalescing()
@@ -491,20 +548,31 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         return true
     }
 
+    @objc func preferredScrollerStyleDidChange(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.rebuildSettingsPanel(preservingEditor: true, scrollerStyle: NSScroller.preferredScrollerStyle)
+            self?.rebuild(preservingEditor: true)
+        }
+    }
+
     func start() {
         ensureEditMainMenu()
+        if !headless {
+            NotificationCenter.default.addObserver(self, selector: #selector(preferredScrollerStyleDidChange(_:)),
+                name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+        }
         signal(SIGPIPE, SIG_IGN)
         cardMenu.autoenablesItems = false
         cardMenu.delegate = self
         settingsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
             let window = event.window ?? NSApp.keyWindow
-            if self.uninstallConfirmOpen && window === self.settingsPanel && event.keyCode == 48 { return nil }
+            if window?.sheetParent === self.settingsPanel && window?.sheetParent != nil { return event }
             let onPanelKey: ((String) -> Void)?
             if self.directoryVisible && window === self.directoryPanel { onPanelKey = self.handleDirectoryKey }
             else if self.settingsVisible && window === self.settingsPanel { onPanelKey = self.handleSettingsKey }
             else { onPanelKey = nil }
-            if let key = panelShortcutKey(event) {
+            if let key = panelShortcutKey(event, includingNative: self.headless || onPanelKey == nil) {
                 if let onPanelKey { onPanelKey(key); return nil }
                 if self.handleTextEditShortcut(key, in: window) { return nil }
                 if key == "command-comma" { self.openSettingsShortcut(); return nil }
@@ -514,7 +582,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             // AppKit can match punctuation key equivalents with an extra Shift.
             // Do not let a rejected window shortcut fall through to the application menu.
             if event.modifierFlags.contains(.command), let character = panelShortcutCharacter(event),
-               [",", "k", "w"].contains(character) { return nil }
+               [",", "k"].contains(character) || (self.headless && character == "w") { return nil }
             // Text Services owns navigation and commit keys while the field editor is active.
             guard let onPanelKey, !(window?.firstResponder is NSTextView),
                   let key = [53:"escape",126:"up",125:"down",36:"return",76:"return",51:"delete",117:"delete"][event.keyCode] else { return event }
@@ -539,7 +607,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             while true {
                 let n = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
                 if n < 0 && errno == EINTR { continue }
-                if n <= 0 { exit(0) }
+                if n <= 0 {
+                    RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self] in self?.finishAfterDaemonEOF() }
+                    return
+                }
                 for byte in bytes.prefix(n) {
                     if byte == 10 {
                         let line = buffer; buffer.removeAll(keepingCapacity: true)
@@ -644,7 +715,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
 
     private func updateActivity(_ frame: Frame) -> Bool {
         guard !frame.preservesCollection("activity"), let items = frame.activity else { return false }
-        let total = frame.activity_total ?? activityTotal
+        let total = frame.activity_total
         let unread = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
         let query = frame.activity_query ?? ""
         let changed = activityAllItems != items || activityTotal != total || activityUnreadCount != unread ||
@@ -771,7 +842,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         }
         panel.recalculateKeyViewLoop()
         panel.makeFirstResponder(nil)
-        presentPanel(panel) { target }
+        _ = applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
         let initialFocus = target.currentEditor() != nil && panel.firstResponder === target.currentEditor()
 
         // Change the responder in the same turn, before the deferred presentation pass.
@@ -947,7 +1018,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild(preservingEditor: true)
-            if settingsPanel != nil { rebuildSettingsPanel(revealAddHub: isAddHubError) }
+            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: sourceOp == "open_settings", revealAddHub: isAddHubError) }
             return
         }
         // State receipts still pass through normal failure and Directory action
@@ -978,7 +1049,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
                !(frame.source_op == "set_host_hub" && presentationError(value.host_hub.error ?? "") == presentationError(warning)) { settingsBannerError = warning }
             if changed || receipt || uiChanged || frame.request_id == hostPort.requestId || settingsBannerError != previousSettingsBanner {
-                rebuildSettingsPanel(preservingEditor: !receipt, revealAddHub: matchingHubSave && hubForm.error != nil)
+                rebuildSettingsPanel(preservingEditor: !receipt || frame.source_op == "open_settings", revealAddHub: matchingHubSave && hubForm.error != nil)
             }
             return
         }
@@ -1068,8 +1139,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                     let markerPath = expandedStateDir + "/onboarding-shown"
                     if !FileManager.default.fileExists(atPath: markerPath) {
                         pendingOnboardingMarker = markerPath
-                        settingsActiveTab = "apps"
-                        openSettingsPanel()
+                        openSettingsPanel(tab: "apps")
                     }
                 }
             }
@@ -1107,7 +1177,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     }
 
     func emit(_ action: [String: Any], userInitiated: Bool = true, appCheck: Bool = false) {
+        guard quitState == .running else { return }
         let operation = action["op"] as? String ?? ""
+        if operation == "quit" { NSApp.terminate(nil); return }
         let passive = ["query_directory", "refresh_available"].contains(operation)
         if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild(preservingEditor: true) }
         var outgoing = action
@@ -1194,16 +1266,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        if uninstallConfirmOpen, let control = obj.object as? NSControl, control.window === settingsPanel { return }
         if let field = obj.object as? NSSearchField, field === directorySearchField {
-            activityClearConfirm = false; clearDirectoryActionError(); updateDirectoryFacetStyles()
-            directoryQuery = field.stringValue
-            if directoryMode == "activity" {
-                applyActivityFilter()
-            } else {
-                applyDirectoryFilter()
-            }
-            queryDirectory()
+            updateDirectoryQuery(field.stringValue)
             return
         }
         if let field = obj.object as? NSTextField, field === composerInputField { composerDraftIdempotencyKey = UUID().uuidString }
@@ -1253,10 +1317,6 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             return false
         }
         if control.window === settingsPanel {
-            if uninstallConfirmOpen {
-                if commandSelector == #selector(NSResponder.cancelOperation(_:)) { handleSettingsKey("escape") }
-                return true
-            }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleSettingsKey("return"); return true }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 handleSettingsKey("escape")

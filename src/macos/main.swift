@@ -8,6 +8,7 @@ atexit { if usesPrivatePasteboard { appPasteboard.releaseGlobally() } }
 
 let app = NSApplication.shared
 let companion = Companion()
+app.delegate = companion
 app.setActivationPolicy(.accessory)
 companion.start()
 app.run()

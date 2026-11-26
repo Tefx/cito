@@ -68,9 +68,18 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     func place(_ view: NSView, x: CGFloat) {
         view.frame.origin = NSPoint(x: x, y: y + (height - view.frame.height) / 2)
     }
-    for view in leftItems { place(view, x: left); left += view.frame.width + spacing }
-    for view in rightItems.reversed() { right -= view.frame.width; place(view, x: right); right -= spacing }
+    for view in leftItems {
+        view.autoresizingMask.subtract([.width, .minXMargin])
+        place(view, x: left); left += view.frame.width + spacing
+    }
+    for view in rightItems.reversed() {
+        view.autoresizingMask.remove(.width)
+        view.autoresizingMask.insert(.minXMargin)
+        right -= view.frame.width; place(view, x: right); right -= spacing
+    }
     if let view = flexible, !view.isHidden {
+        view.autoresizingMask.remove(.minXMargin)
+        view.autoresizingMask.insert(.width)
         view.frame = NSRect(x: left, y: y + (height - view.frame.height) / 2,
                             width: max(0, right - left), height: view.frame.height)
     }
@@ -84,7 +93,7 @@ func makePillTrack(_ frame: NSRect, radius: CGFloat, bordered: Bool = true) -> S
 enum PillAlignment { case leading, trailing }
 @discardableResult
 func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,
-                    spacing: CGFloat = 4, trackRadius: CGFloat? = nil, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
+                    spacing: CGFloat = 4, trackRadius: CGFloat? = nil, pills: [NSView], activePredicate: (NSView) -> Bool) -> NSScrollView {
     let visible = pills.filter { !$0.isHidden }
     let totalWidth = visible.isEmpty ? 0 : visible.enumerated().reduce(CGFloat(4)) {
         $0 + $1.element.frame.width + ($1.offset > 0 ? spacing : 0)
@@ -92,9 +101,9 @@ func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: 
     let trackWidth = min(frame.width, max(totalWidth, 0))
     let scrollFrame = NSRect(x: alignment == .trailing ? frame.maxX - trackWidth : frame.minX,
                              y: frame.minY, width: trackWidth, height: frame.height)
-    let scroll = OverlayScrollView(frame: scrollFrame)
+    let scroll = NSScrollView(frame: scrollFrame)
     scroll.identifier = NSUserInterfaceItemIdentifier(id)
-    scroll.scrollerStyle = .overlay; scroll.drawsBackground = false
+    scroll.drawsBackground = false
     scroll.hasHorizontalScroller = false; scroll.hasVerticalScroller = false
     if let radius = trackRadius {
         scroll.wantsLayer = true
@@ -261,39 +270,73 @@ func panelShortcutCharacter(_ event: NSEvent) -> String? {
     return character.flatMap { panelShortcutCharacters.contains($0) ? $0 : nil } ?? panelShortcutKeys[event.keyCode]
 }
 
-func panelShortcutKey(_ event: NSEvent) -> String? {
+func panelShortcutKey(_ event: NSEvent, includingNative: Bool) -> String? {
     let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
     guard flags == [.command] || flags == [.command, .shift], let key = panelShortcutCharacter(event) else { return nil }
+    if !includingNative && ![",", "k", "1", "2", "3"].contains(key) { return nil }
     if flags.contains(.shift) { return key == "z" ? "shift-command-z" : nil }
     return key == "," ? "command-comma" : "command-" + key
 }
 
-func makeFloatingKeyPanel(width: CGFloat, height: CGFloat, headerHeight: CGFloat, appearance: NSAppearance?) -> KeyPanel {
-    let panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-                         styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
-    panel.headerHeight = headerHeight
-    panel.titleVisibility = .hidden
-    panel.titlebarAppearsTransparent = true
-    for type in KeyPanel.chromeButtons {
-        panel.standardWindowButton(type)?.isHidden = false
-        panel.standardWindowButton(type)?.isEnabled = type != .zoomButton
+func makeKeyWindow(title: String, width: CGFloat, height: CGFloat, headerHeight: CGFloat, appearance: NSAppearance?) -> KeyWindow {
+    let window = KeyWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                           styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    window.headerHeight = headerHeight
+    window.title = title
+    window.titleVisibility = .hidden
+    window.titlebarAppearsTransparent = true
+    for type in KeyWindow.chromeButtons {
+        window.standardWindowButton(type)?.isHidden = false
+        window.standardWindowButton(type)?.isEnabled = type != .zoomButton
     }
-    panel.appearance = appearance
-    panel.level = .floating
-    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    panel.isFloatingPanel = true
-    panel.hidesOnDeactivate = false
-    panel.isOpaque = false
-    panel.backgroundColor = .clear
-    panel.hasShadow = true
-    panel.isMovableByWindowBackground = true
-    return panel
+    window.appearance = appearance
+    window.level = .normal
+    window.isOpaque = false
+    window.backgroundColor = .clear
+    window.hasShadow = true
+    window.isMovableByWindowBackground = true
+    return window
 }
 
-final class KeyPanel: NSPanel {
+final class KeyWindow: NSWindow {
     static let chromeButtons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
     var headerHeight: CGFloat?
     var onKey: ((String) -> Void)?
+    var handlesNativeShortcuts = false
+
+    func restorePlacement(named name: NSWindow.FrameAutosaveName,
+                          visibleFrames: [NSRect] = NSScreen.screens.map(\.visibleFrame),
+                          fallback: NSRect? = NSScreen.main?.visibleFrame) {
+        let size = frame.size
+        let placement: NSRect?
+        if setFrameUsingName(name, force: true) {
+            // These panels have fixed layouts; restore placement, not an old layout's size.
+            let saved = NSRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height)
+            placement = Self.usablePlacement(saved, visibleFrames: visibleFrames, fallback: fallback)
+        } else {
+            placement = nil
+        }
+        // AppKit reapplies the saved frame when the autosave name is registered.
+        setFrameAutosaveName(name)
+        if let placement {
+            if placement != frame { setFrame(placement, display: false) }
+        } else {
+            center()
+        }
+    }
+
+    private static func usablePlacement(_ saved: NSRect, visibleFrames: [NSRect], fallback: NSRect?) -> NSRect {
+        func coverage(_ area: NSRect) -> CGFloat {
+            let overlap = area.intersection(saved)
+            return overlap.isEmpty ? 0 : overlap.width * overlap.height
+        }
+        if visibleFrames.contains(where: { $0.contains(saved) }) { return saved }
+        let best = visibleFrames.max { coverage($0) < coverage($1) }
+        guard let area = best.flatMap({ coverage($0) > 0 ? $0 : nil }) ?? fallback ?? best else { return saved }
+        let width = min(saved.width, area.width), height = min(saved.height, area.height)
+        return NSRect(x: max(area.minX, min(saved.minX, area.maxX - width)),
+                      y: max(area.minY, min(saved.minY, area.maxY - height)), width: width, height: height)
+    }
 
     func layoutWindowButtons() {
         guard let headerHeight, let content = contentView else { return }
@@ -312,10 +355,9 @@ final class KeyPanel: NSPanel {
     }
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        isReleasedWhenClosed = false
         autorecalculatesKeyViewLoop = true
     }
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
     override func resignKey() {
         super.resignKey()
         MenuControl.clearHoverWhere { $0.window === self }
@@ -330,20 +372,11 @@ final class KeyPanel: NSPanel {
         return accepted
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if let key = panelShortcutKey(event), let onKey { onKey(key); return true }
+        if let onKey, let key = panelShortcutKey(event, includingNative: handlesNativeShortcuts) {
+            onKey(key)
+            return true
+        }
         return super.performKeyEquivalent(with: event)
-    }
-}
-
-final class OverlayScrollView: NSScrollView {
-    var nativeScrollerStyle: NSScroller.Style { super.scrollerStyle }
-    override var scrollerStyle: NSScroller.Style {
-        get { .overlay }
-        set { super.scrollerStyle = .overlay }
-    }
-    override func tile() {
-        if super.scrollerStyle != .overlay { super.scrollerStyle = .overlay }
-        super.tile()
     }
 }
 
@@ -397,7 +430,9 @@ final class MenuControl: NSControl {
     var centerSymbolView: NSImageView?
     var accessorySymbolView: NSImageView? { didSet { applyVisualState() } }
     var symbolName: String?
-    var pressed: (() -> Void)?
+    private var gestureToken: UInt64 = 0
+    var pressed: (() -> Void)? { didSet { invalidatePress() } }
+    func invalidatePress() { gestureToken &+= 1; isPressed = false }
     var style: Style = .neutral { didSet { layoutContents(); applyVisualState() } }
     var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
     // Reserve the resting title while pending so draft edits can restore it in place.
@@ -407,6 +442,7 @@ final class MenuControl: NSControl {
     var restingTitle: String?
     var restingAccessibilityLabel: String?
     private(set) var isHovered = false
+    private var isPressed = false { didSet { if oldValue != isPressed { applyVisualState() } } }
     private var trackingArea: NSTrackingArea?
     static weak var activeHovered: MenuControl?
     private static var hoverWatchTimer: Timer?
@@ -422,6 +458,7 @@ final class MenuControl: NSControl {
         super.init(frame: frame)
         wantsLayer = true; layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous
+        focusRingType = .default
         label.font = .systemFont(ofSize:11,weight:.medium)
         label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1
         label.alignment = .center; label.textColor = color; normalColor = color
@@ -459,13 +496,61 @@ final class MenuControl: NSControl {
         layoutContents()
         applyVisualState()
     }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var acceptsFirstResponder: Bool {
+        enclosingMenuItem == nil && isEnabled && pressed != nil && !isHiddenOrHasHiddenAncestor
+    }
+    override var canBecomeKeyView: Bool { acceptsFirstResponder }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        let radius = layer?.cornerRadius ?? 0
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { enclosingMenuItem != nil }
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden && !isHiddenOrHasHiddenAncestor && alphaValue > 0.01 else { return nil }
+        guard !isHiddenOrHasHiddenAncestor && alphaValue > 0.01 else { return nil }
         return frame.contains(point) ? self : nil
     }
-    override func mouseDown(with event: NSEvent) { guard isEnabled else { return }; pressed?() }
-    override func accessibilityPerformPress() -> Bool { guard isEnabled else { return false }; pressed?(); return true }
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, pressed != nil else { return }
+        // Custom NSMenuItem views must handle the press without ending menu tracking.
+        if enclosingMenuItem != nil { performClick(nil); return }
+        guard let window else { return }
+        trackWindowPress {
+            window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true)
+        }
+    }
+    func trackWindowPress(nextEvent: () -> NSEvent?) {
+        guard isEnabled, pressed != nil, let trackingWindow = window else { return }
+        let capturedToken = gestureToken
+        trackingWindow.makeFirstResponder(self)
+        isPressed = true
+        defer { isPressed = false }
+        while let event = nextEvent(), window === trackingWindow, isEnabled, !isHiddenOrHasHiddenAncestor {
+            let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+            if event.type == .leftMouseUp {
+                isPressed = false
+                if capturedToken == gestureToken && inside { performClick(nil) }
+                return
+            }
+            isPressed = capturedToken == gestureToken && inside
+        }
+    }
+    override func keyDown(with event: NSEvent) {
+        if enclosingMenuItem == nil, event.characters == " ",
+           event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            if !event.isARepeat { performClick(nil) }
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+    override func performClick(_ sender: Any?) {
+        if isEnabled { pressed?() }
+    }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled, pressed != nil else { return false }
+        performClick(nil)
+        return true
+    }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if trackingArea == nil {
@@ -562,7 +647,8 @@ final class MenuControl: NSControl {
             let copiedBackground = CitoPalette.surfaceBackground.blended(
                 withFraction: copiedFill?.alphaComponent ?? 0,
                 of: copiedFill?.withAlphaComponent(1) ?? .clear)
-            layer?.backgroundColor = (isCopied ? copiedBackground ?? CitoPalette.surfaceBackground : fill).cgColor
+            let background = isCopied ? copiedBackground ?? CitoPalette.surfaceBackground : fill
+            layer?.backgroundColor = (isPressed ? NSColor.shadowColor.withAlphaComponent(0.28) : background).cgColor
             layer?.borderColor = (isCopied ? CitoPalette.copiedBorder : border)?.cgColor
             layer?.borderWidth = isCopied || border != nil ? 1 : 0
         }
@@ -602,10 +688,6 @@ final class MenuControl: NSControl {
     }
 }
 
-final class ModalOverlay: NSView {
-    override func hitTest(_ point: NSPoint) -> NSView? { guard frame.contains(point) else{return nil}; return super.hitTest(point) ?? self }
-    override func mouseDown(with event: NSEvent) {}
-}
 final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }

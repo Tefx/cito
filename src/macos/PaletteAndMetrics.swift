@@ -9,7 +9,6 @@ enum CitoMetrics {
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
     static let cardRadius: CGFloat = 10
-    static let activityTextWidth: CGFloat = 492
 }
 
 func compactHomePath(_ path: String, home: String = NSHomeDirectory()) -> String {
@@ -122,12 +121,6 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
 func measureWrappedHeight(_ text: String, width: CGFloat, font: NSFont) -> CGFloat {
     ceil((text as NSString).boundingRect(with: NSSize(width: max(1, width - 4), height: .greatestFiniteMagnitude),
         options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font]).height)
-}
-
-func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
-    let font = NSFont.systemFont(ofSize: 12)
-    guard selected && (measureTextWidth(text, font: font) > CitoMetrics.activityTextWidth || text.contains("\n")) else { return 60 }
-    return min(108, max(60, 44 + measureWrappedHeight(text, width: CitoMetrics.activityTextWidth, font: font)))
 }
 
 func cleanHostDisplay(_ raw: String) -> String {

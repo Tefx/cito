@@ -540,6 +540,29 @@ fn local_key_monitor_accepts_only_exact_command_shortcuts() {
 }
 
 #[test]
+fn settings_checkbox_first_mouse_activates_without_changing_launch_preference() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "apps");
+    let id = "settings_launch_at_login";
+    assert_eq!(inspect(&f, p).settings(id)["accepts_first_mouse"], false);
+    f.send(p, json!({"op":"test_window_button_events","id":id}));
+    wait(|| {
+        f.output(p, true)
+            .contains("window-button-event key-activation")
+    });
+    let output = f.output(p, true);
+    let gestures: Vec<_> = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("cito-ui: window-button-event "))
+        .collect();
+    assert_eq!(gestures, ["first-click false true 0", "key-activation 1"]);
+    wait(|| f.frames_for(p, "set_launch_at_login").count() == 1);
+    assert_eq!(latest(&f, p, "set_launch_at_login")["enabled"], true);
+    assert_eq!(inspect(&f, p).settings(id)["accessibility_value"], 0);
+}
+
+#[test]
 fn native_form_accessibility_checkbox_values_and_tab_navigation() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -615,13 +638,40 @@ fn native_form_accessibility_checkbox_values_and_tab_navigation() {
         f.send(p, json!({"op":"settings","settings":cfg}));
         let s = inspect(&f, p);
         let checkbox = s.settings("settings_launch_at_login");
+        assert_eq!(checkbox["native_button"], true);
+        assert_eq!(checkbox["can_become_key_view"], true);
         assert_eq!(checkbox["accessibility_role"], "AXCheckBox");
         assert_eq!(checkbox["accessibility_value"], u8::from(enabled));
         assert_eq!(checkbox["accessibility_label"], "Start Cito at Login");
     }
-    control(&f, p, "open_uninstall_confirm");
+    control(&f, p, "settings_launch_at_login");
+    inspect(&f, p);
+    assert_eq!(latest(&f, p, "set_launch_at_login")["enabled"], false);
+
+    let trigger = "open_uninstall_confirm";
+    f.send(p, json!({"op":"test_control","id":trigger,"drag":[false]}));
+    let canceled = inspect(&f, p);
+    assert!(canceled.settings("uninstall_alert_sheet").is_null());
+    assert_eq!(canceled.settings(trigger)["accepts_first_mouse"], false);
+    assert_eq!(canceled.settings(trigger)["can_become_key_view"], true);
+    assert_eq!(canceled.settings(trigger)["focused"], true);
+    f.send(p, json!({"op":"test_tab","backward":true}));
+    assert_eq!(inspect(&f, p).settings(trigger)["focused"], false);
+    f.send(p, json!({"op":"test_tab"}));
+    assert_eq!(inspect(&f, p).settings(trigger)["focused"], true);
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"space","via":"responder"}),
+    );
+    assert!(inspect(&f, p).settings("uninstall_alert_sheet").is_object());
+    control(&f, p, "cancel_uninstall_all");
+    f.send(
+        p,
+        json!({"op":"test_control","id":trigger,"drag":[false,true]}),
+    );
     for enabled in [false, true] {
         let checkbox = inspect(&f, p).settings("uninstall_purge_data");
+        assert_eq!(checkbox["native_button"], true);
         assert_eq!(checkbox["accessibility_role"], "AXCheckBox");
         assert_eq!(checkbox["accessibility_value"], u8::from(enabled));
         assert_eq!(

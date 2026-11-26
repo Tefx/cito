@@ -130,7 +130,7 @@ extension Companion: NSMenuDelegate {
         return copy
     }
 
-    func rebuild(preservingEditor: Bool = false) {
+    func rebuild(preservingEditor: Bool = false, scrollerStyle: NSScroller.Style? = nil) {
         updateStatusItem()
         menuDirty = true
         guard menuOpen || renderingForInspection else { return }
@@ -163,6 +163,13 @@ extension Companion: NSMenuDelegate {
             }
         }
         menu.removeAllItems()
+        func makeMenuScroll(height: CGFloat) -> NSScrollView {
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: height))
+            if let scrollerStyle { scroll.scrollerStyle = scrollerStyle }
+            scroll.drawsBackground = false
+            scroll.hasVerticalScroller = true
+            return scroll
+        }
         func host(_ view: NSView, id: String, scrollKey: String? = nil) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
             let item = NSMenuItem()
@@ -213,7 +220,7 @@ extension Companion: NSMenuDelegate {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 32))
             let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": hub.status == "connected" ? "switch_account" : "login"]) }
             let reconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "reconnect"]) }
-            let disconnectRun = { self.cardMenu.cancelTracking(); self.settingsActiveTab="hubs"; self.openSettingsPanel() }
+            let disconnectRun = { self.cardMenu.cancelTracking(); self.openSettingsPanel(tab: "hubs") }
             let buttons: [(String, String, Bool, () -> Void)]
             switch hub.status {
             case "connected" where hub.error != nil:
@@ -348,7 +355,7 @@ extension Companion: NSMenuDelegate {
             notice.setAccessibilityLabel(notice.toolTip)
             notice.pressed = { [weak self, weak menu] in
                 guard let self = self else { return }
-                menu?.cancelTracking(); self.selectedChannelHub = targetHub; self.settingsActiveTab = "channels"; self.openSettingsPanel()
+                menu?.cancelTracking(); self.openSettingsPanel(tab: "channels", channelHub: targetHub)
             }
             let row = NSView(frame:NSRect(x:0,y:0,width:380,height:30)); row.addSubview(notice)
             _ = host(row,id:"inbox_notice_row")
@@ -357,6 +364,8 @@ extension Companion: NSMenuDelegate {
         agentHeader.addSubview(textLabel("LISTENING SESSIONS",NSRect(x:16,y:3,width:344,height:16),size:10,weight:.semibold,color:CitoPalette.secondaryText))
         _ = host(agentHeader,id:"listening_sessions_header")
         let orderedListeners = listeners.filter { $0.harness != "human" }
+        let activeScroll = orderedListeners.count > 4 ? makeMenuScroll(height: 256) : nil
+        let activeWidth = activeScroll?.contentSize.width ?? CitoMetrics.menuWidth
         for listener in orderedListeners {
             let sessionKey = "\(listener.harness):\(listener.session_id)"
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
@@ -365,9 +374,9 @@ extension Companion: NSMenuDelegate {
             let aboutText = distinctAbout(listener.about, title:listener.title, user:user, otherTitle:displayTitle)
             let rowHeight: CGFloat = aboutText != nil ? 78 : 64
             let cardHeight: CGFloat = aboutText != nil ? 72 : 58
-            let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
+            let row = NSView(frame: NSRect(x: 0, y: 0, width: activeWidth, height: rowHeight))
             row.identifier = NSUserInterfaceItemIdentifier("session:\(listener.scoped_id)")
-            let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
+            let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: activeWidth - 2 * CitoMetrics.menuInset, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             row.addSubview(card)
             activeRows.append((id: "session:\(listener.scoped_id)", view: row))
@@ -461,21 +470,17 @@ extension Companion: NSMenuDelegate {
             }
             layoutBar(in: card, insetLeft: titleX, insetRight: CitoMetrics.cardInset, y: 7, height: 19, leading: [copy], flexible: path)
         }
-        if activeRows.count <= 4 {
-            for (id, row) in activeRows { _ = host(row, id: id) }
-        } else {
+        if let scroll = activeScroll {
             let totalHeight = activeRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
-            let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 256))
-            scroll.scrollerStyle = .overlay
-            scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-            scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
-            let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: totalHeight))
+            let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: activeWidth, height: totalHeight))
             var y: CGFloat = 0
             for (_, row) in activeRows {
                 row.frame.origin = NSPoint(x: 0, y: y)
                 doc.addSubview(row); y += row.frame.height
             }
             scroll.documentView = doc; _ = host(scroll, id: "active_scroll")
+        } else {
+            for (id, row) in activeRows { _ = host(row, id: id) }
         }
         if orderedListeners.isEmpty {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 92))
@@ -490,11 +495,11 @@ extension Companion: NSMenuDelegate {
                 card.addSubview(emptyHint)
                 let apps=MenuControl("Set Up Agent Apps…",frame:NSRect(x:44,y:8,width:148,height:22),radius:6)
                 apps.identifier=NSUserInterfaceItemIdentifier("empty_open_setup")
-                apps.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
+                apps.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.openSettingsPanel(tab: "apps") }
                 card.addSubview(apps)
                 let channels=MenuControl("Human Channels…",frame:NSRect(x:198,y:8,width:148,height:22),radius:6)
                 channels.identifier=NSUserInterfaceItemIdentifier("empty_open_channels")
-                channels.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
+                channels.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.openSettingsPanel(tab: "channels") }
                 card.addSubview(channels)
                 row.addSubview(card); _ = host(row, id: "empty")
         }
@@ -518,8 +523,10 @@ extension Companion: NSMenuDelegate {
             _ = host(remoteHeader, id: "my_remote_header")
             if !myRemoteCollapsed {
                 var remoteRows: [(id: String, view: NSView)] = []
+                let remoteScroll = myRemote.count > 3 ? makeMenuScroll(height: 102) : nil
+                let remoteWidth = remoteScroll?.contentSize.width ?? CitoMetrics.menuWidth
                 for peer in myRemote {
-                    let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 34))
+                    let row = NSView(frame: NSRect(x: 0, y: 0, width: remoteWidth, height: 34))
                     let rowId = "remote:\(peer.scoped_id)"
                     row.identifier = NSUserInterfaceItemIdentifier(rowId)
                     let hostIcon = NSImageView(frame: NSRect(x: 16, y: 10, width: 14, height: 14))
@@ -527,8 +534,6 @@ extension Companion: NSMenuDelegate {
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
                     let copy = makeAddressCopyControl(peer.display_address,id:"copy_remote:\(peer.scoped_id)",height:20)
-                    let copyWidth = copy.frame.width
-                    copy.frame.origin.x = 368 - copyWidth
                     row.addSubview(copy)
                     let cleanHost = cleanHostDisplay(peer.host_name)
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
@@ -536,27 +541,23 @@ extension Companion: NSMenuDelegate {
                     let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
                     let displayTitle = nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true)
                     let info = textLabel("\(hostText) · \(displayTitle)\(branchSuffix)",
-                        NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
+                        NSRect(x: 36, y: 8, width: 0, height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
                     info.toolTip = peer.display_address + (distinctAbout(peer.about, title:peer.title, user:peer.user, otherTitle:displayTitle).map { " — \($0)" } ?? "")
                     row.addSubview(info)
                     layoutBar(in: row, insetLeft: 16, y: 7, height: 20, leading: [hostIcon], flexible: info, trailing: [copy])
                     remoteRows.append((id: rowId, view: row))
                 }
-                if remoteRows.count <= 3 {
-                    for (id, row) in remoteRows { _ = host(row, id: id) }
-                } else {
+                if let scroll = remoteScroll {
                     let totalHeight = CGFloat(remoteRows.count) * 34
-                    let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 102))
-                    scroll.scrollerStyle = .overlay
-                    scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-                    scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
-                    let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: totalHeight))
+                    let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: remoteWidth, height: totalHeight))
                     for (idx, (_, row)) in remoteRows.enumerated() {
                         row.frame.origin = NSPoint(x: 0, y: CGFloat(idx) * 34)
                         doc.addSubview(row)
                     }
                     scroll.documentView = doc; _ = host(scroll, id: "my_remote_scroll")
+                } else {
+                    for (id, row) in remoteRows { _ = host(row, id: id) }
                 }
             }
         }
@@ -662,21 +663,25 @@ extension Companion: NSMenuDelegate {
                 _ = host(groupRow, id: "group:\(harness)")
                 if !isCollapsed {
                     var candidateRows: [(id: String, view: NSView)] = []
+                    let candidateScroll = items.count > 4 ? makeMenuScroll(height: 176) : nil
+                    let candidateWidth = candidateScroll?.contentSize.width ?? CitoMetrics.menuWidth
+                    let actionX = candidateWidth - CitoMetrics.menuInset - 70
+                    let textWidth = actionX - 54
                     for c in items {
                         let needsReload = c.needs_reload == true
                         let hintText = c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen"
-                        let hintHeight = needsReload ? max(14, measureWrappedHeight(hintText, width: 244, font: .systemFont(ofSize: 10)) + 2) : 0
+                        let hintHeight = needsReload ? max(14, measureWrappedHeight(hintText, width: textWidth, font: .systemFont(ofSize: 10)) + 2) : 0
                         let rowHeight: CGFloat = needsReload ? 44+hintHeight : 44
-                        let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
+                        let row = NSView(frame: NSRect(x: 0, y: 0, width: candidateWidth, height: rowHeight))
                         let rowId = "candidate:\(c.harness):\(c.session_id)"
                         row.identifier = NSUserInterfaceItemIdentifier(rowId)
                         let shortCwd = compactHomePath(c.cwd)
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
                         let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, harnessName: visual.name, customTitle: c.custom_title == true)
-                        let info = textLabel(candidateTitle, NSRect(x:46,y:rowHeight-21,width:244,height:16),size:12,weight:.medium,color:.labelColor)
+                        let info = textLabel(candidateTitle, NSRect(x:46,y:rowHeight-21,width:textWidth,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
-                        let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix, maxWidth:244),NSRect(x:46,y:needsReload ? hintHeight+7 : 6,width:244,height:14),size:10.5,color:CitoPalette.secondaryText)
+                        let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix, maxWidth:textWidth),NSRect(x:46,y:needsReload ? hintHeight+7 : 6,width:textWidth,height:14),size:10.5,color:CitoPalette.secondaryText)
                         location.lineBreakMode = .byTruncatingMiddle
                         location.toolTip = "\(shortCwd)\(branchSuffix)"
                         location.identifier = NSUserInterfaceItemIdentifier("candidate_cwd:\(c.harness):\(c.session_id)")
@@ -685,12 +690,12 @@ extension Companion: NSMenuDelegate {
                         info.identifier=NSUserInterfaceItemIdentifier("candidate_title:\(c.harness):\(c.session_id)")
                         row.addSubview(info)
                         if needsReload {
-                            let hint=textLabel(hintText,NSRect(x:46,y:5,width:244,height:hintHeight),size:10,color:CitoPalette.warningText)
+                            let hint=textLabel(hintText,NSRect(x:46,y:5,width:textWidth,height:hintHeight),size:10,color:CitoPalette.warningText)
                             hint.maximumNumberOfLines = 0; hint.lineBreakMode = .byWordWrapping; hint.cell?.wraps = true
                             hint.toolTip=hint.stringValue
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
-                            let reload=MenuControl("/reload",frame:NSRect(x:298,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
+                            let reload=MenuControl("/reload",frame:NSRect(x:actionX,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
                             reload.label.font = .systemFont(ofSize:10)
                             reload.identifier=NSUserInterfaceItemIdentifier("reload:\(c.harness):\(c.session_id)")
                             reload.toolTip = "Copy /reload to paste in \(visual.name)"
@@ -702,12 +707,12 @@ extension Companion: NSMenuDelegate {
                             row.addSubview(reload)
                             candidateRows.append((id:rowId,view:row)); continue
                         }
-                        let listenBtn = MenuControl("Listen", frame: NSRect(x: 298, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
+                        let listenBtn = MenuControl("Listen", frame: NSRect(x: actionX, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
                         listenBtn.toolTip = "Start listening in \(candidateTitle)"
                         listenBtn.isEnabled = !targetHub.isEmpty
                         pendingLabel(listenBtn,isPending("listen_session",hub:targetHub,target:"\(c.harness):\(c.session_id)"),"Listening…")
-                        info.frame.size.width = min(info.frame.width, listenBtn.frame.minX - 54)
+                        info.frame.size.width = min(textWidth, listenBtn.frame.minX - info.frame.minX - 8)
                         location.frame.size.width = info.frame.width
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
@@ -724,17 +729,9 @@ extension Companion: NSMenuDelegate {
                         listenBtn.pressed = listenRun; row.addSubview(listenBtn)
                         candidateRows.append((id: rowId, view: row))
                     }
-                    if candidateRows.count <= 4 {
-                        for (id, row) in candidateRows { _ = host(row, id: id) }
-                    } else {
+                    if let scroll = candidateScroll {
                         let totalHeight = candidateRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
-                        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 176))
-                        // Overlay scrollers preserve the authored row width even
-                        // when macOS is configured to always show scrollbars.
-                        scroll.scrollerStyle = .overlay
-                        scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-                        scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
-                        let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: totalHeight))
+                        let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: candidateWidth, height: totalHeight))
                         var rowY: CGFloat = 0
                         for (_, row) in candidateRows {
                             row.frame.origin = NSPoint(x:0,y:rowY)
@@ -743,6 +740,8 @@ extension Companion: NSMenuDelegate {
                         }
                         let scrollId = expandedGroupCount == 1 ? "available_scroll" : "available_scroll:\(harness)"
                         scroll.documentView = doc; _ = host(scroll, id: scrollId, scrollKey:"available_scroll:\(harness)")
+                    } else {
+                        for (id, row) in candidateRows { _ = host(row, id: id) }
                     }
                 }
             }
@@ -822,7 +821,7 @@ extension Companion: NSMenuDelegate {
     }
     @objc func openDirectoryShortcut() {
         cardMenu.cancelTracking()
-        if !(settingsVisible && uninstallConfirmOpen) { openDirectoryPanel(mode:"directory") }
+        if activeUninstallAlert == nil { openDirectoryPanel(mode:"directory") }
     }
     @objc func openSettingsShortcut() { cardMenu.cancelTracking(); openSettingsPanel() }
     @objc func quitMenu() { emit(["op": "quit"]) }

@@ -286,6 +286,43 @@ fn hidden_panels_retain_models_and_flush_only_on_open_inspect_or_capture() {
 }
 
 #[test]
+fn directory_arrows_preserve_unaffected_row_views_without_reloading() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one"),peer("two"),peer("three")],"matched_count":3,"online_count":3}),
+    );
+    let spectator = "msg_dir:personal:three";
+    f.send(p, json!({"op":"test_hover","id":spectator,"hovered":true}));
+    let before = inspect(&f, p);
+    assert_eq!(before.directory(spectator)["hovered"], true);
+    let reloads = render_state(&f, p)["directory_reloads"].clone();
+    assert!(reloads.as_u64().unwrap() > 0);
+    for (key, selected) in [("up", "one"), ("down", "two"), ("up", "one")] {
+        f.send(p, json!({"op":"test_directory_key","key":key}));
+        let after = inspect(&f, p);
+        assert_eq!(
+            after["directory_selected_id"],
+            format!("personal:{selected}")
+        );
+        for id in ["one", "two", "three"] {
+            let row = format!("dir_peer:personal:{id}");
+            assert_eq!(after.directory(&row)["selected"], id == selected);
+            assert_eq!(
+                after.directory(&row)["instance"],
+                before.directory(&row)["instance"]
+            );
+        }
+        assert_eq!(after.directory(spectator)["hovered"], true);
+        assert_eq!(render_state(&f, p)["directory_reloads"], reloads);
+    }
+}
+
+#[test]
 fn panel_hover_uses_exit_and_resign_events_and_menu_fallback_is_tracking_only() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -295,6 +332,8 @@ fn panel_hover_uses_exit_and_resign_events_and_menu_fallback_is_tracking_only() 
     f.send(p, json!({"op":"test_open_panel","surface":"directory"}));
     let panels = render_state(&f, p);
     assert_eq!(panels["panel_effect_states"], json!([0, 0]));
+    assert_eq!(panels["panel_uses_window_background"], json!([true, true]));
+    assert_eq!(panels["panel_uses_normal_level"], json!([true, true]));
     for (surface, id) in [
         ("settings", "settings_tab:apps"),
         ("directory", "dir_mode:directory"),

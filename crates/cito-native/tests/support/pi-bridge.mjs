@@ -13,7 +13,7 @@ import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
 import bridge from '../../../../plugins/pi/cito-bridge.ts';
 test('real Pi host, socket repair, and shutdown', async t => {
-const root=fs.mkdtempSync('/tmp/ct-pi-');
+const root=fs.mkdtempSync(join(process.env.TMPDIR || '/tmp','ct-pi-'));
 t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
 const state=join(root,'state'), path=join(state,'sockets',`pi-pid-${process.pid}.sock`);
 process.env.HOME=root;

@@ -1,5 +1,47 @@
 import AppKit
 
+private final class SettingsCheckbox: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { false }
+    override var canBecomeKeyView: Bool { isEnabled && acceptsFirstResponder && !isHiddenOrHasHiddenAncestor }
+}
+
+private final class SettingsScrollView: NSScrollView {
+    override func tile() {
+        super.tile()
+        // Resize the existing document, including while its field editor is mounted.
+        if let document = documentView, document.frame.width != contentSize.width {
+            document.setFrameSize(NSSize(width: contentSize.width, height: document.frame.height))
+        }
+    }
+}
+
+private final class SettingsHubForm: SurfaceView {
+    var equalColumns: (left: [NSView], right: [NSView])? { didSet { layoutEqualColumns() } }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        if bounds.width != oldSize.width { layoutEqualColumns() }
+    }
+
+    private func layoutEqualColumns() {
+        guard let (left, right) = equalColumns else { return }
+        let available = max(0, bounds.width - 28 - 8)
+        let leftWidth = floor(available / 2)
+        for view in left { view.frame.size.width = leftWidth }
+        for view in right {
+            view.frame.origin.x = 14 + leftWidth + 8
+            view.frame.size.width = available - leftWidth
+        }
+    }
+}
+
+// Reserve wrapping height and intrinsic-width siblings at the narrowest
+// viewport this fixed-size panel can have under either scroller style.
+private func settingsScrollerAllowance(_ scroll: NSScrollView) -> CGFloat {
+    let legacy = NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .legacy)
+    return max(0, scroll.contentSize.width - (scroll.bounds.width - legacy))
+}
+
 // The mounted document owns its editor routing until AppKit releases it.
 final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
     let hub: String
@@ -25,7 +67,7 @@ final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ notification: Notification) {
-        guard let selfUI = companion, !selfUI.uninstallConfirmOpen,
+        guard let selfUI = companion,
               let field = notification.object as? NSTextField, let id = field.identifier?.rawValue,
               let (channel, schema) = channelField(id) else { return }
         let key = "\(hub)|\(channel.id)"
@@ -259,23 +301,23 @@ extension Companion {
         emit(action)
     }
 
-    // MARK: - Surface 3: Native AppKit Settings Panel (520 × 460 pt KeyPanel: NSPanel)
+    // MARK: - Surface 3: Native AppKit Settings Window (520 × 460 pt)
 
     func ensureSettingsPanel() {
+        guard settingsPanel == nil else { return }
         ensureEditMainMenu()
-        if settingsPanel == nil {
-            let window = makeFloatingKeyPanel(width: 520, height: 460, headerHeight: 48, appearance: testAppearance)
-            window.delegate = self
-            window.onKey = { [weak self] key in self?.handleSettingsKey(key) }
-            let root = SurfaceView(frame:NSRect(x:0,y:0,width:520,height:460),radius:14,color:.clear,border:.labelColor.withAppearanceAlpha(0.15))
-            root.identifier=NSUserInterfaceItemIdentifier("settings_panel"); root.layer?.masksToBounds=true
-            let effect=NSVisualEffectView(frame:root.bounds)
-            effect.material = .popover; effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState
-            root.addSubview(effect); window.contentView=root
-            window.layoutWindowButtons()
-            settingsPanel = window
-        }
-        rebuildSettingsPanel()
+        let window = makeKeyWindow(title: "Settings", width: 520, height: 460, headerHeight: 48, appearance: testAppearance)
+        window.delegate = self
+        window.onKey = { [weak self] key in self?.handleSettingsKey(key) }
+        window.handlesNativeShortcuts = headless
+        let root = NSView(frame:NSRect(x:0,y:0,width:520,height:460))
+        root.identifier = NSUserInterfaceItemIdentifier("settings_panel")
+        let effect = NSVisualEffectView(frame:root.bounds)
+        effect.material = .windowBackground; effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState
+        root.addSubview(effect); window.contentView = root
+        if !headless { window.restorePlacement(named: "CitoSettingsWindow") }
+        window.layoutWindowButtons()
+        settingsPanel = window
     }
 
     func handleSettingsKey(_ key: String) {
@@ -283,23 +325,21 @@ extension Companion {
         guard allowPanelKey(key, in: settingsPanel), !handleTextEditShortcut(key, in: settingsPanel) else { return }
         switch key {
         case "command-comma": openSettingsPanel()
-        case "command-w": closeSettingsPanel(emitAction: true)
-        case "command-m": if !headless { settingsPanel?.miniaturize(nil) }
-        case "command-k": if !uninstallConfirmOpen { openDirectoryPanel(mode: "directory") }
+        case "command-w": if headless && settingsVisible { settingsPanel?.performClose(nil) }
+        case "command-k": openDirectoryPanel(mode: "directory")
         case "command-1", "command-2", "command-3":
-            guard !uninstallConfirmOpen, let tab = ["command-1": "apps", "command-2": "channels", "command-3": "hubs"][key] else { return }
+            guard let tab = ["command-1": "apps", "command-2": "channels", "command-3": "hubs"][key] else { return }
             settingsActiveTab = tab
             if tab == "channels" { refreshChannelSettingsIfNeeded() }
             rebuildSettingsPanel()
         case "escape":
-            if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
-            else if settingsActiveTab == "hubs" && hubForm.isOpen { hubForm = HubFormState(); rebuildSettingsPanel() }
+            if settingsActiveTab == "hubs" && hubForm.isOpen { hubForm = HubFormState(); rebuildSettingsPanel() }
             else if settingsActiveTab == "channels", let mounted = mountedChannelsSettings {
                 let hub = mounted.hub
                 let channels = mounted.channels
                 let editingGateway = channels.filter { channelUiStates["\(hub)|\($0.id)"]?.editingGateway == true }
                 let editing = editingGateway.isEmpty ? channels.filter { channelUiStates["\(hub)|\($0.id)"]?.editingPersonal == true } : editingGateway
-                guard !editing.isEmpty else { closeSettingsPanel(emitAction: true); return }
+                guard !editing.isEmpty else { closeSettingsPanel(); return }
                 for channel in editing {
                     let key = "\(hub)|\(channel.id)"
                     clearChannelDrafts(channel, scope: editingGateway.isEmpty ? "user" : "hub", hub: hub)
@@ -308,9 +348,8 @@ extension Companion {
                 }
                 rebuildSettingsPanel()
             }
-            else { closeSettingsPanel(emitAction:true) }
+            else { closeSettingsPanel() }
         case "return":
-            if uninstallConfirmOpen { return }
             let id = (settingsPanel?.firstResponder as? NSTextView)?.delegate as? NSTextField
             let field=id?.identifier?.rawValue ?? ""
             let actionId: String
@@ -384,34 +423,42 @@ extension Companion {
         rebuildSettingsPanel()
     }
 
-    func mountSettingsCards(_ content: NSView, in root: NSView) {
+    private func makeSettingsScroll(in root: NSView) -> NSScrollView {
+        let scroll = SettingsScrollView(frame: NSRect(x: 0, y: 44, width: root.bounds.width, height: 368 - (settingsBannerError == nil ? 0 : 48)))
+        scroll.autoresizingMask = [.width]
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        root.addSubview(scroll)
+        return scroll
+    }
+
+    func mountSettingsCards(_ content: NSView, on scroll: NSScrollView) {
         let id = content.identifier?.rawValue ?? ""
         let minY = content.subviews.map { $0.frame.minY }.min() ?? 8
         let extra = max(0, 8 - minY)
         for child in content.subviews { child.frame.origin.y += extra }
-        let viewport = content.frame
-        content.frame = NSRect(x: 0, y: 0, width: viewport.width, height: viewport.height + extra)
-        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 44, width: 520, height: 368 - (settingsBannerError == nil ? 0 : 48)))
-        scroll.scrollerStyle = .overlay
+        content.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: content.frame.height + extra)
         scroll.identifier = NSUserInterfaceItemIdentifier(id)
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
         scroll.isHidden = content.isHidden
-        scroll.alphaValue = uninstallConfirmOpen ? 0.35 : 1
         content.isHidden = false
         scroll.documentView = content
-        root.addSubview(scroll)
         let top = max(0, content.frame.height - scroll.contentSize.height)
         scroll.contentView.scroll(to: NSPoint(x: 0, y: top - min(top, settingsScrollOffsets[id] ?? 0)))
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false, revealChannel: String? = nil, revealPairing: Bool = false, revealEditorScope: String = "hub", syncFields: Bool = true) {
+    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false, revealChannel: String? = nil, revealPairing: Bool = false, revealEditorScope: String = "hub", syncFields: Bool = true, scrollerStyle: NSScroller.Style? = nil) {
+        if let scrollerStyle {
+            // A style notification changes geometry, not the mounted Settings state.
+            for case let scroll as SettingsScrollView in settingsPanel?.contentView?.subviews ?? [] {
+                scroll.scrollerStyle = scrollerStyle
+                scroll.tile()
+            }
+            return
+        }
         settingsDirty = true
         guard settingsVisible || renderingForInspection, let window = settingsPanel else { return }
-        if uninstallConfirmOpen { window.makeFirstResponder(nil) }
-        if preservingEditor && !uninstallConfirmOpen, settingsFieldControls.values.contains(where: { $0.currentEditor() === window.firstResponder && $0.currentEditor() != nil }) {
+        if preservingEditor, settingsFieldControls.values.contains(where: { $0.currentEditor() === window.firstResponder && $0.currentEditor() != nil }) {
             settingsRebuildDeferred = true
             return
         }
@@ -431,14 +478,13 @@ extension Companion {
         }
         settingsFieldControls.removeAll()
 
-        guard let root=window.contentView as? SurfaceView else { return }
+        guard let root = window.contentView else { return }
         root.subviews.filter { !($0 is NSVisualEffectView) }.forEach { $0.removeFromSuperview() }
         window.invalidateShadow()
 
         // Header & Segmented Tab Bar (520 × 48 pt, y: 412)
         let header = NSView(frame: NSRect(x: 0, y: 412, width: 520, height: 48))
         header.identifier = NSUserInterfaceItemIdentifier("settings_header")
-        header.alphaValue = uninstallConfirmOpen ? 0.35 : 1
 
         let tabPadding: CGFloat = 8
         let tabWidths = [("Agent Apps","square.grid.2x2"),("Human Channels","bubble.left.and.bubble.right"),("Hubs & Network","network")].map {
@@ -453,7 +499,6 @@ extension Companion {
         appsTab.style = settingsActiveTab == "apps" ? .prominent : .subtleHeader
         appsTab.pressed = { [weak self] in
             guard let self = self else { return }
-            self.uninstallConfirmOpen = false
             self.settingsActiveTab = "apps"
             self.rebuildSettingsPanel()
         }
@@ -464,7 +509,6 @@ extension Companion {
         channelsTab.style = settingsActiveTab == "channels" ? .prominent : .subtleHeader
         channelsTab.pressed = { [weak self] in
             guard let self = self else { return }
-            self.uninstallConfirmOpen = false
             self.settingsActiveTab = "channels"
             self.refreshChannelSettingsIfNeeded()
             self.rebuildSettingsPanel()
@@ -476,7 +520,6 @@ extension Companion {
         hubsTab.style = settingsActiveTab == "hubs" ? .prominent : .subtleHeader
         hubsTab.pressed = { [weak self] in
             guard let self = self else { return }
-            self.uninstallConfirmOpen = false
             self.settingsActiveTab = "hubs"
             self.rebuildSettingsPanel()
         }
@@ -484,8 +527,8 @@ extension Companion {
 
         header.addSubview(roundedView(NSRect(x: 0, y: 0, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         root.addSubview(header)
-        if let error = settingsBannerError, !uninstallConfirmOpen {
-            let banner=roundedView(NSRect(x:20,y:368,width:480,height:40),radius:6,color:CitoPalette.dangerText.withAppearanceAlpha(0.10))
+        if let error = settingsBannerError {
+            let banner=roundedView(NSRect(x:CitoMetrics.settingsInset,y:368,width:480,height:40),radius:6,color:CitoPalette.dangerText.withAppearanceAlpha(0.10))
             banner.identifier=NSUserInterfaceItemIdentifier("settings_error_banner")
             let label=textLabel(presentationError(error),NSRect(x:10,y:7,width:432,height:26),size:10,color:CitoPalette.dangerText)
             label.maximumNumberOfLines = 2; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = label.stringValue
@@ -497,104 +540,31 @@ extension Companion {
             banner.addSubview(dismiss); root.addSubview(banner)
         }
 
-        buildAppsTab(in: root)
+        buildAppsTab(in: makeSettingsScroll(in: root))
         let renderedHub = effectiveChannelHub
-        buildChannelsTab(in: root, renderedHub: renderedHub)
-        buildHubsTab(in: root)
+        buildChannelsTab(in: makeSettingsScroll(in: root), renderedHub: renderedHub)
+        buildHubsTab(in: makeSettingsScroll(in: root))
 
         // Persistent Footer (520 × 44 pt, y: 0)
         let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 44))
         footerBar.identifier = NSUserInterfaceItemIdentifier("settings_footer")
-        footerBar.alphaValue = uninstallConfirmOpen ? 0.35 : 1
         footerBar.addSubview(roundedView(NSRect(x: 0, y: 43, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-        func checkbox(_ title: String, id: String, frame: NSRect, checked: Bool) -> MenuControl {
-            let control = MenuControl(title, frame: frame, leadingSymbol: checked ? "checkmark.square.fill" : "square")
-            control.identifier = NSUserInterfaceItemIdentifier(id)
-            control.style = .subtleHeader
-            control.setAccessibilityRole(.checkBox)
-            control.setAccessibilityValue(checked ? 1 : 0)
-            control.label.alignment = .left
-            control.layoutContents()
-            return control
-        }
-        let launchAtLogin = settings?.launch_at_login ?? false
-        let loginBtn = checkbox("Start Cito at Login", id: "settings_launch_at_login",
-            frame: NSRect(x: 20, y: 10, width: 164, height: 24), checked: launchAtLogin)
-        loginBtn.pressed = { [weak self] in
-            self?.emit(["op": "set_launch_at_login", "enabled": !launchAtLogin])
-        }
+        let loginBtn = SettingsCheckbox(checkboxWithTitle: "Start Cito at Login", target: self, action: #selector(toggleLaunchAtLogin(_:)))
+        loginBtn.identifier = NSUserInterfaceItemIdentifier("settings_launch_at_login")
+        loginBtn.focusRingType = .default
+        loginBtn.state = settings?.launch_at_login == true ? .on : .off
         footerBar.addSubview(loginBtn)
 
         let uninstallBtn = MenuControl("Disconnect Agent Apps…", frame: NSRect(x: 316, y: 10, width: MenuControl.intrinsicWidth("Disconnect Agent Apps…", paddingX: 12), height: 24), radius: 6, paddingX: 12)
         uninstallBtn.identifier = NSUserInterfaceItemIdentifier("open_uninstall_confirm")
         uninstallBtn.style = .destructiveHover
-        uninstallBtn.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.uninstallConfirmOpen = true
-            self.uninstallPurgeData = false
-            self.rebuildSettingsPanel()
-        }
+        uninstallBtn.pressed = { [weak self] in self?.presentUninstallAlert() }
         footerBar.addSubview(uninstallBtn)
         layoutBar(in: footerBar, insetLeft: 20, insetRight: 20, y: 10, height: 24, leading: [loginBtn], trailing: [uninstallBtn])
         root.addSubview(footerBar)
 
-        if uninstallConfirmOpen {
-            func disableBackground(_ view: NSView) {
-                if let field = view as? NSTextField, field.isEditable || field.isSelectable {
-                    field.isEnabled = false
-                    if !field.isEditable { field.isSelectable = false }
-                } else if let control = view as? MenuControl {
-                    control.isEnabled = false
-                }
-                view.subviews.forEach(disableBackground)
-            }
-            root.subviews.forEach(disableBackground)
-            let overlay = ModalOverlay(frame:NSRect(x:0,y:0,width:520,height:460))
-            overlay.identifier = NSUserInterfaceItemIdentifier("uninstall_modal_overlay")
-            let confirmBox = roundedView(NSRect(x: 40, y: 150, width: 440, height: 112), radius: 10,
-                color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: CitoPalette.dangerText.withAppearanceAlpha(0.35))
-            confirmBox.identifier = NSUserInterfaceItemIdentifier("uninstall_confirm_box")
-
-            confirmBox.addSubview(textLabel("Disconnect Agent Apps",NSRect(x:12,y:82,width:416,height:18),size:12.5,weight:.semibold))
-            let purgeCheckbox = checkbox("Also delete local data and Hub settings", id: "uninstall_purge_data",
-                frame: NSRect(x: 12, y: 50, width: 416, height: 22), checked: uninstallPurgeData)
-            purgeCheckbox.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.uninstallPurgeData.toggle()
-                self.rebuildSettingsPanel()
-            }
-            confirmBox.addSubview(purgeCheckbox)
-
-            let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 32, y: 16, width: MenuControl.intrinsicWidth("Cancel"), height: 24), radius: 6)
-            cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_all")
-            cancelUninstallBtn.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.uninstallConfirmOpen = false
-                self.uninstallPurgeData = false
-                self.rebuildSettingsPanel()
-            }
-            confirmBox.addSubview(cancelUninstallBtn)
-
-            let disconnectTitle=uninstallPurgeData ? "Disconnect & Delete Data" : "Disconnect Apps"
-            let disconnect=MenuControl(disconnectTitle,frame:NSRect(x:112,y:16,width:MenuControl.intrinsicWidth(disconnectTitle),height:24),radius:6)
-            disconnect.identifier=NSUserInterfaceItemIdentifier("confirm_disconnect_all")
-            disconnect.style = .destructive
-            disconnect.toolTip = uninstallPurgeData ? "Disconnect all Agent Apps and delete local data and Hub settings" : "Disconnect all Agent Apps and keep Cito running"
-            disconnect.pressed = { [weak self] in
-                guard let self = self else { return }
-                let purge = self.uninstallPurgeData
-                self.uninstallConfirmOpen = false
-                self.uninstallPurgeData = false
-                self.emit(["op": "setup_disconnect_all", "purge_data": purge])
-                self.rebuildSettingsPanel()
-            }
-            confirmBox.addSubview(disconnect)
-            layoutBar(in: confirmBox, insetLeft: 12, insetRight: 12, y: 14, height: 24, leading: [cancelUninstallBtn], trailing: [disconnect])
-            overlay.addSubview(confirmBox); root.addSubview(overlay)
-        }
-
         window.invalidateShadow()
-        if !uninstallConfirmOpen, let id = focusedId, let field = settingsFieldControls[id],
+        if let id = focusedId, let field = settingsFieldControls[id],
            !(id.hasPrefix("channel_field:") || id.hasPrefix("pairing_instruction:")) || previousChannelHub == renderedHub {
             window.makeFirstResponder(field)
             if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }
@@ -648,9 +618,10 @@ extension Companion {
         }
     }
 
-    func buildAppsTab(in root: NSView) {
-        // Tab 1: Agent Apps (520 × 368 pt, y: 44)
-        let appsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
+    func buildAppsTab(in scroll: NSScrollView) {
+        let cardWidth = scroll.contentSize.width - 32
+        let allowance = settingsScrollerAllowance(scroll)
+        let appsView = NSView(frame: NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: 368))
         appsView.identifier = NSUserInterfaceItemIdentifier("settings_apps_tab")
         appsView.isHidden = settingsActiveTab != "apps"
 
@@ -658,15 +629,18 @@ extension Companion {
             AppSetupItem(id: h.id, display_name: h.display_name, tier: h.tier,
                 configured: false, status: "not_configured", detail: "Click Set Up to connect", paths: [])
         }
-        appsView.addSubview(textLabel("AGENT APPS", NSRect(x:20,y:338,width:240,height:14),size:10,weight:.semibold,color:CitoPalette.secondaryText))
+        appsView.addSubview(textLabel("AGENT APPS", NSRect(x:16,y:338,width:240,height:14),size:10,weight:.semibold,color:CitoPalette.secondaryText))
         let map = harnessMap
-        appsView.addSubview(textLabel("Connect your coding apps, then choose sessions to listen.",NSRect(x:20,y:316,width:480,height:16),size:11,color:CitoPalette.secondaryText))
+        let intro = textLabel("Connect your coding apps, then choose sessions to listen.",NSRect(x:16,y:316,width:cardWidth,height:16),size:11,color:CitoPalette.secondaryText)
+        intro.autoresizingMask = [.width]
+        appsView.addSubview(intro)
         var appTop: CGFloat = 304
         for app in resolvedApps {
             let cardHeight: CGFloat = 70
             appTop -= cardHeight
-            let card = roundedView(NSRect(x:20,y:appTop,width:480,height:cardHeight),radius:10,
+            let card = roundedView(NSRect(x:16,y:appTop,width:cardWidth,height:cardHeight),radius:10,
                 color:.labelColor.withAppearanceAlpha(0.045),border:.labelColor.withAppearanceAlpha(0.08))
+            card.autoresizingMask = [.width]
             card.identifier = NSUserInterfaceItemIdentifier("settings_app:\(app.id)")
             let barY: CGFloat = 36
             card.addSubview(makeHarnessBadge(NSRect(x:12,y:barY-2,width:28,height:28),radius:7,iconInset:6,harness:app.id,harnesses:map))
@@ -674,17 +648,18 @@ extension Companion {
             let title = textLabel(app.display_name,NSRect(x:50,y:barY+3.5,width:titleW,height:17),size:13,weight:.semibold)
             title.toolTip = app.display_name; title.lineBreakMode = .byTruncatingMiddle
             card.addSubview(title)
-            var leading: [NSView] = [title]
+            let tier: NSView?
             if app.tier == "experimental" {
-                let tier = makePillBadge("Experimental", id: "settings_app_tier:\(app.id)", textColor: CitoPalette.warningText, fill: CitoPalette.warningSurface, border: CitoPalette.warningBorder, minWidth:0)
-                card.addSubview(tier); leading.append(tier)
-            }
+                let badge = makePillBadge("Experimental", id: "settings_app_tier:\(app.id)", textColor: CitoPalette.warningText, fill: CitoPalette.warningSurface, border: CitoPalette.warningBorder, minWidth:0)
+                card.addSubview(badge); tier = badge
+            } else { tier = nil }
             let statusText = app.isConfigured ? "Connected" : (app.status == "error" ? "Inspection failed" : (app.status == "repair_needed" ? "Repair Needed" : "Not Set Up"))
             let statusColor = app.status == "error" ? CitoPalette.dangerText : app.isConfigured ? CitoPalette.successText : CitoPalette.warningText
             let dot=roundedView(NSRect(x:50,y:16,width:6,height:6),radius:3,color:statusColor)
             dot.identifier=NSUserInterfaceItemIdentifier("settings_app_status_dot:\(app.id)"); card.addSubview(dot)
             let detailText = presentationError(app.detail).replacingOccurrences(of:"^(Connected|Disconnected) · ",with:"",options:.regularExpression)
-            let status=textLabel(statusText + (detailText.isEmpty || detailText == statusText ? "" : " · " + detailText),NSRect(x:62,y:10,width:406,height:18),size:11,color:statusColor)
+            let status=textLabel(statusText + (detailText.isEmpty || detailText == statusText ? "" : " · " + detailText),NSRect(x:62,y:10,width:cardWidth-74,height:18),size:11,color:statusColor)
+            status.autoresizingMask = [.width]
             status.identifier=NSUserInterfaceItemIdentifier("settings_app_status:\(app.id)"); status.lineBreakMode = .byTruncatingMiddle
             status.toolTip=([detailText]+app.paths).filter { !$0.isEmpty }.joined(separator:"\n"); card.addSubview(status)
             let appActionWidth = max(76, MenuControl.intrinsicWidth("Disconnect"))
@@ -710,21 +685,26 @@ extension Companion {
                 card.addSubview(remove); trailing.append(remove)
             }
             let barSpacing: CGFloat = 5
-            let trailingWidth = trailing.reduce(CGFloat(0)) { $0 + $1.frame.width + barSpacing }
-            let tierWidth: CGFloat = leading.count > 1 ? (88 + barSpacing) : 0
-            title.frame.size.width = max(0,min(titleW,418 - trailingWidth - tierWidth))
-            layoutBar(in:card,insetLeft:50,y:barY,height:24,spacing:barSpacing,leading:leading,trailing:trailing)
+            layoutBar(in:card,insetLeft:50,y:barY,height:24,spacing:barSpacing,trailing:trailing)
+            let right = (trailing.first?.frame.minX ?? cardWidth - 12) - allowance - barSpacing
+            let tierWidth = tier.map { $0.frame.width + barSpacing } ?? 0
+            title.frame.size.width = max(0,min(titleW,right - title.frame.minX - tierWidth))
+            if let tier { tier.frame.origin = NSPoint(x: title.frame.maxX + barSpacing, y: barY + (24 - tier.frame.height) / 2) }
             appsView.addSubview(card); appTop -= 8
         }
-        mountSettingsCards(appsView, in: root)
+        mountSettingsCards(appsView, on: scroll)
 
     }
 
-    func buildChannelsTab(in root: NSView, renderedHub: String) {
-        // Tab 2: Human Channels (520 × 368 pt, y: 44)
+    func buildChannelsTab(in scroll: NSScrollView, renderedHub: String) {
+        let cardWidth = scroll.contentSize.width - 32
+        let stratumWidth = cardWidth - 24
+        let stratumTextWidth = stratumWidth - 24
+        let allowance = settingsScrollerAllowance(scroll)
         let resolvedChannels = channelSettingsByHub[renderedHub] ?? []
         let visibleChannels = resolvedChannels.filter { $0.can_configure_hub == true || $0.hub_ready == true }
         let channelsView = ChannelsSettingsView(hub: renderedHub, channels: resolvedChannels, companion: self)
+        channelsView.frame.size.width = scroll.contentSize.width
         channelsView.identifier = NSUserInterfaceItemIdentifier("settings_channels_tab")
         channelsView.isHidden = settingsActiveTab != "channels"
         let inboxHub = renderedHub
@@ -744,11 +724,12 @@ extension Companion {
         let externalNames = inboxAttachments.filter { $0.location == "hub" }.map { cleanHostDisplay($0.display_name) }
         let deliveryNames = externalNames + ["Activity"] + inboxAttachments.filter { $0.location == "device" }.map { cleanHostDisplay($0.display_name) }
         let inboxSummary = inboxPaused ? (externalNames.isEmpty ? "Inbox alerts paused" : "Inbox paused · Activity & " + externalNames.joined(separator:" · ") + " paused") : deliveryNames.joined(separator:" · ")
-        let inboxBar = roundedView(NSRect(x:20,y:308,width:480,height:48),radius:CitoMetrics.cardRadius,color:inboxPaused ? CitoPalette.warningSurface : .labelColor.withAppearanceAlpha(0.045))
+        let inboxBar = roundedView(NSRect(x:16,y:308,width:cardWidth,height:48),radius:CitoMetrics.cardRadius,color:inboxPaused ? CitoPalette.warningSurface : .labelColor.withAppearanceAlpha(0.045))
+        inboxBar.autoresizingMask = [.width]
         inboxBar.identifier = NSUserInterfaceItemIdentifier("inbox_control_bar")
         let inboxTitle = textLabel("You (@\(inboxUser))",NSRect(x:12,y:30,width:220,height:12),size:11,weight:.semibold)
         inboxTitle.identifier = NSUserInterfaceItemIdentifier("inbox_control_title"); inboxTitle.toolTip = inboxTitle.stringValue
-        let inboxDetail = textLabel(inboxSummary,NSRect(x:12,y:5,width:456,height:24),size:10,color:inboxPaused ? CitoPalette.warningText : CitoPalette.secondaryText)
+        let inboxDetail = textLabel(inboxSummary,NSRect(x:12,y:5,width:stratumWidth,height:24),size:10,color:inboxPaused ? CitoPalette.warningText : CitoPalette.secondaryText)
         inboxDetail.identifier = NSUserInterfaceItemIdentifier("inbox_control_summary")
         inboxDetail.toolTip = inboxSummary + "\nExternal channels deliver alerts even when this Mac is offline."
         inboxDetail.setAccessibilityLabel(inboxSummary)
@@ -772,25 +753,27 @@ extension Companion {
         }
         inboxActions.append(inboxToggle)
         layoutBar(in:inboxBar,y:13,height:22,trailing:inboxActions)
-        let textWidth = max(0,(inboxActions.map { $0.frame.minX }.min() ?? 468) - 10 - 12)
-        let summaryHeight = max(12, measureWrappedHeight(inboxSummary, width: textWidth, font: .systemFont(ofSize: 10)) + 2)
+        let textWidth = max(0,(inboxActions.map { $0.frame.minX }.min() ?? cardWidth - 12) - 10 - 12)
+        let summaryHeight = max(12, measureWrappedHeight(inboxSummary, width: max(1, textWidth - allowance), font: .systemFont(ofSize: 10)) + 2)
         let titleHeight: CGFloat = summaryHeight > 14 ? 12 : 14
         let stackGap: CGFloat = summaryHeight > 14 ? 0 : 1
         let inboxBarHeight = max(48, 20 + titleHeight + stackGap + summaryHeight)
-        inboxBar.frame = NSRect(x: 20, y: 356 - inboxBarHeight, width: 480, height: inboxBarHeight)
+        inboxBar.frame = NSRect(x: 16, y: 356 - inboxBarHeight, width: cardWidth, height: inboxBarHeight)
         for action in inboxActions { action.frame.origin.y = (inboxBarHeight - action.frame.height) / 2 }
         let stackY = (inboxBarHeight-titleHeight-summaryHeight-stackGap)/2
         inboxTitle.frame = NSRect(x:12,y:stackY+summaryHeight+stackGap,width:textWidth,height:titleHeight)
         inboxTitle.lineBreakMode = .byTruncatingMiddle
+        inboxTitle.autoresizingMask = [.width]
+        inboxDetail.autoresizingMask = [.width]
         inboxDetail.frame = NSRect(x:12,y:stackY,width:textWidth,height:summaryHeight)
         inboxDetail.maximumNumberOfLines = 0; inboxDetail.lineBreakMode = .byWordWrapping; inboxDetail.cell?.wraps = true
         channelsView.addSubview(inboxBar)
         var cursorY = inboxBar.frame.minY - 8
         let channelHubs = settings?.hubs.filter { $0.enabled != false }.map { $0.name } ?? hubs.filter { $0.enabled != false }.map { $0.name }
-        if channelHubs.count > 1 { channelsView.addSubview(textLabel("Target Hub", NSRect(x: 20, y: cursorY-22, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText)) }
+        if channelHubs.count > 1 { channelsView.addSubview(textLabel("Target Hub", NSRect(x: 16, y: cursorY-22, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText)) }
         var channelPills: [NSView] = []
         for name in channelHubs {
-            let shown = compactAddressLabel(name, maxWidth:394, font:.systemFont(ofSize:11,weight:.medium), paddingX:11)
+            let shown = compactAddressLabel(name, maxWidth:cardWidth-86-allowance, font:.systemFont(ofSize:11,weight:.medium), paddingX:11)
             let width = max(64, MenuControl.intrinsicWidth(shown))
             let pill = MenuControl(shown, frame: NSRect(x: 0, y: 3, width: width, height: 22), radius: 11)
             pill.toolTip = name; pill.setAccessibilityLabel(name)
@@ -805,7 +788,7 @@ extension Companion {
             channelPills.append(pill)
         }
         if channelHubs.count > 1 {
-            mountPillStrip(in: channelsView, frame: NSRect(x: 102, y: cursorY-26, width: 398, height: 26),
+            mountPillStrip(in: channelsView, frame: NSRect(x: 98, y: cursorY-26, width: cardWidth - 82 - allowance, height: 26),
                            id: "channel_hub_strip", spacing: 6, trackRadius: 13, pills: channelPills) {
                 $0.identifier?.rawValue == "channel_hub_selector:\(renderedHub)"
             }
@@ -814,8 +797,9 @@ extension Companion {
 
         if let error = channelInventoryErrorsByHub[renderedHub], !error.isEmpty {
             let message = presentationError(error)
-            let height = max(16, measureWrappedHeight(message, width: 480, font: .systemFont(ofSize: 11)))
-            let diagnostic = textLabel(message, NSRect(x:20,y:cursorY-height-4,width:480,height:height),size:11,color:CitoPalette.dangerText)
+            let height = max(16, measureWrappedHeight(message, width: cardWidth - allowance, font: .systemFont(ofSize: 11)))
+            let diagnostic = textLabel(message, NSRect(x:16,y:cursorY-height-4,width:cardWidth,height:height),size:11,color:CitoPalette.dangerText)
+            diagnostic.autoresizingMask = [.width]
             diagnostic.identifier = NSUserInterfaceItemIdentifier("channel_inventory_error")
             diagnostic.maximumNumberOfLines = 0; diagnostic.lineBreakMode = .byWordWrapping
             diagnostic.toolTip = message
@@ -823,7 +807,8 @@ extension Companion {
             cursorY -= height + 12
         }
         if !resolvedChannels.isEmpty && visibleChannels.isEmpty && channelInventoryErrorsByHub[renderedHub] == nil {
-            let notice = textLabel("External channels are managed by your '\(renderedHub)' Hub administrator. None are enabled yet.", NSRect(x:20,y:cursorY-42,width:480,height:36),size:11,color:CitoPalette.secondaryText)
+            let notice = textLabel("External channels are managed by your '\(renderedHub)' Hub administrator. None are enabled yet.", NSRect(x:16,y:cursorY-42,width:cardWidth,height:36),size:11,color:CitoPalette.secondaryText)
+            notice.autoresizingMask = [.width]
             notice.identifier = NSUserInterfaceItemIdentifier("channels_managed_notice")
             notice.maximumNumberOfLines = 0; notice.lineBreakMode = .byWordWrapping
             channelsView.addSubview(notice); cursorY -= 48
@@ -835,7 +820,7 @@ extension Companion {
             let channelUi = channelUiStates[channelKey] ?? ChannelUiState()
             let instruction = channelUi.pairingInstruction
             let instructionFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-            let instructionHeight = instruction.isEmpty ? 0 : max(16, measureWrappedHeight(instruction, width: 432, font: instructionFont) + 4)
+            let instructionHeight = instruction.isEmpty ? 0 : max(16, measureWrappedHeight(instruction, width: stratumTextWidth - allowance, font: instructionFont) + 4)
             let guide = (ch.setup_guide ?? []).joined(separator:"\n")
             let hubFields = visibleFields.filter { $0.scope == "hub" && ch.can_configure_hub == true }
             let disclosure = ch.can_edit_personal == true && ch.pairing_supported && ch.can_pair == true && ch.pairing_manual_disclosure == true
@@ -852,11 +837,11 @@ extension Companion {
             let showInboundToggle = ch.supports_outbound_only == true && ch.can_configure_hub == true && gatewayActive && !hubGatewayExpanded
             let personalCollapsed = gatewayActive && ch.configured && !channelUi.editingPersonal && instruction.isEmpty
             let reusableBinding = !personalCollapsed && gatewayActive && instruction.isEmpty && !manualExpanded ? ch.reusable_binding : nil
-            let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13, measureWrappedHeight(guide, width: 432, font: .systemFont(ofSize: 10)) + 2) : 0
+            let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13, measureWrappedHeight(guide, width: stratumTextWidth - allowance, font: .systemFont(ofSize: 10)) + 2) : 0
             let currentUser=settings?.hubs.first(where:{$0.name==renderedHub})?.user ?? hubs.first(where:{$0.name==renderedHub})?.user ?? "local"
             let gatewayRole = !hubFields.isEmpty ? (guideH > 0 ? "" : "Configured once by the Hub owner. Shared by everyone on this Hub.") :
                 (hasHubScopeFields ? (ch.hub_provided ? "Provided by '\(renderedHub)' Hub administrator — no gateway setup needed on your Mac." : "Not yet configured by the '\(renderedHub)' Hub administrator.") : "No shared gateway credentials required for this channel.")
-            let gatewayRoleH = gatewayRole.isEmpty ? 0 : max(13, measureWrappedHeight(gatewayRole, width: 432, font: .systemFont(ofSize: 10)))
+            let gatewayRoleH = gatewayRole.isEmpty ? 0 : max(13, measureWrappedHeight(gatewayRole, width: stratumTextWidth - allowance, font: .systemFont(ofSize: 10)))
             let gatewayHasClear = ch.can_clear_hub == true
             let cleanConnectedState = personalCollapsed && !hubGatewayExpanded
             let gatewayStatusVisible = !(cleanConnectedState && ch.error_origin != "hub" && !isOutboundOnly)
@@ -868,28 +853,29 @@ extension Companion {
             let gatewayStatusColor = ch.error_origin == "hub" ? CitoPalette.dangerText :
                 (sharedOutbound ? CitoPalette.infoText : (gatewayActive ? CitoPalette.successText : CitoPalette.secondaryText))
             let gatewayStatus = statusLabel(gatewayStatusText,frame:NSRect(x:0,y:0,width:164,height:14),color:gatewayStatusColor,filled:gatewayActive && !sharedOutbound,size:9)
-            let titleWidth = 456 - 2 * CitoMetrics.cardInset
+            let titleWidth = stratumWidth - 2 * CitoMetrics.cardInset
             let titleFont = NSFont.systemFont(ofSize:9.5,weight:.bold)
-            let titleSpace = titleWidth - (gatewayStatusVisible ? gatewayStatus.frame.width + CitoMetrics.gap : 0)
+            let titleSpace = titleWidth - allowance - (gatewayStatusVisible ? gatewayStatus.frame.width + CitoMetrics.gap : 0)
             let separateTitle = showHubStratum && !serviceSuffix.isEmpty && measureTextWidth(hubTitleText, font:titleFont) > titleSpace
-            let titleHeight = separateTitle ? max(14, measureWrappedHeight(hubTitleText, width:titleWidth, font:titleFont) + 2) : 14
+            let titleHeight = separateTitle ? max(14, measureWrappedHeight(hubTitleText, width:titleWidth - allowance, font:titleFont) + 2) : 14
             let extraTitleH = separateTitle ? titleHeight + CitoMetrics.gap : 0
             let twoRowGatewayTop = !hubGatewayExpanded && (showInboundToggle || (!serviceSuffix.isEmpty && (!hubFields.isEmpty || gatewayHasClear)))
             let hubStratumH: CGFloat = !showHubStratum ? 0 : (hubGatewayExpanded ? 36 + gatewayRoleH + guideH + hubFieldsH + (!hubFields.isEmpty || gatewayHasClear ? 32 : 0) : (twoRowGatewayTop ? 64 : 36))
             let collapsedSummary = Date() < (channelUi.savedUntil["user"] ?? .distantPast) ? "✓ Saved" : "Paired · \(ch.display_label ?? userFields.first?.value ?? "")"
-            let collapsedSummaryHeight = max(16, measureWrappedHeight(collapsedSummary, width: 432, font: .systemFont(ofSize: 10)))
+            let collapsedSummaryHeight = max(16, measureWrappedHeight(collapsedSummary, width: stratumTextWidth - allowance, font: .systemFont(ofSize: 10)))
             let userStratumH: CGFloat = !gatewayActive ? 0 : (personalCollapsed ? 44 + collapsedSummaryHeight : 40 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34)
             let channelResult = (ch.warning == true || ch.status == "error") && !channelUi.testResultIsLatest ? nil : channelUi.testResult
             let showDetail = ch.status == "error" || ch.warning == true || channelResult != nil
             let detail = presentationError(channelResult?.detail ?? ch.detail)
-            let detailHeight = showDetail ? max(14, measureWrappedHeight(detail, width: 422, font: .systemFont(ofSize: 10.5))) : 0
+            let detailHeight = showDetail ? max(14, measureWrappedHeight(detail, width: cardWidth - 58 - allowance, font: .systemFont(ofSize: 10.5))) : 0
             let headerHeight: CGFloat = showDetail ? 38 + detailHeight : 38
             let unavailable = ch.status == "error" && ch.fields.isEmpty
             let recoveryHeight: CGFloat = ch.status == "error" ? 34 : 0
             let cardHeight: CGFloat = unavailable ? max(90, headerHeight + 40) : headerHeight + hubStratumH + extraTitleH + (showHubStratum && gatewayActive ? CitoMetrics.gap : 0) + userStratumH + recoveryHeight + 8
             chCursorY -= cardHeight
-            let chCard = roundedView(NSRect(x: 20, y: chCursorY, width: 480, height: cardHeight), radius: 10,
+            let chCard = roundedView(NSRect(x: 16, y: chCursorY, width: cardWidth, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
+            chCard.autoresizingMask = [.width]
             chCard.identifier = NSUserInterfaceItemIdentifier("settings_channel:\(ch.id)")
 
             let chBadge = roundedView(NSRect(x: 12, y: cardHeight - 34, width: 24, height: 24), radius: 6,
@@ -921,8 +907,9 @@ extension Companion {
             chCard.addSubview(chStatusLabel)
             layoutBar(in:chCard,insetLeft:44,insetRight:14,y:cardHeight-30,height:16,flexible:chTitle,trailing:[chStatusLabel])
 
-            let chDetail = textLabel(detail, NSRect(x: 44, y: cardHeight - 32 - detailHeight, width: 422, height: detailHeight), size: 10.5, color:channelResult?.ok == false || ch.status == "error" ? CitoPalette.dangerText : (ch.warning == true ? CitoPalette.warningText : CitoPalette.secondaryText))
+            let chDetail = textLabel(detail, NSRect(x: 44, y: cardHeight - 32 - detailHeight, width: cardWidth - 58, height: detailHeight), size: 10.5, color:channelResult?.ok == false || ch.status == "error" ? CitoPalette.dangerText : (ch.warning == true ? CitoPalette.warningText : CitoPalette.secondaryText))
             chDetail.maximumNumberOfLines=0; chDetail.lineBreakMode = .byWordWrapping; chDetail.cell?.wraps = true; chDetail.toolTip = chDetail.stringValue
+            chDetail.autoresizingMask = [.width]
             chDetail.identifier = NSUserInterfaceItemIdentifier("settings_channel_detail:\(ch.id)")
             if showDetail { chCard.addSubview(chDetail) }
             let chId = ch.id
@@ -943,6 +930,7 @@ extension Companion {
 
             if ch.status == "error" {
                 let recoveryBar = NSView(frame:NSRect(x:0,y:unavailable ? 8 : cardHeight-headerHeight-28,width:chCard.bounds.width,height:22))
+                recoveryBar.autoresizingMask = [.width]
                 recoveryBar.identifier = NSUserInterfaceItemIdentifier("channel_recovery_bar:\(ch.id)")
                 var recovery:[NSView]=[]
                 let actions = [("Retry","retry",true),("Change Token…","change",ch.can_configure_hub == true),("Clear Token","clear",ch.can_clear_hub == true),("Send Test","test",ch.can_test == true && ch.configured),("Unpair","unpair",ch.can_unpair == true)]
@@ -973,8 +961,9 @@ extension Companion {
                 }
             }
 
-            let hubStratum = roundedView(NSRect(x:12,y:8+userStratumH+(gatewayActive ? 6 : 0),width:456,height:hubStratumH + extraTitleH),radius:8,
+            let hubStratum = roundedView(NSRect(x:12,y:8+userStratumH+(gatewayActive ? 6 : 0),width:stratumWidth,height:hubStratumH + extraTitleH),radius:8,
                 color:.labelColor.withAppearanceAlpha(0.035),border:nil)
+            hubStratum.autoresizingMask = [.width]
             hubStratum.identifier=NSUserInterfaceItemIdentifier("stratum_hub:\(ch.id)")
             var gatewayTop: [NSView] = [], gatewayLeading: [NSView] = [], gatewayTrailing: [NSView] = []
             var personalActions: [NSView] = [], pairingActions: [NSView] = []
@@ -982,6 +971,7 @@ extension Companion {
             if separateTitle {
                 hubTitle.maximumNumberOfLines = 0; hubTitle.lineBreakMode = .byCharWrapping; hubTitle.cell?.wraps = true
             }
+            hubTitle.autoresizingMask = [.width]
             hubTitle.identifier=NSUserInterfaceItemIdentifier("stratum_hub_title:\(ch.id)")
             hubTitle.toolTip = serviceSuffix.isEmpty ? gatewayRole : [hubTitleText, gatewayRole].filter { !$0.isEmpty }.joined(separator:"\n")
             hubStratum.addSubview(hubTitle)
@@ -999,21 +989,25 @@ extension Companion {
                 if hubGatewayExpanded { gatewayLeading.append(clear) } else { gatewayTop.append(clear) }
             }
             if hubGatewayExpanded && gatewayRoleH > 0 {
-                let gatewayDescription=textLabel(gatewayRole,NSRect(x:12,y:hubStratumH-30-gatewayRoleH,width:432,height:gatewayRoleH),size:10,color:CitoPalette.secondaryText)
+                let gatewayDescription=textLabel(gatewayRole,NSRect(x:12,y:hubStratumH-30-gatewayRoleH,width:stratumTextWidth,height:gatewayRoleH),size:10,color:CitoPalette.secondaryText)
                 gatewayDescription.maximumNumberOfLines=0; gatewayDescription.lineBreakMode = .byWordWrapping
+                gatewayDescription.autoresizingMask = [.width]
                 hubStratum.addSubview(gatewayDescription)
             }
             if hubGatewayExpanded && guideH>0 {
-                let box=textLabel(guide,NSRect(x:12,y:hubStratumH-30-gatewayRoleH-guideH,width:432,height:guideH),size:10,color:CitoPalette.secondaryText)
+                let box=textLabel(guide,NSRect(x:12,y:hubStratumH-30-gatewayRoleH-guideH,width:stratumTextWidth,height:guideH),size:10,color:CitoPalette.secondaryText)
                 box.identifier=NSUserInterfaceItemIdentifier("channel_setup_guide:\(ch.id)")
                 box.maximumNumberOfLines=0; box.lineBreakMode = .byWordWrapping
+                box.autoresizingMask = [.width]
                 hubStratum.addSubview(box)
             }
-            let userStratum=roundedView(NSRect(x:12,y:8,width:456,height:userStratumH),radius:8,
+            let userStratum=roundedView(NSRect(x:12,y:8,width:stratumWidth,height:userStratumH),radius:8,
                 color:.labelColor.withAppearanceAlpha(0.035),border:nil)
+            userStratum.autoresizingMask = [.width]
             userStratum.identifier=NSUserInterfaceItemIdentifier("stratum_user:\(ch.id)")
-            let userTitle=textLabel((ch.configured || !showHubStratum ? "" : "2. ") + "Your Personal Account (@\(currentUser))",NSRect(x:12,y:userStratumH-21,width:432,height:13),size:9.5,weight:.bold,color:CitoPalette.secondaryText)
+            let userTitle=textLabel((ch.configured || !showHubStratum ? "" : "2. ") + "Your Personal Account (@\(currentUser))",NSRect(x:12,y:userStratumH-21,width:stratumTextWidth,height:13),size:9.5,weight:.bold,color:CitoPalette.secondaryText)
             userTitle.lineBreakMode = .byTruncatingMiddle; userTitle.toolTip = userTitle.stringValue
+            userTitle.autoresizingMask = [.width]
             userTitle.identifier=NSUserInterfaceItemIdentifier("stratum_user_title:\(ch.id)")
             if !personalCollapsed { userStratum.addSubview(userTitle) }
             for (container, fields, top) in [(hubStratum,hubGatewayExpanded ? hubFields : [],hubStratumH-34-gatewayRoleH-guideH),(userStratum,gatewayActive && !personalCollapsed ? formFields : [],userStratumH-40)] {
@@ -1027,6 +1021,7 @@ extension Companion {
                     labelView.toolTip=f.label; container.addSubview(labelView)
                     let initialVal=channelUi.drafts[f.key] ?? (f.value ?? "")
                     let inputField=makeEditableField(fieldId,frame:NSRect(x:inputX,y:fieldY,width:inputW,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret",accessibilityLabel:f.label)
+                    inputField.autoresizingMask = [.width]
                     inputField.delegate = channelsView
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     fieldY-=26
@@ -1036,7 +1031,8 @@ extension Companion {
             if gatewayActive { chCard.addSubview(userStratum) }
             func gate(_ control: MenuControl) { control.isEnabled=gatewayActive }
             if !instruction.isEmpty {
-                let instrLabel = textLabel(instruction, NSRect(x: 12, y: userStratumH - 40 - CGFloat(formFields.count) * 26 - instructionHeight, width: 432, height: instructionHeight), size: 10.5, weight: .semibold, color: CitoPalette.infoText)
+                let instrLabel = textLabel(instruction, NSRect(x: 12, y: userStratumH - 40 - CGFloat(formFields.count) * 26 - instructionHeight, width: stratumTextWidth, height: instructionHeight), size: 10.5, weight: .semibold, color: CitoPalette.infoText)
+                instrLabel.autoresizingMask = [.width]
                 instrLabel.maximumNumberOfLines = 0
                 instrLabel.lineBreakMode = .byWordWrapping
                 instrLabel.isSelectable = true
@@ -1085,7 +1081,7 @@ extension Companion {
             }
             if disclosure && !personalCollapsed && gatewayActive {
                 let title = manualExpanded ? "▾ Hide manual entry" : "▸ Enter \(userFields.first?.label ?? "account") manually…"
-                let width = min(userStratum.bounds.width - 24, MenuControl.intrinsicWidth(title, paddingX: 4))
+                let width = min(userStratum.bounds.width - 24 - allowance, MenuControl.intrinsicWidth(title, paddingX: 4))
                 let manual = MenuControl(title,frame:NSRect(x:12,y:instruction.isEmpty ? 38 : 66,width:width,height:22),paddingX:0)
                 manual.label.alignment = .left; manual.layoutContents()
                 manual.style = .subtleHeader; manual.identifier=NSUserInterfaceItemIdentifier("manual_channel:\(ch.id)")
@@ -1181,8 +1177,9 @@ extension Companion {
             if hubGatewayExpanded { layoutBar(in: hubStratum, y: 8, height: 24, leading: gatewayLeading, trailing: gatewayTrailing) }
             if personalCollapsed {
                 let saved = Date() < (channelUi.savedUntil["user"] ?? .distantPast)
-                let summary = textLabel(collapsedSummary, NSRect(x:12,y:38,width:432,height:collapsedSummaryHeight),size:10,color:saved ? CitoPalette.successText : CitoPalette.secondaryText)
+                let summary = textLabel(collapsedSummary, NSRect(x:12,y:38,width:stratumTextWidth,height:collapsedSummaryHeight),size:10,color:saved ? CitoPalette.successText : CitoPalette.secondaryText)
                 summary.identifier = NSUserInterfaceItemIdentifier("channel_summary:\(ch.id)"); summary.toolTip = summary.stringValue; summary.lineBreakMode = .byWordWrapping; summary.maximumNumberOfLines = 0
+                summary.autoresizingMask = [.width]
                 userStratum.addSubview(summary)
                 let edit = MenuControl("Edit…",frame:NSRect(x:0,y:6,width:MenuControl.intrinsicWidth("Edit…"),height:24))
                 edit.identifier = NSUserInterfaceItemIdentifier("edit_user_channel:\(ch.id)"); edit.style = .neutral
@@ -1212,8 +1209,10 @@ extension Companion {
                     layoutBar(in:userStratum,y:8,height:24,trailing:actions)
                     let right = actions.filter { !$0.isHidden }.map { $0.frame.minX - CitoMetrics.gap }.min() ?? (userStratum.bounds.width - CitoMetrics.cardInset)
                     let title = "Link \(reuse.display_label) (from '\(reuse.source_hub)')"
-                    let shown = compactAddressLabel(title, maxWidth:right - CitoMetrics.cardInset, font:.systemFont(ofSize:11,weight:.medium), paddingX:11)
+                    let maxWidth = max(0, right - CitoMetrics.cardInset - allowance)
+                    let shown = compactAddressLabel(title, maxWidth:maxWidth - 17, font:.systemFont(ofSize:11,weight:.medium), paddingX:11)
                     let link = MenuControl(shown,frame:NSRect(x:0,y:8,width:0,height:24),leadingSymbol:"link")
+                    link.maximumWidth = maxWidth
                     link.identifier = NSUserInterfaceItemIdentifier("reuse_channel_binding:\(ch.id)")
                     link.style = .prominent; link.toolTip = title; link.setAccessibilityLabel(title)
                     pendingLabel(link,isPending("channel_save",hub:renderedHub,target:ch.id),"Linking…")
@@ -1234,13 +1233,15 @@ extension Companion {
             channelsView.addSubview(chCard)
             chCursorY -= 10
         }
-        mountSettingsCards(channelsView, in: root)
+        mountSettingsCards(channelsView, on: scroll)
 
     }
 
-    func buildHubsTab(in root: NSView) {
-        // Tab 3: Hubs & Network (520 × 368 pt, y: 44)
-        let hubsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
+    func buildHubsTab(in scroll: NSScrollView) {
+        let cardWidth = scroll.contentSize.width - 32
+        let fieldWidth = cardWidth - 28
+        let allowance = settingsScrollerAllowance(scroll)
+        let hubsView = NSView(frame: NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: 368))
         hubsView.identifier = NSUserInterfaceItemIdentifier("settings_hubs_tab")
         hubsView.isHidden = settingsActiveTab != "hubs"
 
@@ -1257,17 +1258,19 @@ extension Companion {
         let hostNotice = hostError ?? (!hostHub.enabled && hostExpanded ? "Choose Start Sharing to accept connections" : nil)
         let hostNoticeText = hostNotice.map(presentationError)
         let noticeHeight = hostNoticeText.map {
-            max(18, measureWrappedHeight($0, width: 452, font: .systemFont(ofSize: 11)) + 2)
+            max(18, measureWrappedHeight($0, width: fieldWidth - allowance, font: .systemFont(ofSize: 11)) + 2)
         } ?? 0
         let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 160 : 120) + (noticeHeight == 0 ? 0 : noticeHeight + 10) : 46
-        let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 356 - hostHeight, width: 480, height: hostHeight), radius: 10,
+        let hostCard = roundedView(NSRect(x: 16, y: 356 - hostHeight, width: cardWidth, height: hostHeight), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
+        hostCard.autoresizingMask = [.width]
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
         let hostTitle=textLabel(hostHub.enabled && !hostHub.running && hostError == nil ? "Share This Mac as a Hub · Starting…" : "Share This Mac as a Hub", NSRect(x:14,y:0,width:280,height:17),size:13,weight:.semibold)
         hostTitle.identifier = NSUserInterfaceItemIdentifier("host_hub_title")
         hostCard.addSubview(hostTitle)
         if hostExpanded, let notice = hostNoticeText {
-            let subtitle = textLabel(notice, NSRect(x:14,y:hostHeight-34-noticeHeight,width:452,height:noticeHeight), size:11, color:hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
+            let subtitle = textLabel(notice, NSRect(x:14,y:hostHeight-34-noticeHeight,width:fieldWidth,height:noticeHeight), size:11, color:hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
+            subtitle.autoresizingMask = [.width]
             subtitle.identifier = NSUserInterfaceItemIdentifier("host_hub_error")
             subtitle.maximumNumberOfLines = 0; subtitle.lineBreakMode = .byWordWrapping; subtitle.cell?.wraps = true
             subtitle.toolTip = notice
@@ -1393,36 +1396,46 @@ extension Companion {
         }
         addBtn.isEnabled = hubForm.pendingSave == nil
         hubsView.addSubview(addBtn)
-        layoutBar(in:hubsView,insetLeft:20,insetRight:20,y:190+hubOffset,height:22,flexible:connectedTitle,trailing:[pasteBtn,addBtn])
+        layoutBar(in:hubsView,insetLeft:16,insetRight:16,y:190+hubOffset,height:22,flexible:connectedTitle,trailing:[pasteBtn,addBtn])
 
         if hubForm.isOpen {
             let errorText = hubForm.error.map(presentationError)
-            let errorHeight = errorText.map { measureWrappedHeight($0, width: 452, font: .systemFont(ofSize: 10)) + 4 } ?? 0
+            let errorHeight = errorText.map { measureWrappedHeight($0, width: fieldWidth - allowance, font: .systemFont(ofSize: 10)) + 4 } ?? 0
             let errorSpace: CGFloat = errorText == nil ? 0 : errorHeight + 6
             let isOIDC = !editingBuiltinHub && hubForm.auth == "oidc"
             let oidcExpanded = isOIDC && hubForm.oidcExpanded
             let formHeight: CGFloat = (editingBuiltinHub ? 124 : oidcExpanded ? 298 : 252) + errorSpace
-            let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
+            let form = SettingsHubForm(frame: NSRect(x: 16, y: 180 + hubOffset - formHeight, width: cardWidth, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
+            form.autoresizingMask = [.width]
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
 
-            func fieldLabel(_ title: String, _ frame: NSRect) {
-                form.addSubview(textLabel(title,frame,size:10,weight:.semibold,color:CitoPalette.secondaryText))
+            func add(_ view: NSView, sizing: NSView.AutoresizingMask = [.width]) {
+                view.autoresizingMask = sizing
+                form.addSubview(view)
+            }
+            @discardableResult
+            func fieldLabel(_ title: String, _ frame: NSRect, sizing: NSView.AutoresizingMask = [.width], id: String? = nil) -> NSTextField {
+                let label = textLabel(title,frame,size:10,weight:.semibold,color:CitoPalette.secondaryText)
+                if let id { label.identifier = NSUserInterfaceItemIdentifier(id) }
+                add(label, sizing: sizing)
+                return label
             }
             if editingBuiltinHub {
-                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94,width:452,height:18),size:12.5,weight:.semibold))
-                fieldLabel("Username (Optional)",NSRect(x:14,y:72,width:452,height:14))
-                form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:452,height:24),placeholder:"Defaults to your Mac username",value:hubForm.user,accessibilityLabel:"Hub username"))
+                add(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94,width:fieldWidth,height:18),size:12.5,weight:.semibold))
+                fieldLabel("Username (Optional)",NSRect(x:14,y:72,width:fieldWidth,height:14))
+                add(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:fieldWidth,height:24),placeholder:"Defaults to your Mac username",value:hubForm.user,accessibilityLabel:"Hub username"))
             } else {
-                fieldLabel("Hub URL",NSRect(x:14,y:179,width:298,height:13))
-                fieldLabel("Hub Name (Optional)",NSRect(x:320,y:179,width:146,height:13))
-                form.addSubview(makeEditableField("settings_hub_url",frame:NSRect(x:14,y:153,width:298,height:24),placeholder:"http://192.168.1.10:4291",value:hubForm.url,accessibilityLabel:"Hub URL"))
-                let nameField = makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:hubForm.name,accessibilityLabel:"Hub name")
+                let nameX = cardWidth - 160
+                fieldLabel("Hub URL",NSRect(x:14,y:179,width:nameX-22,height:13))
+                fieldLabel("Hub Name (Optional)",NSRect(x:nameX,y:179,width:146,height:13),sizing:[.minXMargin])
+                add(makeEditableField("settings_hub_url",frame:NSRect(x:14,y:153,width:nameX-22,height:24),placeholder:"http://192.168.1.10:4291",value:hubForm.url,accessibilityLabel:"Hub URL"))
+                let nameField = makeEditableField("settings_hub_name",frame:NSRect(x:nameX,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:hubForm.name,accessibilityLabel:"Hub name")
                 if hubForm.isEditing { nameField.toolTip = hubForm.originalName }
-                form.addSubview(nameField)
-                fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14))
+                add(nameField, sizing: [.minXMargin])
+                fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14),sizing:[])
                 let authOptions = [("none","Trusted Network"),("token","Shared Token"),("oidc","Team Sign-In")]
-                let authTrack = makePillTrack(NSRect(x:68,y:118,width:398,height:26),radius:13,bordered:false)
+                let authTrack = makePillTrack(NSRect(x:68,y:118,width:cardWidth-82,height:26),radius:13,bordered:false)
                 authTrack.identifier = NSUserInterfaceItemIdentifier("settings_hub_auth_track")
                 var authPills: [NSView] = []
                 for (mode,label) in authOptions {
@@ -1440,32 +1453,37 @@ extension Companion {
                 authTrack.frame.size.width = authPills.reduce(CGFloat(4)) { $0 + $1.frame.width } + CGFloat(max(0,authPills.count-1)) * 4
                 form.addSubview(authTrack)
                 if hubForm.auth == "none" {
-                    fieldLabel("Username (Optional)",NSRect(x:14,y:97,width:452,height:14))
-                    form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:71,width:452,height:24),placeholder:"Defaults to your Mac username",value:hubForm.user,accessibilityLabel:"Hub username"))
+                    fieldLabel("Username (Optional)",NSRect(x:14,y:97,width:fieldWidth,height:14))
+                    add(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:71,width:fieldWidth,height:24),placeholder:"Defaults to your Mac username",value:hubForm.user,accessibilityLabel:"Hub username"))
                 } else if hubForm.auth == "token" {
-                    fieldLabel("Shared Access Token",NSRect(x:14,y:97,width:274,height:14))
-                    fieldLabel("Username (Optional)",NSRect(x:296,y:97,width:170,height:14))
-                    form.addSubview(makeEditableField("settings_hub_token",frame:NSRect(x:14,y:71,width:274,height:24),placeholder:hubForm.isEditing ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac",value:hubForm.token,secret:true,accessibilityLabel:"Hub token"))
-                    form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:296,y:71,width:170,height:24),placeholder:"e.g. alice",value:hubForm.user,accessibilityLabel:"Hub username"))
+                    let userX = cardWidth - 184
+                    fieldLabel("Shared Access Token",NSRect(x:14,y:97,width:userX-22,height:14))
+                    fieldLabel("Username (Optional)",NSRect(x:userX,y:97,width:170,height:14),sizing:[.minXMargin])
+                    add(makeEditableField("settings_hub_token",frame:NSRect(x:14,y:71,width:userX-22,height:24),placeholder:hubForm.isEditing ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac",value:hubForm.token,secret:true,accessibilityLabel:"Hub token"))
+                    add(makeEditableField("settings_hub_user",frame:NSRect(x:userX,y:71,width:170,height:24),placeholder:"e.g. alice",value:hubForm.user,accessibilityLabel:"Hub username"), sizing: [.minXMargin])
                 } else if isOIDC {
                     if oidcExpanded {
                         for control in form.subviews { control.frame.origin.y += 62 }
-                        fieldLabel("OIDC Issuer URL",NSRect(x:14,y:118,width:452,height:14))
-                        form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:92,width:452,height:24),placeholder:"Auto-discovered",value:hubForm.issuer,accessibilityLabel:"OIDC issuer URL"))
-                        fieldLabel("OIDC Client ID",NSRect(x:14,y:70,width:222,height:14))
-                        fieldLabel("Redirect Port",NSRect(x:244,y:70,width:222,height:14))
-                        form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:14,y:44,width:222,height:24),placeholder:"Auto-discovered",value:hubForm.clientId,accessibilityLabel:"OIDC client ID"))
-                        form.addSubview(makeEditableField("settings_hub_redirect_port",frame:NSRect(x:244,y:44,width:222,height:24),placeholder:"Auto-discovered",value:hubForm.redirectPort,accessibilityLabel:"OIDC redirect port"))
+                        fieldLabel("OIDC Issuer URL",NSRect(x:14,y:118,width:fieldWidth,height:14))
+                        add(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:92,width:fieldWidth,height:24),placeholder:"Auto-discovered",value:hubForm.issuer,accessibilityLabel:"OIDC issuer URL"))
+                        let labelFrame = NSRect(x:14,y:70,width:0,height:14)
+                        let fieldFrame = NSRect(x:14,y:44,width:0,height:24)
+                        let clientLabel = fieldLabel("OIDC Client ID",labelFrame,sizing:[],id:"settings_hub_client_id_label")
+                        let portLabel = fieldLabel("Redirect Port",labelFrame,sizing:[],id:"settings_hub_redirect_port_label")
+                        let client = makeEditableField("settings_hub_client_id",frame:fieldFrame,placeholder:"Auto-discovered",value:hubForm.clientId,accessibilityLabel:"OIDC client ID")
+                        let port = makeEditableField("settings_hub_redirect_port",frame:fieldFrame,placeholder:"Auto-discovered",value:hubForm.redirectPort,accessibilityLabel:"OIDC redirect port")
+                        add(client, sizing: []); add(port, sizing: [])
+                        form.equalColumns = (left: [clientLabel, client], right: [portLabel, port])
                     } else {
                         let hasIssuer = hubForm.isEditing && !hubForm.issuer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         let issuer = hubForm.issuer.replacingOccurrences(of: "^https?://", with: "", options: .regularExpression)
                         let title = hasIssuer ? "OIDC: \(issuer) · Auto-discovered" : "Sign-in settings (issuer, client ID, port) are auto-discovered from the Hub URL."
-                        let summary = textLabel(title, NSRect(x:14,y:92,width:452,height:15), size:10.5, color:CitoPalette.secondaryText)
+                        let summary = textLabel(title, NSRect(x:14,y:92,width:fieldWidth,height:15), size:10.5, color:CitoPalette.secondaryText)
                         summary.identifier = NSUserInterfaceItemIdentifier("hub_oidc_discovery_summary")
                         summary.maximumNumberOfLines = 1
                         summary.lineBreakMode = .byTruncatingMiddle
                         summary.toolTip = hasIssuer ? "Issuer: \(hubForm.issuer)\nClient ID: \(hubForm.clientId)\nRedirect port: \(hubForm.redirectPort)" : title
-                        form.addSubview(summary)
+                        add(summary)
                     }
                     let title = oidcExpanded ? "▾ Hide manual OIDC settings" :
                         hubForm.isEditing ? "▸ Edit OIDC settings manually…" : "▸ Configure OIDC settings manually…"
@@ -1486,19 +1504,19 @@ extension Companion {
             if !editingBuiltinHub {
                 let captionHeight: CGFloat = oidcExpanded ? 32 : 48
                 for control in form.subviews { control.frame.origin.y += captionHeight }
-                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.", NSRect(x: 14, y: oidcExpanded ? 40 : 60, width: 452, height: captionHeight), size: 11, color: CitoPalette.secondaryText)
+                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.", NSRect(x: 14, y: oidcExpanded ? 40 : 60, width: fieldWidth, height: captionHeight), size: 11, color: CitoPalette.secondaryText)
                 visibility.identifier = NSUserInterfaceItemIdentifier("hub_visibility_caption")
                 visibility.maximumNumberOfLines = 3
                 visibility.cell?.wraps = true
-                form.addSubview(visibility)
+                add(visibility)
             }
             // Keep the error between the fields/caption and the fixed action row.
             for control in form.subviews { control.frame.origin.y += errorSpace }
             if let error = errorText {
-                let label=textLabel(error,NSRect(x:14,y:40,width:452,height:errorHeight),size:10,color:CitoPalette.dangerText)
+                let label=textLabel(error,NSRect(x:14,y:40,width:fieldWidth,height:errorHeight),size:10,color:CitoPalette.dangerText)
                 label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=error
                 label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true
-                form.addSubview(label)
+                add(label)
             }
             let cancelBtn = MenuControl("Cancel", frame: NSRect(x: 306, y: 12, width: 72, height: 24), radius: 6)
             cancelBtn.identifier = NSUserInterfaceItemIdentifier("cancel_add_hub")
@@ -1592,7 +1610,8 @@ extension Companion {
                 let endpoint = hub.is_builtin == true ? "On this Mac" : hub.url.replacingOccurrences(of:"^https?://",with:"",options:.regularExpression)
                 let detail = hub.error.map(presentationError) ?? (hub.status == "connected" ? "" : (["auth_required":"Sign-in required","disconnected":"Offline","connecting":"Connecting…"][hub.status] ?? "Unavailable"))
                 let subtitle=local ? "Built-in on this Mac · Signed in as @\(hub.user ?? "local")" : "\(endpoint) · \(authTitle)" + (hub.user.map { " · @\($0)" } ?? "") + (detail.isEmpty ? "" : " · \(detail)")
-                let row = roundedView(NSRect(x:20,y:0,width:480,height:0),radius:9,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.10))
+                let row = roundedView(NSRect(x:16,y:0,width:cardWidth,height:0),radius:9,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.10))
+                row.autoresizingMask = [.width]
                 let hubName = hub.name
                 var orderActions: [NSView] = []
                 for (direction, symbol, title, available) in [("up", "arrow.up", "Move Up", index > 0),
@@ -1617,12 +1636,12 @@ extension Companion {
                     row.addSubview(button); orderActions.append(button)
                 }
                 layoutBar(in:row,y:7,height:22,trailing:orderActions)
-                let subtitleWidth = (orderActions.first.map { $0.frame.minX - CitoMetrics.gap } ?? 466) - 28
-                let subtitleHeight = max(14, measureWrappedHeight(subtitle, width: subtitleWidth, font: .systemFont(ofSize: 10.5)) + 2)
+                let subtitleWidth = (orderActions.first.map { $0.frame.minX - CitoMetrics.gap } ?? cardWidth - 14) - 28
+                let subtitleHeight = max(14, measureWrappedHeight(subtitle, width: subtitleWidth - allowance, font: .systemFont(ofSize: 10.5)) + 2)
                 let lowerRowHeight = max(subtitleHeight, orderActions.isEmpty ? 0 : 22)
                 let rowHeight = lowerRowHeight + 42
                 rowTop -= rowHeight
-                row.frame = NSRect(x:20,y:rowTop,width:480,height:rowHeight)
+                row.frame = NSRect(x:16,y:rowTop,width:cardWidth,height:rowHeight)
                 rowTop -= 6
                 for action in orderActions { action.frame.origin.y = 7 + (lowerRowHeight - action.frame.height) / 2 }
                 row.identifier = NSUserInterfaceItemIdentifier("settings_hub:\(hub.name)")
@@ -1634,6 +1653,7 @@ extension Companion {
                 let subtitleLabel = textLabel(subtitle,NSRect(x:28,y:7+(lowerRowHeight-subtitleHeight)/2,width:subtitleWidth,height:subtitleHeight),size:10.5,color:CitoPalette.secondaryText)
                 subtitleLabel.maximumNumberOfLines=0; subtitleLabel.lineBreakMode = .byWordWrapping
                 subtitleLabel.toolTip = (local ? "Built-in on this Mac" : presentationError(hub.url)) + (hub.error.map { "\n" + presentationError($0) } ?? "")
+                subtitleLabel.autoresizingMask = [.width]
                 row.addSubview(subtitleLabel)
 
                 let edit=MenuControl("Edit",frame:NSRect(x:0,y:rowHeight-25,width:52,height:22),radius:6)
@@ -1691,7 +1711,7 @@ extension Companion {
                 layoutBar(in:row,y:y,height:22,trailing:actions)
                 let right = actions.filter { !$0.isHidden }.map { $0.frame.minX - spacing }.min() ?? row.bounds.maxX - CitoMetrics.cardInset
                 let badge = hub.is_default ? makePillBadge("Default",id:"default_hub:\(hub.name)",height:18,textColor:CitoPalette.infoText,fill:.labelColor.withAppearanceAlpha(0.06),paddingX:6,minWidth:0) : nil
-                let room = right - inset - (badge.map { $0.frame.width + spacing } ?? 0)
+                let room = right - inset - allowance - (badge.map { $0.frame.width + spacing } ?? 0)
                 nameLabel.frame = NSRect(x:inset,y:y+3,width:max(0,min(room,measureTextWidth(hub.name,font:.systemFont(ofSize:12.5,weight:.semibold))+4)),height:16)
                 if let badge {
                     badge.frame.origin = NSPoint(x:nameLabel.frame.maxX+spacing,y:y+2)
@@ -1700,25 +1720,96 @@ extension Companion {
                 hubsView.addSubview(row)
             }
         }
-        mountSettingsCards(hubsView, in: root)
+        mountSettingsCards(hubsView, on: scroll)
 
     }
 
-    private func hubFormFocusTarget() -> NSTextField? {
-        guard settingsActiveTab == "hubs", hubForm.isOpen, !uninstallConfirmOpen else { return nil }
+    @objc private func toggleLaunchAtLogin(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        // The settings receipt, not the local click, owns the committed value.
+        sender.state = settings?.launch_at_login == true ? .on : .off
+        emit(["op": "set_launch_at_login", "enabled": enabled])
+    }
+
+    private func presentUninstallAlert() {
+        guard let window = settingsPanel, activeUninstallAlert == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Disconnect Agent Apps?"
+        alert.informativeText = "This disconnects all Agent Apps from Cito. Local data and Hub settings are kept unless you choose to delete them."
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_all")
+        cancel.keyEquivalent = "\u{1b}"
+        let confirm = alert.addButton(withTitle: "Disconnect Apps")
+        confirm.identifier = NSUserInterfaceItemIdentifier("confirm_disconnect_all")
+        confirm.keyEquivalent = ""
+        confirm.hasDestructiveAction = true
+        confirm.toolTip = "Disconnect all Agent Apps and keep Cito running"
+        alert.showsSuppressionButton = true
+        if let purge = alert.suppressionButton {
+            purge.identifier = NSUserInterfaceItemIdentifier("uninstall_purge_data")
+            purge.title = "Also delete local data and Hub settings"
+            purge.state = .off
+            purge.target = self
+            purge.action = #selector(updateUninstallPurge(_:))
+        }
+        guard window.makeFirstResponder(nil) else { return }
+        activeUninstallAlert = alert
+        if headless {
+            alert.window.appearance = testAppearance
+            alert.layout()
+            alert.window.contentView?.identifier = NSUserInterfaceItemIdentifier("uninstall_alert_sheet")
+            for button in alert.buttons {
+                button.target = self
+                button.action = #selector(pressOffscreenAlertButton(_:))
+            }
+        } else {
+            alert.beginSheetModal(for: window) { [weak self, weak alert] response in
+                if let alert { self?.finishUninstallAlert(alert, confirmed: response == .alertSecondButtonReturn) }
+            }
+        }
+    }
+
+    @objc private func updateUninstallPurge(_ sender: NSButton) {
+        guard let alert = activeUninstallAlert, sender === alert.suppressionButton else { return }
+        let purge = sender.state == .on
+        let confirm = alert.buttons[1]
+        confirm.title = purge ? "Disconnect & Delete Data" : "Disconnect Apps"
+        confirm.toolTip = purge ? "Disconnect all Agent Apps and delete local data and Hub settings" : "Disconnect all Agent Apps and keep Cito running"
+        alert.layout()
+    }
+
+    @objc private func pressOffscreenAlertButton(_ sender: NSButton) {
+        guard let alert = activeUninstallAlert else { return }
+        finishUninstallAlert(alert, confirmed: sender === alert.buttons[1])
+    }
+
+    private func finishUninstallAlert(_ alert: NSAlert, confirmed: Bool) {
+        guard activeUninstallAlert === alert else { return }
+        activeUninstallAlert = nil
+        if confirmed {
+            emit(["op": "setup_disconnect_all", "purge_data": alert.suppressionButton?.state == .on])
+        }
+    }
+
+    func hubFormFocusTarget() -> NSTextField? {
+        guard settingsActiveTab == "hubs", hubForm.isOpen else { return nil }
         return settingsFieldControls[editingBuiltinHub ? "settings_hub_user" : "settings_hub_url"]
     }
 
-    func openSettingsPanel() {
-        settingsVisible = true
+    func openSettingsPanel(tab: String? = nil, channelHub: String? = nil) {
         ensureSettingsPanel()
+        let previousTab = settingsActiveTab
+        let previousHub = effectiveChannelHub
+        if let channelHub { selectedChannelHub = channelHub }
+        settingsActiveTab = tab ?? previousTab
+        if !settingsVisible || settingsActiveTab != previousTab || effectiveChannelHub != previousHub {
+            settingsVisible = true
+            rebuildSettingsPanel()
+        }
         emit(["op": "open_settings", "hub": effectiveChannelHub])
         if !headless, let window = settingsPanel {
-            if let screen = NSScreen.main, !window.isMiniaturized {
-                let area = screen.visibleFrame
-                window.setFrameOrigin(NSPoint(x: area.midX - 260, y: area.midY - 200))
-            }
-            presentPanel(window) { [weak self] in self?.hubFormFocusTarget() }
+            presentPanel(window)
             if window.isVisible, let markerPath = pendingOnboardingMarker {
                 try? FileManager.default.createDirectory(atPath: (markerPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
                 try? "1\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
@@ -1727,16 +1818,21 @@ extension Companion {
         }
     }
 
-    func closeSettingsPanel(emitAction: Bool) {
+    func closeSettingsPanel() {
         MenuControl.clearHoverWhere { $0.window === self.settingsPanel }
         settingsVisible = false
         subscribedChannelHub = ""
         settingsBannerError = nil; hostPort.error = nil
-        uninstallConfirmOpen = false; uninstallPurgeData = false
+        if let alert = activeUninstallAlert {
+            finishUninstallAlert(alert, confirmed: false)
+            if !headless, settingsPanel?.attachedSheet === alert.window {
+                settingsPanel?.endSheet(alert.window, returnCode: .abort)
+            }
+        }
         settingsDirty = true
         settingsPanel?.orderOut(nil)
-        if !headless && !settingsVisible && !directoryVisible { NSApp.setActivationPolicy(.accessory) }
-        if emitAction { emit(["op": "close_settings"]) }
+        restoreAccessoryPolicyIfNoWindows()
+        emit(["op": "close_settings"])
     }
 
     var hubNamePlaceholder: String {

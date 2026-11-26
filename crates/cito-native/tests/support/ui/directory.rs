@@ -48,7 +48,7 @@ fn v41_directory_copy_drafts_and_activity_confirmation_survive_only_valid_transi
     send_fixture(
         &f,
         p,
-        json!({"op":"directory","peers":[],"activity":[{"hub":"personal","signal_id":"observed","listener_id":"agent","from_user":"bob","from_host_name":"desktop","from_title":"Build","target_harness":"fixture","target_title":"Session","target_scoped_id":"personal:agent","message":"Build ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":false}]}),
+        json!({"op":"directory","peers":[],"activity_filter":"all","activity_total":1,"activity":[{"hub":"personal","signal_id":"observed","listener_id":"agent","from_user":"bob","from_host_name":"desktop","from_title":"Build","target_harness":"fixture","target_title":"Session","target_scoped_id":"personal:agent","message":"Build ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":false}]}),
     );
     control(&f, p, "activity_clear");
     assert!(!inspect(&f, p)
@@ -544,19 +544,76 @@ fn activity_projection_is_atomic_and_only_unread_human_replies_acknowledge() {
 }
 
 #[test]
+fn appkit_activity_delete_cancels_a_press_when_a_correlated_refresh_reuses_the_row() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state());
+    control(&f, p, "open_activity");
+    control(&f, p, "act_filter:all");
+    let activity = |ids: [&str; 3]| {
+        ids.map(|id| json!({"hub":"personal","signal_id":id,
+        "listener_id":"c_target","from_user":"bob","from_host_name":"laptop","from_harness":"fixture",
+        "from_title":"Schema work","target_harness":"human","target_title":"Review","message":"Approve?",
+        "created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true,"can_reply":true}))
+    };
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":activity(["a", "b", "c"]),"activity_filter":"all"}),
+    );
+    let original = inspect(&f, p);
+    assert_eq!(original["directory_selected_index"], 0);
+    assert!(original.directory("delete_activity:a").is_object());
+    let request = latest(&f, p, "query_directory");
+    let mut refresh = json!({"op":"directory","peers":[],"activity":activity(["b", "c", "d"]),"activity_filter":"all"});
+    for key in ["request_id", "query", "scope", "harness"] {
+        refresh[key] = request[key].clone();
+    }
+    f.send(
+        p,
+        json!({"op":"test_tracked_row_press","id":"delete_activity:a","refresh":refresh}),
+    );
+    wait(|| f.output(p, true).contains("tracked-row-release"));
+    let refreshed = inspect(&f, p);
+    assert!(refreshed.directory("delete_activity:a").is_null());
+    assert!(refreshed.directory("delete_activity:d").is_object());
+    assert!(
+        f.output(p, true)
+            .contains("tracked-row-press true true activity_row:b"),
+        "{}",
+        f.output(p, true)
+            .lines()
+            .find(|line| line.contains("tracked-row-press"))
+            .unwrap_or("no tracked press")
+    );
+    assert_eq!(f.frames_for(p, "clear_activity_history").count(), 0);
+    // Exercise the incremental keyboard path after the replacement, then release inside B normally.
+    let reloads = super::lazy_rendering::render_state(&f, p)["directory_reloads"].clone();
+    f.send(p, json!({"op":"test_directory_key","key":"down"}));
+    assert_eq!(inspect(&f, p)["directory_selected_index"], 1);
+    assert_eq!(
+        super::lazy_rendering::render_state(&f, p)["directory_reloads"],
+        reloads
+    );
+    f.send(
+        p,
+        json!({"op":"test_tracked_row_press","id":"delete_activity:b"}),
+    );
+    wait(|| f.frames_for(p, "clear_activity_history").count() == 1);
+    assert_eq!(latest(&f, p, "clear_activity_history")["signal_id"], "b");
+}
+
+#[test]
 fn appkit_activity_reply_filters_navigation_and_read_all() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut frame = state();
     let activity = json!([{"hub":"personal","signal_id":"personal:sig_unread","listener_id":"c_human","from_user":"bob","from_host_name":"laptop","from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Approve?","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true},{"hub":"personal","signal_id":"personal:sig_read","listener_id":"c_other","from_user":"alice","from_host_name":"desktop","from_harness":"fixture","from_title":"Other","from_scoped_id":"personal:two","target_harness":"fixture","target_title":"Other","target_scoped_id":"personal:other","message":"Done","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
+    let mut activity = activity;
+    activity[1]["message"] = json!("First line\nSecond line\nThird line");
     frame["activity"] = activity.clone();
     frame["unread_count"] = json!(1);
-    f.send(p, frame);
-    send_fixture(
-        &f,
-        p,
-        json!({"op":"directory","peers":[peer("one")],"matched_count":1,"online_count":2,"activity":activity,"unread_count":1}),
-    );
+    f.send(p, frame.clone());
     control(&f, p, "open_activity");
     let s = inspect(&f, p);
     assert_eq!(s["directory_mode"], "activity");
@@ -598,8 +655,20 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
         "Just now"
     );
     assert_eq!(s.directory("act_time:personal:sig_unread")["tooltip"], "");
-    assert_eq!(s.directory("act_msg:personal:sig_unread")["width"], 492);
+    let viewport = s.directory("directory_scroll")["content_width"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        s.directory("act_msg:personal:sig_unread")["width"]
+            .as_f64()
+            .unwrap(),
+        viewport - 68.0
+    );
     let delete = s.directory("delete_activity:personal:sig_unread");
+    assert_eq!(
+        delete["x"].as_f64().unwrap() + delete["width"].as_f64().unwrap(),
+        viewport - 16.0
+    );
     assert_eq!(delete["symbol"], "xmark");
     assert_eq!(delete["width"], 24);
     assert_eq!(delete["tooltip"], "Delete message");
@@ -621,9 +690,33 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
         "Delete must keep normal text editing semantics"
     );
     control(&f, p, "act_filter:all");
+    let short_row = "activity_row:personal:sig_unread";
+    let long_row = "activity_row:personal:sig_read";
+    let long_message = "act_msg:personal:sig_read";
+    let before = inspect(&f, p);
+    assert_eq!(before.directory(short_row)["selected"], true);
+    assert_eq!(before.directory(long_row)["selected"], false);
+    assert_eq!(before.directory(long_row)["row_height"], 60);
+    assert_eq!(before.directory(long_message)["maximum_lines"], 1);
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     let s = inspect(&f, p);
     assert_eq!(s["directory_selected_id"], "personal:sig_read");
+    assert_eq!(s.directory(short_row)["selected"], false);
+    assert_eq!(s.directory(long_row)["selected"], true);
+    assert!(s.directory(long_row)["row_height"].as_f64().unwrap() > 60.0);
+    assert_eq!(
+        s.directory(long_row)["height"],
+        s.directory(long_row)["row_height"]
+    );
+    assert_eq!(s.directory(long_message)["maximum_lines"], 4);
+    assert_eq!(s.directory(long_message)["text"], activity[1]["message"]);
+    // Directory has not replied yet. Updating the seed peers must not change Activity selection.
+    frame["listeners"] = json!([]);
+    f.send(p, frame);
+    let seeded = inspect(&f, p);
+    assert_eq!(seeded["directory_selected_id"], "personal:sig_read");
+    assert_eq!(seeded.directory(long_row)["selected"], true);
+
     let mut inserted = activity.clone();
     let mut newer = activity[0].clone();
     newer["signal_id"] = json!("newer");
@@ -656,10 +749,13 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     f.send(p, json!({"op":"test_directory_key","key":"return"}));
     assert_eq!(inspect(&f, p)["composer_open"], false);
     f.send(p, json!({"op":"test_directory_key","key":"up"}));
-    assert_eq!(
-        inspect(&f, p)["directory_selected_id"],
-        "personal:sig_unread"
-    );
+    let collapsed = inspect(&f, p);
+    assert_eq!(collapsed["directory_selected_id"], "personal:sig_unread");
+    assert_eq!(collapsed.directory(short_row)["selected"], true);
+    assert_eq!(collapsed.directory(long_row)["selected"], false);
+    assert_eq!(collapsed.directory(long_row)["row_height"], 60);
+    assert_eq!(collapsed.directory(long_row)["height"], 60);
+    assert_eq!(collapsed.directory(long_message)["maximum_lines"], 1);
     control(&f, p, "act_filter:unread");
     assert!(inspect(&f, p)
         .directory("activity_row:personal:sig_read")

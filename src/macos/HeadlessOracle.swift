@@ -9,7 +9,34 @@ final class HeadlessMenu: NSMenu {
     }
 }
 
+// Route the native Copy/Paste actions to the private pasteboard in the menu probe.
+private final class OracleFieldEditor: NSTextView {
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)) { return isEditable && appPasteboard.string(forType: .string) != nil }
+        return super.validateUserInterfaceItem(item)
+    }
+    override func copy(_ sender: Any?) {
+        let selection = (string as NSString).substring(with: selectedRange())
+        appPasteboard.clearContents()
+        appPasteboard.setString(selection, forType: .string)
+    }
+    override func paste(_ sender: Any?) {
+        guard let value = appPasteboard.string(forType: .string) else { return }
+        let undo = undoManager
+        undo?.beginUndoGrouping()
+        defer { breakUndoCoalescing(); undo?.endUndoGrouping() }
+        insertText(value, replacementRange: selectedRange())
+    }
+}
+
+private final class OracleFieldCell: NSTextFieldCell {
+    private let editor = OracleFieldEditor()
+    override func fieldEditor(for controlView: NSView) -> NSTextView? { editor }
+}
+
 extension Companion {
+    private var settingsInteractionWindow: NSWindow? { activeUninstallAlert?.window ?? settingsPanel }
+
     func flushDirtyViews() {
         guard headless else { return }
         renderingForInspection = true
@@ -27,7 +54,7 @@ extension Companion {
                let name = object["appearance"] as? String, ["light", "dark"].contains(name) {
                 testAppearance = NSAppearance(named: name == "light" ? .aqua : .darkAqua)
                 for item in cardMenu.items { item.view?.appearance = testAppearance }
-                for window in [directoryPanel, settingsPanel].compactMap({ $0 }) {
+                for window in [directoryPanel, settingsPanel, activeUninstallAlert?.window].compactMap({ $0 }) {
                     window.appearance = testAppearance
                     window.contentView?.appearance = testAppearance
                 }
@@ -41,11 +68,21 @@ extension Companion {
                 }
                 return true
             }
+            if op == "test_terminate" {
+                if let menu = NSApp.mainMenu?.items.first?.submenu,
+                   let quit = menu.items.firstIndex(where: { $0.action == #selector(NSApplication.terminate(_:)) }) {
+                    menu.performActionForItem(at: quit)
+                }
+                return true
+            }
             if op == "test_tab" {
-                let window = object["surface"] as? String == "directory" ? directoryPanel : settingsPanel
+                let window = object["surface"] as? String == "directory" ? directoryPanel : settingsInteractionWindow
+                let backward = object["backward"] as? Bool == true
                 if let editor = window?.firstResponder as? NSTextView {
-                    if object["backward"] as? Bool == true { editor.insertBacktab(nil) }
-                    else { editor.insertTab(nil) }
+                    if backward { editor.insertBacktab(nil) } else { editor.insertTab(nil) }
+                } else if let window {
+                    window.recalculateKeyViewLoop()
+                    if backward { window.selectPreviousKeyView(nil) } else { window.selectNextKeyView(nil) }
                 }
                 return true
             }
@@ -58,6 +95,8 @@ extension Companion {
                 func containsRename(_ view: NSView) -> Bool {
                     view.identifier?.rawValue.hasPrefix("rename_field:") == true || view.subviews.contains(where: containsRename)
                 }
+                let windows = [settingsPanel, directoryPanel].compactMap { $0 }
+                let effects = windows.flatMap { $0.contentView?.subviews.compactMap { $0 as? NSVisualEffectView } ?? [] }
                 let snapshot: [String: Any] = [
                     "menu_open": menuOpen, "menu_dirty": menuDirty, "menu_rebuilds": rebuildCount,
                     "mounted_rename": cardMenu.items.compactMap { $0.view }.contains(where: containsRename),
@@ -76,7 +115,9 @@ extension Companion {
                     "settings_launch_at_login": settings?.launch_at_login ?? false,
                     "hover_watch_active": MenuControl.hoverWatchActive,
                     "hovered": MenuControl.activeHovered?.identifier?.rawValue ?? "",
-                    "panel_effect_states": [settingsPanel, directoryPanel].compactMap { $0?.contentView }.flatMap { $0.subviews.compactMap { ($0 as? NSVisualEffectView)?.state.rawValue } }
+                    "panel_effect_states": effects.map { $0.state.rawValue },
+                    "panel_uses_window_background": effects.map { $0.material == .windowBackground },
+                    "panel_uses_normal_level": windows.map { $0.level == .normal }
                 ]
                 diagnostic("render-state " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
                 return true
@@ -132,12 +173,121 @@ extension Companion {
                 for root in cardMenu.items.compactMap({ $0.view }) + [directoryPanel?.contentView].compactMap({ $0 }) { scroll(root) }
                 return true
             }
-            if op == "test_tile_scroll_views" {
-                func tile(_ view: NSView) {
-                    if let scroll = view as? OverlayScrollView { scroll.scrollerStyle = .legacy; scroll.tile() }
-                    for child in view.subviews { tile(child) }
+            if op == "test_resize_settings_scroll", let width = object["width"] as? CGFloat,
+               let root = settingsPanel?.contentView, (400...root.bounds.width).contains(width) {
+                for case let scroll as NSScrollView in root.subviews {
+                    scroll.setFrameSize(NSSize(width: width, height: scroll.frame.height))
+                    scroll.layoutSubtreeIfNeeded()
                 }
-                for root in cardMenu.items.compactMap({ $0.view }) + [settingsPanel?.contentView, directoryPanel?.contentView].compactMap({ $0 }) { tile(root) }
+                return true
+            }
+            if op == "test_tile_scroll_views" {
+                let style: NSScroller.Style = object["style"] as? String == "overlay" ? .overlay : .legacy
+                if let scroll = directoryScrollView {
+                    scroll.scrollerStyle = style
+                    scroll.tile()
+                    scroll.layoutSubtreeIfNeeded()
+                }
+                renderingForInspection = true
+                defer { renderingForInspection = false }
+                rebuildSettingsPanel(preservingEditor: true, scrollerStyle: style)
+                rebuild(preservingEditor: true, scrollerStyle: style)
+                return true
+            }
+            if op == "test_restore_placement", let surface = object["surface"] as? String,
+               let window = surface == "settings" ? settingsPanel : directoryPanel, let available = NSScreen.main?.visibleFrame {
+                let name = (surface == "settings" ? "CitoSettingsWindow" : "CitoDirectoryWindow") + "-" + UUID().uuidString
+                defer { window.setFrameAutosaveName(""); NSWindow.removeFrame(usingName: name) }
+                window.center()
+                let saved = window.frame
+                window.saveFrame(usingName: name)
+                var area = available
+                switch object["coverage"] as? String {
+                case "partial": area.size.width = saved.maxX - available.minX - 20
+                case "none": area.origin.x = saved.maxX + 20
+                default: break
+                }
+                window.setFrameOrigin(NSPoint(x: saved.minX - 40, y: saved.minY - 20))
+                window.restorePlacement(named: name, visibleFrames: [area], fallback: area)
+                diagnostic("restore-placement \(available.contains(saved)) \(area.intersects(saved)) \(area.contains(window.frame)) \(window.frame == saved)")
+                return true
+            }
+            if op == "test_main_menu_shortcuts", let window = settingsPanel, let root = window.contentView,
+               let replacement = object["replacement"] as? String {
+                let field = NSTextField(frame: NSRect(x: 20, y: 20, width: 160, height: 24))
+                let cell = OracleFieldCell(textCell: "Original")
+                cell.isEditable = true
+                cell.isSelectable = true
+                field.cell = cell
+                field.identifier = NSUserInterfaceItemIdentifier("test_main_menu_field")
+                root.addSubview(field)
+                window.handlesNativeShortcuts = false
+                makeEventProbeKey(window)
+                window.makeFirstResponder(field)
+                guard let editor = field.currentEditor() as? OracleFieldEditor else { return true }
+                editor.allowsUndo = true
+                let undo = editor.undoManager
+                let groupsByEvent = undo?.groupsByEvent ?? true
+                undo?.groupsByEvent = false
+                defer { undo?.groupsByEvent = groupsByEvent }
+                let shortcuts: [(String, UInt16)] = [("a", 0), ("c", 8), ("v", 9), ("z", 6), ("w", 13)]
+                for (character, keyCode) in shortcuts {
+                    if character == "v" {
+                        appPasteboard.clearContents()
+                        appPasteboard.setString(replacement, forType: .string)
+                    }
+                    guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0,
+                        windowNumber: window.windowNumber, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: keyCode) else { continue }
+                    let isKey = NSApp.keyWindow === window && window.firstResponder === editor
+                    let handled = NSApp.mainMenu?.performKeyEquivalent(with: event) == true
+                    let selection = window.firstResponder === editor ? editor.selectedRange().length : -1
+                    let observed = character == "c" ? appPasteboard.string(forType: .string) ?? "" : editor.string
+                    diagnostic("main-menu-key \(character) \(isKey) \(handled) \(selection) \(observed)")
+                }
+                return true
+            }
+            if op == "test_window_button_events", let id = object["id"] as? String, let window = settingsPanel,
+               let root = window.contentView, let button: NSButton = findView(in: root, id: id) {
+                makeEventProbeKey(window)
+                let alternate = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 50, height: 50), styleMask: [.titled], backing: .buffered, defer: false)
+                alternate.isReleasedWhenClosed = false
+                defer { alternate.close() }
+                makeEventProbeKey(alternate)
+                guard let mouseDown = mouseEvent(.leftMouseDown, in: button),
+                      let mouseUp = mouseEvent(.leftMouseUp, in: button) else { return true }
+                let wasKey = NSApp.keyWindow === window
+                let beforeClick = pendingControls.count
+                NSApp.postEvent(mouseUp, atStart: true)
+                window.sendEvent(mouseDown)
+                diagnostic("window-button-event first-click \(wasKey) \(NSApp.keyWindow === window) \(pendingControls.count - beforeClick)")
+                guard NSApp.keyWindow === window, window.makeFirstResponder(button) else { return true }
+                let beforeActivation = pendingControls.count
+                // Invoke the native button's standard activation once the window is key.
+                button.performClick(nil)
+                diagnostic("window-button-event key-activation \(pendingControls.count - beforeActivation)")
+                return true
+            }
+            if op == "test_tracked_row_press", let id = object["id"] as? String, let window = directoryPanel,
+               let table = directoryTableView, let control: MenuControl = findView(in: table, id: id),
+               let down = mouseEvent(.leftMouseDown, in: control), let up = mouseEvent(.leftMouseUp, in: control),
+               let root = window.contentView {
+                let parentPoint = root.convert(down.locationInWindow, from: nil)
+                let hit = root.hitTest(root.convert(parentPoint, to: root.superview))
+                let timer = Timer(timeInterval: 0, repeats: false) { _ in
+                    if let refresh = object["refresh"], let data = try? JSONSerialization.data(withJSONObject: refresh) {
+                        self.receive(data)
+                    }
+                    let row = table.row(at: table.convert(up.locationInWindow, from: nil))
+                    let replacement = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? DirectoryPeerCellView
+                    if object["refresh"] != nil {
+                        diagnostic("tracked-row-press \(RunLoop.current.currentMode == .eventTracking) \(replacement?.deleteControl === control) \(replacement?.inspectionId ?? "")")
+                    }
+                    NSApp.postEvent(up, atStart: true)
+                }
+                RunLoop.main.add(timer, forMode: .eventTracking)
+                hit?.mouseDown(with: down)
+                timer.invalidate()
+                diagnostic("tracked-row-release")
                 return true
             }
             if op == "test_menu_open" { menuWillOpen(cardMenu); return true }
@@ -157,7 +307,7 @@ extension Companion {
                 return true
             }
             if op == "test_editor_marked", let value = object["value"] as? String {
-                let window: KeyPanel?
+                let window: KeyWindow?
                 switch object["surface"] as? String {
                 case "menu": window = headlessMenuPanel
                 case "directory": window = directoryPanel
@@ -177,32 +327,33 @@ extension Companion {
                     guard let cell = table.view(atColumn:0,row:row,makeIfNecessary:false) as? DirectoryPeerCellView else { continue }
                     if directoryMode == "activity", activityFilteredItems.indices.contains(row) {
                         let item = activityFilteredItems[row]
-                        cell.configureActivity(with:item,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
+                        cell.configureActivity(with:item,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
                     } else if directoryFilteredPeers.indices.contains(row) {
                         let peer = directoryFilteredPeers[row]
-                        cell.configure(with:peer,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] _,c in self?.copyPeer(peer,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
+                        cell.configure(with:peer,harnesses:harnessMap,onCopy:{ [weak self] _,c in self?.copyPeer(peer,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
                     }
                 }
                 return true
             }
+            if activeUninstallAlert != nil, ["test_settings_scroll", "test_settings_input"].contains(op) { return true }
             if (op == "test_focus_field" || (op == "test_settings_input" && object["value"] is String)),
                let id = object["id"] as? String,
                ["settings_hub_issuer", "settings_hub_client_id", "settings_hub_redirect_port"].contains(id),
                settingsActiveTab == "hubs", hubForm.isOpen, hubForm.auth == "oidc", !editingBuiltinHub,
-               !uninstallConfirmOpen, !hubForm.oidcManualExpanded {
+               activeUninstallAlert == nil, !hubForm.oidcManualExpanded {
                 hubForm.oidcManualExpanded = true
                 rebuildSettingsPanel(syncFields: true)
             }
             if op == "test_focus_field", let id = object["id"] as? String {
                 if id.hasPrefix("rename_field:"), let field = renameField, let root = cardMenu.items.compactMap({ $0.view }).first(where: { findView(in:$0,id:id,as:NSTextField.self) != nil }) {
-                    let panel = headlessMenuPanel ?? KeyPanel(contentRect:NSRect(x:0,y:0,width:380,height:600),styleMask:[.titled],backing:.buffered,defer:false)
+                    let panel = headlessMenuPanel ?? KeyWindow(contentRect:NSRect(x:0,y:0,width:380,height:600),styleMask:[.titled],backing:.buffered,defer:false)
                     headlessMenuPanel = panel
                     panel.contentView?.addSubview(root)
                     panel.makeFirstResponder(field); field.selectText(nil)
                     return true
                 }
                 if id == "directory_table" { directoryPanel?.makeFirstResponder(directoryTableView); return true }
-                for window in [settingsPanel, directoryPanel].compactMap({ $0 }) {
+                for window in [settingsInteractionWindow, directoryPanel].compactMap({ $0 }) {
                     if let root = window.contentView, let field: NSTextField = findView(in: root, id: id), field.isSelectable, field.isEnabled {
                         // Hidden panels never receive AppKit's order-front key-loop pass.
                         window.recalculateKeyViewLoop()
@@ -252,7 +403,19 @@ extension Companion {
                 return true
             }
             if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
+                if op == "test_settings_key", let alert = activeUninstallAlert {
+                    if key == "escape" { alert.buttons[0].performClick(nil) }
+                    if object["via"] as? String == "field" { diagnostic("field-key {\"handled\":false}") }
+                    return true
+                }
                 let window = op == "test_settings_key" ? settingsPanel : directoryPanel
+                if object["via"] as? String == "responder", key == "space" {
+                    if let window, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: window.windowNumber, context: nil, characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49) {
+                        window.firstResponder?.keyDown(with: event)
+                    }
+                    return true
+                }
                 if object["via"] as? String == "field" {
                     let commands = ["up": #selector(NSResponder.moveUp(_:)), "down": #selector(NSResponder.moveDown(_:)),
                                     "return": #selector(NSResponder.insertNewline(_:)), "escape": #selector(NSResponder.cancelOperation(_:))]
@@ -290,7 +453,7 @@ extension Companion {
             }
             if op == "test_control", let requestedId = object["id"] as? String {
                 if requestedId == "close_settings" {
-                    if settingsVisible { settingsPanel?.performClose(nil) }
+                    if settingsVisible && activeUninstallAlert == nil { settingsPanel?.performClose(nil) }
                     return true
                 }
                 if requestedId == "close_directory" {
@@ -298,9 +461,25 @@ extension Companion {
                     return true
                 }
                 let id = requestedId.hasPrefix("target_hub:") ? "hub:" + requestedId.dropFirst("target_hub:".count) : requestedId
-                let roots = cardMenu.items.compactMap { $0.view } + [directoryPanel?.contentView, settingsPanel?.contentView].compactMap { $0 }
-                if let control = roots.lazy.compactMap({ self.findView(in: $0, id: id, as: MenuControl.self) }).first {
-                    _ = control.accessibilityPerformPress()
+                let roots = cardMenu.items.compactMap { $0.view } + [directoryPanel?.contentView, settingsInteractionWindow?.contentView].compactMap { $0 }
+                if let control = roots.lazy.compactMap({ self.findView(in: $0, id: id, as: NSControl.self) }).first {
+                    if let control = control as? MenuControl {
+                        if let drag = object["drag"] as? [Bool], let window = control.window, control.enclosingMenuItem == nil {
+                            func mouse(_ type: NSEvent.EventType, inside: Bool) -> NSEvent? {
+                                let bounds = control.bounds
+                                let location = control.convert(NSPoint(x: inside ? bounds.midX : bounds.maxX + 5, y: bounds.midY), to: nil)
+                                return NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 0,
+                                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0)
+                            }
+                            if let releasedInside = drag.last, let up = mouse(.leftMouseUp, inside: releasedInside) {
+                                // Feed the tracker directly; a nested run loop could handle the next IPC frame before release.
+                                var events = (drag.compactMap { mouse(.leftMouseDragged, inside: $0) } + [up]).makeIterator()
+                                control.trackWindowPress { events.next() }
+                            }
+                        } else {
+                            _ = control.accessibilityPerformPress()
+                        }
+                    } else if let button = control as? NSButton, button.isEnabled { button.performClick(nil) }
                     return true
                 }
                 if id.hasPrefix("dir_peer:"), let table = directoryTableView {
@@ -320,13 +499,32 @@ extension Companion {
         return false
     }
 
+    private func makeEventProbeKey(_ window: NSWindow) {
+        // Exercise the real in-process key window without taking system-wide foreground focus.
+        if let activation = NSEvent.otherEvent(with: .appKitDefined, location: .zero,
+           modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+           context: nil, subtype: NSEvent.EventSubtype.applicationActivated.rawValue, data1: 0, data2: 0) {
+            NSApp.sendEvent(activation)
+        }
+        window.orderFrontRegardless()
+        window.makeMain()
+        window.makeKey()
+    }
+
+    private func mouseEvent(_ type: NSEvent.EventType, in view: NSView) -> NSEvent? {
+        guard let window = view.window else { return nil }
+        return NSEvent.mouseEvent(with: type, location: view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 0)
+    }
+
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
     func renderPNG(surface: String, path: String) {
         flushDirtyViews()
         var restored: [(NSMenuItem, NSView, NSView?, NSRect)] = []
         let view: NSView
         var compositeWindow: NSPanel?
-        if surface == "settings", let content = settingsPanel?.contentView { view = content }
+        if surface == "settings", let content = settingsInteractionWindow?.contentView { view = content }
         else if surface == "directory", let content = directoryPanel?.contentView { view = content }
         else if surface == "menu" {
             let rows=cardMenu.items.filter { !$0.isHidden }
@@ -609,8 +807,11 @@ extension Companion {
                         clippedViews.append(name(scroll)+": default viewport needs scrolling")
                     }
                 }
-                if ((scroll.hasVerticalScroller || scroll.hasHorizontalScroller) && ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle) != .overlay) || (scroll.hasHorizontalScroller && scroll.frame.height < 34) { overlappingSiblings.append(name(scroll)+": scroller geometry") }
+                if scroll.hasHorizontalScroller && scroll.frame.height < 34 { overlappingSiblings.append(name(scroll)+": scroller geometry") }
                 if let doc = scroll.documentView {
+                    if scroll.hasVerticalScroller && !scroll.hasHorizontalScroller && doc.frame.width > scroll.contentSize.width + 0.5 {
+                        clippedViews.append(name(scroll) + ": document exceeds the viewport width")
+                    }
                     for pill in doc.subviews.compactMap({ $0 as? MenuControl }) where pill.style == .prominent {
                         if !scroll.contentView.bounds.contains(pill.frame) { clippedViews.append(name(scroll)+": selected pill") }
                     }
@@ -619,7 +820,7 @@ extension Companion {
             let childViews: [NSView]
             // Native field/image internals are AppKit rendering layers, not layout
             // siblings authored by this UI (they intentionally overlay one another).
-            if view is NSTextField || view is NSImageView {
+            if view is NSTextField || view is NSImageView || view is NSButton {
                 childViews = []
             } else if let table = view as? NSTableView {
                 let count = min(table.numberOfRows, 100)
@@ -631,7 +832,7 @@ extension Companion {
                     childViews = doc.subviews
                 }
             } else {
-                childViews = view.subviews
+                childViews = view.subviews.filter { !($0 is DirectoryActionHitView) }
             }
             if visible {
                 let children = childViews.filter { !$0.isHidden && !($0 is NSVisualEffectView) }
@@ -681,8 +882,6 @@ extension Companion {
                     checkActionRow("port", items: port, midY: 24, rightInset: 14)
                 case "add_hub_form":
                     checkActionRow("submit", items: actionItems(["cancel_add_hub", "submit_add_hub"]), midY: 22, rightInset: 14)
-                case "uninstall_confirm_box":
-                    checkActionRow("confirm", items: actionItems(["cancel_uninstall_all", "confirm_disconnect_all"]), midY: 26, rightInset: 12)
                 default: break
                 }
                 let pairingActions = id.hasPrefix("stratum_user:") ? edgeItems.filter { item in
@@ -763,7 +962,7 @@ extension Companion {
                     if f.minX < -0.5 || f.minY < -0.5 || f.maxX > parentBounds.width + 0.5 || f.maxY > parentBounds.height + 0.5 {
                         clippedViews.append("\(name(view)) > \(name(child))")
                     }
-                    for other in children.dropFirst(index+1) where child.identifier?.rawValue != "uninstall_modal_overlay" && other.identifier?.rawValue != "uninstall_modal_overlay" && f.insetBy(dx:0.5,dy:0.5).intersects(frame(other).insetBy(dx:0.5,dy:0.5)) {
+                    for other in children.dropFirst(index+1) where f.insetBy(dx:0.5,dy:0.5).intersects(frame(other).insetBy(dx:0.5,dy:0.5)) {
                         overlappingSiblings.append("\(name(view)): \(name(child)) / \(name(other))")
                     }
                 }
@@ -786,12 +985,23 @@ extension Companion {
                 view.effectiveAppearance.performAsCurrentDrawingAppearance { result["tint"] = components(image.contentTintColor) }
             }
             if let scroll = view as? NSScrollView {
-                result["scroller_style"] = ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle).rawValue
+                result["scroller_style"] = scroll.scrollerStyle.rawValue
+                result["content_width"] = scroll.contentSize.width
+                result["document_width"] = scroll.documentView?.frame.width
                 result["draws_background"] = scroll.drawsBackground
                 result["content_x"] = scroll.contentView.bounds.origin.x
                 result["content_y"] = scroll.contentView.bounds.origin.y
             }
-            if let cell = view as? DirectoryPeerCellView { result["reuse_identifier"] = cell.identifier?.rawValue ?? "" }
+            if let table = view as? NSTableView, table === directoryTableView {
+                result["column_width"] = table.tableColumns.first?.width
+            }
+            if let cell = view as? DirectoryPeerCellView {
+                result["reuse_identifier"] = cell.identifier?.rawValue ?? ""
+                if let row = cell.superview as? NSTableRowView {
+                    result["selected"] = row.isSelected
+                    result["row_height"] = row.frame.height
+                }
+            }
             if let label = view as? NSTextField {
                 result["text"] = label is NSSecureTextField ? "••••" : label.stringValue
                 result["secure"] = label is NSSecureTextField
@@ -806,8 +1016,17 @@ extension Companion {
             if let control = view as? NSControl {
                 result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue
                 result["accessibility_label"] = control.accessibilityLabel() ?? ""
-                result["accessibility_role"] = control.accessibilityRole()?.rawValue ?? ""
-                if let value = control.accessibilityValue() as? NSNumber { result["accessibility_value"] = value }
+                // NSButton's native cell supplies the role and value in offscreen windows.
+                let cell = (control as? NSButton)?.cell
+                result["accessibility_role"] = (cell?.accessibilityRole() ?? control.accessibilityRole())?.rawValue ?? ""
+                if let value = (cell?.accessibilityValue() ?? control.accessibilityValue()) as? NSNumber { result["accessibility_value"] = value }
+                result["can_become_key_view"] = control.canBecomeKeyView
+                result["focused"] = control.window?.firstResponder === control
+                result["accepts_first_mouse"] = control.acceptsFirstMouse(for: nil)
+            }
+            if let button = view as? NSButton {
+                result["text"] = button.title
+                result["native_button"] = true
             }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
@@ -826,7 +1045,7 @@ extension Companion {
             guard visible else { return }
             let field = view as? NSTextField
             if let control = view as? NSControl, control.isEnabled,
-               (control as? MenuControl)?.pressed != nil || field?.isEditable == true {
+               (control as? MenuControl)?.pressed != nil || control is NSButton || field?.isEditable == true {
                 // Sample the visible interior in the root's superview coordinates.
                 let bounds = control.bounds.intersection(control.visibleRect)
                 if !bounds.isEmpty {
@@ -834,22 +1053,26 @@ extension Companion {
                     let occluded = [0.15, 0.5, 0.85].contains { fraction in
                         let point = control.convert(NSPoint(x:bounds.minX+bounds.width*fraction,y:bounds.midY),to:root.superview)
                         let hit = root.hitTest(point)
-                        // AppKit may host the search field's editable region in a native subview.
-                        let nativeSearchHit = control is NSSearchField && hit?.isDescendant(of: control) == true
-                        return hit !== control && (editor == nil || hit !== editor) && !nativeSearchHit
+                        // AppKit may delegate a native control's hit to one of its subviews.
+                        let nativeControlHit = (control is NSSearchField || control is NSButton) && hit?.isDescendant(of: control) == true
+                        let rowActionHit = (hit as? DirectoryActionHitView).map {
+                            guard let parent = $0.superview else { return false }
+                            return $0.control(at: parent.convert(point, from: root.superview)) === control
+                        } ?? false
+                        return hit !== control && (editor == nil || hit !== editor) && !nativeControlHit && !rowActionHit
                     }
                     if occluded {
                         overlappingSiblings.append("\(surface) > \(name(control)): occluded in hitTest")
                     }
                 }
             }
-            if field != nil { return }
+            if field != nil || view is NSButton { return }
             for child in view.subviews { checkHitTests(child,root:root,surface:surface,visible:visible) }
         }
         for item in cardMenu.items where !item.isHidden {
             if let root = item.view { checkHitTests(root,root:root,surface:"menu") }
         }
-        if let root = settingsPanel?.contentView { checkHitTests(root,root:root,surface:"settings") }
+        if let root = settingsInteractionWindow?.contentView { checkHitTests(root,root:root,surface:"settings") }
         if let root = directoryPanel?.contentView { checkHitTests(root,root:root,surface:"directory") }
         let items = cardMenu.items.compactMap { item -> [String: Any]? in
             guard let view = item.view else { return nil }
@@ -861,11 +1084,12 @@ extension Companion {
         } else {
             directoryItems = []
         }
-        let settingsItems: [[String: Any]]
-        if let rootView = settingsPanel?.contentView {
-            settingsItems = [project(rootView)]
-        } else {
-            settingsItems = []
+        var settingsItems = settingsPanel?.contentView.map { [project($0)] } ?? []
+        if let alert = activeUninstallAlert, let root = alert.window.contentView {
+            var sheet = project(root)
+            sheet["on_screen"] = alert.window.isVisible
+            sheet["attached"] = alert.window.sheetParent != nil
+            settingsItems.append(sheet)
         }
         let selectedId: String
         if directoryMode == "activity" {
@@ -907,13 +1131,16 @@ extension Companion {
             "tracking_cancellations": (cardMenu as? HeadlessMenu)?.trackingCancellations ?? 0,
             "low_contrast_labels": lowContrastLabels, "jargon_leaks":jargonLeaks, "address_mismatches":addressMismatches,
             "edit_menu": NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "Edit" })?.submenu?.items.map { ["title": $0.title, "key": $0.keyEquivalent, "action": $0.action.map(NSStringFromSelector) ?? "", "shift": $0.keyEquivalentModifierMask.contains(.shift)] as [String: Any] } ?? [],
+            "window_frames": [settingsPanel, directoryPanel].compactMap { window in
+                window.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] }
+            },
             "key_panels": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in
                 guard let window = window else { return nil }
                 return ["titled": window.styleMask.contains(.titled), "full_size_content": window.styleMask.contains(.fullSizeContentView),
                     "automatic_key_view_loop": window.autorecalculatesKeyViewLoop,
                     "hidden_title": window.titleVisibility == .hidden, "transparent_titlebar": window.titlebarAppearsTransparent,
                     "closable": window.styleMask.contains(.closable), "miniaturizable": window.styleMask.contains(.miniaturizable),
-                    "visible_window_buttons": KeyPanel.chromeButtons.allSatisfy { window.standardWindowButton($0)?.isHidden == false },
+                    "visible_window_buttons": KeyWindow.chromeButtons.allSatisfy { window.standardWindowButton($0)?.isHidden == false },
                     "close_enabled": window.standardWindowButton(.closeButton)?.isEnabled == true,
                     "miniaturize_enabled": window.standardWindowButton(.miniaturizeButton)?.isEnabled == true,
                     "zoom_disabled": window.standardWindowButton(.zoomButton)?.isEnabled == false,
@@ -922,7 +1149,7 @@ extension Companion {
                         let center = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: frame.superview)
                         return frame.hitTest(center) === button
                     },
-                    "window_button_positions": KeyPanel.chromeButtons.compactMap { type -> [CGFloat]? in
+                    "window_button_positions": KeyWindow.chromeButtons.compactMap { type -> [CGFloat]? in
                         guard let content = window.contentView, let button = window.standardWindowButton(type) else { return nil }
                         let rect = content.convert(button.bounds, from: button)
                         return [rect.minX, content.bounds.maxY - rect.midY]

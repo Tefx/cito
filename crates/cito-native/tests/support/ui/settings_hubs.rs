@@ -865,7 +865,10 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     control(&f, p, "cancel_add_hub");
     control(&f, p, "open_uninstall_confirm");
     let modal = inspect(&f, p);
-    assert!(modal.settings("confirm_uninstall_all").is_null());
+    assert_eq!(
+        modal.settings("confirm_disconnect_all")["native_button"],
+        true
+    );
     assert_eq!(
         modal.settings("confirm_disconnect_all")["text"],
         "Disconnect Apps"
@@ -878,6 +881,10 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     });
     control(&f, p, "open_uninstall_confirm");
     control(&f, p, "uninstall_purge_data");
+    assert_eq!(
+        inspect(&f, p).settings("confirm_disconnect_all")["text"],
+        "Disconnect & Delete Data"
+    );
     control(&f, p, "confirm_disconnect_all");
     wait(|| {
         f.frames(p)
@@ -1059,18 +1066,18 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     });
     control(&f, p, "open_uninstall_confirm");
     let s = inspect(&f, p);
-    assert_eq!(s.settings("uninstall_confirm_box")["hidden"], false);
+    assert_eq!(s.settings("uninstall_alert_sheet")["on_screen"], false);
     assert_eq!(s.settings("settings_channels_tab")["hidden"], false);
     assert!(f.frames_for(p, "setup_uninstall_all").next().is_none());
     control(&f, p, "settings_tab:hubs");
     let modal = inspect(&f, p);
     assert_eq!(modal["settings_tab"], "channels");
-    assert_eq!(modal.settings("settings_tab:hubs")["enabled"], false);
-    assert!(!modal.settings("uninstall_confirm_box").is_null());
+    assert_eq!(modal.settings("settings_tab:hubs")["enabled"], true);
+    assert!(!modal.settings("uninstall_alert_sheet").is_null());
     control(&f, p, "cancel_uninstall_all");
     control(&f, p, "settings_tab:hubs");
     let s = inspect(&f, p);
-    assert!(s.settings("uninstall_confirm_box").is_null());
+    assert!(s.settings("uninstall_alert_sheet").is_null());
     assert_eq!(s.settings("settings_hubs_tab")["hidden"], false);
     f.send(
         p,

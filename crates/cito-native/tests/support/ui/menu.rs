@@ -348,7 +348,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let edit = s.settings("edit_hub:local");
     assert_eq!(
         edit["x"].as_f64().unwrap() + edit["width"].as_f64().unwrap(),
-        468.0
+        s.settings("settings_hub:local")["width"].as_f64().unwrap() - 12.0
     );
     l.control("edit_hub:local");
     assert_eq!(inspect(&f, l.ui).settings("submit_add_hub")["text"], "Save");
@@ -857,6 +857,24 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":if i == 1 { "~/Documents/A-very-long-ancestor/Projects/service" } else if i == 2 { "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else if i == 3 { "/srv/Documents/A-very-long-ancestor/Projects/service" } else if i == 4 { "/srv/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else { "/tmp/work" },"branch":"main","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
     f.send(p, frame.clone());
     control(&f, p, "target_hub:work");
+    for (style, native_style) in [("legacy", 0), ("overlay", 1)] {
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let snapshot = inspect(&f, p);
+        let scroll = snapshot.menu("available_scroll");
+        let width = scroll["content_width"].as_f64().unwrap();
+        let action = snapshot.menu("listen:fixture:candidate-0");
+        assert_eq!(scroll["scroller_style"], native_style);
+        assert_eq!(
+            snapshot.menu("candidate:fixture:candidate-0")["width"],
+            width
+        );
+        assert_eq!(
+            action["x"].as_f64().unwrap() + action["width"].as_f64().unwrap(),
+            width - 12.0
+        );
+        assert_eq!(snapshot["clipped_views"], json!([]), "{style}");
+        assert_eq!(snapshot["overlapping_siblings"], json!([]), "{style}");
+    }
     let s = inspect(&f, p);
     assert_eq!(s.menu("available_scroll")["height"], 176);
     let candidate = s.menu("candidate:fixture:candidate-0");

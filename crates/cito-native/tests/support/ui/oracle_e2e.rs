@@ -311,6 +311,279 @@ fn panel_presentation_restores_missing_focus_and_preserves_an_active_field_edito
             "Expected initial focus, prepared responder, and deferred focus postcondition"
         );
     }
+    f.send(p, json!({"op":"test_focus_field","id":"settings_hub_name"}));
+    f.send(p, json!({"op":"test_clipboard","text":"draft"}));
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"command-v","via":"panel"}),
+    );
+    let before = inspect(&f, p);
+    assert_eq!(before["field_editors"][0]["can_undo"], true);
+    f.send(
+        p,
+        json!({"op":"test_editor_marked","surface":"settings","value":"中"}),
+    );
+    let composing = inspect(&f, p);
+    assert_eq!(composing["field_editors"][0]["marked"], true);
+    f.send(p, json!({"op":"test_open_panel","surface":"settings"}));
+    f.send(
+        p,
+        json!({"op":"error","source_op":"open_settings","error":"Unable to refresh settings."}),
+    );
+    let reopened = inspect(&f, p);
+    for key in [
+        "instance",
+        "id",
+        "attached",
+        "can_undo",
+        "marked",
+        "selection_location",
+        "selection_length",
+    ] {
+        assert_eq!(
+            reopened["field_editors"][0][key], composing["field_editors"][0][key],
+            "{key}"
+        );
+    }
+    assert_eq!(
+        reopened.settings("settings_hub_name")["instance"],
+        composing.settings("settings_hub_name")["instance"]
+    );
+}
+
+#[test]
+fn saved_panel_placement_is_constrained_and_reopen_preserves_editing() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "hubs");
+    control(&f, p, "open_add_hub");
+    for (index, surface, field) in [
+        (0, "settings", "settings_hub_url"),
+        (1, "directory", "directory_search"),
+    ] {
+        if surface == "directory" {
+            control(&f, p, "open_directory");
+        }
+        for (coverage, expected) in [
+            ("full", "true true true true"),
+            ("partial", "true true true false"),
+            ("none", "true false true false"),
+        ] {
+            f.send(
+                p,
+                json!({"op":"test_restore_placement","surface":surface,"coverage":coverage}),
+            );
+            inspect(&f, p);
+            let output = f.output(p, true);
+            assert_eq!(
+                output
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("cito-ui: restore-placement "))
+                    .next_back(),
+                Some(expected),
+                "{surface}: {coverage}"
+            );
+        }
+        f.send(p, json!({"op":"test_focus_field","id":field}));
+        f.send(p, json!({"op":"test_clipboard","text":"draft"}));
+        let op = if surface == "settings" {
+            "test_settings_key"
+        } else {
+            "test_directory_key"
+        };
+        f.send(p, json!({"op":op,"key":"command-v","via":"panel"}));
+        f.send(
+            p,
+            json!({"op":"test_editor_marked","surface":surface,"value":"中"}),
+        );
+        let find_editor = |snapshot: &Value| {
+            snapshot["field_editors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|editor| editor["id"] == field)
+                .unwrap()
+                .clone()
+        };
+        let before = inspect(&f, p);
+        let editor = find_editor(&before);
+        assert_eq!(editor["marked"], true);
+        assert_eq!(editor["can_undo"], true);
+        f.send(p, json!({"op":"test_open_panel","surface":surface}));
+        let reopened = inspect(&f, p);
+        assert_eq!(
+            reopened["window_frames"][index],
+            before["window_frames"][index]
+        );
+        for key in [
+            "instance",
+            "attached",
+            "marked",
+            "can_undo",
+            "selection_location",
+            "selection_length",
+        ] {
+            assert_eq!(find_editor(&reopened)[key], editor[key], "{surface}: {key}");
+        }
+    }
+}
+
+#[test]
+fn scroller_style_retiles_expanded_oidc_while_composing() {
+    assert_settings_retile("hubs", "settings_hub_url");
+}
+
+#[test]
+fn scroller_style_retiles_channel_strata_and_inbox_while_composing() {
+    assert_settings_retile("channels", "channel_field:channel:account");
+}
+
+fn assert_settings_retile(tab: &str, field: &str) {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["hubs"][0]["supports_workspace_scope"] = json!(true);
+    cfg["hubs"][0]["human_can_set_scope"] = json!(true);
+    cfg["hubs"][0]["human_listener_id"] = json!("c_alice");
+    open_settings(&f, p, &cfg, tab);
+    if tab == "hubs" {
+        control(&f, p, "open_add_hub");
+        control(&f, p, "settings_hub_auth:oidc");
+        control(&f, p, "manual_hub_oidc");
+        f.send(p, json!({"op":"test_end_editing"}));
+    } else {
+        control(&f, p, "edit_hub_service:channel");
+    }
+    let number = |view: &Value, key: &str| view[key].as_f64().unwrap();
+    let right = |view: &Value| number(view, "x") + number(view, "width");
+    f.send(p, json!({"op":"test_tile_scroll_views","style":"overlay"}));
+    f.send(p, json!({"op":"test_focus_field","id":field}));
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"http://example.com"}),
+    );
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"command-v","via":"panel"}),
+    );
+    f.send(p, json!({"op":"test_editor_marked","value":"中"}));
+    let before = inspect(&f, p);
+    let editor = &before["field_editors"][0];
+    assert_eq!(editor["id"], field);
+    assert_eq!(editor["marked"], true);
+    assert_eq!(editor["attached"], true);
+    assert_eq!(editor["can_undo"], true);
+    let scroll_id = format!("settings_{tab}_tab");
+    let overlay = number(&before.settings(&scroll_id), "content_width");
+    let rebuilds = super::lazy_rendering::render_state(&f, p)["settings_rebuilds"].clone();
+    for (style, native_style, resize) in [
+        ("legacy", 0, None),
+        ("overlay", 1, None),
+        ("overlay", 1, Some(overlay - 11.0)),
+        ("overlay", 1, Some(overlay)),
+    ] {
+        if let Some(width) = resize {
+            f.send(p, json!({"op":"test_resize_settings_scroll","width":width}));
+        } else {
+            f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        }
+        let after = inspect(&f, p);
+        for key in [
+            "id",
+            "instance",
+            "attached",
+            "marked",
+            "can_undo",
+            "selection_location",
+            "selection_length",
+        ] {
+            assert_eq!(
+                after["field_editors"][0][key], editor[key],
+                "{style}: {key}"
+            );
+        }
+        let scroll = after.settings(&scroll_id);
+        let width = number(&scroll, "content_width");
+        assert_eq!(scroll["scroller_style"], native_style);
+        if style == "legacy" {
+            assert!(width < overlay);
+        } else {
+            assert_eq!(width, resize.unwrap_or(overlay));
+        }
+        assert_eq!(scroll["document_width"], width);
+        let mounted_field = after.settings(field);
+        assert_eq!(
+            mounted_field["instance"],
+            before.settings(field)["instance"]
+        );
+        let cards = if tab == "hubs" {
+            ["add_hub_form", "host_hub_card"]
+        } else {
+            ["settings_channel:channel", "inbox_control_bar"]
+        };
+        for id in cards {
+            assert_eq!(after.settings(id)["width"], width - 32.0, "{style}: {id}");
+        }
+        if tab == "hubs" {
+            assert_eq!(mounted_field["width"], width - 214.0);
+            for suffix in ["", "_label"] {
+                let left = after.settings(&format!("settings_hub_client_id{suffix}"));
+                let right_column = after.settings(&format!("settings_hub_redirect_port{suffix}"));
+                let left_width = number(&left, "width");
+                let right_width = number(&right_column, "width");
+                assert!((left_width - right_width).abs() <= 1.0);
+                assert_eq!(number(&right_column, "x") - right(&left), 8.0);
+                assert_eq!(left_width + right_width, width - 68.0);
+                assert_eq!(right(&right_column), width - 46.0);
+            }
+        } else {
+            for id in ["stratum_hub:channel", "stratum_user:channel"] {
+                let stratum = after.settings(id);
+                assert_eq!(number(&stratum, "width"), width - 56.0, "{style}: {id}");
+                assert_eq!(right(&stratum), width - 44.0);
+            }
+            assert_eq!(right(&mounted_field), width - 68.0);
+            let toggle = after.settings("toggle_inbox");
+            let scope = after.settings("scope:c_alice");
+            assert_eq!(right(&toggle), width - 44.0);
+            assert!(right(&scope) < number(&toggle, "x"));
+            for id in ["inbox_control_title", "inbox_control_summary"] {
+                let text = after.settings(id);
+                assert_eq!(right(&text) + 10.0, number(&scope, "x"), "{style}: {id}");
+            }
+        }
+    }
+    assert_eq!(
+        super::lazy_rendering::render_state(&f, p)["settings_rebuilds"],
+        rebuilds
+    );
+}
+
+#[test]
+fn main_menu_key_equivalents_reach_the_key_windows_appkit_responder_chain() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "apps");
+    f.send(
+        p,
+        json!({"op":"test_main_menu_shortcuts","replacement":"Replacement"}),
+    );
+    let snapshot = inspect_unchecked(&f, p, None);
+    let output = f.output(p, true);
+    assert_eq!(
+        output
+            .lines()
+            .filter_map(|line| line.strip_prefix("cito-ui: main-menu-key "))
+            .collect::<Vec<_>>(),
+        [
+            "a true true 8 Original",
+            "c true true 8 Original",
+            "v true true 0 Replacement",
+            "z true true 8 Original",
+            "w true true -1 Original"
+        ]
+    );
+    assert_eq!(snapshot["settings_open"], false);
 }
 
 #[test]
@@ -576,7 +849,10 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
         let error = s.settings("add_hub_error");
         assert_eq!(error["text"], clean.trim());
         assert_eq!(error["tooltip"], clean.trim());
-        assert_eq!(error["width"], 452);
+        assert_eq!(
+            error["width"].as_f64().unwrap(),
+            s.settings("add_hub_form")["width"].as_f64().unwrap() - 28.0
+        );
         assert!(error["height"].as_f64().unwrap() > 15.0);
         let submit = s.settings("submit_add_hub");
         assert!(
@@ -618,6 +894,9 @@ fn activity_clear_confirmation_and_dynamic_accessibility() {
     frame["hubs"][0]["attachments"] = json!([{"channel_id":"hub:telegram","location":"hub","plugin_id":"telegram","display_name":"Telegram","availability":"ACTIVE","is_local":false},{"channel_id":"here:human","location":"device","host_id":"here","display_name":"laptop","availability":"ACTIVE","is_local":true}]);
     frame["unread_count"] = json!(2);
     frame["activity"]=json!([("review","The review is ready. Can you check the final changes?",true,true),("build","Build passed. All checks are green.",false,false),("reply","Approved. Please continue with the next step.",true,true)].into_iter().map(|(id,message,unread,for_me)|json!({"hub":"personal","signal_id":id,"listener_id":"human-node","from_user":"bob","from_host_name":"desktop","from_harness":"pi","from_title":"Release review","from_scoped_id":"personal:sender","from_display_address":"bob/pi#abcd","target_harness":if for_me{"human"}else{"pi"},"target_title":"Build session","target_scoped_id":"personal:receiver","message":message,"created_at":"2030-01-01T00:00:00Z","unread":unread,"for_me":for_me,"can_reply":for_me})).collect::<Vec<_>>());
+    let activity_items = frame["activity"].clone();
+    frame["activity_filter"] = json!("all");
+    frame["activity_total"] = json!(3);
     f.send(p, frame);
     let s = inspect(&f, p);
     assert!(s["button_tooltip"].as_str().unwrap().contains("unread"));
@@ -684,15 +963,39 @@ fn activity_clear_confirmation_and_dynamic_accessibility() {
         p,
         json!({"op":"test_directory_query","query":"Build passed"}),
     );
-    inspect(&f, p);
+    let cached = inspect(&f, p);
+    assert!(!cached.directory("activity_row:build").is_null());
+    assert_eq!(cached.directory("activity_clear")["enabled"], false);
+    control(&f, p, "activity_clear");
+    assert!(inspect(&f, p)
+        .directory("activity_clear_confirm_label")
+        .is_null());
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[activity_items[1]],"activity_total":2,"activity_filter":"all","activity_query":"Build passed"}),
+    );
     control(&f, p, "activity_clear");
     assert_eq!(
         inspect(&f, p).directory("activity_clear_confirm_label")["text"],
-        "Clear 1 matching messages?"
+        "Clear 2 matching messages?"
     );
-    control(&f, p, "activity_clear_confirm_cancel");
-    f.send(p, json!({"op":"test_directory_query","query":""}));
-    inspect(&f, p);
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[],"activity_total":0,"activity_filter":"all","activity_query":"Build passed"}),
+    );
+    control(&f, p, "act_reset_search");
+    let reset = inspect(&f, p);
+    assert_eq!(reset["directory_query"], "");
+    assert!(reset.directory("activity_clear_confirm_commit").is_null());
+    assert_eq!(reset.directory("activity_clear")["enabled"], false);
+    assert!(f.frames_for(p, "clear_activity_history").next().is_none());
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":activity_items,"activity_total":3,"activity_filter":"all","activity_query":""}),
+    );
     control(&f, p, "activity_clear");
     f.send(p, json!({"op":"test_directory_key","key":"escape"}));
     let cancelled = inspect(&f, p);
@@ -868,7 +1171,42 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
         p,
         json!({"op":"directory","peers":[peer("one")],"matched_count":1}),
     );
-    f.send(p, json!({"op":"test_tile_scroll_views"}));
+    let mut overlay_widths = None;
+    for (style, native_style) in [("overlay", 1), ("legacy", 0), ("overlay", 1)] {
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let s = inspect(&f, p);
+        assert_eq!(s["clipped_views"], json!([]), "{style}");
+        assert_eq!(s["overlapping_siblings"], json!([]), "{style}");
+        let directory = s.directory("directory_scroll");
+        let settings = s.settings("settings_channels_tab");
+        assert_eq!(directory["scroller_style"], native_style);
+        assert_eq!(settings["scroller_style"], native_style);
+        let directory_width = directory["content_width"].as_f64().unwrap();
+        let settings_width = settings["content_width"].as_f64().unwrap();
+        if style == "legacy" {
+            let (overlay_directory, overlay_settings) = overlay_widths.unwrap();
+            assert!(directory_width < overlay_directory);
+            assert!(settings_width < overlay_settings);
+        } else if let Some(widths) = overlay_widths {
+            assert_eq!((directory_width, settings_width), widths);
+        } else {
+            overlay_widths = Some((directory_width, settings_width));
+        }
+        let card = s.settings("settings_channel:channel");
+        assert_eq!(card["x"], 16);
+        assert_eq!(card["width"].as_f64().unwrap(), settings_width - 32.0);
+        let table = s.directory("directory_table");
+        assert_eq!(table["column_width"], directory["content_width"]);
+        let message = s.directory("msg_dir:personal:one");
+        assert_eq!(
+            message["x"].as_f64().unwrap() + message["width"].as_f64().unwrap(),
+            directory_width - 16.0
+        );
+        for panel in [s.settings("settings_panel"), s.directory("directory_panel")] {
+            assert_eq!(panel["radius"], 0);
+            assert_eq!(panel["border_width"], 0);
+        }
+    }
     let s = inspect(&f, p);
     assert_eq!(
         s["key_panels"],
@@ -891,8 +1229,6 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     assert_eq!(s.directory("directory_mode_track")["x"], 78);
     assert_eq!(s.directory("directory_search")["x"], 256);
     assert_eq!(s.directory("directory_search")["width"], 290);
-    assert_eq!(s.directory("directory_scroll")["scroller_style"], 1);
-    assert_eq!(s.settings("settings_channels_tab")["scroller_style"], 1);
     assert_eq!(
         json!(&s["edit_menu"].as_array().unwrap()[..6]),
         json!([
@@ -2334,7 +2670,15 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 ))
             }
             "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 387.0)),
-            "settings" => Some(("settings_items", "channel_hub_strip", 6.0, 398.0)),
+            "settings" => Some((
+                "settings_items",
+                "channel_hub_strip",
+                6.0,
+                snapshot.settings("settings_channels_tab")["content_width"]
+                    .as_f64()
+                    .unwrap()
+                    - 114.0,
+            )),
             _ => None,
         };
         if let Some((tree, id, spacing, allocated)) = strip {
@@ -2376,7 +2720,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 match surface {
                     "menu" => assert!((x + width - 368.0).abs() < 0.5),
                     "directory" => assert_eq!(x, 157.0),
-                    "settings" => assert_eq!(x, 102.0),
+                    "settings" => assert_eq!(x, 98.0),
                     _ => unreachable!(),
                 }
             }
@@ -2640,7 +2984,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             for appearance in ["light", "dark"] {
                 let snapshot = inspect_as(&f, p, Some(appearance));
                 let track = snapshot.settings("channel_hub_strip");
-                assert!(track["width"].as_f64().unwrap() <= 398.0);
+                let viewport = snapshot.settings("settings_channels_tab")["content_width"]
+                    .as_f64()
+                    .unwrap();
+                assert!(track["width"].as_f64().unwrap() <= viewport - 114.0);
                 let mut right = 0.0;
                 for hub in ["local", "work"] {
                     let pill = snapshot.settings(&format!("channel_hub_selector:{hub}"));
@@ -2769,12 +3116,63 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     control(&f, p, "cancel_add_hub");
     control(&f, p, "open_uninstall_confirm");
     let s = inspect(&f, p);
-    assert_eq!(s.settings("uninstall_modal_overlay")["width"], 520);
+    let sheet = s.settings("uninstall_alert_sheet");
+    assert!(sheet["width"].as_f64().unwrap() > 0.0);
+    assert_eq!(sheet["on_screen"], false);
+    assert_eq!(sheet["attached"], false);
     assert_eq!(s.settings("settings_footer")["hidden"], false);
     capture("settings", "settings_uninstall_modal");
     control(&f, p, "cancel_uninstall_all");
     control(&f, p, "close_settings");
     assert_eq!(inspect(&f, p)["settings_open"], false);
+}
+
+#[test]
+fn directory_escape_clears_search_before_closing() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    f.send(p, json!({"op":"test_directory_query","query":"absent"}));
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"matched_count":0,"online_count":2}),
+    );
+    f.send(p, json!({"op":"test_focus_field","id":"directory_search"}));
+    let filtered = inspect(&f, p);
+    assert_eq!(filtered["directory_matched_count"], 0);
+    assert_eq!(filtered["field_editors"][0]["id"], "directory_search");
+    assert_eq!(
+        filtered.directory("directory_shortcuts")["text"],
+        "↵ Copy Address   ⇧↵ Message   ⎋ Clear Search"
+    );
+    let escape = json!({"op":"test_directory_key","key":"escape","via":"field"});
+    f.send(p, escape.clone());
+    let cleared = inspect(&f, p);
+    assert_eq!(cleared["directory_open"], true);
+    assert_eq!(cleared["directory_query"], "");
+    assert_eq!(cleared.directory("directory_search")["text"], "");
+    assert_eq!(
+        cleared.directory("directory_shortcuts")["text"],
+        "↵ Copy Address   ⇧↵ Message   ⎋ Close"
+    );
+    assert_eq!(
+        cleared["field_editors"][0]["instance"],
+        filtered["field_editors"][0]["instance"]
+    );
+    assert_eq!(latest(&f, p, "query_directory")["query"], "");
+    assert_eq!(f.frames_for(p, "close_directory").count(), 0);
+
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one"),peer("two")],"matched_count":2}),
+    );
+    assert_eq!(inspect(&f, p)["directory_matched_count"], 2);
+    f.send(p, escape);
+    assert_eq!(inspect(&f, p)["directory_open"], false);
+    assert_eq!(f.frames_for(p, "close_directory").count(), 1);
 }
 
 #[test]
@@ -2876,9 +3274,12 @@ fn correlation_editor_keys_and_modal_escape() {
         .any(|editor| editor["id"] == "settings_hub_url"));
     control(&f, p, "open_uninstall_confirm");
     let modal = inspect(&f, p);
-    assert_eq!(modal.settings("settings_hub_url")["enabled"], false);
-    assert_eq!(modal.settings("settings_tab:apps")["enabled"], false);
-    assert_eq!(modal.settings("cancel_uninstall_all")["enabled"], true);
+    assert_eq!(modal.settings("settings_hub_url")["enabled"], true);
+    assert_eq!(modal.settings("settings_tab:apps")["enabled"], true);
+    assert_eq!(
+        modal.settings("cancel_uninstall_all")["native_button"],
+        true
+    );
     assert!(!modal["field_editors"]
         .as_array()
         .unwrap()
@@ -2900,12 +3301,13 @@ fn correlation_editor_keys_and_modal_escape() {
         s.settings("settings_hub_url")["text"],
         "https://id.example.com"
     );
-    assert_eq!(modal.settings("uninstall_modal_overlay")["width"], 520);
+    assert_eq!(modal.settings("uninstall_alert_sheet")["on_screen"], false);
     assert_eq!(modal.settings("settings_footer")["hidden"], false);
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     let s = inspect(&f, p);
     assert_eq!(s["settings_open"], true);
-    assert!(s.settings("uninstall_modal_overlay").is_null());
+    assert!(s.settings("uninstall_alert_sheet").is_null());
+    assert_eq!(f.frames_for(p, "setup_disconnect_all").count(), 0);
     assert_eq!(s.settings("settings_hub_url")["enabled"], true);
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     assert!(inspect(&f, p).settings("add_hub_form").is_null());
@@ -2937,7 +3339,73 @@ fn appkit_fragmented_utf8_invalid_frames_activity_and_eof() {
     assert_eq!(inspect(&f, p)["directory_mode"], "activity");
     f.eof(p);
     wait(|| f.exited(p));
+    assert_eq!(f.frames_for(p, "quit").count(), 0);
 }
+
+#[test]
+fn native_quit_sends_one_request_and_exits_if_the_daemon_does_not_close_the_pipe() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, json!({"op":"test_terminate"}));
+    f.send(p, json!({"op":"test_terminate"}));
+    // Leave stdin open to exercise the fallback, not the EOF path.
+    wait(|| f.exited(p));
+    f.stop(p);
+    assert_eq!(
+        f.frames_for(p, "quit").collect::<Vec<_>>(),
+        vec![json!({"op":"quit"})]
+    );
+}
+
+#[test]
+fn native_quit_shuts_down_the_supervising_daemon_without_respawn() {
+    use std::io::Write;
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let commands = f.home.join("ui-commands");
+    let path = std::ffi::CString::new(commands.as_os_str().as_bytes()).unwrap();
+    // Inject a menu gesture into the real headless child. Its stdout remains
+    // attached directly to the daemon, and exec preserves the supervised PID.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let launcher = f.dir.join("native-ui.sh");
+    script(
+        &launcher,
+        "#!/bin/sh\necho $$ >> \"$HOME/ui-pids\"\nexec 3<&0\nexec \"$TEST_UI\" < \"$HOME/ui-commands\"\n",
+    );
+    let staged_ui = root().join("bin/cito-ui-darwin-arm64");
+    let daemon = f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", launcher.to_str().unwrap()),
+        (
+            "TEST_UI",
+            option_env!("CITO_TEST_BUILT_UI").unwrap_or_else(|| staged_ui.to_str().unwrap()),
+        ),
+    ]);
+    let mut injection = None;
+    wait(|| {
+        injection = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&commands)
+            .ok();
+        injection.is_some()
+    });
+    let mut injection = injection.unwrap();
+    writeln!(injection, "{}", json!({"op":"test_terminate"})).unwrap();
+    // Keep the test input open; exit must come from the daemon or the fallback.
+    wait(|| f.exited(daemon));
+    let launches = fs::read_to_string(f.home.join("ui-pids")).unwrap();
+    let pids: Vec<i32> = launches.lines().map(|line| line.parse().unwrap()).collect();
+    assert_eq!(pids.len(), 1, "ordinary Quit must not respawn the UI");
+    assert_ne!(
+        unsafe { libc::kill(pids[0], 0) },
+        0,
+        "daemon left its UI running"
+    );
+}
+
 #[test]
 fn daemon_ui_action_stream_accepts_full_messages_and_recovers_after_oversized_lines() {
     let _lock = serial();
