@@ -352,33 +352,39 @@ final class TransientFeedbackStore {
     }
     private struct Entry {
         let until: Date
-        var restore: (() -> Void)?
+        var observers: [ObjectIdentifier: () -> Void] = [:]
     }
     private var entries: [Key: Entry] = [:]
     private var timer: Timer?
     var didExpire: ((Set<Action>) -> Void)?
 
-    func deadline(_ key: Key) -> Date? {
-        entries[key].map(\.until).flatMap { $0 > Date() ? $0 : nil }
-    }
-    // Mounted ink remains valid until the same expiry transaction restores its title.
-    func contains(_ key: Key) -> Bool { entries[key] != nil }
+    // The deadline schedules expiry; membership changes only when expiry restores the views.
+    func deadline(_ key: Key) -> Date? { entries[key]?.until }
+    func contains(_ key: Key) -> Bool { deadline(key) != nil }
     func set(_ key: Key, until: Date?) {
-        if let until, until > Date() { entries[key] = Entry(until: until, restore: entries[key]?.restore) }
-        else if let entry = entries.removeValue(forKey: key) { entry.restore?() }
+        guard let until, until > Date() else { expire(key); return }
+        entries[key] = Entry(until: until, observers: entries[key]?.observers ?? [:])
         schedule()
     }
-    func observe(_ key: Key, restore: (() -> Void)?) {
-        entries[key]?.restore = restore
+    func observe(_ key: Key, owner: AnyObject, restore: @escaping () -> Void) {
+        entries[key]?.observers[ObjectIdentifier(owner)] = restore
+    }
+    // The channel summary has a single presentation slot per key.
+    func observe(_ key: Key, restore: @escaping () -> Void) {
+        observe(key, owner: self, restore: restore)
+    }
+    func unobserve(_ key: Key, owner: AnyObject) {
+        entries[key]?.observers.removeValue(forKey: ObjectIdentifier(owner))
     }
     func expire(_ key: Key) {
-        if let entry = entries.removeValue(forKey: key) { entry.restore?() }
+        if let entry = entries.removeValue(forKey: key) {
+            for restore in entry.observers.values { restore() }
+        }
         schedule()
     }
     func deadlines(for action: Action) -> [String: Date] {
-        let now = Date()
-        return entries.reduce(into: [:]) { result, pair in
-            if pair.key.action == action && pair.value.until > now { result[pair.key.target] = pair.value.until }
+        entries.reduce(into: [:]) { result, pair in
+            if pair.key.action == action { result[pair.key.target] = pair.value.until }
         }
     }
     private func schedule() {
@@ -396,7 +402,9 @@ final class TransientFeedbackStore {
         let now = Date()
         let expired = entries.filter { $0.value.until <= now }
         for key in expired.keys { entries.removeValue(forKey: key) }
-        for entry in expired.values { entry.restore?() }
+        for entry in expired.values {
+            for restore in entry.observers.values { restore() }
+        }
         schedule()
         if !expired.isEmpty { didExpire?(Set(expired.keys.map(\.action))) }
     }

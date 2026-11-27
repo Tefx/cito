@@ -922,7 +922,7 @@ final class MenuControl: NSControl {
     }
     func clearFeedback(title: String, accessibilityLabel: String?) {
         if let key = feedbackKey {
-            TransientFeedbackStore.shared.observe(key, restore: nil)
+            TransientFeedbackStore.shared.unobserve(key, owner: self)
             if key.action == .control { TransientFeedbackStore.shared.set(key, until: nil) }
             if symbolName != nil { leadingSymbolView?.isHidden = false }
             feedbackKey = nil
@@ -941,7 +941,7 @@ final class MenuControl: NSControl {
     }
     func showFeedback(_ message: String = "✓ Copied", key: TransientFeedbackStore.Key) {
         let store = TransientFeedbackStore.shared
-        guard store.deadline(key) != nil else { return }
+        guard store.contains(key) else { return }
         if let previous = feedbackKey, previous != key {
             clearFeedback(title: restingTitle ?? label.stringValue, accessibilityLabel: restingAccessibilityLabel)
         }
@@ -953,7 +953,7 @@ final class MenuControl: NSControl {
         leadingSymbolView?.isHidden = true
         label.stringValue = message
         layoutContents()
-        store.observe(key) { [weak self] in
+        store.observe(key, owner: self) { [weak self] in
             guard let self else { return }
             self.clearFeedback(title: self.restingTitle ?? self.label.stringValue, accessibilityLabel: self.restingAccessibilityLabel)
         }

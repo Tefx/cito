@@ -125,6 +125,52 @@ fn v41_directory_copy_drafts_and_activity_confirmation_survive_only_valid_transi
 }
 
 #[test]
+fn directory_copy_expiry_restores_every_control_observing_the_same_peer() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state());
+    control(&f, p, "open_directory");
+    let one = peer("one");
+    let two = peer("two");
+    send_fixture(&f, p, json!({"op":"directory","peers":[one,two]}));
+    let id = "copy_dir:personal:one";
+    control(&f, p, id);
+    assert_eq!(inspect(&f, p).directory(id)["text"], "✓ Copied");
+
+    // Project the same peer in two cells to force overlapping subscriptions
+    // without relying on which cell AppKit chooses to recycle during the reload.
+    send_fixture(&f, p, json!({"op":"directory","peers":[one,one,two]}));
+    let peer_controls = |snapshot: &Value| {
+        nodes(&snapshot["directory_items"])
+            .into_iter()
+            .filter(|node| node["id"] == id)
+            .collect::<Vec<_>>()
+    };
+    let copied = peer_controls(&inspect(&f, p));
+    assert_eq!(copied.len(), 2);
+    assert_ne!(copied[0]["instance"], copied[1]["instance"]);
+    assert!(copied.iter().all(|node| node["text"] == "✓ Copied"));
+
+    control(&f, p, "copy_dir:personal:two");
+    f.send(p, json!({"op":"test_expire_copy_feedback","id":id}));
+    let expired = inspect(&f, p); // Also requires address_mismatches == [].
+    let restored = peer_controls(&expired);
+    assert_eq!(restored.len(), 2);
+    for (before, after) in copied.iter().zip(restored) {
+        assert_eq!(after["instance"], before["instance"]);
+        assert_eq!(after["text"], one["display_address"]);
+        assert_eq!(
+            after["accessibility_label"],
+            format!("Copy address {}", one["display_address"].as_str().unwrap())
+        );
+    }
+    assert_eq!(
+        expired.directory("copy_dir:personal:two")["text"],
+        "✓ Copied"
+    );
+}
+
+#[test]
 fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     let _lock = serial();
     let (f, p) = ui_fixture();
