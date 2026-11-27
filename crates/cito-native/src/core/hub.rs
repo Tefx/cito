@@ -1,9 +1,10 @@
 //! One persisted HubEngine for embedded and standalone HTTP deployments.
 use super::auth::{env_value, principal_ids_equal, principal_matches, HubAuth};
 use super::database::{Connection, Database};
-use super::hub_plugins::{self, ChannelPlugin, ChannelProcess, CHANNEL_RETRY_DELAY};
+use super::hub_plugins::{self, ChannelProcess, CHANNEL_RETRY_DELAY};
 use super::identity::{alternate_oidc_principal, hash, listener_id, principal, string as s};
 use super::lease::evaluate_node_lease;
+use super::plugins::PluginDescriptor as ChannelPlugin;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -431,9 +432,10 @@ impl HubEngine {
         db.transaction(|c|{
             for stmt in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()){c.execute(stmt,&[])?;}
             for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","initial_human_scope","TEXT NOT NULL DEFAULT 'self'"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_pairing_codes","pairing_url","TEXT"),("hub_pairing_codes","bot_username","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
-            for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
+            for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
             c.execute("CREATE INDEX IF NOT EXISTS idx_hub_kv_principal ON hub_kv(principal_id)", &[])?;
             c.execute("INSERT OR IGNORE INTO hub_meta(key,int_val) VALUES('kv_seq',0)",&[])?;
+            c.execute("DROP INDEX IF EXISTS idx_hub_channel_deliveries_ext_msg", &[])?;
             // Existing single-message deliveries retain reply and acknowledgment mappings.
             c.execute("INSERT OR IGNORE INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) SELECT plugin_id,principal_id,external_msg_id,signal_id,COALESCE(from_listener_id,'') FROM hub_channel_deliveries WHERE external_msg_id IS NOT NULL",&[])?;
             // Backfill the additive ID column without changing legacy payload bytes.
@@ -1115,8 +1117,9 @@ impl HubEngine {
                 let row = consumer(c, &name, caller)?;
                 let mut result = json!({"name":name,"stream_name":stream,"config":cfg,"backlog":[],"server_now_ms":now_ms()});
                 let budget = MAX_RPC_BYTES - PAGE_OVERHEAD - result.to_string().len();
-                result["backlog"] =
-                    backlog_from(c, &row, caller, n(&row, "start_seq"), budget)?["backlog"].take();
+                let mut backlog = backlog_from(c, &row, caller, n(&row, "start_seq"), budget)?;
+                result["backlog"] = backlog["backlog"].take();
+                result["server_now_ms"] = backlog["server_now_ms"].take();
                 Ok(result)
             }
             "consumer_backlog" => {
@@ -1249,11 +1252,11 @@ impl HubEngine {
         self.inner.db.transaction(|c| {
             for plugin in plugins {
                 let (mut cfg, _) = service(c, &plugin.id)?;
-                for field in fields(&plugin) {
-                    if s(&field, "scope") != "hub" {
+                for field in &plugin.fields {
+                    if s(field, "scope") != "hub" {
                         continue;
                     }
-                    let key = s(&field, "key");
+                    let key = s(field, "key");
                     let mut snake = String::new();
                     for (i, ch) in key.chars().enumerate() {
                         if ch.is_uppercase() && i > 0 {
@@ -1478,7 +1481,7 @@ impl HubEngine {
                 .get("inbound_mode")
                 .map(|mode| match mode.as_str() {
                     Some("primary") => Ok("primary"),
-                    Some("outbound_only") if plugin.manifest["supportsOutboundOnly"] == true => {
+                    Some("outbound_only") if plugin.channel.supports_outbound_only => {
                         Ok("outbound_only")
                     }
                     _ => Err("INVALID_INPUT: Unsupported inbound_mode"),
@@ -1502,7 +1505,7 @@ impl HubEngine {
                     .iter()
                     .any(|key| p.get(key).is_some());
             let destination = |old: Option<&Value>| -> Result<_, String> {
-                let identity = plugin.manifest["pairing"]["privateIdentityField"].as_str();
+                let identity = plugin.channel.pairing["privateIdentityField"].as_str();
                 let mut config = old
                     .map(|b| parse(b, "user_config_json"))
                     .unwrap_or(json!({}));
@@ -1525,7 +1528,7 @@ impl HubEngine {
                         identity
                             .map(|key| prev[key] != config[key])
                             .unwrap_or_else(|| {
-                                fields(&plugin).iter().any(|f| {
+                                plugin.fields.iter().any(|f| {
                                     s(f, "scope") == "user"
                                         && prev[s(f, "key")] != config[s(f, "key")]
                                 })
@@ -1622,11 +1625,6 @@ impl HubEngine {
                     write_service_state(c, id, &state)?;
                 }
                 if reset_user || p["cancel_pair"] == true { cancel_pair(c, id, pid)?; }
-                if reset_hub {
-                    for b in c.query("SELECT * FROM hub_human_channels WHERE plugin_id=?", &[json!(id)])? {
-                        attach(c, &b, false, initial_human_scope(caller, self.inner.default_human_scope), Some(&plugin))?;
-                    }
-                }
                 if edit_user {
                     let old = channel_binding(c, id, pid)?;
                     let binding_pid = old.as_ref().map_or(pid, |b| s(b,"principal_id"));
@@ -1673,7 +1671,7 @@ impl HubEngine {
         if op != "human_channels_test" && op != "human_channel_pair_start" {
             return Err(format!("INVALID_INPUT: Unknown hub RPC op: {op}"));
         }
-        if op == "human_channel_pair_start" && plugin.manifest["pairing"]["supported"] != true {
+        if op == "human_channel_pair_start" && plugin.channel.pairing["supported"] != true {
             return Err("INVALID_INPUT: pairing is not supported".into());
         }
         let (cfg, user, changed) = self.inner.db.transaction(|c| {
@@ -1780,11 +1778,11 @@ impl HubEngine {
                 let (cfg,health) = service(c,&plugin.id)?;
                 let binding=channel_binding(c,&plugin.id,pid)?.unwrap_or(Value::Null);
                 let user=parse(&binding,"user_config_json");
-                let has_hub_service=fields(&plugin).iter().any(|f|s(f,"scope")=="hub");
+                let has_hub_service=plugin.fields.iter().any(|f|s(f,"scope")=="hub");
                 let can_configure_hub=has_hub_service && is_admin;
-                let hub_configured_any=fields(&plugin).iter().any(|f|s(f,"scope")=="hub" && configured(&cfg[s(f,"key")]));
-                let can_edit_personal=fields(&plugin).iter().any(|f|s(f,"scope")=="user");
-                let pairing_supported=plugin.manifest["pairing"]["supported"]==true;
+                let hub_configured_any=plugin.fields.iter().any(|f|s(f,"scope")=="hub" && configured(&cfg[s(f,"key")]));
+                let can_edit_personal=plugin.fields.iter().any(|f|s(f,"scope")=="user");
+                let pairing_supported=plugin.channel.pairing["supported"]==true;
                 let mode=inbound_mode(&health);
                 let pairing_enabled=pairing_supported && mode != "outbound_only";
                 let hub_ready=ready(&plugin,&cfg,"hub");
@@ -1812,7 +1810,7 @@ impl HubEngine {
                     if (matches!(s(&failed,"status"),"failed"|"failed_permanent"|"effect_unknown") || (failed["status"] == "in_flight" && n(&failed,"attempts") > 0)) && !s(&failed,"last_error").is_empty() { warning = true; error_origin = Some("user"); detail = if failed["status"] == "effect_unknown" { format!("Delivery outcome unknown; automatic replay stopped to avoid duplicates. {}", s(&failed,"last_error")) } else { s(&failed,"last_error").into() };  }
                 }
                 if let Some(error) = health["poll_error"].as_str() { warning = true; error_origin = Some("hub"); detail = error.into(); }
-                let fs=fields(&plugin).iter().map(|f| {
+                let fs=plugin.fields.iter().map(|f| {
                     let hub=s(f,"scope")=="hub";
                     let val=if hub { &cfg[s(f,"key")] } else { &user[s(f,"key")] };
                     let is_secret=s(f,"type")=="secret";
@@ -1823,22 +1821,31 @@ impl HubEngine {
                         "placeholder":f["placeholder"].as_str().unwrap_or(""),"configured_placeholder":f["configuredPlaceholder"].as_str().unwrap_or(if is_secret{"•••••••• (Saved — enter new value to replace)"}else{s(f,"placeholder")}),
                         "help_text":f["helpText"].as_str(),"value":value,"configured":configured(val),"hidden":hidden,"redacted":redacted})
                 }).collect::<Vec<_>>();
-                let channel = json!({"id":plugin.id,"display_name":plugin.manifest["displayName"],
-                    "sf_symbol":plugin.manifest["sfSymbol"].as_str().unwrap_or("paperplane.fill"),"tint":plugin.manifest["tint"].as_str().unwrap_or("blue"),
+                let mut channel = json!({"id":plugin.id,"display_name":plugin.display_name,
+                    "sf_symbol":plugin.sf_symbol,"tint":plugin.tint,
                     "has_hub_service":has_hub_service,"hub_ready":hub_ready,"can_configure_hub":can_configure_hub,
                     "can_clear_hub":can_configure_hub&&hub_configured_any,"can_edit_personal":can_edit_personal,
                     "can_pair":pairing_enabled&&(hub_ready||can_configure_hub),
-                    "supports_outbound_only":plugin.manifest["supportsOutboundOnly"]==true,
+                    "supports_outbound_only":plugin.channel.supports_outbound_only,
                     "inbound_mode":mode,"service_label":health["service_label"],"service_identity":public_service_identity(&plugin,&cfg),
                     "can_test":((hub_ready&&user_ready)||can_edit_personal)&&(hub_ready||can_configure_hub),
                     "can_unpair":(hub_ready&&user_ready)||!pair.is_null(),"error_origin":error_origin,
                     "enabled":enabled,"configured":hub_ready&&user_ready,"inbox_paused":inbox_paused,"delivery_enabled":enabled&&hub_ready&&user_ready&&!inbox_paused,"status":status,"detail":detail,"display_label":binding["display_label"],
-                    "hub_provided":hub_ready&&fields(&plugin).iter().any(|f|s(f,"scope")=="hub"),
-                    "setup_guide":plugin.manifest.get("setupGuide").cloned().unwrap_or(Value::Null),
-                    "pairing_help_text":plugin.manifest["pairing"]["helpText"].as_str(),
-                    "pairing_supported":plugin.manifest["pairing"]["supported"]==true,
-                    "pairing_action_label":plugin.manifest["pairing"]["actionLabel"].as_str().unwrap_or("Pair Account…"),
-                    "warning":warning,"pairing_manual_disclosure":plugin.manifest["pairing"]["manualDisclosure"]==true,"pairing_open_url_label":plugin.manifest["pairing"]["openUrlLabel"],"pairing_pending":!pair.is_null(),"pairing_code":pair["code"],"pairing_instruction":pair["instruction"],"pairing_command":pair["pairing_command"],"pairing_url":pair["pairing_url"],"bot_username":pair["bot_username"],"fields":fs});
+                    "hub_provided":hub_ready&&has_hub_service,
+                    "setup_guide":plugin.channel.setup_guide,
+                    "pairing_help_text":plugin.channel.pairing["helpText"].as_str(),
+                    "pairing_supported":pairing_supported,
+                    "pairing_action_label":plugin.channel.pairing["actionLabel"].as_str().unwrap_or("Pair Account…"),
+                    "warning":warning,"pairing_manual_disclosure":plugin.channel.pairing["manualDisclosure"]==true,"pairing_open_url_label":plugin.channel.pairing["openUrlLabel"],"pairing_pending":!pair.is_null(),"pairing_code":pair["code"],"pairing_instruction":pair["instruction"],"pairing_command":pair["pairing_command"],"pairing_url":pair["pairing_url"],"bot_username":pair["bot_username"],"fields":fs});
+                for (key, label) in [
+                    ("service_save_label", &plugin.channel.service_actions.save),
+                    ("service_change_label", &plugin.channel.service_actions.change),
+                    ("service_clear_label", &plugin.channel.service_actions.clear),
+                ] {
+                    if let Some(label) = label {
+                        channel[key] = json!(label);
+                    }
+                }
                 bytes += channel.to_string().len() + 1;
                 if bytes >= MAX_RPC_BYTES {
                     return Err("RESOURCE_LIMIT: Channel inventory exceeds response frame budget".into());
@@ -2018,8 +2025,8 @@ impl HubEngine {
             }
             let attempts = n(&row, "attempts").max(0);
             let (status, retry_at) = delivery_transition(f, attempts, now_ms());
-            c.execute("UPDATE hub_channel_deliveries SET status=?,external_msg_id=?,delivered_ms=?,attempts=attempts+1,next_retry_ms=?,last_error=? WHERE plugin_id=? AND reservation_id=?",
-                &[json!(status),f["external_msg_id"].clone(),json!(now_ms()),json!(retry_at),f["error"].clone(),json!(id),json!(token)])?;
+            c.execute("UPDATE hub_channel_deliveries SET status=?,delivered_ms=?,attempts=attempts+1,next_retry_ms=?,last_error=? WHERE plugin_id=? AND reservation_id=?",
+                &[json!(status),json!(now_ms()),json!(retry_at),f["error"].clone(),json!(id),json!(token)])?;
             Ok(Value::Null)
         })
     }
@@ -2290,26 +2297,31 @@ fn next_revision(c: &Connection) -> Result<i64, String> {
             .unwrap_or(1),
     )
 }
-fn stream_info(c: &Connection, name: &str) -> Result<Value, String> {
+fn stream_config(c: &Connection, name: &str) -> Result<Value, String> {
     let row = one(
         c,
         "SELECT json_val FROM hub_meta WHERE key=?",
         &[json!(format!("stream:{name}"))],
     )?;
-    let config = if let Some(row) = row {
-        parse(&row, "json_val")
+    if let Some(row) = row {
+        Ok(parse(&row, "json_val"))
     } else if matches!(name, SIGNALS | KV_STREAM) {
-        default_stream(name)
+        Ok(default_stream(name))
     } else {
-        return Err(format!("10059: stream not found: {name}"));
-    };
+        Err(format!("10059: stream not found: {name}"))
+    }
+}
+fn stream_info(c: &Connection, name: &str) -> Result<Value, String> {
+    let config = stream_config(c, name)?;
     let state = if name == KV_STREAM {
         let count = one(c, "SELECT COUNT(*) AS messages FROM hub_kv", &[])?.unwrap_or(Value::Null);
         let rev =
             one(c, "SELECT int_val FROM hub_meta WHERE key='kv_seq'", &[])?.unwrap_or(Value::Null);
         json!({"messages":count["messages"],"last_seq":rev["int_val"],"first_seq":if n(&count,"messages")==0{0}else{1},"bytes":0,"consumer_count":0})
-    } else {
+    } else if name == SIGNALS {
         one(c,"SELECT COUNT(*) AS messages,COALESCE(MAX(seq),0) AS last_seq,COALESCE(MIN(seq),0) AS first_seq,0 AS bytes,(SELECT COUNT(*) FROM hub_consumers) AS consumer_count FROM hub_signals",&[])?.unwrap_or(Value::Null)
+    } else {
+        json!({"messages":0,"last_seq":0,"first_seq":0,"bytes":0,"consumer_count":0})
     };
     Ok(json!({"config":config,"state":state,"ts":super::identity::iso(now_ms() as u64)}))
 }
@@ -2332,7 +2344,7 @@ fn maintain(c: &Connection) -> Result<(), String> {
     Ok(())
 }
 fn signal_cutoff(c: &Connection) -> Result<i64, String> {
-    let cfg = stream_info(c, SIGNALS)?["config"].clone();
+    let cfg = stream_config(c, SIGNALS)?;
     let age = cfg["max_age"].as_i64().unwrap_or(1_800_000_000_000) / 1_000_000;
     Ok(if age > 0 {
         now_ms().saturating_sub(age)
@@ -2341,7 +2353,7 @@ fn signal_cutoff(c: &Connection) -> Result<i64, String> {
     })
 }
 fn prune(c: &Connection) -> Result<(), String> {
-    let cfg = stream_info(c, SIGNALS)?["config"].clone();
+    let cfg = stream_config(c, SIGNALS)?;
     let now = now_ms();
     let age = cfg["max_age"].as_i64().unwrap_or(1_800_000_000_000) / 1_000_000;
     if age > 0 {
@@ -2482,7 +2494,7 @@ fn publish_payload(
         }
     }
     if let Some(mid) = msg_id {
-        let config = stream_info(c, SIGNALS)?["config"].clone();
+        let config = stream_config(c, SIGNALS)?;
         let window = config["duplicate_window"]
             .as_i64()
             .unwrap_or(1_800_000_000_000)
@@ -2652,12 +2664,6 @@ fn ack(
     Ok(json!({"acked_count":count,"acked_at_ms":now,"signal_ids":ids}))
 }
 
-fn fields(plugin: &ChannelPlugin) -> Vec<Value> {
-    plugin.manifest["fields"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-}
 fn configured(v: &Value) -> bool {
     match v {
         Value::String(s) => !s.trim().is_empty(),
@@ -2666,7 +2672,8 @@ fn configured(v: &Value) -> bool {
     }
 }
 fn ready(plugin: &ChannelPlugin, config: &Value, scope: &str) -> bool {
-    fields(plugin)
+    plugin
+        .fields
         .iter()
         .filter(|f| s(f, "scope") == scope && f["required"] == true)
         .all(|f| configured(&config[s(f, "key")]))
@@ -2694,9 +2701,9 @@ fn validate_config(plugin: &ChannelPlugin, patch: &Value, scope: &str) -> Result
     let patch = patch
         .as_object()
         .ok_or("INVALID_INPUT: channel config must be an object")?;
-    let fields = fields(plugin);
     for (key, value) in patch {
-        let field = fields
+        let field = plugin
+            .fields
             .iter()
             .find(|f| s(f, "key") == key && s(f, "scope") == scope)
             .ok_or_else(|| format!("INVALID_INPUT: unknown {scope} field: {key}"))?;
@@ -2721,7 +2728,7 @@ fn service(c: &Connection, id: &str) -> Result<(Value, Value), String> {
         .unwrap_or((json!({}), json!({}))))
 }
 fn service_identity(plugin: &ChannelPlugin, cfg: &Value) -> Value {
-    let identity = &plugin.manifest["serviceIdentity"];
+    let identity = &plugin.channel.service_identity;
     let Some(field) = identity["field"].as_str() else {
         return cfg.clone();
     };
@@ -2734,7 +2741,7 @@ fn service_identity(plugin: &ChannelPlugin, cfg: &Value) -> Value {
         .unwrap_or(value))
 }
 fn public_service_identity(plugin: &ChannelPlugin, cfg: &Value) -> Value {
-    let identity = &plugin.manifest["serviceIdentity"];
+    let identity = &plugin.channel.service_identity;
     let prefix = identity["field"].as_str().and_then(|field| {
         let separator = identity["separator"].as_str().filter(|s| !s.is_empty())?;
         let (prefix, rest) = cfg[field].as_str()?.split_once(separator)?;
@@ -2788,10 +2795,7 @@ fn save_channel_service(
     plugin: &ChannelPlugin,
     cfg: &Value,
 ) -> Result<bool, String> {
-    if plugin.manifest["serviceIdentity"]["field"]
-        .as_str()
-        .is_none()
-    {
+    if plugin.channel.service_identity["field"].as_str().is_none() {
         return save_service(c, &plugin.id, cfg);
     }
     let (old, _) = service(c, &plugin.id)?;
@@ -2867,7 +2871,8 @@ fn merge_channel_config(
 ) {
     if let Some(patch) = patch.as_object() {
         for (key, value) in patch {
-            let secret = fields(plugin)
+            let secret = plugin
+                .fields
                 .iter()
                 .any(|f| s(f, "key") == key && s(f, "scope") == scope && s(f, "type") == "secret");
             if secret
@@ -2919,7 +2924,7 @@ fn replace_destination(
         identity(old) != next
             || next.0.is_none()
                 && next.1.is_none()
-                && plugin.manifest["pairing"]["privateIdentityField"]
+                && plugin.channel.pairing["privateIdentityField"]
                     .as_str()
                     .map(|key| old[key] != config[key])
                     .unwrap_or(old != config)
@@ -3065,17 +3070,16 @@ mod resilience_tests {
         let hub = HubEngine::open(&dir).unwrap();
         let guard = hub.inner.lifecycle.lock().unwrap();
         std::fs::create_dir_all(dir.join("missing")).unwrap();
-        *hub.inner.plugins.lock().unwrap() = vec![ChannelPlugin {
-            is_builtin: false,
-            id: "missing".into(),
-            dir: dir.join("missing"),
-            command: if blocked_input {
+        *hub.inner.plugins.lock().unwrap() = vec![hub_plugins::test_descriptor(
+            &dir.join("missing"),
+            "missing",
+            if blocked_input {
                 vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()]
             } else {
                 vec![dir.join("unavailable").to_string_lossy().into_owned()]
             },
-            manifest: json!({"kind":"human-channel","fields":[]}),
-        }];
+            json!({}),
+        )];
         let (entered, boundary) = mpsc::channel();
         let (resume, released) = mpsc::channel();
         *hub.inner.before_worker_wait.lock().unwrap() = Some(Box::new(move || {
@@ -3183,7 +3187,7 @@ mod resilience_tests {
             *hub.inner.plugins.lock().map_err(|e| e.to_string())? = [
                 ("missing", vec![dir.join("unavailable").to_string_lossy().into_owned()]),
                 ("healthy", vec!["/bin/sh".into(), "-c".into(), "while IFS= read -r line; do case \"$line\" in *configure*) printf '%s\\n' '{\"op\":\"cursor_save\",\"cursor\":7}';; esac; done".into()]),
-            ].into_iter().map(|(id, command)| ChannelPlugin { is_builtin:false, id:id.into(), dir:dir.join(id), command, manifest:json!({"kind":"human-channel","fields":[]}) }).collect();
+            ].into_iter().map(|(id, command)| hub_plugins::test_descriptor(&dir.join(id), id, command, json!({}))).collect();
             for id in ["missing", "healthy"] {
                 std::fs::create_dir_all(dir.join(id)).map_err(|e| e.to_string())?;
             }
@@ -3243,14 +3247,13 @@ mod resilience_tests {
         ));
         let hub = HubEngine::open(&dir).unwrap();
         hub.pause_worker();
-        let plugin = ChannelPlugin {
-            is_builtin: false,
-            id: "sample".into(),
-            dir: dir.clone(),
-            command: vec![],
-            manifest: json!({"fields":[{"key":"credential","scope":"hub","required":true},
+        let plugin = hub_plugins::test_descriptor(
+            &dir,
+            "sample",
+            vec![],
+            json!({"fields":[{"key":"credential","scope":"hub","required":true},
                 {"key":"destination","scope":"user","required":true}],"pairing":{"supported":true}}),
-        };
+        );
         *hub.inner.plugins.lock().unwrap() = vec![plugin.clone()];
         let caller = json!({"principal_id":"oidc:alice","owner_user":"alice","oidc":true});
         let channel = hub.channel_list(&caller).unwrap()["channels"][0].clone();
@@ -3362,13 +3365,7 @@ mod resilience_tests {
         let lifecycle = hub.inner.lifecycle.lock().map_err(|e| e.to_string())?;
         let result = (|| {
             hub.inner.db.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES('cito.signal.node','old',?,CAST('{}' AS BLOB))", &[json!(now_ms()-2_000_000)])?;
-            let plugin = ChannelPlugin {
-                is_builtin: false,
-                id: "fixture".into(),
-                dir: dir.clone(),
-                manifest: json!({}),
-                command: vec![],
-            };
+            let plugin = hub_plugins::test_descriptor(&dir, "fixture", vec![], json!({}));
             let changes = || hub.inner.db.query("SELECT total_changes() AS n", &[]);
             let before = changes()?;
             for _ in 0..8 {
@@ -3449,13 +3446,12 @@ mod resilience_tests {
             crate::plugins::random_uuid_v4()
         ));
         let hub = HubEngine::open(&dir)?;
-        *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
-            is_builtin: false,
-            id: "messenger".into(),
-            manifest: json!({"displayName":"Messenger","fields":[{"key":"destination","scope":"user","type":"text","required":true}]}),
-            dir: dir.clone(),
-            command: vec![dir.join("unavailable").to_string_lossy().into_owned()],
-        }];
+        *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![hub_plugins::test_descriptor(
+            &dir,
+            "messenger",
+            vec![dir.join("unavailable").to_string_lossy().into_owned()],
+            json!({"displayName":"Messenger","fields":[{"key":"destination","scope":"user","type":"text","required":true}]}),
+        )];
         let caller = json!({"principal_id":"none#alice","owner_user":"alice"});
         let result = hub.rpc(
             "human_channels_configure",
@@ -3490,13 +3486,12 @@ mod resilience_tests {
         let hub = HubEngine::open(&dir)?;
         // Serialize the manually driven channel transitions against the mutation-woken worker.
         let lifecycle = hub.inner.lifecycle.lock().map_err(|e| e.to_string())?;
-        *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
-            is_builtin: false,
-            id: "messenger".into(),
-            manifest: json!({"displayName":"Messenger","fields":[]}),
-            dir: dir.clone(),
-            command: vec![],
-        }];
+        *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![hub_plugins::test_descriptor(
+            &dir,
+            "messenger",
+            vec![],
+            json!({"displayName":"Messenger"}),
+        )];
         hub.inner.db.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES('messenger','{}','{}',0)",&[])?;
         hub.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,attempts,delivered_ms,last_error) VALUES('messenger','none#alice','signal',1,'failed',1,1,'Retry pending')",&[])?;
         let caller = json!({"principal_id":"none#alice","owner_user":"alice"});
@@ -3766,7 +3761,7 @@ fn attach(
         reg["human_control_revision"] = json!(1);
     }
     let channel = format!("hub:{}", s(b, "plugin_id"));
-    reg["channels"][&channel] = json!({"channel_id":channel,"kind":"human","host_id":"hub","host_name":"Hub","display_name":plugin.map(|p|p.manifest["displayName"].clone()).unwrap_or_else(||b["plugin_id"].clone()),"display_label":b["display_label"],"delivery_mode":"notify_fanout","priority":100,"state":if enabled{"ACTIVE"}else{"UNLISTENED"},"updated_at_ms":now_ms()});
+    reg["channels"][&channel] = json!({"channel_id":channel,"kind":"human","host_id":"hub","host_name":"Hub","display_name":plugin.map(|p|json!(p.display_name)).unwrap_or_else(||b["plugin_id"].clone()),"display_label":b["display_label"],"delivery_mode":"notify_fanout","priority":100,"state":if enabled{"ACTIVE"}else{"UNLISTENED"},"updated_at_ms":now_ms()});
     reg["updated_at_ms"] = json!(now_ms());
     save_human(c, &id, &mut reg)?;
     Ok(())

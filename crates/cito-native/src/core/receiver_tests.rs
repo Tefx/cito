@@ -135,6 +135,8 @@ impl Fixture {
             fields: vec![],
             post_setup_hint: None,
             post_disconnect_hint: None,
+            reload_hint: None,
+            channel: Default::default(),
         }
     }
     fn probe_result(&self, plugin: &PluginDescriptor, row: &Value) -> Value {
@@ -301,7 +303,7 @@ fn poll_settles_over_budget_delivery_and_admits_the_following_signal() -> Result
 }
 
 #[test]
-fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), String> {
+fn poll_drains_one_backlog_page_from_consumer_add() -> Result<(), String> {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     let f = Fixture::new()?;
@@ -313,7 +315,6 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
     let server = thread::spawn(move || {
         for (index, expected) in [
             "consumer_add",
-            "consumer_backlog",
             "kv_get",
             "consumer_ack",
             "consumer_ack",
@@ -354,14 +355,11 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
             let now = 10_000_000u64; // Deliberately unrelated to the local wall clock.
             let body = if expected == "consumer_add" {
                 let signal = json!({"signal_id":"expiring","to":id,"target_generation":generation,"from":{"principal_id":"none#alice","user":"alice","host_name":"desktop"},"message":"near expiry"});
-                json!({"ok":true,"result":{"server_now_ms":now,"backlog":[{}, {"seq":1,"data_b64":"!"},{"seq":2,"data_b64":STANDARD.encode(b"not JSON")},{"seq":3,"data_b64":STANDARD.encode(json!({"to":"c_0000000000000000"}).to_string())},{"seq":4,"created_ms":now-1_800_000+50,"data_b64":STANDARD.encode(signal.to_string())}]}})
+                json!({"ok":true,"result":{"server_now_ms":now,"backlog":[{}, {"seq":1,"data_b64":"!"},{"seq":2,"data_b64":STANDARD.encode(b"not JSON")},{"seq":3,"data_b64":STANDARD.encode(json!({"to":"c_0000000000000000"}).to_string())},{"seq":4,"created_ms":now-1_800_000+30_000,"data_b64":STANDARD.encode(signal.to_string())}]}})
             } else if expected == "kv_get" {
                 json!({"ok":true,"result":{"revision":1,"value_b64":STANDARD.encode(remote.to_string())}})
-            } else if expected == "consumer_backlog" {
-                thread::sleep(Duration::from_millis(150));
-                json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Backlog failed"}})
             } else {
-                if expected == "consumer_ack" { assert_eq!(request["params"]["seq"], index - 2); }
+                if expected == "consumer_ack" { assert_eq!(request["params"]["seq"], index - 1); }
                 json!({"ok":true,"result":{}})
             }.to_string();
             write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
@@ -386,12 +384,12 @@ fn poll_fallback_preserves_the_original_hub_clock_observation() -> Result<(), St
     server.join().map_err(|_| "Clock server panicked")?;
     let rows = f.rows()?;
     assert_eq!(rows.len(), 1);
-    // Admission clamps already elapsed lifetimes to zero. Re-anchoring the add
-    // response after the failed RPC incorrectly leaves another 50ms of lifetime.
+    // Use the clock carried by the same page, not the local wall clock.
     let created = rows[0]["created_at"].as_str().unwrap();
     assert!(created.contains("1970"), "{rows:?}");
+    let expiry = rows[0]["expires_at_ms"].as_u64().unwrap();
     assert!(
-        rows[0]["expires_at_ms"].as_u64().unwrap() <= admitted_at,
+        (admitted_at + 20_000..=admitted_at + 30_000).contains(&expiry),
         "{rows:?}"
     );
     Ok(())
@@ -1503,7 +1501,17 @@ fn colon_bearing_wake_references_round_trip_without_changing_hub_ack_keys() -> R
         .hub_db()?
         .query("SELECT signal_id,acked_at_ms FROM hub_signals", &[])?;
     assert_eq!(acks[0]["signal_id"], "local:part:two");
-    assert!(acks[0]["acked_at_ms"].is_number());
+    assert!(
+        acks[0]["acked_at_ms"].is_null(),
+        "Only the outbox flush may ACK the Hub"
+    );
+    let pending = f
+        .state
+        .db
+        .query("SELECT signal_id, acked_at_ms FROM pending_hub_acks", &[])?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["signal_id"], "local:part:two");
+    assert!(pending[0]["acked_at_ms"].is_number());
     Ok(())
 }
 

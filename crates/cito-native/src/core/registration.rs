@@ -306,7 +306,7 @@ fn register_human_device(
         .ok_or("STATE_ERROR: Hub returned no Human identity")?;
     let public = record["public_id"].clone();
     state.db.transaction(|c| {
-        if client.closed.load(std::sync::atomic::Ordering::SeqCst) { return Err("NATS_UNAVAILABLE: Hub disconnected during enrollment".into()); }
+        if client.closed.load(std::sync::atomic::Ordering::SeqCst) { return Err("HUB_UNAVAILABLE: Hub disconnected during enrollment".into()); }
         c.execute("INSERT INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation,owner_token,hub_url,updated_at) VALUES(?,?,?,?,?,?,?,'human','default','','Human',?,?,'ACTIVE',?,?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET public_id=excluded.public_id,principal_id=excluded.principal_id,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token,hub_url=excluded.hub_url,updated_at=excluded.updated_at", &[json!(client.name),json!(id),public.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host),json!(local_host_name()),record["about"].clone(),record["scope"].clone(),json!(generation),json!(token),client.config["url"].clone(),json!(now_ms())])?;
         c.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?", &[json!(client.name),json!(id)])?;
         Ok(())
@@ -434,7 +434,7 @@ fn register_locked(
     let host_name = local_host_name();
     for attempt in 0..3 {
         if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("NATS_UNAVAILABLE: Hub disconnected during registration".into());
+            return Err("HUB_UNAVAILABLE: Hub disconnected during registration".into());
         }
         let remote = if attempt == 0 {
             initial_remote.take()
@@ -567,7 +567,7 @@ fn register_locked(
         let committed = state.db.transaction(|connection| {
             // Close precedes profile fencing under this same database mutex.
             if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("NATS_UNAVAILABLE: Hub disconnected during registration".into());
+                return Err("HUB_UNAVAILABLE: Hub disconnected during registration".into());
             }
             // Admission and cross-Hub revocation share the same SQLite write lock.
             let cutoff = if discovered_at > 0 { connection.query(

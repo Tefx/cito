@@ -389,14 +389,15 @@ fn disabled_hub_retirement_reaches_durable_agent_and_human_bindings() {
 }
 
 #[test]
-fn oversized_committed_channel_values_get_payload_free_success_receipts() {
+fn large_committed_channel_values_get_complete_settings_receipts() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let mut fields = vec![json!({"key":"address","scope":"user","type":"string","required":true})];
     let mut values = json!({"address":"room"});
-    // The saved config fits the 256 KiB hub limit, but its settings frame
-    // (including the field schemas) does not. Each field must fit 64 KiB.
-    for key in ["first", "second", "third", "fourth"] {
+    // The saved config fits the Hub limit, but the complete settings frame
+    // exceeds the retired 256 KiB UI limit. Each field must fit 64 KiB.
+    let keys = ["first", "second", "third", "fourth"];
+    for key in keys {
         fields.push(json!({"key":key,"scope":"hub","type":"string","required":true}));
         values[key] = json!(key.repeat((64 * 1024 - 32) / key.len()));
     }
@@ -407,8 +408,15 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
         ("save_hub_service", "large-service"),
         ("channel_toggle", "large-toggle"),
     ] {
-        let action = json!({"op":op,"hub":"local","channel_id":"channel","enabled":true,
-            "request_id":request,"values":values});
+        let mut action = json!({"op":op,"hub":"local","channel_id":"channel",
+            "enabled":op != "channel_toggle","request_id":request});
+        if op == "save_hub_service" {
+            let first = values["first"].as_str().unwrap().to_ascii_uppercase();
+            values["first"] = json!(first);
+        }
+        if op != "channel_toggle" {
+            action["values"] = values.clone();
+        }
         let (status, response) = f.action(action);
         assert_eq!(status, 200, "{response}");
         wait(|| {
@@ -425,9 +433,23 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
         assert_eq!(receipt["hub"], "local");
         assert_eq!(receipt["channel_id"], "channel");
         assert_eq!(receipt["action"], op);
+        assert_eq!(receipt["source_op"], op);
         assert_eq!(receipt["authority_changed"], false);
-        assert!(receipt["warning"].is_string());
-        assert!(receipt.get("settings").is_none());
+        assert!(receipt.get("warning").is_none(), "{op}");
+        assert!(receipt.get("maintenance_warning").is_none(), "{op}");
+        let settings = &receipt["settings"];
+        assert!(settings.to_string().len() > 256 * 1024);
+        let channel = settings["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|channel| channel["id"] == "channel")
+            .unwrap();
+        let fields = channel["fields"].as_array().unwrap();
+        for key in keys {
+            let field = fields.iter().find(|field| field["key"] == key).unwrap();
+            assert_eq!(field["value"], values[key], "{op}: {key}");
+        }
         let rows = f
             .db("hub.sqlite")
             .query(
@@ -436,8 +458,8 @@ fn oversized_committed_channel_values_get_payload_free_success_receipts() {
             )
             .unwrap();
         let saved: Value = serde_json::from_str(rows[0]["config_json"].as_str().unwrap()).unwrap();
-        for key in ["first", "second", "third", "fourth"] {
-            assert_eq!(saved[key], values[key]);
+        for key in keys {
+            assert_eq!(saved[key], values[key], "{op}: {key}");
         }
     }
 }
@@ -463,7 +485,8 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
         ),
     ] {
         let before = frames().len();
-        let action = json!({"op":"channel_test","channel_id":id,"values":if id == "channel" {
+        let request_id = format!("test-{id}");
+        let action = json!({"op":"channel_test","channel_id":id,"request_id":request_id,"values":if id == "channel" {
             json!({"credential":"invalid"})
         } else {
             json!({"botToken":"x"})
@@ -481,10 +504,23 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
             };
             assert_eq!(frames[index]["ok"], false);
             assert_eq!(frames[index]["error"], expected_error);
+            assert_eq!(
+                frames[index]["detail"],
+                expected_error.trim_start_matches("INVALID_INPUT: ")
+            );
             assert_eq!(frames[index]["hub"], "local");
-            let subsequent = &frames[index + 1..];
+            assert_eq!(frames[index]["request_id"], request_id);
+            assert_eq!(frames[index]["source_op"], "channel_test");
+            let mut subsequent = frames[index + 1..].iter();
             for op in ["settings", "state"] {
-                let Some(refresh) = subsequent.iter().find(|v| v["op"] == op) else {
+                let Some(refresh) = subsequent.find(|v| {
+                    v["op"] == op
+                        && if op == "settings" {
+                            v["request_id"] == request_id
+                        } else {
+                            v.get("request_id").is_none()
+                        }
+                }) else {
                     return false;
                 };
                 let channel = refresh["settings"]["channels"]

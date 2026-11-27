@@ -184,7 +184,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.identifier = NSUserInterfaceItemIdentifier("msg_dir:\(peer.scoped_id)")
         msgControl.pressed = onMessage
 
-        let normalizedTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user, about: peer.about, harnessName: visual.name, customTitle: peer.custom_title == true)
+        let normalizedTitle = peer.use_app_title == true ? visual.name : peer.display_title ?? peer.title
         let displayTitle = peer.harness == "human" && peer.custom_title != true ? "@\(peer.user)" + (peer.is_self_principal == true ? " (You)" : "") : normalizedTitle
         line1TitleLabel.stringValue = displayTitle
         line1TitleLabel.frame = NSRect(x: 52, y: 26, width: 0, height: 18)
@@ -220,7 +220,7 @@ final class DirectoryPeerCellView: NSTableCellView {
             if !host.isEmpty && !internalTokens.contains(host.lowercased()) && !hosts.contains(host) { hosts.append(host) }
         }
         let hostText = hosts.joined(separator: ", ")
-        let displayAbout = distinctAbout(peer.about, title:peer.title, user:peer.user, otherTitle:displayTitle)
+        let displayAbout = peer.display_about
         let attachmentNames = displayAttachments(peer.attachments ?? []).map { cleanHostDisplay($0.display_name) }
         let segments = (peer.harness == "human" ? ["Inbox"] + attachmentNames + [displayAbout ?? ""] : [hostText,displayAbout ?? ""]).filter { !$0.isEmpty }
         line2MetaLabel.stringValue = (peer.harness != "human" && !segments.isEmpty ? " · " : "") + segments.joined(separator:" · ")
@@ -276,7 +276,7 @@ final class DirectoryPeerCellView: NSTableCellView {
             "session_switched":"Conversation changed","unlistened":"Listening paused",
             "unlistened_before_dispatch":"Listening paused","fenced_before_dispatch":"Connection changed",
             "sender_ack_timeout":"Awaiting acknowledgment"][item.held_reason ?? ""]
-        let senderTitle = distinctAbout(item.from_title,title:"",user:item.from_user)
+        let senderTitle = item.display_from_title
         line1TitleLabel.stringValue = "@\(item.from_user)" + (senderTitle.map { " (\($0))" } ?? "") + " → " + (item.target_harness == "human" ? "You" : item.target_title)
         line1TitleLabel.font = .systemFont(ofSize:12.5,weight:item.unread ? .semibold : .medium)
         line1TitleLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText

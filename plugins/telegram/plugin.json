@@ -11,6 +11,11 @@
     "./bin/cito-plugin-telegram"
   ],
   "supportsOutboundOnly": true,
+  "serviceActions": {
+    "save": "Save Gateway Token",
+    "change": "Change Token…",
+    "clear": "Clear Token"
+  },
   "serviceIdentity": { "field": "botToken", "separator": ":" },
   "fields": [
     {

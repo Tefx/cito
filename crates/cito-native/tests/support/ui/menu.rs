@@ -134,7 +134,7 @@ fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discov
     ] {
         let mut frame = state();
         frame["hubs"][0]["error"] = json!(raw);
-        f.send(p, frame);
+        send_companion(&f, p, frame);
         let s = inspect(&f, p);
         assert_eq!(s.menu("hub_error:personal")["text"], expected, "{raw}");
     }
@@ -143,7 +143,7 @@ fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discov
     for [raw, expected] in vectors {
         let mut frame = state();
         frame["hubs"][0]["error"] = json!(raw);
-        f.send(p, frame);
+        send_companion(&f, p, frame);
         let s = inspect(&f, p);
         assert_eq!(s.menu("hub_error:personal")["text"], expected, "{raw}");
     }
@@ -151,7 +151,7 @@ fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discov
     for appearance in ["light", "dark"] {
         let mut frame = state();
         frame["discovery"] = json!([{"harness":"fixture","status":"error","error":format!("fixture: Discovery rejected: 10071: {clean}")}]);
-        f.send(p, frame);
+        send_companion(&f, p, frame);
         let s = inspect_as(&f, p, Some(appearance));
         let row = s.menu("discovery:fixture");
         let label = nodes(&row["children"])
@@ -175,7 +175,7 @@ fn hub_drawer_renders_the_presented_error_as_visible_text() {
     let (f, ui) = ui_fixture();
     let mut frame = state();
     frame["hubs"][0]["error"] = json!("personal: FAILED: Port already in use (os error 48)");
-    f.send(ui, frame);
+    send_companion(&f, ui, frame);
     let snapshot = inspect(&f, ui);
     let drawer = snapshot.menu("drawer:personal");
     assert_eq!(drawer["hidden"], false);
@@ -184,7 +184,7 @@ fn hub_drawer_renders_the_presented_error_as_visible_text() {
         .any(|n| n["text"] == "Port already in use" && n["hidden"] != true));
     let mut frame = state();
     frame["hubs"][0]["error"] = json!("INVALID_INPUT: Hub URL must use HTTP or HTTPS");
-    f.send(ui, frame);
+    send_companion(&f, ui, frame);
     let snapshot = inspect(&f, ui);
     assert_eq!(
         snapshot.menu("hub_error:personal")["text"],
@@ -238,7 +238,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
     frame["harnesses"][0]["pid_bound"] = json!(false);
     frame["available"] =
         json!([{"harness":"fixture","session_id":"recent","title":"Recent session","cwd":"/tmp"}]);
-    f.send(p, frame.clone());
+    send_companion(&f, p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(s.menu("toggle_group:fixture")["text"], "Fixture · 1 open");
     assert!(!s.menu("candidate:fixture:recent").is_null());
@@ -253,7 +253,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
         json!({"harness":"fixture","session_id":"older","title":"Older session","cwd":"/tmp"}),
     );
     frame["discovery"] = json!([{"harness":"fixture","status":"scanning"}]);
-    f.send(p, frame.clone());
+    send_companion(&f, p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(
         s.menu("toggle_group:fixture")["text"],
@@ -264,7 +264,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
         .any(|n| n["text"] == "Fixture · Scanning sessions…"));
     frame["available"] = json!([]);
     frame["discovery"] = json!([{"harness":"fixture","status":"error","error":"personal: PLUGIN_EXEC_FAILED: Cannot scan (os error 13)"}]);
-    f.send(p, frame.clone());
+    send_companion(&f, p, frame.clone());
     let s = inspect(&f, p);
     assert!(s.menu("available_empty_target").is_null());
     assert!(nodes(&s.menu("discovery:fixture")["children"])
@@ -278,7 +278,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
     assert_eq!(action["hub"], "personal");
     frame["source_op"] = json!("unlisten_all");
     frame["request_id"] = action["request_id"].clone();
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     assert_eq!(inspect(&f, p).menu("stop_all")["enabled"], true);
 }
 
@@ -649,7 +649,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         frame["harnesses"][0]["display_name"] = json!(display_name);
         frame["available"] =
             json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
-        f.send(p, frame.clone());
+        send_companion(&f, p, frame.clone());
         // Extreme input intentionally truncates. The strict V29 oracle must detect it
         // while every geometry, contrast, jargon, and address invariant stays intact.
         let stress_inspect = || {
@@ -678,8 +678,8 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         let mut active = listener();
         active["hub"] = json!(hub);
         frame["listeners"] = json!([active]);
-        f.send(p, frame.clone());
-        f.send(p, json!({"op":"error","error":error}));
+        send_companion(&f, p, frame.clone());
+        send_companion(&f, p, json!({"op":"error","error":error}));
         let s = stress_inspect();
         tooltip(&s, "items", &clean_error);
         assert!(s.menu("switch_hub:personal:repo-abcdefghijkl").is_null());
@@ -707,7 +707,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         let title = expanded.settings("stratum_user_title:channel");
         assert_eq!(title["text"], format!("Your Personal Account (@{handle})"));
         assert_eq!(title["tooltip"], title["text"]);
-        f.send(p, json!({"op":"error","error":error}));
+        send_companion(&f, p, json!({"op":"error","error":error}));
         let s = stress_inspect();
         tooltip(&s, "settings_items", &clean_error);
         control(&f, p, "open_directory");
@@ -725,7 +725,11 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
             "personal:{}",
             remote["display_address"].as_str().unwrap()
         ));
-        f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[remote]}));
+        send_companion(
+            &f,
+            p,
+            json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[remote]}),
+        );
         control(&f, p, "msg_dir:personal:one");
         f.send(
             p,
@@ -734,7 +738,11 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         control(&f, p, "composer_send");
         stress_inspect();
         let submitted = f.frames_for(p, "send_signal").next().unwrap();
-        f.send(p,json!({"op":"composer_result","ok":false,"request_id":submitted["request_id"],"error":error}));
+        send_companion(
+            &f,
+            p,
+            json!({"op":"composer_result","ok":false,"request_id":submitted["request_id"],"error":error}),
+        );
         let s = stress_inspect();
         assert_eq!(s.directory("composer_input")["text"], "Keep this draft");
         tooltip(&s, "directory_items", &clean_error);
@@ -946,11 +954,11 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
     );
     let before = inspect(&f, p)["rebuilds"].as_u64().unwrap();
-    // An unrelated error must not settle Listen; even an unchanged state must refresh it.
+    // An unrelated error must not settle Listen or force an unchanged state to redraw.
     f.send(p, frame.clone());
     let after = inspect(&f, p)["rebuilds"].as_u64().unwrap();
-    assert_eq!(after, before + 1);
-    // The next identical state is idle.
+    assert_eq!(after, before);
+    // The next identical state is also idle.
     let before = json!(after);
     f.send(p, frame.clone());
     assert_eq!(inspect(&f, p)["rebuilds"], before);
@@ -1035,7 +1043,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     initial["my_remote_listeners"] = json!([peer("remote"), other_network, unscoped]);
     initial["available"] =
         json!([{"harness":"fixture","session_id":"candidate","title":"alice","cwd":"/tmp"}]);
-    f.send(p, initial);
+    send_companion(&f, p, initial);
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert!(s.menu("remote:work:work-peer").is_null());
@@ -1060,7 +1068,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     initial["source_op"] = json!("listen_session");
     initial["request_id"] = f.frames_for(p, "listen_session").next().unwrap()["request_id"].clone();
     initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","custom_title":true,"cwd":"/tmp"}]);
-    f.send(p, initial);
+    send_companion(&f, p, initial);
     let custom = inspect(&f, p);
     assert_eq!(
         custom.menu("candidate_title:fixture:candidate")["text"],
@@ -1119,7 +1127,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     second["listener_id"] = json!("c_workabcdefgh");
     second["display_address"] = json!("work:alice/fixture#abcd");
     next["listeners"] = json!([listener(), second]);
-    f.send(p, next.clone());
+    send_companion(&f, p, next.clone());
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert!(s.menu("session:work:repo-workabcdefgh").is_null());
@@ -1139,7 +1147,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     control(&f, p, "copy:personal:repo-abcdefghijkl");
     assert_eq!(inspect(&f, p)["clipboard"], "alice/fixture#abcd");
     next["hubs"][1]["supports_workspace_scope"] = json!(false);
-    f.send(p, next.clone());
+    send_companion(&f, p, next.clone());
     control(&f, p, "hub:work");
     assert!(!inspect(&f, p)
         .menu("session:work:repo-workabcdefgh")
@@ -1159,7 +1167,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(pause["border_width"], 1);
     assert!(pause["symbol"].is_null());
     next["hubs"][1]["auth_mode"] = json!("token");
-    f.send(p, next.clone());
+    send_companion(&f, p, next.clone());
     assert!(inspect(&f, p)
         .menu("scope:work:repo-workabcdefgh")
         .is_null());
@@ -1168,7 +1176,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     other["listener_id"] = json!("c_other");
     other["scoped_id"] = json!("work:other");
     next["listeners"].as_array_mut().unwrap().push(other);
-    f.send(p, next.clone());
+    send_companion(&f, p, next.clone());
     assert!(
         inspect(&f, p)
             .menu("scope:work:repo-workabcdefgh")
@@ -1178,7 +1186,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     next["listeners"].as_array_mut().unwrap().pop();
     next["hubs"][1]["auth_mode"] = json!("oidc");
     next["hubs"][1]["supports_workspace_scope"] = json!(true);
-    f.send(p, next.clone());
+    send_companion(&f, p, next.clone());
     let scope_before = inspect(&f, p).menu("scope:work:repo-workabcdefgh");
     assert_eq!(scope_before["width"], 68);
     assert_eq!(scope_before["tooltip"], "Visibility: Only Me (@alice) — only your own sessions and devices on 'work' can message this node. Click to share with Team.");
@@ -1212,7 +1220,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     f.send(p, json!({"op":"test_settings_input","id":"rename_field:work:repo-workabcdefgh","value":"Backend API"}));
     let rename_identity = inspect(&f, p)["rename_field_identity"].clone();
     next["unread_count"] = json!(1);
-    f.send(p, next);
+    send_companion(&f, p, next);
     assert_eq!(
         inspect(&f, p)["rename_field_identity"],
         rename_identity,
@@ -1253,7 +1261,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     short_addresses["listeners"] = json!([human]);
     short_addresses["settings"] = settings();
     short_addresses["settings"]["hubs"][0]["name"] = json!("local");
-    f.send(p, short_addresses);
+    send_companion(&f, p, short_addresses);
     assert!(inspect(&f, p).menu("session:local:human:default").is_null());
     control(&f, p, "open_directory");
     let mut person = peer("human:default");
@@ -1292,7 +1300,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     let mut addresses = state_with_settings(settings());
     addresses["listeners"] = json!([long]);
     addresses["my_remote_listeners"] = json!([remote.clone()]);
-    f.send(p, addresses);
+    send_companion(&f, p, addresses);
     control(&f, p, "target_hub:work");
     if inspect(&f, p)
         .menu("copy_remote:work:long-remote")
@@ -1338,7 +1346,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
             row
         })
         .collect::<Vec<_>>());
-    f.send(p, many);
+    send_companion(&f, p, many);
     control(&f, p, "hub:personal");
     let scrolled = inspect(&f, p);
     assert_eq!(scrolled.menu("active_scroll")["height"], 256);

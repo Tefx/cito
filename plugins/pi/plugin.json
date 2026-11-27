@@ -13,6 +13,7 @@
     "./bin/cito-plugin-pi"
   ],
   "version": "0.22.3",
+  "reloadHint": "Run /reload in Pi to enable 1-click listen",
   "postSetupHint": "Connected · Run /reload in open Pi sessions, then click + Listen",
   "postDisconnectHint": "Disconnected · Active Pi listeners stopped"
 }

@@ -43,6 +43,7 @@ extension Companion {
         defer { renderingForInspection = false }
         if menuDirty && hasRenderedState { rebuild(preservingEditor: true) }
         if settingsDirty, settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+        flushDeferredSettings()
         if directoryDirty, directoryPanel != nil { refreshDirectoryViews() }
     }
 
@@ -103,7 +104,7 @@ extension Companion {
                     "directory_open": directoryVisible, "directory_dirty": directoryDirty, "directory_reloads": directoryReloadCount,
                     "settings_open": settingsVisible, "settings_dirty": settingsDirty, "settings_rebuilds": settingsRebuildCount,
                     "status_updates": statusUpdateCount, "unread_count": unreadCount,
-                    "status_image": statusImage.map { String(describing: ObjectIdentifier($0)) } ?? "",
+                    "status_image": (status?.button ?? headlessStatusButton)?.image.map { String(describing: ObjectIdentifier($0)) } ?? "",
                     "button_tooltip": (status?.button ?? headlessStatusButton)?.toolTip ?? "",
                     "listeners": listeners.count, "directory_peers": directoryAllPeers.count,
                     "collection_counts": [
@@ -315,6 +316,7 @@ extension Companion {
                 }
                 if let editor = window?.firstResponder as? NSTextView {
                     editor.setMarkedText(value, selectedRange:NSRange(location:value.utf16.count,length:0), replacementRange:editor.selectedRange())
+                    if object["reveal_caret"] as? Bool == true { editor.scrollRangeToVisible(editor.selectedRange()) }
                 }
                 return true
             }
@@ -391,7 +393,6 @@ extension Companion {
                 return true
             }
             if op == "test_clipboard", let text = object["text"] as? String {
-                if object["system_only"] as? Bool != true { clipboardString = text }
                 appPasteboard.clearContents()
                 appPasteboard.setString(text, forType: .string)
                 return true
@@ -734,7 +735,7 @@ extension Companion {
                 if id.hasPrefix("act_title:"), let item = (label.superview as? DirectoryPeerCellView)?.activityItem {
                     // Provenance comes from the rendered cell, including its Hub. Remove
                     // only verified user spans; generated targets and held suffixes remain.
-                    let senderTitle = distinctAbout(item.from_title,title:"",user:item.from_user)
+                    let senderTitle = item.display_from_title
                     let senderSpan = "@\(item.from_user)" + (senderTitle.map { " (\($0))" } ?? "") + " → "
                     if generatedText.hasPrefix(senderSpan) {
                         var target = String(generatedText.dropFirst(senderSpan.count))
@@ -791,8 +792,8 @@ extension Companion {
                     let mounted = scroll.documentView as? ChannelsSettingsView
                     let hub = mounted?.hub ?? effectiveChannelHub
                     let channels = mounted?.channels ?? []
-                    defaultLayout = channelInventoryErrorsByHub[hub] == nil && channels.count == 1 && channels.allSatisfy { channel in
-                        let ui = channelUiStates["\(hub)|\(channel.id)"] ?? ChannelUiState()
+                    defaultLayout = settingsChannels.errors[hub] == nil && channels.count == 1 && channels.allSatisfy { channel in
+                        let ui = settingsChannels.editors["\(hub)|\(channel.id)"] ?? ChannelUiState()
                         return !ui.editingGateway && !ui.editingPersonal && !ui.manualEntry && ui.pairingInstruction.isEmpty &&
                             channel.status != "error" && channel.warning != true && ui.testResult == nil && channel.fields.count <= 2
                     }
@@ -1099,12 +1100,14 @@ extension Companion {
             selectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex)
                 ? directoryFilteredPeers[directorySelectedIndex].scoped_id : ""
         }
+        let button = status?.button ?? headlessStatusButton
+        let image = button?.image
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 40, pixelsHigh: 40, bitsPerSample: 8,
             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
         NSGraphicsContext.current?.cgContext.scaleBy(x: 2, y: 2)
-        statusImage?.draw(in: NSRect(x: 0, y: 0, width: 20, height: 20))
+        image?.draw(in: NSRect(x: 0, y: 0, width: 20, height: 20))
         NSGraphicsContext.restoreGraphicsState()
         func alpha(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
             // Bitmap rows start at the top; drawing coordinates start at the bottom.
@@ -1113,7 +1116,6 @@ extension Companion {
         let probes: [String: CGFloat] = ["arc": alpha(1.75, 10), "core": alpha(9.2, 10),
             "wave": alpha(18.75, 10), "arc_gap": alpha(15.2, 10), "warning_dot": alpha(15.7, 4.3),
             "warning_ring": alpha(12.5, 4.3), "outside_cutout": alpha(11.0, 4.3), "inside_dot": alpha(17.0, 4.3)]
-        let button = status?.button ?? headlessStatusButton
         if let button = button {
             let title = button.title + button.attributedTitle.string
             if title.unicodeScalars.contains(where: { $0.value > 0x27BF && $0.properties.isEmoji }) {
@@ -1122,7 +1124,7 @@ extension Companion {
         }
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
-        let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
+        let effectiveClipboard = readPasteboardString()
         let now = Date()
         pruneCopyFeedback(at: now)
         let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
@@ -1160,6 +1162,7 @@ extension Companion {
                 return ["id": (editor.delegate as? NSTextField)?.identifier?.rawValue ?? "", "instance": String(describing:ObjectIdentifier(editor)),
                     "marked": editor.hasMarkedText(), "selection_length": editor.selectedRange().length,
                     "selection_location": editor.selectedRange().location, "editable": editor.isEditable,
+                    "visible_x": (editor.superview as? NSClipView)?.bounds.origin.x ?? editor.visibleRect.origin.x,
                     "can_undo": editor.undoManager?.canUndo ?? false, "undo_groups": editor.undoManager?.groupingLevel ?? -1,
                     "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
@@ -1178,7 +1181,7 @@ extension Companion {
             "directory_selection_visible": directoryTableView.map { table in directorySelectedIndex >= 0 && directorySelectedIndex < table.numberOfRows && table.visibleRect.contains(table.rect(ofRow:directorySelectedIndex)) } ?? false,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
             "pending_hub_save": hubForm.pendingSave?.requestId ?? "",
-            "hub_invite_pending": hubInvitePending, "host_hub_port_pending": hostPort.pending,
+            "hub_invite_pending": hubInvite.requestId != nil, "host_hub_port_pending": hostPort.pending,
             "pending_app_checks": pendingControls.filter { $0.value.appCheck }.keys.sorted(),
             "pending_channel_saves": pendingControls.filter { $0.value.channelSave != nil }.keys.sorted(),
             "pending_channel_resets": pendingControls.filter { $0.value.channelReset.map { $0.hub || $0.user } == true }.keys.sorted(),
@@ -1186,8 +1189,8 @@ extension Companion {
             "settings_rebuild_deferred": settingsRebuildDeferred,
             "settings_channel_hub": mountedChannelsSettings?.hub ?? "",
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
-            "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
-            "icon_height": statusImage?.size.height ?? 0, "clipboard": effectiveClipboard,
+            "icon_template": image?.isTemplate ?? false, "icon_width": image?.size.width ?? 0,
+            "icon_height": image?.size.height ?? 0, "clipboard": effectiveClipboard,
             "button_tooltip": button?.toolTip ?? "", "button_accessibility_label": button?.accessibilityLabel() ?? "",
             "button_title": button?.title ?? "", "button_image_position": button?.imagePosition.rawValue ?? -1,
             "button_font_size": font?.pointSize ?? 0, "button_font_weight": traits?[.weight] as? CGFloat ?? 0,

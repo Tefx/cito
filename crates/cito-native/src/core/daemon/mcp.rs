@@ -887,7 +887,14 @@ impl HubAccess {
         }
         // Registration commits the Hub-scoped PID and transition timestamp together.
         // Do not rewrite binding metadata after releasing registration authority.
-        let _ = self.slot(hub)?.directory();
+        let slot = self.slot(hub)?;
+        let _ = slot.directory();
+        result["display_address"] = json!(crate::core::identity::display_address(
+            hub,
+            &self.config.default_hub,
+            &json!({"owner_user":result["user"],"harness":result["harness"],"listener_id":result["canonical_listener_id"]}),
+            &super::projection::address_peers(&self.state, slot),
+        ));
         result["listener_id"] = json!(self.scoped(hub, string(&result, "listener_id")));
         Ok(result)
     }
@@ -1100,7 +1107,7 @@ impl HubAccess {
                         name,
                         slot,
                         worker.join().unwrap_or_else(|_| {
-                            Err("NATS_UNAVAILABLE: Directory worker failed".into())
+                            Err("HUB_UNAVAILABLE: Directory worker failed".into())
                         }),
                     )
                 })
@@ -1115,14 +1122,13 @@ impl HubAccess {
                     let peers = super::projection::address_peers(&self.state, &slot);
                     let sample = super::projection::HubSample::capture(&slot, directory);
                     for row in &sample.directory {
-                        if !matches!(
-                            crate::core::lease::evaluate_node_lease(row, now_ms()),
-                            "ACTIVE" | "DISCONNECTED_RETAINED"
-                        ) || (row["scope"] == "self"
-                            && !crate::core::auth::principal_ids_equal(
-                                string(row, "principal_id"),
-                                string(&slot.identity, "principal_id"),
-                            ))
+                        let availability = crate::core::lease::evaluate_node_lease(row, now_ms());
+                        if !matches!(availability, "ACTIVE" | "DISCONNECTED_RETAINED")
+                            || (row["scope"] == "self"
+                                && !crate::core::auth::principal_ids_equal(
+                                    string(row, "principal_id"),
+                                    string(&slot.identity, "principal_id"),
+                                ))
                         {
                             continue;
                         }
@@ -1258,14 +1264,17 @@ impl HubAccess {
                             if harness.is_none_or(|h| dto["harness"] == h)
                                 && (!mine || dto["is_self_principal"] == true)
                             {
-                                groups
-                                    .entry(directory_identity(&dto))
-                                    .or_insert((dto, Vec::new()));
+                                groups.entry(directory_identity(&dto)).or_insert((
+                                    dto,
+                                    Vec::new(),
+                                    availability == "ACTIVE",
+                                ));
                             }
                         } else {
-                            let (_, hubs) = groups
+                            let (_, hubs, online) = groups
                                 .entry((String::new(), string(row, "listener_id").into()))
-                                .or_insert_with(|| (dto, Vec::new()));
+                                .or_insert_with(|| (dto, Vec::new(), false));
+                            *online |= availability == "ACTIVE";
                             if hubs.last() != Some(&name) {
                                 hubs.push(name.clone());
                             }
@@ -1275,9 +1284,10 @@ impl HubAccess {
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
             }
         }
+        let online_count = groups.values().filter(|(_, _, online)| *online).count();
         let mut rows: Vec<_> = groups
             .into_values()
-            .map(|(mut row, hubs)| {
+            .map(|(mut row, hubs, _)| {
                 if ui_filters.is_none() {
                     if args["hub"].is_null() {
                         row["hubs"] = json!(hubs);
@@ -1299,7 +1309,6 @@ impl HubAccess {
             )
         });
         let matched_count = rows.len();
-        let online_count = matched_count;
         rows.truncate(limit as usize);
         Ok(
             json!({"ok":true,"listeners":rows,"warnings":warnings,"matched_count":matched_count,"online_count":online_count}),
@@ -1851,7 +1860,7 @@ impl HubAccess {
                         }).as_ref().map_err(Clone::clone)?;
                         if principals.iter().any(|identity| scoped_key(string(identity, "principal_id"), "local://", string(&row, "to_listener_id")) == row["dedup_id"]) {
                             if local_slot.is_none() {
-                                return Err("NATS_UNAVAILABLE: Original local reservation cannot be verified while the local Hub is unavailable".into());
+                                return Err("HUB_UNAVAILABLE: Original local reservation cannot be verified while the local Hub is unavailable".into());
                             }
                             old = Some(row);
                         }
@@ -1878,7 +1887,7 @@ impl HubAccess {
         } else {
             let (hub, prepared, fallback_error) = match prepare(hub, None, None) {
                 Ok(prepared) => (hub, prepared, None),
-                Err(error) if local_slot.is_some() && error.starts_with("NATS_UNAVAILABLE:") => {
+                Err(error) if local_slot.is_some() && error.starts_with("HUB_UNAVAILABLE:") => {
                     self.state
                         .db
                         .read(|db| guard_fallback(db, &error, now_ms()))?;
@@ -1946,7 +1955,7 @@ impl HubAccess {
                 return Err("IDEMPOTENCY_KEY_CONFLICT: Different target".into());
             }
             if reservation["status"] == "PENDING_PUBLISH" {
-                return Err("NATS_UNAVAILABLE: Local fallback publication is still pending".into());
+                return Err("HUB_UNAVAILABLE: Local fallback publication is still pending".into());
             }
             return Ok(receipt(
                 string(&reservation, "fallback_public_id"),
@@ -2023,7 +2032,7 @@ impl HubAccess {
     }
 }
 impl DaemonService {
-    fn inbox(&mut self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {
+    fn inbox(&self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {
         let caller = self
             .caller(meta, false)?
             .ok_or("BINDING_REQUIRED: Caller required")?;
@@ -2032,6 +2041,7 @@ impl DaemonService {
             return Err("INVALID_INPUT: limit must be 1..1000".into());
         }
         let mut bindings = serde_json::Map::new();
+        let mut addresses = std::collections::HashMap::new();
         for (name, slot) in &self.slots {
             if args["hub"].is_string() && name != hub {
                 continue;
@@ -2049,14 +2059,16 @@ impl DaemonService {
                 string(&caller, "session_id"),
             )?;
             bindings.insert(name.clone(), json!(id));
+            addresses.insert(
+                name.as_str(),
+                super::projection::address_peers(&self.state, slot),
+            );
         }
         let bindings = Value::String(Value::Object(bindings).to_string());
         let channel = format!("{}:{}", self.host_id, string(&caller, "harness"));
-        let page = self.state.db.transaction(|db| {
-            self.read_and_ack_inbox(db, args, &bindings, &channel, limit as usize)
-        })?;
-        self.flush_acks();
-        Ok(page)
+        self.state.db.transaction(|db| {
+            self.read_and_ack_inbox(db, args, &bindings, &channel, limit as usize, &addresses)
+        })
     }
 
     fn read_and_ack_inbox(
@@ -2066,6 +2078,7 @@ impl DaemonService {
         bindings: &Value,
         channel: &str,
         limit: usize,
+        addresses: &std::collections::HashMap<&str, Vec<Value>>,
     ) -> Result<Value, String> {
         let ack_all = args["ack_all"]
             .as_bool()
@@ -2103,20 +2116,35 @@ impl DaemonService {
             if !super::super::state::joined_signal_is_current(&key) { return Ok(true); }
             let row = db.query("SELECT * FROM local_signals WHERE hub=? AND signal_id=?", &[key["hub"].clone(),key["signal_id"].clone()])?.pop().ok_or("STATE_ERROR: Inbox row missing")?;
             let hub = string(&row, "hub");
-            let signal = json!({"hub":hub,"signal_id":self.scoped(hub,string(&row,"signal_id")),"seq":row["seq"],"from":{"user":row["from_user"],"host_name":row["from_host_name"],"harness":row["from_harness"],"listener_id":row["from_listener_id"],"title":row["from_title"],"about":row["from_about"]},"message":row["message"],"in_reply_to":row["in_reply_to"].as_str().map(|id|self.scoped(hub,id)),"created_at":row["created_at"],"held_reason":row["held_reason"]});
+            let mut signal = json!({"hub":hub,"signal_id":self.scoped(hub,string(&row,"signal_id")),"seq":row["seq"],"from":{"user":row["from_user"],"host_name":row["from_host_name"],"harness":row["from_harness"],"listener_id":row["from_listener_id"],"title":row["from_title"],"about":row["from_about"]},"message":row["message"],"in_reply_to":row["in_reply_to"].as_str().map(|id|self.scoped(hub,id)),"created_at":row["created_at"],"held_reason":row["held_reason"]});
             // Reserve the two outer quotes counted by single-row admission.
             // This also covers the comma between consecutive rows in a page.
             let mut budget = TextBudget(remaining.saturating_sub(2));
             if write!(budget, "{signal}").is_err() {
-                if signals.is_empty() {
-                    return Err("INVALID_INPUT: Signal exceeds inbox transport limit".into());
-                }
+                if signals.is_empty() { return Err("INVALID_INPUT: Signal exceeds inbox transport limit".into()); }
                 return Ok(false);
             }
-            remaining = budget.0;
+            let address = json!(super::projection::sender_display_address(
+                hub, &self.config.default_hub, row["from_listener_id"].as_str(),
+                string(&row, "from_user"), string(&row, "from_harness"),
+                addresses.get(hub).map(Vec::as_slice).unwrap_or_default(),
+            ));
+            let write_address = |budget: &mut TextBudget| write!(budget, ",\"display_address\":{address}");
+            let mut with_address = TextBudget(budget.0);
+            signal["from"]["display_address"] = if write_address(&mut with_address).is_ok() {
+                remaining = with_address.0;
+                address
+            } else if !signals.is_empty() {
+                return Ok(false);
+            } else {
+                // Admission budgets the signal without the display address.
+                // Keep that row readable, spending at most 1 KiB of envelope headroom.
+                remaining = 0;
+                if write_address(&mut TextBudget(budget.0 + 1024)).is_ok() { address } else { Value::Null }
+            };
             if ack_all { select(&key); }
             signals.push(signal);
-            Ok(signals.len() < limit)
+            Ok(remaining > 0 && signals.len() < limit)
         })?;
         for raw in args["ack_ids"].as_array().into_iter().flatten() {
             let raw = raw

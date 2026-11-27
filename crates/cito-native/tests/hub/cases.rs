@@ -1121,13 +1121,7 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
     let dir = temp();
     let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
-    let plugin = ChannelPlugin {
-        is_builtin: false,
-        id: "fixture".into(),
-        dir: dir.clone(),
-        manifest: json!({}),
-        command: vec![],
-    };
+    let plugin = hub_plugins::test_descriptor(&dir, "fixture", vec![], json!({}));
     let old = json!({"_external_chat_id":"41","_external_user_id":"41"});
     let next = json!({"_external_chat_id":"42","_external_user_id":"42"});
     e.inner.db.transaction(|c| {
@@ -1290,7 +1284,20 @@ fn outbound_only_keeps_delivery_and_identity_while_fencing_pairing() {
     configure(json!({"inbound_mode":"primary"})).unwrap();
     assert_eq!(list()["can_pair"], true);
     assert_eq!(list()["pairing_pending"], false);
+    let human = listener_id("none#alice", "human", "default");
+    let registration = || hub.inner.db.read(|c| kv_row(c, &human)).unwrap().unwrap();
+    let before = registration();
+    assert_eq!(
+        parse(&before, "value")["channels"]["hub:fixture"]["state"],
+        "ACTIVE"
+    );
     configure(json!({"reset_hub":true})).unwrap();
+    let after = registration();
+    assert_eq!(n(&after, "revision"), n(&before, "revision") + 1);
+    assert_eq!(
+        parse(&after, "value")["channels"]["hub:fixture"]["state"],
+        "UNLISTENED"
+    );
     assert!(list()["service_label"].is_null());
     assert!(list()["service_identity"].is_null());
 }
@@ -1392,7 +1399,7 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let dir = temp();
     let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
-    e.inner.plugins.lock().unwrap().push(ChannelPlugin{is_builtin:false,id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
+    e.inner.plugins.lock().unwrap().push(hub_plugins::test_descriptor(&dir, "fixture", vec![], json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})));
     e.pause_worker();
     let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice"});
     let bob = json!({"principal_id":"none#bob","owner_user":"bob"});
@@ -1595,7 +1602,7 @@ for line in sys.stdin:
         .unwrap()
         .remove(0);
     plugin.command = vec!["python3".into(), "-c".into(), script.into()];
-    let plugin_dir = plugin.dir.clone();
+    let plugin_dir = plugin.plugin_dir.clone();
     *e.inner.plugins.lock().unwrap() = vec![plugin];
     e.inner
         .db
@@ -2092,6 +2099,16 @@ fn stream_and_consumer_configs_fit_their_read_responses() {
     let mut cfg = json!({"durable_name":name,"filter_subject":subject,"pad":""});
     cfg["pad"] = json!("x".repeat(64 * 1024 - cfg.to_string().len()));
     assert_eq!(consumer(cfg.clone()).unwrap()["config"], cfg);
+    let info = |stream: &str| {
+        e.rpc("stream_info", &json!({"stream":stream}), None)
+            .unwrap()
+    };
+    assert_eq!(info(SIGNALS)["state"]["consumer_count"], 1);
+    assert_eq!(info(KV_STREAM)["state"]["consumer_count"], 0);
+    assert_eq!(
+        info(&name)["state"],
+        json!({"messages":0,"last_seq":0,"first_seq":0,"bytes":0,"consumer_count":0})
+    );
     cfg["pad"] = json!(format!("{}x", s(&cfg, "pad")));
     assert!(consumer(cfg).unwrap_err().starts_with("INVALID_INPUT:"));
 }
@@ -3402,8 +3419,30 @@ fn non_destructive_upgrade_preserves_legacy_payloads() {
     db.execute("INSERT INTO hub_signals(subject,created_ms,data) VALUES('cito.signal.target',?,CAST(? AS BLOB))",&[json!(now_ms()),json!(raw)]).unwrap();
     db.execute("CREATE TABLE hub_channel_deliveries(plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,signal_id TEXT NOT NULL,seq INTEGER NOT NULL,status TEXT NOT NULL,external_msg_id TEXT,from_listener_id TEXT,from_user TEXT,from_title TEXT,delivered_ms INTEGER NOT NULL,PRIMARY KEY(plugin_id,principal_id,signal_id))",&[]).unwrap();
     db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,external_msg_id,from_listener_id,delivered_ms) VALUES('fixture','p','original',1,'delivered','42','sender',?)",&[json!(now_ms())]).unwrap();
+    db.execute("CREATE INDEX idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)", &[]).unwrap();
     drop(db);
     let e = test_engine(&dir);
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE name='idx_hub_channel_deliveries_ext_msg'",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+    e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,reservation_id,delivered_ms) VALUES('fixture','p','new',2,'in_flight','sender','token',?)", &[json!(now_ms())]).unwrap();
+    e.delivery_result("fixture", &json!({"delivery_id":"token","ok":true,"external_msg_id":"primary","external_msg_ids":["chunk"]})).unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT status,external_msg_id FROM hub_channel_deliveries WHERE signal_id='new'",
+                &[]
+            )
+            .unwrap(),
+        vec![json!({"status":"delivered","external_msg_id":null})]
+    );
     let signals = e
         .inner
         .db
@@ -3418,12 +3457,18 @@ fn non_destructive_upgrade_preserves_legacy_payloads() {
         .inner
         .db
         .query(
-            "SELECT external_msg_id,signal_id FROM hub_channel_delivery_msgs",
+            "SELECT external_msg_id,signal_id FROM hub_channel_delivery_msgs ORDER BY external_msg_id",
             &[],
         )
         .unwrap();
-    assert_eq!(mappings[0]["external_msg_id"], "42");
-    assert_eq!(mappings[0]["signal_id"], "original");
+    assert_eq!(
+        mappings,
+        vec![
+            json!({"external_msg_id":"42","signal_id":"original"}),
+            json!({"external_msg_id":"chunk","signal_id":"new"}),
+            json!({"external_msg_id":"primary","signal_id":"new"})
+        ]
+    );
     assert_eq!(
         e.inner
             .db
@@ -3682,7 +3727,8 @@ fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
         )
         .unwrap();
         let frames =
-            std::fs::read_to_string(e.plugin("fixture").unwrap().dir.join("frames.jsonl")).unwrap();
+            std::fs::read_to_string(e.plugin("fixture").unwrap().plugin_dir.join("frames.jsonl"))
+                .unwrap();
         assert!(frames
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -4110,17 +4156,16 @@ fn pending_request_fails_on_child_exit() {
     let root = temp();
     let dir = root.join("fixture");
     std::fs::create_dir_all(&dir).unwrap();
-    let plugin = ChannelPlugin {
-        is_builtin: false,
-        id: "fixture".into(),
-        dir: dir.clone(),
-        manifest: json!({}),
-        command: vec![
+    let plugin = hub_plugins::test_descriptor(
+        &dir,
+        "fixture",
+        vec![
             "python3".into(),
             "-c".into(),
             "import sys; sys.stdin.readline(); sys.exit(0)".into(),
         ],
-    };
+        json!({}),
+    );
     let p = ChannelProcess::spawn(&plugin, Arc::new(|_| None)).unwrap();
     let started = std::time::Instant::now();
     let result = p.request(json!({"op":"test"}));
@@ -4307,13 +4352,12 @@ fn replay_quarantines_only_the_frame_partially_written_to_the_pipe() {
         "import os, pathlib\npathlib.Path('received').write_bytes(os.read(0, 1))\n",
     )
     .unwrap();
-    let plugin = ChannelPlugin {
-        is_builtin: false,
-        id: "fixture".into(),
-        dir: plugin_dir.clone(),
-        manifest: json!({"kind":"human-channel"}),
-        command: vec!["python3".into(), script.to_str().unwrap().into()],
-    };
+    let plugin = hub_plugins::test_descriptor(
+        &plugin_dir,
+        "fixture",
+        vec!["python3".into(), script.to_str().unwrap().into()],
+        json!({}),
+    );
     let process = ChannelProcess::spawn(&plugin, Arc::new(|_| None)).unwrap();
     let pid = "none#alice";
     let node = listener_id(pid, "human", "default");
@@ -4353,13 +4397,12 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     let dir = temp();
     let e = test_engine(&dir);
     e.set_plugin_roots(&[]).unwrap();
-    let plugin = ChannelPlugin {
-        is_builtin: false,
-        id: "fixture".into(),
-        dir: dir.clone(),
-        manifest: json!({"fields":[{"key":"credential","scope":"hub","type":"secret"}]}),
-        command: vec![],
-    };
+    let plugin = hub_plugins::test_descriptor(
+        &dir,
+        "fixture",
+        vec![],
+        json!({"fields":[{"key":"credential","scope":"hub","type":"secret"}]}),
+    );
     let binding = json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"fixture"});
     e.inner.db.transaction(|c| {
         c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES('none#alice','fixture','alice')",&[])?;
@@ -4480,9 +4523,8 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     // The public configure path also performs a synchronous channel tick.
     e.pause_worker();
     let mut plugin = plugin.clone();
-    plugin.manifest["fields"]
-        .as_array_mut()
-        .unwrap()
+    plugin
+        .fields
         .push(json!({"key":"transport","scope":"hub","type":"secret","required":true}));
     send(&e, &node, "after-binding");
     e.inner.plugins.lock().unwrap().push(plugin);

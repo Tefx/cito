@@ -19,6 +19,48 @@ pub(super) fn latest(f: &Fixture, p: usize, op: &str) -> Value {
 }
 
 #[test]
+fn control_reopen_reaches_the_companion_and_opens_settings() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let mut l = ClosedLoop::new(&f);
+    assert_eq!(
+        l.until(|s| s.menu("header").is_object())["settings_open"],
+        false
+    );
+    let event = json!({"op":"reopen_ui"});
+    let (status, reply) = http(f.port, "/control", Some(&event));
+    assert_eq!((status, reply), (200, json!({"ok":true})));
+    l.until(|s| s["settings_open"] == true);
+    assert_eq!(
+        l.frames
+            .iter()
+            .filter(|frame| frame["op"] == "reopen_ui")
+            .collect::<Vec<_>>(),
+        vec![&event]
+    );
+}
+
+#[test]
+fn companion_decodes_complete_passive_listener_and_attachment_collections() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    frame["hubs"][0]["attachments"] = json!((0..129).map(|i| json!({"channel_id":format!("device-{i}"),"location":"device","display_name":format!("Device {i}"),"availability":"ACTIVE","is_local":false})).collect::<Vec<_>>());
+    frame["listeners"] = json!((0..65)
+        .map(|i| {
+            let mut row = listener();
+            for key in ["listener_id", "public_id", "scoped_id", "session_id"] {
+                row[key] = json!(format!("node-{i}"));
+            }
+            row
+        })
+        .collect::<Vec<_>>());
+    f.send(p, frame);
+    assert_eq!(render_state(&f, p)["listeners"], 65);
+    assert_eq!(inspect(&f, p)["hub_attachment_counts"]["personal"], 129);
+}
+
+#[test]
 fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banners_redraw() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -257,8 +299,12 @@ fn read_only_pairing_editor_can_select_and_copy_and_feedback_restores_full_width
     inspect(&f, p);
     let pair = f.frames_for(p, "channel_pair").next_back().unwrap();
     let instruction = "Open your account, then enter this code.\nCode: 123456";
-    f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":pair["request_id"],"instruction":instruction,"pairing_command":"pair 123456"}));
+    let command = format!("pair {}", "é".repeat(3000));
+    let url = format!("https://id.example.com/pair?code={}", "a".repeat(6000));
+    f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":pair["request_id"],"instruction":instruction,"pairing_command":command,"pairing_url":url}));
     let copied = inspect(&f, p);
+    assert_eq!(copied["clipboard"], command);
+    assert!(copied.settings("open_pair_url:channel").is_object());
     let width = copied.settings("copy_pair_command:channel")["width"].clone();
     assert_eq!(
         copied.settings("copy_pair_command:channel")["text"],

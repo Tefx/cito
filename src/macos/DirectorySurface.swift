@@ -2,7 +2,7 @@ import AppKit
 
 extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func clearDirectoryActionError() {
-        let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError.map(presentationError) : nil
+        let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError : nil
         directoryActionError = nil; directoryActionErrorSourceOp = nil; directoryActionWarning = nil
         if let oldCopyError = oldCopyError {
             if directorySummaryLabel?.toolTip == oldCopyError { directorySummaryLabel?.toolTip = nil }
@@ -27,12 +27,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         } else {
             directoryWarningLabel?.stringValue = "Some Hubs are unavailable. Results may be incomplete."
         }
-        // Directory warnings carry a Hub label added by the daemon. Keep that
-        // scope while sanitizing only its diagnostic payload.
-        directoryWarningLabel?.toolTip = (error ?? directoryActionWarning).map(presentationError) ?? directoryWarnings.map { warning in
-            guard let separator = warning.range(of:": ") else { return presentationError(warning) }
-            return String(warning[..<separator.lowerBound]) + ": " + presentationError(String(warning[separator.upperBound...]))
-        }.joined(separator:"\n")
+        // The daemon supplies warnings with their Hub labels intact.
+        directoryWarningLabel?.toolTip = (error ?? directoryActionWarning) ?? directoryWarnings.joined(separator: "\n")
         directoryWarningLabel?.textColor = hasError ? CitoPalette.dangerText : CitoPalette.secondaryText
         let bottom: CGFloat = directoryComposerBar?.isHidden == false ? 28 + (directoryComposerBar?.frame.height ?? 44) : 28
         directoryScrollView?.frame = NSRect(x:0,y:bottom,width:560,height:362-bottom-(hasWarning ? 28 : 0))
@@ -45,8 +41,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryActionError = message; directoryActionErrorSourceOp = "copy_activity_message"
         updateDirectoryWarnings()
         if directoryComposerBar?.isHidden != false {
-            directorySummaryLabel?.stringValue = presentationError(message)
-            directorySummaryLabel?.toolTip = presentationError(message)
+            directorySummaryLabel?.stringValue = message
+            directorySummaryLabel?.toolTip = message
         }
     }
     func queryDirectory(op: String = "query_directory") {
@@ -72,7 +68,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         composerErrorLabel?.frame=NSRect(x:16,y:6,width:528,height:15)
     }
     func setComposerStatus(_ message: String) {
-        composerError = presentationError(message)
+        composerError = message
         composerErrorLabel?.stringValue = composerError
         composerErrorLabel?.toolTip = composerError
         composerErrorLabel?.isHidden = composerError.isEmpty
@@ -444,7 +440,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         guard pendingComposer == nil, !composerTarget.isEmpty, !text.isEmpty else { return }
         // Match the daemon's Unicode code-point limit, including combining scalars.
         guard text.unicodeScalars.count <= 65_536 else {
-            setComposerStatus("INVALID_INPUT: Message exceeds maximum length")
+            setComposerStatus("Message exceeds maximum length")
             return
         }
         let requestId = UUID().uuidString
@@ -706,9 +702,10 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 public_id: listener.public_id, scoped_id: listener.scoped_id,
                 user: user, host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
                 display_address: listener.display_address, title: listener.title, about: listener.about ?? "",
-                scope: listener.scope, custom_title: listener.custom_title, cwd: listener.cwd, repo: listener.repo,
+                custom_title: listener.custom_title, cwd: listener.cwd, repo: listener.repo,
                 branch: listener.branch, is_self_principal: listener.is_self_principal, channels: listener.channels,
-                attachments:listener.attachments ?? (listener.harness == "human" ? hubs.first(where:{$0.name == listener.hub})?.attachments : nil))
+                attachments:listener.attachments ?? (listener.harness == "human" ? hubs.first(where:{$0.name == listener.hub})?.attachments : nil),
+                display_title: listener.display_title, use_app_title: listener.use_app_title, display_about: listener.display_about)
         } + myRemote
     }
 

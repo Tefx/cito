@@ -580,6 +580,11 @@ impl SessionActivity {
                             })
                             .cloned()
                             .map(|mut row| {
+                                if row["needs_reload"] == true {
+                                    if let Some(hint) = &plugin.reload_hint {
+                                        row["reload_hint"] = json!(hint);
+                                    }
+                                }
                                 row["title"] = json!(row["title"]
                                     .as_str()
                                     .filter(|s| !s.trim().is_empty())
@@ -1030,32 +1035,18 @@ print(json.dumps(response), flush=True)
             fs::create_dir_all(&path).map_err(|e| e.to_string())?;
             fs::write(path.join("provider.py"), PROVIDER).map_err(|e| e.to_string())?;
             fs::write(path.join("options.json"), options.to_string()).map_err(|e| e.to_string())?;
-            self.plugins.plugins.push(PluginDescriptor {
-                id: id.into(),
-                kind: "agent".into(),
-                display_name: id.into(),
-                tier: "custom".into(),
-                order: i64::MAX,
-                sf_symbol: "bolt".into(),
-                tint: "blue".into(),
-                cli_flag: false,
-                pid_bound: true,
-                auto_listen: Default::default(),
-                plugin_dir: path.clone(),
-                is_builtin: false,
-                channel_env: None,
-                fields: Vec::new(),
-                post_setup_hint: None,
-                post_disconnect_hint: None,
-                command: vec![
-                    "/usr/bin/env".into(),
-                    format!("HOME={}", self.config.home_dir.display()),
-                    format!("CITO_STATE_DIR={}", self.config.state_dir.display()),
-                    format!("CITO_CONFIG_PATH={}", self.config.config_path.display()),
-                    "/usr/bin/python3".into(),
-                    path.join("provider.py").to_string_lossy().into(),
-                ],
-            });
+            self.plugins.plugins.push(crate::plugins::parse_manifest(
+                &path,
+                false,
+                &json!({
+                    "id":id,"kind":"agent","displayName":id,"sfSymbol":"bolt","tint":"blue",
+                    "reloadHint":options["reloadHint"],
+                    "command":["/usr/bin/env", format!("HOME={}", self.config.home_dir.display()),
+                        format!("CITO_STATE_DIR={}", self.config.state_dir.display()),
+                        format!("CITO_CONFIG_PATH={}", self.config.config_path.display()),
+                        "/usr/bin/python3",path.join("provider.py")],
+                }),
+            )?);
             Ok(())
         }
         fn records(&self, id: &str) -> Vec<Value> {
@@ -1201,6 +1192,32 @@ print(json.dumps(response), flush=True)
             expiring.tick(&f.state, &[]).is_err(),
             "Expiry requires fallback reconciliation without mutation or liveness changes"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_projects_manifest_reload_hint_and_preserves_legacy_copy() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider("agent", json!({"reloadHint":"Reload the integration", "sessions":[
+            {"harness":"agent","cwd":"/repo","session_id":"pending","needs_reload":true,"reload_hint":"Provider-local copy"},
+            {"harness":"agent","cwd":"/repo","session_id":"ready","needs_reload":false}
+        ]}))?;
+        f.provider("legacy", json!({"sessions":[
+            {"harness":"legacy","cwd":"/repo","session_id":"legacy","needs_reload":true,"reload_hint":"Legacy reload instructions"}
+        ]}))?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &[], |a| a.candidates().count() == 3)?;
+        let hint = |id| {
+            activity
+                .candidates()
+                .find(|row| row["session_id"] == id)
+                .unwrap()["reload_hint"]
+                .clone()
+        };
+        assert_eq!(hint("pending"), "Reload the integration");
+        assert_eq!(hint("ready"), Value::Null);
+        assert_eq!(hint("legacy"), "Legacy reload instructions");
+        activity.shutdown()?;
         Ok(())
     }
 

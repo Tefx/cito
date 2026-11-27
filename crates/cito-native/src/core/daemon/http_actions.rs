@@ -4,9 +4,8 @@ use super::{
         host_hub_server_config, parse_hub_invite, prepare_host_hub_server, validate_hub_endpoints,
     },
     mcp::{run_captured, validate_tool_input, Detaches, ToolCall},
-    request_shutdown, shutdown_requested,
-    ui_ipc::bounded_frame,
-    wake_daemon, ConfigSnapshot, DaemonService, SHUTDOWN_REQUESTED,
+    request_shutdown, shutdown_requested, wake_daemon, ConfigSnapshot, DaemonService,
+    SHUTDOWN_REQUESTED,
 };
 use crate::core::{
     config::{
@@ -296,6 +295,7 @@ fn dispatch_action_inner(
                             || old.is_builtin != p.is_builtin
                             || old.auto_listen.recent_window_ms != p.auto_listen.recent_window_ms
                             || old.display_name != p.display_name
+                            || old.reload_hint != p.reload_hint
                     })
                 })
                 .map(|p| p.id.clone())
@@ -1337,7 +1337,7 @@ impl DaemonService {
                     }
                     Err(error) => {
                         let transient = [
-                            "NATS_UNAVAILABLE:",
+                            "HUB_UNAVAILABLE:",
                             "UNAVAILABLE:",
                             "INTERNAL_ERROR:",
                             "AUTH_UNAVAILABLE:",
@@ -1398,7 +1398,20 @@ impl DaemonService {
             .map(|w| format!("{}: {}", string(w, "hub"), string(w, "message")))
             .collect();
         let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":string(action,"query"),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"warnings":warnings,"activity":activity,"activity_total":total,"activity_has_any":all_total>0,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":all_unread});
-        self.emit(frame.clone());
+        let mut projection = frame.clone();
+        projection["warnings"] = json!(result["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|warning| {
+                format!(
+                    "{}: {}",
+                    string(warning, "hub"),
+                    crate::core::cli::companion_error(string(warning, "message"))
+                )
+            })
+            .collect::<Vec<_>>());
+        self.emit(projection);
         Ok(frame)
     }
 
@@ -1452,6 +1465,20 @@ impl DaemonService {
             }
             "set_launch_at_login" if !action["enabled"].is_boolean() => {
                 return Err("INVALID_INPUT: enabled must be a boolean".into())
+            }
+            "reopen_ui" => {
+                let queued = self.ui.as_ref().is_some_and(|ui| {
+                    let mut event = json!({"op":op});
+                    if let Some(id) = action.get("request_id") {
+                        event["request_id"] = id.clone();
+                    }
+                    ui.emit(event)
+                });
+                return if queued {
+                    Ok(ToolCall::Ready(json!({"ok":true})))
+                } else {
+                    Err("UNAVAILABLE: UI is not connected".into())
+                };
             }
             "quit" | "close_settings" | "close_directory" | "close_menu" => {
                 match op {
@@ -1718,19 +1745,7 @@ impl DaemonService {
             }
             "copy_activity_message" => {
                 let row = self.state.activity_message(&hub, &action["signal_id"])?;
-                let message = string(&row, "message");
-                let characters: Vec<_> = message.chars().collect();
-                let chunks: Vec<String> = if characters.is_empty() {
-                    vec![String::new()]
-                } else {
-                    characters
-                        .chunks(16_000)
-                        .map(|part| part.iter().collect())
-                        .collect()
-                };
-                for (index, chunk) in chunks.iter().enumerate() {
-                    self.emit(json!({"op":"activity_message","request_id":action["request_id"],"part":index,"complete":index+1==chunks.len(),"message":chunk}));
-                }
+                self.emit(json!({"op":"activity_message","request_id":action["request_id"],"message":row["message"]}));
                 return Ok(ToolCall::Ready(json!({"ok":true})));
             }
             "clear_activity_history" => {

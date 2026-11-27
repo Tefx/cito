@@ -7,7 +7,7 @@ fn channels(f: &Fixture, ui: usize, cfg: &Value) -> Value {
 }
 
 #[test]
-fn v48_non_admin_channel_authority_and_error_matrix() {
+fn v48_non_admin_channel_authority_and_gateway_health() {
     let _lock = serial();
     let (f, ui) = ui_fixture();
     f.send(ui, state());
@@ -44,40 +44,29 @@ fn v48_non_admin_channel_authority_and_error_matrix() {
             );
         }
     }
-    cfg["channels"][0]["status"] = json!("error");
+    // Gateway health is independent of pairing status and administrator access.
+    cfg["channels"][0]["warning"] = json!(true);
     cfg["channels"][0]["error_origin"] = json!("hub");
+    cfg["channels"][0]["detail"] = json!("Gateway token needs attention.");
     let readonly = channels(&f, ui, &cfg);
-    assert!(!readonly.settings("stratum_hub:channel").is_null());
+    assert_eq!(
+        readonly.settings("settings_channel_detail:channel")["text"],
+        "Gateway token needs attention."
+    );
+    assert_eq!(
+        readonly.settings("stratum_hub_status:channel")["text"],
+        "Service needs attention"
+    );
     assert!(readonly.settings("edit_hub_service:channel").is_null());
     assert!(readonly.settings("clear_channel_service:channel").is_null());
-    cfg["channels"][0]["fields"] = json!([]);
-    for paired in [false, true] {
-        cfg["channels"][0]["configured"] = json!(paired);
-        cfg["channels"][0]["can_test"] = json!(paired);
-        cfg["channels"][0]["can_unpair"] = json!(paired);
-        let s = channels(&f, ui, &cfg);
-        let ids: Vec<_> = nodes(&s["settings_items"])
-            .into_iter()
-            .filter_map(|n| {
-                n["id"]
-                    .as_str()
-                    .filter(|id| id.starts_with("recover_channel:"))
-                    .map(str::to_owned)
-            })
-            .collect();
-        assert_eq!(ids.len(), if paired { 3 } else { 1 });
-        assert!(ids.contains(&"recover_channel:channel:retry".into()));
-        assert_eq!(ids.contains(&"recover_channel:channel:test".into()), paired);
-        assert_eq!(
-            ids.contains(&"recover_channel:channel:unpair".into()),
-            paired
-        );
-    }
     cfg["channels"][0]["can_configure_hub"] = json!(true);
     cfg["channels"][0]["can_clear_hub"] = json!(true);
-    let admin = channels(&f, ui, &cfg);
-    assert!(!admin.settings("recover_channel:channel:change").is_null());
-    control(&f, ui, "recover_channel:channel:clear");
+    cfg["channels"][0]["fields"][0]["hidden"] = json!(false);
+    assert_eq!(
+        channels(&f, ui, &cfg).settings("edit_hub_service:channel")["enabled"],
+        true
+    );
+    control(&f, ui, "clear_channel_service:channel");
     inspect(&f, ui);
     let action = f.frames_for(ui, "disconnect_human_channel").next().unwrap();
     assert_eq!(action["reset_hub"], true);

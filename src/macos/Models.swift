@@ -47,6 +47,7 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
 }
 
 struct ChannelAttachment: Decodable, Equatable {
+    let channel_id: String?
     let location: String, display_name: String, availability: String
     let is_local: Bool
 }
@@ -88,6 +89,9 @@ struct Listener: Decodable, Equatable {
     var can_pin: Bool? = nil
     var can_rename: Bool? = nil
     var can_stop: Bool? = nil
+    var display_title: String? = nil
+    var use_app_title: Bool? = nil
+    var display_about: String? = nil
 }
 struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
@@ -96,18 +100,23 @@ struct Candidate: Decodable, Equatable {
     let custom_title: Bool?
     let needs_reload: Bool?
     let reload_hint: String?
+    var generic_title: Bool? = nil
+    var title_fallback_hubs: [String]? = nil
 }
 struct RemotePeer: Decodable, Equatable {
     let hub: String?
     let listener_id: String, public_id: String, scoped_id: String
     let user: String, host_name: String, harness: String
     let display_address: String
-    let title: String, about: String, scope: String
+    let title: String, about: String
     var custom_title: Bool? = nil
     let cwd: String?, repo: String?, branch: String?
     let is_self_principal: Bool?
     let channels: [String]?
     var attachments: [ChannelAttachment]? = nil
+    var display_title: String? = nil
+    var use_app_title: Bool? = nil
+    var display_about: String? = nil
 }
 struct ActivityItem: Decodable, Equatable {
     let hub: String
@@ -129,6 +138,7 @@ struct ActivityItem: Decodable, Equatable {
     var unread: Bool
     var from_listener_id: String? = nil
     var can_reply: Bool? = nil
+    var display_from_title: String? = nil
 }
 struct ChannelFieldItem: Decodable, Equatable {
     let key: String
@@ -242,7 +252,6 @@ struct HubConfigItem: Decodable, Equatable {
     var human_can_set_scope: Bool? = nil
     var human_control_revision: Int? = nil
     var human_scope: String? = nil
-    var human_availability: String? = nil
     var human_state_status: String? = nil
     var attachments: [ChannelAttachment]? = nil
     var is_builtin: Bool? = nil
@@ -327,8 +336,6 @@ struct Frame: Decodable {
     let activity_filter: String?
     let activity_query: String?
     let message: String?
-    let part: Int?
-    let complete: Bool?
 
     func preservesCollection(_ key: String) -> Bool {
         truncated_collections?.contains(key) == true

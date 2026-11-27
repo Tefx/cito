@@ -135,10 +135,7 @@ pub(in crate::core::daemon) fn handle_http(
     };
     if matches!(path, "/ui" | "/action" | "/control") {
         match dispatch_action(&service, &parsed, None) {
-            Ok(v) => match bounded_frame(v) {
-                Ok(bytes) => respond_bytes(&mut stream, 200, &bytes),
-                Err(error) => respond(&mut stream, 500, &json!({"ok":false,"error":error})),
-            },
+            Ok(v) => respond(&mut stream, 200, &v),
             Err(e) => respond(&mut stream, 400, &json!({"ok":false,"error":e})),
         }
         return;
@@ -194,7 +191,7 @@ pub(in crate::core::daemon) fn handle_http(
                 }
                 Err(error) => {
                     let (code, message) = crate::core::http_boundary::coded_error(&error);
-                    json!({"isError":true,"content":[{"type":"text","text":json!({"ok":false,"error":{"code":code,"message":message.trim(),"retryable":matches!(code,"NATS_UNAVAILABLE"|"UNAVAILABLE"|"INTERNAL_ERROR"|"AUTH_UNAVAILABLE"|"STALE_GENERATION")}}).to_string()}]})
+                    json!({"isError":true,"content":[{"type":"text","text":json!({"ok":false,"error":{"code":code,"message":message.trim(),"retryable":matches!(code,"HUB_UNAVAILABLE"|"UNAVAILABLE"|"INTERNAL_ERROR"|"AUTH_UNAVAILABLE"|"STALE_GENERATION")}}).to_string()}]})
                 }
             }
         }

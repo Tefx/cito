@@ -396,10 +396,7 @@ fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
     let mut verifier =
         OidcVerifier::with_cache_policy(&issuer, "client", Duration::from_secs(300), cooldown)
             .unwrap();
-    verifier.agent = ureq::AgentBuilder::new()
-        .tls_config(std::sync::Arc::new(tls))
-        .timeout(Duration::from_secs(3))
-        .build();
+    verifier.tls = Arc::new(tls);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -582,7 +579,7 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
             .map(|_| {
                 scope.spawn(|| {
                     start.wait();
-                    verifier.verify_with_deadline(&token, deadline)
+                    verifier.verify_with_deadline(&token, HttpDeadline::uncancelled(deadline))
                 })
             })
             .collect();
@@ -811,10 +808,16 @@ fn caller_deadline_bounds_cache_wait_and_cached_verification() {
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();
     assert!(v
-        .verify_with_deadline(&token, Instant::now() + Duration::from_secs(1))
+        .verify_with_deadline(
+            &token,
+            HttpDeadline::uncancelled(Instant::now() + Duration::from_secs(1))
+        )
         .is_ok());
     assert!(v
-        .verify_with_deadline(&token, Instant::now() - Duration::from_millis(1))
+        .verify_with_deadline(
+            &token,
+            HttpDeadline::uncancelled(Instant::now() - Duration::from_millis(1))
+        )
         .unwrap_err()
         .starts_with("OIDC_LOGIN_TIMEOUT"));
     let v = OidcVerifier::new(&server.issuer, "client").unwrap();
@@ -827,7 +830,10 @@ fn caller_deadline_bounds_cache_wait_and_cached_verification() {
             assert!(start.elapsed() < Duration::from_secs(1));
             std::thread::yield_now();
         }
-        let result = v.verify_with_deadline(&token, Instant::now() + Duration::from_millis(50));
+        let result = v.verify_with_deadline(
+            &token,
+            HttpDeadline::uncancelled(Instant::now() + Duration::from_millis(50)),
+        );
         drop(keys);
         assert!(result.unwrap_err().starts_with("OIDC_LOGIN_TIMEOUT"));
         assert!(start.elapsed() < Duration::from_secs(1));

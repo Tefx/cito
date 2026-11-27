@@ -1,6 +1,7 @@
 use super::*;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -40,6 +41,7 @@ struct ProviderState {
     redirect: String,
     nonce: String,
     stall: String,
+    stall_reached: Option<std::sync::mpsc::Sender<()>>,
 }
 struct Provider {
     issuer: String,
@@ -106,12 +108,23 @@ impl Provider {
                             let mut body = vec![0;length];
                             if reader.read_exact(&mut body).is_err() { return; }
                             let url = url::Url::parse(&format!("{issuer}{target}")).unwrap();
-                            if state.lock().unwrap().stall == url.path() {
-                                while !stop.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(5)); }
-                                return;
-                            }
-                            if state.lock().unwrap().stall == format!("body{}", url.path()) {
-                                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{");
+                            let stall = {
+                                let state = state.lock().unwrap();
+                                if state.stall == url.path() {
+                                    Some((false, state.stall_reached.clone()))
+                                } else if state.stall.strip_prefix("body") == Some(url.path()) {
+                                    Some((true, state.stall_reached.clone()))
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some((body, reached)) = stall {
+                                if body {
+                                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{");
+                                }
+                                if let Some(reached) = reached {
+                                    let _ = reached.send(());
+                                }
                                 while !stop.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(5)); }
                                 return;
                             }
@@ -833,6 +846,45 @@ fn overall_deadline_includes_discovery_token_and_jwks() {
     }
 }
 #[test]
+fn cancellation_interrupts_active_discovery_token_and_jwks_reads() {
+    for stall in [
+        "/.well-known/openid-configuration",
+        "body/token",
+        "body/jwks",
+    ] {
+        let dir = Temp::new();
+        let provider = Provider::new();
+        provider.seed(&dir.0, 0);
+        let path = cache_path(&dir.0, "work").unwrap();
+        let before = fs::read(&path).unwrap();
+        let (signal, reached) = std::sync::mpsc::channel();
+        {
+            let mut state = provider.state.lock().unwrap();
+            state.stall = stall.into();
+            state.stall_reached = Some(signal);
+        }
+        let process = worker(&dir.0, &provider.config(), None, 3000);
+        reached.recv_timeout(Duration::from_secs(2)).unwrap();
+        let start = Instant::now();
+        std::os::unix::net::UnixDatagram::unbound()
+            .unwrap()
+            .send_to(b"x", dir.0.join("cancel.sock"))
+            .unwrap();
+        let value = result(&dir.0, process);
+        assert_eq!(
+            value["error"], "OIDC_LOGIN_TIMEOUT: OIDC login cancelled",
+            "{stall}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{stall}: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+}
+
+#[test]
 fn cache_lock_deadline_and_cancellation_do_not_open_a_browser() {
     let dir = Temp::new();
     let provider = Provider::new();
@@ -841,13 +893,13 @@ fn cache_lock_deadline_and_cancellation_do_not_open_a_browser() {
         at: Instant::now() + LOGIN_TIMEOUT,
         cancelled: &|| false,
     };
-    let lock = FileLock::acquire(
-        &cache_path(&dir.0, "work")
-            .unwrap()
-            .with_extension("json.lock"),
-        &deadline,
-    )
-    .unwrap();
+    let lock = deadline
+        .lock(
+            &cache_path(&dir.0, "work")
+                .unwrap()
+                .with_extension("json.lock"),
+        )
+        .unwrap();
     let value = result(&dir.0, worker(&dir.0, &provider.config(), None, 600));
     assert!(value["error"]
         .as_str()
@@ -884,7 +936,7 @@ fn queued_fixed_port_cancellation_opens_no_browser() {
     // SAFETY: geteuid has no preconditions and does not access Rust memory.
     let uid = unsafe { libc::geteuid() };
     let lock_path = PathBuf::from(format!("/tmp/cito-oidc-callback-{uid}-{port}.lock"));
-    let _lock = FileLock::acquire(&lock_path, &deadline).unwrap();
+    let _lock = deadline.lock(&lock_path).unwrap();
     let mut config = provider.config();
     config["redirectPort"] = json!(port);
     let process = worker(&dir.0, &config, None, 3000);

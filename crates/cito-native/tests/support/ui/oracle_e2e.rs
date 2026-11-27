@@ -24,21 +24,9 @@ fn oversized_pairing_instruction() -> String {
 
 #[test]
 fn change_token_reveals_gateway_editor_over_an_oversized_pairing_receipt() {
-    assert_gateway_editor_reveal("edit_hub_service:channel", "stratum_hub:channel");
-}
-
-#[test]
-fn recovery_change_token_reveals_gateway_editor_over_an_oversized_pairing_receipt() {
-    assert_gateway_editor_reveal(
-        "recover_channel:channel:change",
-        "channel_recovery_bar:channel",
-    );
-}
-
-fn assert_gateway_editor_reveal(change: &str, parent: &str) {
     let _lock = serial();
     let (f, p) = ui_fixture();
-    let mut cfg = settings();
+    let cfg = settings();
     open_settings(&f, p, &cfg, "channels");
     control(&f, p, "pair_channel:channel");
     let request = latest(&f, p, "channel_pair");
@@ -53,18 +41,6 @@ fn assert_gateway_editor_reveal(change: &str, parent: &str) {
         inspect(&f, p).settings("pairing_instruction:channel")["text"],
         instruction
     );
-    if parent == "channel_recovery_bar:channel" {
-        // A hub error projection can still carry an active pairing instruction.
-        cfg["channels"][0]["configured"] = json!(true);
-        cfg["channels"][0]["status"] = json!("error");
-        cfg["channels"][0]["error_origin"] = json!("hub");
-        cfg["channels"][0]["detail"] = json!("Gateway token needs attention.");
-        cfg["channels"][0]["pairing_instruction"] = json!(instruction);
-        f.send(
-            p,
-            json!({"op":"settings","hub":request["hub"],"settings":cfg}),
-        );
-    }
     f.send(p, json!({"op":"test_settings_scroll","offset":100_000}));
     let before = inspect(&f, p);
     let number = |node: &Value, key: &str| node[key].as_f64().unwrap();
@@ -77,8 +53,9 @@ fn assert_gateway_editor_reveal(change: &str, parent: &str) {
         instruction
     );
     assert!(before.settings("channel_field:channel:secret").is_null());
+    let change = "edit_hub_service:channel";
     assert_eq!(before.settings(change)["enabled"], true);
-    assert_channel_view_visible(&before, parent, change);
+    assert_channel_view_visible(&before, "stratum_hub:channel", change);
 
     control(&f, p, change);
     let after = inspect(&f, p);
@@ -642,14 +619,15 @@ fn failed_state_and_directory_receipts_route_errors_before_projection_guards() {
 }
 
 #[test]
-fn partial_settings_keep_channels_and_recovery_uses_saved_values_and_drafts() {
+fn partial_settings_keep_channels_and_actions_use_saved_values_and_drafts() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut frame = state();
     let mut cfg = settings();
     let channel = &mut cfg["channels"][0];
     channel["configured"] = json!(true);
-    channel["status"] = json!("error");
+    channel["status"] = json!("ready");
+    channel["warning"] = json!(true);
     channel["fields"][1]["value"] = json!("saved-account");
     channel["fields"].as_array_mut().unwrap().push(json!({
         "key":"gateway", "scope":"hub", "label":"Gateway", "type":"string",
@@ -662,8 +640,8 @@ fn partial_settings_keep_channels_and_recovery_uses_saved_values_and_drafts() {
     cfg.as_object_mut().unwrap().remove("channels");
     f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
-    assert_eq!(s.settings("recover_channel:channel:test")["enabled"], true);
-    control(&f, p, "recover_channel:channel:test");
+    assert_eq!(s.settings("test_channel:channel")["enabled"], true);
+    control(&f, p, "test_channel:channel");
     inspect(&f, p);
     let action = f.frames_for(p, "channel_test").next_back().unwrap();
     assert_eq!(
@@ -673,14 +651,14 @@ fn partial_settings_keep_channels_and_recovery_uses_saved_values_and_drafts() {
     f.send(p, json!({"op":"channel_test_result","request_id":action["request_id"],"channel_id":"channel","ok":true}));
     control(&f, p, "edit_user_channel:channel");
     f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"draft-account"}));
-    control(&f, p, "recover_channel:channel:test");
+    control(&f, p, "test_channel:channel");
     inspect(&f, p);
     let action = f.frames_for(p, "channel_test").next_back().unwrap();
     assert_eq!(
         action["values"],
         json!({"account":"draft-account","gateway":"saved-gateway"})
     );
-    control(&f, p, "recover_channel:channel:unpair");
+    control(&f, p, "unpair_channel:channel");
     let s = inspect(&f, p);
     let action = f.frames_for(p, "channel_unpair").next_back().unwrap();
     assert_eq!(s["pending_channel_resets"], json!([action["request_id"]]));
@@ -833,7 +811,7 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let frame = state_with_settings(settings());
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:hubs");
     control(&f, p, "open_add_hub");
@@ -843,7 +821,11 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
     let clean =
         "The Hub is unavailable. Check its address and network connection before trying again. "
             .repeat(3);
-    f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":submitted["request_id"],"error":format!("10071: {clean}")}));
+    send_companion(
+        &f,
+        p,
+        json!({"op":"error","source_op":"setup_save_hub","request_id":submitted["request_id"],"error":format!("10071: {clean}")}),
+    );
     for appearance in ["light", "dark"] {
         let s = inspect_as(&f, p, Some(appearance));
         let error = s.settings("add_hub_error");
@@ -2084,20 +2066,20 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert!(s.settings("clear_channel_service:channel").is_null());
     assert!(s.settings("stratum_hub:channel").is_null());
     render_png(&f, p, "settings", "r1_gateway_non_admin.png");
-    let channel = cfg["channels"][0].clone();
-    cfg["channels"][0]["status"] = json!("error");
-    cfg["channels"][0]["configured"] = json!(false);
-    cfg["channels"][0]["fields"] = json!([]);
-    cfg["channels"][0]["detail"] = json!("Unable to load channel settings.");
+    cfg["channel_inventory_error"] = json!("Unable to load channel settings.");
+    cfg["channels"] = Value::Null;
     f.send(p, json!({"op":"settings","settings":cfg}));
     let unavailable = inspect(&f, p);
     assert!(unavailable.settings("stratum_hub:channel").is_null());
-    assert!(unavailable.settings("save_channel:channel").is_null());
     assert_eq!(
-        unavailable.settings("settings_channel_detail:channel")["text"],
+        unavailable.settings("channel_inventory_error")["text"],
         "Unable to load channel settings."
     );
-    cfg["channels"][0] = channel;
+    assert!(
+        !unavailable.settings("settings_channel:channel").is_null(),
+        "retain the last inventory"
+    );
+    cfg["channel_inventory_error"] = Value::Null;
     cfg["host_hub"]["auth_mode"] = json!("token");
     cfg["host_hub"]["token"] = json!("12345678abcdef0123456789");
     cfg["host_hub"]["enabled"] = json!(true);
@@ -2803,7 +2785,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     frame["listeners"] = json!([agent, human]);
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert_eq!(s.menu("plugin_icon:pi")["tint"], json!([]));
@@ -3022,7 +3004,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         p,
         json!({"op":"test_settings_input","id":"settings_hub_name","value":"studio"}),
     );
-    f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
+    f.send(p, json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
     let s = inspect(&f, p);
     assert_eq!(s.settings("host_hub_card")["height"], 160);
     assert_eq!(s.settings("add_hub_form")["y"], 8);
@@ -3089,7 +3071,11 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     control(&f, p, "edit_hub:local");
     assert!(!inspect(&f, p).settings("settings_hub_user").is_null());
     capture("settings", "settings_edit_local");
-    f.send(p, json!({"op":"error","source_op":"setup_save_hub","error":"INVALID_INPUT: Username is invalid"}));
+    send_companion(
+        &f,
+        p,
+        json!({"op":"error","source_op":"setup_save_hub","error":"INVALID_INPUT: Username is invalid"}),
+    );
     let local_error = inspect(&f, p);
     let error = local_error.settings("add_hub_error");
     let user = local_error.settings("settings_hub_user");
@@ -3323,13 +3309,15 @@ fn appkit_fragmented_utf8_invalid_frames_activity_and_eof() {
     f.send_raw(p, &bytes[split..]);
     wait(|| f.output(p, true).contains("state hubs=2 listeners=1"));
     f.send_raw(p, b"bad json\n");
-    f.send_raw(p, &vec![b'x'; 1_048_577]);
-    f.send_raw(p, b"\n");
-    f.send(p, state());
-    inspect(&f, p);
+    // A valid projection larger than the former frame cap still reaches the UI.
+    // Padding is an ignored extension field, so this tests transport, not text layout.
+    let mut large = state();
+    large["extension_data"] = json!("x".repeat(1_048_577));
+    large["unread_count"] = json!(7);
+    f.send(p, large);
+    assert_eq!(inspect(&f, p)["unread_count"], 7);
     assert!(!f.exited(p));
     assert!(f.output(p, true).contains("invalid frame"));
-    assert!(f.output(p, true).contains("oversized frame"));
     control(&f, p, "open_activity");
     wait(|| {
         f.frames(p)
@@ -3486,7 +3474,7 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             .filter(|frame| frame["op"] == "error")
             .cloned()
             .collect::<Vec<_>>(),
-        vec![json!({"op":"error","error":"INVALID_INPUT: Message is too large to send"})]
+        vec![json!({"op":"error","error":"Message is too large to send"})]
     );
     assert_eq!(
         f.db("hub.sqlite")

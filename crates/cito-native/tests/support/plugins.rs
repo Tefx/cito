@@ -1689,9 +1689,9 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
             .find(|v| v["endpoint_pid"] == p)
             .unwrap();
         assert_eq!(row["needs_reload"], true);
-        assert_eq!(
-            row["reload_hint"],
-            "Run /reload in Pi to enable 1-click listen"
+        assert!(
+            row.get("reload_hint").is_none(),
+            "Copy is projected by the daemon"
         );
         assert_eq!(
             f.plugin(PI, json!({"op":"resolve_caller","endpoint_pid":p}))["ok"],
@@ -1888,6 +1888,29 @@ fn agent_badge_clear_converges_for_missing_or_departed_bridges() {
             "A reused PID running another app cannot retain a badge socket"
         );
     }
+}
+
+#[test]
+fn setup_unlinks_symlinked_legacy_entries_without_removing_the_target() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let legacy = f.home.join(".pi/agent/extensions/cito-bridge.ts");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let target = f.dir.join("keep.txt");
+    fs::write(&target, "keep").unwrap();
+    std::os::unix::fs::symlink(&target, &legacy).unwrap();
+    let apply = |dry| f.plugin(PI, json!({"op":"setup_apply","dry_run":dry}));
+    assert_eq!(apply(true)["ok"], true);
+    assert_eq!(fs::read_link(&legacy).unwrap(), target);
+    assert_eq!(apply(false)["ok"], true);
+    assert!(fs::symlink_metadata(&legacy).is_err());
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+    let absent = target.with_extension("missing");
+    std::os::unix::fs::symlink(&absent, &legacy).unwrap();
+    let removed = f.plugin(PI, json!({"op":"setup_remove"}));
+    assert_eq!(removed["ok"], true, "{removed}");
+    assert!(fs::symlink_metadata(legacy).is_err());
+    assert!(!absent.exists());
 }
 
 #[test]
@@ -3431,15 +3454,30 @@ fn claude_offline_hook_retires_output_only_after_identity_bound_durable_ack() {
     let f = Fixture::new(json!({}));
     let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
     local.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES('work','c_offline','none#alice','alice','host','laptop','claude','session-a','/repo','Work','','workspace','ACTIVE','https://hub.example.com'); INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,batch_id,queue_written,queue_confirmed,hub_url,principal_id) VALUES('work','offline-signal','c_offline',1,1,'bob','desktop','','Delivered exactly once','now',9999999999999,'DISPATCHED','offline-batch',1,1,'https://hub.example.com','none#alice')",&[]).unwrap();
+    local
+        .db
+        .execute("UPDATE local_listeners SET session_id='session-b'", &[])
+        .unwrap();
     f.plugin(CLAUDE,json!({"op":"wake","session_id":"session-a","batch_id":"offline-batch","text":"Delivered exactly once","wake":false}));
-    let output = f.plugin(
-        HOOK,
-        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"}),
-    );
+    let payload =
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"});
+    let output = f.plugin(HOOK, payload.clone());
     assert_eq!(
         output["hookSpecificOutput"]["additionalContext"],
         "Delivered exactly once"
     );
+    assert!(local
+        .db
+        .query("SELECT * FROM pending_hub_acks", &[])
+        .unwrap()
+        .is_empty());
+    let queue = f.state.join("claude/wakes/session-a.jsonl");
+    assert_eq!(read_json(&queue)["output_delivered"], true);
+    local
+        .db
+        .execute("UPDATE local_listeners SET session_id='session-a'", &[])
+        .unwrap();
+    assert_eq!(f.plugin(HOOK, payload.clone()), json!({}));
     let acks = local
         .db
         .query("SELECT * FROM pending_hub_acks", &[])
@@ -3448,14 +3486,8 @@ fn claude_offline_hook_retires_output_only_after_identity_bound_durable_ack() {
     assert_eq!(acks[0]["hub_url"], "https://hub.example.com");
     assert_eq!(acks[0]["principal_id"], "none#alice");
     assert_eq!(acks[0]["signal_id"], "offline-signal");
-    assert!(!f.state.join("claude/wakes/session-a.jsonl").exists());
-    assert_eq!(
-        f.plugin(
-            HOOK,
-            json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"})
-        ),
-        json!({})
-    );
+    assert!(!queue.exists());
+    assert_eq!(f.plugin(HOOK, payload), json!({}));
 }
 #[test]
 fn claude_hook_routes_alias_and_session_acks_and_requires_confirmed_counts() {

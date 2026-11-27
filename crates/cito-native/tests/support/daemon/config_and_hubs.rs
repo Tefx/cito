@@ -81,6 +81,34 @@ print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
 }
 
 #[test]
+fn config_lock_symlink_to_live_daemon_owner_is_rejected() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let daemon = f.daemon(&[]);
+    let before = fs::read(&f.config).unwrap();
+    let owner = f.state.join("daemon.lock");
+    let owner_before = fs::read(&owner).unwrap();
+    let lock = f.config.with_file_name("config.json.lock");
+    assert!(!lock.exists());
+    std::os::unix::fs::symlink(&owner, &lock).unwrap();
+    let save =
+        json!({"op":"setup_save_hub","name":"personal","name_explicit":true,"url":"local://"});
+    let rejected = f.action(save.clone());
+    assert_eq!(rejected.0, 400, "{rejected:?}");
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("Cannot lock"));
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert_eq!(fs::read_link(&lock).unwrap(), owner);
+    assert_eq!(fs::read(&owner).unwrap(), owner_before);
+    assert!(!f.exited(daemon));
+    fs::remove_file(lock).unwrap();
+    f.action_ok(save);
+    assert_eq!(read_json(&f.config)["hubs"]["personal"]["url"], "local://");
+}
+
+#[test]
 fn ui_retries_after_initial_executable_failure() {
     use std::os::unix::fs::PermissionsExt;
     let _lock = serial();

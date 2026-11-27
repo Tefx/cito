@@ -282,6 +282,11 @@ fn send_fixture(f: &Fixture, p: usize, mut frame: Value) {
             }
         }
     }
+    send_companion(f, p, frame);
+}
+
+fn send_companion(f: &Fixture, p: usize, mut frame: Value) {
+    cito_native::daemon::project_companion_frame(&mut frame, &f.home);
     f.send(p, frame);
 }
 fn peer(id: &str) -> Value {

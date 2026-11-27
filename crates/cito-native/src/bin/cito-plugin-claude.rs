@@ -1,3 +1,7 @@
+#[path = "../../../../plugins/claude/native.rs"]
+pub mod plugin;
+use cito_native::support;
+
 fn main() {
-    cito_native::run_claude_plugin();
+    plugin::main();
 }

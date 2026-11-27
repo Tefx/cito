@@ -1,10 +1,8 @@
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::collections::HashSet;
+use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) fn hub_enabled(cfg: &Value) -> bool {
     cfg["enabled"] != false && cfg["disabled"] != true
@@ -93,9 +91,7 @@ pub fn repair_default_hub(v: &mut Value) {
     }
 }
 
-static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-
-use crate::support::publication_target;
+use crate::support::{publication_target, FileLock};
 
 /// Serialize a complete read-modify-write operation, including the initial read.
 /// Readers that need a filesystem-pure dry run can use `with_config_lock_mode`.
@@ -112,47 +108,16 @@ pub fn with_config_lock_mode<T>(
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let path = publication_target(path)?;
-    let lock = CONFIG_LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| "Config lock registry poisoned".to_string())?
-        .entry(path.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _guard = lock
-        .lock()
-        .map_err(|_| "Config path lock poisoned".to_string())?;
-    // Dry runs never create lockfiles or directories. They do not perform a mutation.
-    if dry_run {
-        return operation();
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".lock");
-    let lock_path = PathBuf::from(name);
-    let result = {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(&lock_path)
-            .map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
-        // SAFETY: the descriptor remains open until after operation returns; close releases flock.
-        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::Interrupted {
-                return Err(error.to_string());
-            }
-        }
-        operation()
+    // Dry runs neither mutate configuration nor create lockfiles or directories.
+    let _lock = if dry_run {
+        None
+    } else {
+        let mut name = path.into_os_string();
+        name.push(".lock");
+        // Keep the lockfile so queued and newly arriving writers use the same inode.
+        Some(FileLock::acquire(&PathBuf::from(name))?)
     };
-    // Keep one inode for waiting and newly arriving writers. Unlinking here lets
-    // them lock different files and enter the read-modify-write section together.
-    result
+    operation()
 }
 
 #[derive(PartialEq, Eq)]
@@ -519,17 +484,22 @@ pub(super) fn probe_hub_health(url: &str, enabled: bool) -> Value {
     if !enabled || url == "local://" {
         return Value::Null;
     }
-    ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(std::time::Duration::from_secs(2))
-        .timeout_connect(std::time::Duration::from_secs(1))
-        .build()
-        .get(&format!("{url}/health"))
-        .call()
+    use super::transport::{http_request, HttpDeadline, HTTP_TLS};
+    use std::time::{Duration, Instant};
+
+    let Ok(url) = url::Url::parse(&format!("{url}/health")) else {
+        return Value::Null;
+    };
+    let now = Instant::now();
+    let deadline = HttpDeadline {
+        connect_at: Some(now + Duration::from_secs(1)),
+        ..HttpDeadline::uncancelled(now + Duration::from_secs(2))
+    };
+    http_request(&url, "GET", &[], None, deadline, &HTTP_TLS)
         .ok()
-        .and_then(|response| {
-            serde_json::from_reader(std::io::Read::take(response.into_reader(), 65536)).ok()
-        })
+        .filter(|response| (200..300).contains(&response.status))
+        .and_then(|response| response.read_body(65_536).ok())
+        .and_then(|body| serde_json::from_slice(&body).ok())
         .unwrap_or(Value::Null)
 }
 
@@ -630,6 +600,7 @@ mod tests {
             json!({"auth_mode":"oidc","oidc":{"issuer":"https://id.example.com","client_id":"discovered","redirect_port":4280}}),
             json!({"auth_mode":"oidc","oidc":{"issuer":"https://id.example.com","client_id":"discovered","redirect_port":4280}}),
             json!({"auth_mode":"token"}),
+            json!({"auth_mode":"token"}),
             json!({"auth_mode":"none", "name":"local"}),
             json!({"auth_mode":"none", "name":"Bad Name"}),
         ];
@@ -649,6 +620,8 @@ mod tests {
                     if line == "\r\n" {
                         break;
                     }
+                    assert!(!line.to_ascii_lowercase().contains("authorization:"));
+                    assert!(!line.to_ascii_lowercase().contains("cookie:"));
                 }
                 let body = value.to_string();
                 write!(
@@ -670,6 +643,8 @@ mod tests {
         assert!(discover_hub_config(json!({"url":url}))
             .unwrap_err()
             .starts_with("INVALID_INPUT:"));
+        let authenticated = discover_hub_config(json!({"url":url,"token":"configured"})).unwrap();
+        assert_eq!(authenticated["token"], "configured");
         for _ in 0..2 {
             let found = discover_hub_config(json!({"url":url})).unwrap();
             assert_eq!(found["authMode"], "none");
@@ -700,6 +675,52 @@ mod tests {
         for port in [json!(-1), json!(65536), json!("4280")] {
             assert!(discover_hub_config(json!({"url":"local://","redirectPort":port})).is_err());
         }
+    }
+
+    #[test]
+    fn discovery_rejects_oversized_and_stalled_health_responses() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        assert!(probe_hub_health("local://", true).is_null());
+        assert!(probe_hub_health(&url, false).is_null());
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        listener.set_nonblocking(false).unwrap();
+        let server = std::thread::spawn(move || {
+            for response in [
+                // A truncated read could accept the valid JSON at the front.
+                "HTTP/1.1 200 OK\r\nContent-Length: 65537\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(4)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+                // The peer must close without needing us to finish the response.
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            }
+        });
+        let start = Instant::now();
+        assert!(probe_hub_health(&url, true).is_null());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let start = Instant::now();
+        assert!(probe_hub_health(&url, true).is_null());
+        assert!(start.elapsed() < Duration::from_secs(3));
+        server.join().unwrap();
     }
 
     #[test]

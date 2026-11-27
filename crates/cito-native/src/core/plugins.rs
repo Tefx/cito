@@ -1,11 +1,12 @@
 pub use super::config::*;
+use super::transport::{http_request, HttpDeadline, HTTP_TLS, RPC_BODY_LIMIT};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+#[cfg(test)]
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,25 @@ pub struct PluginDescriptor {
     pub fields: Vec<Value>,
     pub post_setup_hint: Option<String>,
     pub post_disconnect_hint: Option<String>,
+    pub reload_hint: Option<String>,
+    pub channel: ChannelCapabilities,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ChannelCapabilities {
+    pub hub_scoped: bool,
+    pub supports_outbound_only: bool,
+    pub pairing: Value,
+    pub service_identity: Value,
+    pub setup_guide: Value,
+    pub service_actions: ServiceActionLabels,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ServiceActionLabels {
+    pub save: Option<String>,
+    pub change: Option<String>,
+    pub clear: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -118,17 +138,39 @@ pub fn system_home_dir() -> String {
             return t.to_string();
         }
     }
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if !pw.is_null() && !(*pw).pw_dir.is_null() {
-            if let Ok(s) = CStr::from_ptr((*pw).pw_dir).to_str() {
-                if !s.is_empty() {
-                    return s.to_string();
-                }
+    account_home_dir().unwrap_or_else(|| "/tmp".to_owned())
+}
+
+pub(super) fn account_home_dir() -> Option<String> {
+    // Use the account database independently of a configurable process HOME.
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| unsafe {
+        let mut pwd = std::mem::zeroed::<libc::passwd>();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0u8; 1024];
+        loop {
+            let status = libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            );
+            if status == libc::ERANGE && buffer.len() < 65_536 {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
             }
+            if status != 0 || result.is_null() || pwd.pw_dir.is_null() {
+                return None;
+            }
+            return CStr::from_ptr(pwd.pw_dir)
+                .to_str()
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
         }
-    }
-    "/tmp".to_string()
+    })
+    .clone()
 }
 
 pub fn expand_home_dir(
@@ -274,13 +316,13 @@ fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> 
     roots
 }
 
+fn read_manifest(dir: &Path) -> Result<Value, String> {
+    let raw = fs::read(dir.join("plugin.json")).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&raw).map_err(|e| e.to_string())
+}
+
 pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescriptor, String> {
-    let raw = fs::read_to_string(dir.join("plugin.json")).map_err(|e| e.to_string())?;
-    parse_manifest(
-        dir,
-        is_builtin,
-        &serde_json::from_str(&raw).map_err(|e| e.to_string())?,
-    )
+    parse_manifest(dir, is_builtin, &read_manifest(dir)?)
 }
 
 pub(super) fn reserved_cli_flag(flag: &str) -> bool {
@@ -377,16 +419,16 @@ pub(super) fn parse_manifest(
     if !matches!(scope.as_str(), "user" | "hub") {
         return Err("Invalid plugin scope".to_string());
     }
-    let sf_symbol = map
-        .get("sfSymbol")
-        .and_then(|v| v.as_str())
-        .unwrap_or("terminal")
-        .to_string();
-    let tint = map
-        .get("tint")
-        .and_then(|v| v.as_str())
-        .unwrap_or("indigo")
-        .to_string();
+    let (default_symbol, default_tint) = if kind == "human-channel" {
+        ("paperplane.fill", "blue")
+    } else {
+        ("terminal", "indigo")
+    };
+    let sf_symbol = manifest["sfSymbol"]
+        .as_str()
+        .unwrap_or(default_symbol)
+        .to_owned();
+    let tint = manifest["tint"].as_str().unwrap_or(default_tint).to_owned();
     let mut cli_flag = map
         .get("cliFlag")
         .and_then(|v| v.as_bool())
@@ -477,6 +519,25 @@ pub(super) fn parse_manifest(
             .get("postDisconnectHint")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        reload_hint: manifest["reloadHint"].as_str().map(str::to_owned),
+        channel: ChannelCapabilities {
+            hub_scoped: scope == "hub",
+            supports_outbound_only: manifest["supportsOutboundOnly"] == true,
+            pairing: manifest["pairing"].clone(),
+            service_identity: manifest["serviceIdentity"].clone(),
+            setup_guide: manifest["setupGuide"].clone(),
+            service_actions: ServiceActionLabels {
+                save: manifest["serviceActions"]["save"]
+                    .as_str()
+                    .map(str::to_owned),
+                change: manifest["serviceActions"]["change"]
+                    .as_str()
+                    .map(str::to_owned),
+                clear: manifest["serviceActions"]["clear"]
+                    .as_str()
+                    .map(str::to_owned),
+            },
+        },
     })
 }
 
@@ -493,14 +554,8 @@ pub fn selected_plugin_dir(state_dir: &Path, plugin: &PluginDescriptor) -> PathB
 }
 
 /// Skip legacy copies and aliases even when discovery is read-only.
-fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
-    let read_manifest = |dir: &Path| {
-        serde_json::from_slice::<serde_json::Map<String, Value>>(
-            &fs::read(dir.join("plugin.json")).ok()?,
-        )
-        .ok()
-    };
-    let Some(mut manifest) = read_manifest(sub) else {
+fn remove_legacy_staged_plugin(sub: &Path, manifest: &Value, cleanup: bool) -> bool {
+    let Some(manifest) = manifest.as_object() else {
         return false;
     };
     let Some(id) = manifest.get("id").and_then(Value::as_str) else {
@@ -510,12 +565,23 @@ fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
         return false;
     }
     let bundled = super::setup::resolve_bundled_plugin_dir(id);
-    let Some(mut shipped) = read_manifest(&bundled) else {
-        return false;
-    };
     let alias = same_plugin_root(sub, &bundled);
-    if !alias && (manifest.remove("version") == shipped.remove("version") || manifest != shipped) {
-        return false;
+    if !alias {
+        let Ok(shipped) = read_manifest(&bundled) else {
+            return false;
+        };
+        let Some(shipped) = shipped.as_object() else {
+            return false;
+        };
+        if manifest.get("version") == shipped.get("version")
+            || manifest.len() - usize::from(manifest.contains_key("version"))
+                != shipped.len() - usize::from(shipped.contains_key("version"))
+            || manifest
+                .iter()
+                .any(|(key, value)| key != "version" && shipped.get(key) != Some(value))
+        {
+            return false;
+        }
     }
     if cleanup {
         if fs::symlink_metadata(sub).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
@@ -635,18 +701,17 @@ pub(super) fn load_plugins_from_roots(
         let is_user_root =
             !is_builtin && user_root.is_some_and(|user| same_plugin_root(root, user));
         for sub in subdirs {
-            if is_user_root && remove_legacy_staged_plugin(&sub, cleanup_legacy) {
+            if sub.file_name().is_some_and(|name| name == "human") {
                 continue;
             }
-            if sub.file_name().is_some_and(|name| name == "human")
-                || fs::read(sub.join("plugin.json"))
-                    .ok()
-                    .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-                    .is_some_and(|manifest| manifest["id"].as_str() == Some("human"))
-            {
+            let manifest = read_manifest(&sub);
+            if manifest.as_ref().is_ok_and(|manifest| {
+                manifest["id"] == "human"
+                    || (is_user_root && remove_legacy_staged_plugin(&sub, manifest, cleanup_legacy))
+            }) {
                 continue;
             }
-            match parse_manifest_dir(&sub, is_builtin) {
+            match manifest.and_then(|manifest| parse_manifest(&sub, is_builtin, &manifest)) {
                 Ok(desc) => {
                     if seen_ids.insert(desc.id.clone()) {
                         plugins.push(desc);
@@ -999,117 +1064,54 @@ pub struct HttpResponse {
     pub body: String,
 }
 
+#[cfg(test)]
 pub fn read_http_response(stream: &mut impl Read) -> Result<HttpResponse, String> {
-    const MAX_BYTES: usize = 8 * 1024 * 1024;
-    fn line(reader: &mut impl BufRead, total: &mut usize) -> Result<String, String> {
-        let mut bytes = Vec::new();
-        reader
-            .take((MAX_BYTES - *total + 1) as u64)
-            .read_until(b'\n', &mut bytes)
-            .map_err(|e| e.to_string())?;
-        *total += bytes.len();
-        if *total == 0 {
-            return Err(super::http_boundary::PEER_CLOSED.into());
-        }
-        if *total > MAX_BYTES || !bytes.ends_with(b"\n") {
-            return Err("Truncated or oversized HTTP headers".into());
-        }
-        String::from_utf8(bytes).map_err(|e| e.to_string())
-    }
-    let mut reader = BufReader::new(stream);
-    let mut header_bytes = 0;
-    let status_line = line(&mut reader, &mut header_bytes)?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("Invalid HTTP status: {}", status_line.trim()))?;
-    let mut content_length = None;
-    let mut chunked = false;
-    loop {
-        let header = line(&mut reader, &mut header_bytes)?;
-        if header == "\r\n" || header == "\n" {
-            break;
-        }
-        let (key, value) = header.split_once(':').ok_or("Invalid HTTP header")?;
-        if key.eq_ignore_ascii_case("content-length") {
-            let length = value
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| "Invalid Content-Length")?;
-            if length > MAX_BYTES || content_length.replace(length).is_some() {
-                return Err("Oversized or duplicate Content-Length".into());
-            }
-        } else if key.eq_ignore_ascii_case("transfer-encoding") {
-            chunked = value.trim().eq_ignore_ascii_case("chunked");
-        }
-    }
-    if status == 202 || status == 204 {
-        return Ok(HttpResponse {
-            status,
-            body: String::new(),
-        });
-    }
-    let mut body = Vec::new();
-    if chunked {
-        loop {
-            let size = line(&mut reader, &mut header_bytes)?;
-            let size = usize::from_str_radix(size.trim().split(';').next().unwrap_or(""), 16)
-                .map_err(|_| "Invalid HTTP chunk size")?;
-            if size == 0 {
-                while !matches!(
-                    line(&mut reader, &mut header_bytes)?.as_str(),
-                    "\r\n" | "\n"
-                ) {}
-                break;
-            }
-            if size > MAX_BYTES - body.len() {
-                return Err("HTTP body exceeds 8 MiB".into());
-            }
-            let offset = body.len();
-            body.resize(offset + size, 0);
-            reader
-                .read_exact(&mut body[offset..])
-                .map_err(|e| e.to_string())?;
-            let mut crlf = [0; 2];
-            reader.read_exact(&mut crlf).map_err(|e| e.to_string())?;
-            if &crlf != b"\r\n" {
-                return Err("Invalid HTTP chunk terminator".into());
-            }
-        }
-    } else if let Some(length) = content_length {
-        body.resize(length, 0);
-        reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-    } else {
-        reader
-            .take((MAX_BYTES + 1) as u64)
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        if body.len() > MAX_BYTES {
-            return Err("HTTP body exceeds 8 MiB".into());
-        }
-    }
-    Ok(HttpResponse {
-        status,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
+    daemon_response(super::transport::read_response(stream).map_err(|e| e.to_string())?)
 }
 
-/// Socket reads share one budget, including reads inside BufReader and read_exact.
-fn read_http_until(stream: &mut TcpStream, deadline: Instant) -> Result<HttpResponse, String> {
-    struct SocketReader<'a>(&'a mut TcpStream, Instant);
-    impl Read for SocketReader<'_> {
-        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-            let remaining = self.1.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(std::io::ErrorKind::TimedOut.into());
-            }
-            self.0.set_read_timeout(Some(remaining))?;
-            self.0.read(bytes)
-        }
-    }
-    let response = read_http_response(&mut SocketReader(stream, deadline))?;
-    if Instant::now() >= deadline {
+fn daemon_response(
+    response: super::transport::HttpResponse<impl std::io::Read>,
+) -> Result<HttpResponse, String> {
+    let status = response.status;
+    let body = if status == 202 {
+        String::new()
+    } else {
+        let bytes = response
+            .read_body(RPC_BODY_LIMIT)
+            .map_err(|e| e.to_string())?;
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    Ok(HttpResponse { status, body })
+}
+
+fn daemon_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    at: Instant,
+) -> Result<HttpResponse, String> {
+    let url =
+        url::Url::parse(&format!("http://127.0.0.1:{port}{path}")).map_err(|e| e.to_string())?;
+    let headers: &[(&str, &str)] = if body.is_some() {
+        &[
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+        ]
+    } else {
+        &[]
+    };
+    let response = http_request(
+        &url,
+        method,
+        headers,
+        body.map(str::as_bytes),
+        HttpDeadline::uncancelled(at),
+        &HTTP_TLS,
+    )
+    .map_err(|e| e.to_string())?;
+    let response = daemon_response(response)?;
+    if Instant::now() >= at {
         return Err("HTTP response timed out".into());
     }
     Ok(response)
@@ -1125,27 +1127,7 @@ pub fn http_post_json(
     body: &str,
     timeout: Duration,
 ) -> Result<HttpResponse, String> {
-    let deadline = Instant::now() + timeout;
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|e| e.to_string())?;
-    let req = format!(
-        "POST {path} HTTP/1.1\r\n\
-         Host: 127.0.0.1:{port}\r\n\
-         Content-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\n\
-         Connection: close\r\n\
-         Content-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-    read_http_until(&mut stream, deadline)
+    daemon_request(port, "POST", path, Some(body), Instant::now() + timeout)
 }
 
 #[derive(Debug)]
@@ -1161,18 +1143,7 @@ pub fn probe_daemon_health(config: &NativeConfig) -> Option<DaemonHealth> {
 }
 
 fn probe_daemon_health_until(config: &NativeConfig, deadline: Instant) -> Option<DaemonHealth> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.daemon_port));
-    let mut stream =
-        TcpStream::connect_timeout(&addr, deadline.checked_duration_since(Instant::now())?).ok()?;
-    stream
-        .set_write_timeout(Some(deadline.checked_duration_since(Instant::now())?))
-        .ok()?;
-    let req = format!(
-        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-        config.daemon_port
-    );
-    stream.write_all(req.as_bytes()).ok()?;
-    let resp = read_http_until(&mut stream, deadline).ok()?;
+    let resp = daemon_request(config.daemon_port, "GET", "/health", None, deadline).ok()?;
     if resp.status != 200 {
         return None;
     }
@@ -1924,10 +1895,10 @@ mod tests {
             ),
         ] {
             let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (mut server, _) = listener.accept().unwrap();
-            server.write_all(prefix.as_bytes()).unwrap();
+            let port = listener.local_addr().unwrap().port();
             let writer = thread::spawn(move || {
+                let (mut server, _) = listener.accept().unwrap();
+                server.write_all(prefix.as_bytes()).unwrap();
                 for b in suffix.bytes() {
                     if server.write_all(&[b]).is_err() {
                         break;
@@ -1935,10 +1906,7 @@ mod tests {
                     thread::sleep(Duration::from_millis(10));
                 }
             });
-            assert!(
-                read_http_until(&mut client, Instant::now() + Duration::from_millis(45)).is_err()
-            );
-            drop(client);
+            assert!(http_post_json(port, "/mcp", "{}", Duration::from_millis(45)).is_err());
             writer.join().unwrap();
         }
     }

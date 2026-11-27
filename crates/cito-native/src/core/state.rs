@@ -657,6 +657,43 @@ impl LocalState {
     }
 }
 
+/// Settle plugin queue batches locally when the daemon cannot confirm ACKs.
+/// Each batch is checked and committed against one listener-authority snapshot.
+pub fn acknowledge_queued_batches<'a>(
+    state_dir: &Path,
+    harness: &str,
+    batches: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), String> {
+    let local = LocalState::open(state_dir)?;
+    for (session, batch) in batches {
+        local.db.transaction(|c| {
+            let rows = c.query(
+                "SELECT s.hub,s.listener_id,s.signal_id,s.hub_url,s.principal_id FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.batch_id=? AND l.harness=?",
+                &[json!(batch), json!(harness)],
+            )?;
+            if rows.is_empty() {
+                return Err("ACK continuation has no matching local batch".into());
+            }
+            for row in rows {
+                let hub = string(&row, "hub");
+                let node = string(&row, "listener_id");
+                let listener = current_listener(c, hub, node)?;
+                if listener["session_id"] != session {
+                    return Err("ACK session mismatch".into());
+                }
+                if !signal_matches_listener(&row, &listener) {
+                    return Err("ACK signal authority changed".into());
+                }
+                let channel = format!("{}:{harness}", string(&listener, "host_id"));
+                acknowledge_current(c, hub, node, &row["signal_id"], &channel)?;
+                reconcile_wake_retry(c, hub, node)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 /// A retry belongs to current, unexpired, wakeable unread work, never merely
 /// to a previous attempt. Use inside the same transaction as terminal updates.
 pub(super) fn reconcile_wake_retry(c: &Connection, hub: &str, id: &str) -> Result<bool, String> {

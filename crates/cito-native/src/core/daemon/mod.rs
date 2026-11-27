@@ -23,16 +23,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 mod channels;
+mod companion_projection;
 #[cfg(test)]
 mod event_tests;
 pub(crate) mod host_hub;
 mod http_actions;
 mod mcp;
 mod projection;
+pub use companion_projection::project_companion_frame;
 #[cfg(test)]
 mod tests;
 mod ui_ipc;
-pub use ui_ipc::{bounded_frame, FRAME_LIMIT};
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 

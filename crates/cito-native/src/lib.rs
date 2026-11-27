@@ -1,10 +1,8 @@
-#[path = "../../../plugins/claude/native.rs"]
-mod claude;
-pub use claude::{hook_main as run_claude_hook, main as run_claude_plugin};
 pub mod core;
 pub use core::{daemon, database, hub, plugins, setup};
 mod oidc_constants;
 pub mod support {
+    pub use crate::core::{plugins::http_post_mcp, state::acknowledge_queued_batches};
     pub use subprocess::teardown_child_group;
     include!("plugin_support.rs");
 }

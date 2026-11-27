@@ -243,7 +243,8 @@ impl DaemonService {
             )
         } else {
             hub["user"] = json!(self.config.effective_user(name).ok());
-            self.human_projection(name)
+            hub["attachments"] = json!([]);
+            self.project_human(None, false, false)
         };
         if let (Some(out), Value::Object(fields)) = (hub.as_object_mut(), projection) {
             out.extend(fields);
@@ -565,7 +566,20 @@ impl DaemonService {
                     string(&row, "from_harness"),
                     peers
                 ));
-                row["message_truncated"] = json!(string(&row, "message").len() > 512);
+                // Activity pages show previews; copy reads the canonical stored message.
+                const PREVIEW_BYTES: usize = 512;
+                let message = string(&row, "message");
+                let preview = (message.len() > PREVIEW_BYTES).then(|| {
+                    let mut end = PREVIEW_BYTES - '…'.len_utf8();
+                    while !message.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}…", &message[..end])
+                });
+                row["message_truncated"] = json!(preview.is_some());
+                if let Some(preview) = preview {
+                    row["message"] = json!(preview);
+                }
                 row["for_me"] = json!(target["harness"] == "human");
                 row["can_reply"] = json!(
                     self.slots
@@ -844,32 +858,6 @@ impl super::HubAccess {
         row["can_stop"] = json!(mutable && local && agent);
     }
 
-    pub(super) fn human_projection(&self, hub: &str) -> Value {
-        let slot = self.slots.get(hub);
-        let record = slot.and_then(|slot| {
-            slot.cached_directory().into_iter().find(|row| {
-                row["harness"] == "human"
-                    && crate::core::auth::principal_matches(
-                        string(row, "principal_id"),
-                        &slot.identity,
-                    )
-            })
-        });
-        let current = slot.is_some_and(|slot| slot.human_observation_current());
-        let mut projection = self.project_human(
-            record.as_ref(),
-            current,
-            slot.is_some_and(|slot| {
-                slot.config["url"] != "local://" && slot.capabilities()["auth_valid"] == true
-            }),
-        );
-        projection["attachments"] = json!(record
-            .as_ref()
-            .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
-            .unwrap_or_default());
-        projection
-    }
-
     fn project_human(&self, record: Option<&Value>, current: bool, can_set_scope: bool) -> Value {
         let Some(record) = record else {
             return json!({"human_can_set_scope":false,"human_listener_id":null,"human_paused":null,"human_about":null,"human_control_revision":null,"human_availability":"UNLISTENED","human_scope":null,"human_state_status":"unknown"});
@@ -878,10 +866,11 @@ impl super::HubAccess {
     }
 }
 impl DaemonService {
-    pub(super) fn emit(&self, frame: Value) {
-        if let Some(ui) = &self.ui {
-            ui.emit(frame);
-        }
+    pub(super) fn emit(&self, mut frame: Value) -> bool {
+        self.ui.as_ref().is_some_and(|ui| {
+            super::project_companion_frame(&mut frame, &self.config.home_dir);
+            ui.emit(frame)
+        })
     }
 
     pub(super) fn push_ui(&self) {
@@ -1066,13 +1055,13 @@ impl DaemonService {
                 if super::channels::channel_action_kind(action)
                     == Some(super::channels::ChannelActionKind::Mutation)
                 {
-                    // The settings settlement owns correlation. This full
-                    // state refresh is observational and may shed collections.
+                    // The settings settlement owns correlation; this state
+                    // refresh is observational and can coalesce.
                     frame.as_object_mut().unwrap().remove("request_id");
                     frame.as_object_mut().unwrap().remove("source_op");
                 }
             }
-            if !self.ui.as_ref().is_some_and(|ui| ui.emit(frame)) {
+            if !self.emit(frame) {
                 return;
             }
             if let Some(update) = cache_update {

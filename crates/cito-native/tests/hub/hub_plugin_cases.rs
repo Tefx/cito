@@ -22,13 +22,12 @@ fn child_exit_is_not_masked_by_a_descendants_inherited_stdout() {
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("driver.py");
     fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
-    let plugin = ChannelPlugin {
-        is_builtin: false,
-        id: "sample".into(),
-        dir: dir.clone(),
-        manifest: json!({}),
-        command: vec!["python3".into(), script.to_string_lossy().into_owned()],
-    };
+    let plugin = test_descriptor(
+        &dir,
+        "sample",
+        vec!["python3".into(), script.to_string_lossy().into_owned()],
+        json!({}),
+    );
     let (tx, rx) = mpsc::channel();
     let process = ChannelProcess::spawn(
         &plugin,
@@ -75,13 +74,12 @@ fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader(
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("driver.py");
     fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
-    let plugin = ChannelPlugin {
-        is_builtin: false,
-        id: "sample".into(),
-        dir: dir.clone(),
-        manifest: json!({}),
-        command: vec!["python3".into(), script.to_string_lossy().into_owned()],
-    };
+    let plugin = test_descriptor(
+        &dir,
+        "sample",
+        vec!["python3".into(), script.to_string_lossy().into_owned()],
+        json!({}),
+    );
     let process = ChannelProcess::spawn(&plugin, Arc::new(|_| None)).unwrap();
     assert!(crate::support::wait_child_exit(
         &process.child.lock().unwrap(),
@@ -112,6 +110,83 @@ fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader(
     .unwrap());
     drop(cleanup);
 }
+#[test]
+fn retained_stdout_prefix_counts_toward_the_frame_limit() {
+    use std::io::Cursor;
+
+    let mut line = vec![b' '; MAX_STDOUT_LINE_BYTES - 1];
+    let mut end = Cursor::new(b"\nnext\n");
+    assert_eq!(read_stdout_line(&mut end, &mut line).unwrap(), 1);
+    assert_eq!(line.len(), MAX_STDOUT_LINE_BYTES);
+    assert_eq!(end.position(), 1);
+
+    line.truncate(MAX_STDOUT_LINE_BYTES - 1);
+    let mut oversized = Cursor::new(b"    still writing\n");
+    assert_eq!(
+        read_stdout_line(&mut oversized, &mut line)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+        oversized.position(),
+        2,
+        "Read at most one byte beyond the cap"
+    );
+}
+
+#[test]
+fn channel_inventory_uses_manifest_snapshot_until_plugin_roots_reload() {
+    let root = crate::core::hub::TestDirectory(std::env::temp_dir().join(format!(
+        "cito-channel-metadata-{}",
+        crate::plugins::random_uuid_v4()
+    )));
+    let plugins = root.join("plugins");
+    let dir = plugins.join("sample");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("plugin.json");
+    let mut manifest = json!({
+        "id":"sample","kind":"human-channel","displayName":"Sample",
+        "command":["./driver"],"supportsOutboundOnly":true,
+        "serviceActions":{"save":"Save Credentials","change":"Replace Credentials","clear":"Clear Credentials"},
+        "fields":[{"key":"destination","scope":"user","type":"string","placeholder":"Enter a destination"}]
+    });
+    fs::write(&path, manifest.to_string()).unwrap();
+    let hub = crate::hub::HubEngine::open(&root).unwrap();
+    hub.set_plugin_roots(std::slice::from_ref(&plugins))
+        .unwrap();
+    let list = || {
+        hub.rpc(
+            "human_channels_list",
+            &json!({}),
+            Some(&json!({"principal_id":"none#alice","owner_user":"alice"})),
+        )
+        .unwrap()["channels"][0]
+            .clone()
+    };
+    let channel = list();
+    assert_eq!(channel["supports_outbound_only"], true);
+    assert_eq!(channel["service_save_label"], "Save Credentials");
+    assert_eq!(channel["service_change_label"], "Replace Credentials");
+    assert_eq!(channel["service_clear_label"], "Clear Credentials");
+    assert_eq!(channel["fields"][0]["placeholder"], "Enter a destination");
+
+    manifest
+        .as_object_mut()
+        .unwrap()
+        .remove("supportsOutboundOnly");
+    manifest.as_object_mut().unwrap().remove("serviceActions");
+    manifest["fields"][0]["placeholder"] = json!("New destination");
+    fs::write(&path, manifest.to_string()).unwrap();
+    assert_eq!(list(), channel);
+    hub.set_plugin_roots(&[plugins]).unwrap();
+    let reloaded = list();
+    assert_eq!(reloaded["supports_outbound_only"], false);
+    assert!(reloaded.get("service_save_label").is_none());
+    assert_eq!(reloaded["fields"][0]["placeholder"], "New destination");
+    hub.shutdown();
+}
+
 #[test]
 fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {
     let root = std::env::temp_dir().join(format!(
@@ -187,12 +262,16 @@ fn user_root_aliases_retire_staged_copies_without_retiring_builtin_roots() {
         ("displayName", json!("My channel")),
     ] {
         let mut custom = manifest.clone();
-        custom[field] = value;
+        custom[field] = value.clone();
         write_staged(&custom);
         let found = discover(&[(alias.clone(), false)], Some(&user)).unwrap();
         assert_eq!(found.len(), 1);
         assert!(!found[0].is_builtin);
-        assert_eq!(found[0].manifest, custom);
+        let observed = match field {
+            "command" => json!(found[0].command),
+            _ => json!(found[0].display_name),
+        };
+        assert_eq!(observed, value);
         assert!(staged.join("plugin.json").is_file());
     }
     fs::remove_dir_all(dir).unwrap();
@@ -325,10 +404,10 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
 fn packaged_roots_worker() {
     let dir = PathBuf::from(std::env::var("CITO_PLUGIN_ROOT_TEST").unwrap());
     let data = dir.join("data");
-    let assert_plugin = |plugins: &[ChannelPlugin], id: &str, expected: PathBuf| {
+    let assert_plugin = |plugins: &[PluginDescriptor], id: &str, expected: PathBuf| {
         let plugin = plugins.iter().find(|p| p.id == id).unwrap();
         assert_eq!(
-            plugin.dir.canonicalize().unwrap(),
+            plugin.plugin_dir.canonicalize().unwrap(),
             expected.canonicalize().unwrap()
         );
     };

@@ -23,8 +23,7 @@ extension Companion: NSMenuDelegate {
         if let item = cardMenu.items.first(where: { $0.view?.identifier?.rawValue == "menu_error_row" }) {
             cardMenu.removeItem(item)
         }
-        guard let error = menuBannerError else { return }
-        let message = presentationError(error)
+        guard let message = menuBannerError else { return }
         let labelHeight = max(30, measureWrappedHeight(message, width: 320, font: .systemFont(ofSize: 10)) + 2)
         let row = NSView(frame:NSRect(x:0,y:0,width:380,height:labelHeight+6))
         row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
@@ -80,8 +79,7 @@ extension Companion: NSMenuDelegate {
         let tooltip = statusTooltip
         guard lastStatusPresentation?.icon != icon || lastStatusPresentation?.unread != unreadCount || lastStatusPresentation?.tooltip != tooltip,
               let button = status?.button ?? headlessStatusButton else { return }
-        statusImage = Self.statusIcons[icon]
-        formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
+        formatStatusButton(button, unreadCount: unreadCount, image: Self.statusIcons[icon])
         button.toolTip = tooltip
         button.setAccessibilityLabel(tooltip)
         lastStatusPresentation = (icon, unreadCount, tooltip)
@@ -246,7 +244,7 @@ extension Companion: NSMenuDelegate {
                 control.pressed = run; drawer.addSubview(control); drawerControls.append(control)
             }
             let statusText: String
-            if let error = hub.error { statusText = presentationError(error) }
+            if let error = hub.error { statusText = error }
             else if hub.status == "connected" { statusText = hub.auth_mode == "oidc" ? "Connected as \(hub.user ?? "user")" : "Connected · \(hub.user ?? "local")" }
             else if hub.status == "connecting" { statusText = "Connecting to hub…" }
             else if hub.status == "auth_required" { statusText = "Authentication required" }
@@ -346,7 +344,6 @@ extension Companion: NSMenuDelegate {
         let listeners = self.listeners.filter { targetHub.isEmpty || $0.hub == targetHub }
         let myRemote = self.myRemote.filter { targetHub.isEmpty || $0.hub == nil || $0.hub == targetHub }
         let targetHubObj = hubs.first { $0.name == targetHub }
-        let targetUser = targetHubObj?.user ?? "local"
         if targetHubObj?.human_paused == true {
             let notice = MenuControl("Inbox paused · Resume in Settings…", frame:NSRect(x:12,y:3,width:356,height:24), leadingSymbol:"pause.circle", radius:6)
             notice.identifier = NSUserInterfaceItemIdentifier("inbox_paused_notice")
@@ -369,9 +366,9 @@ extension Companion: NSMenuDelegate {
         for listener in orderedListeners {
             let sessionKey = "\(listener.harness):\(listener.session_id)"
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
-                .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
-            let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user, about: listener.about, harnessName: map[listener.harness]?.display_name, customTitle: listener.custom_title == true)
-            let aboutText = distinctAbout(listener.about, title:listener.title, user:user, otherTitle:displayTitle)
+                .compactMap { $0 }.first { !$0.isEmpty } ?? targetHubObj?.user ?? "local"
+            let displayTitle = listener.use_app_title == true ? map[listener.harness]?.display_name ?? listener.harness : listener.display_title ?? listener.title
+            let aboutText = listener.display_about
             let rowHeight: CGFloat = aboutText != nil ? 78 : 64
             let cardHeight: CGFloat = aboutText != nil ? 72 : 58
             let row = NSView(frame: NSRect(x: 0, y: 0, width: activeWidth, height: rowHeight))
@@ -423,7 +420,6 @@ extension Companion: NSMenuDelegate {
                 var scope = listener.scope
                 scopeBtn.pressed = { [weak self, weak scopeBtn] in
                     guard let self = self, let scopeBtn = scopeBtn else { return }
-                    self.pendingMutation = true
                     scope = scope == "self" ? "workspace" : "self"
                     self.updateScopeControl(scopeBtn, scope:scope, hub:listener.hub, user:user)
                     self.emit(["op":"set_scope","hub":listener.hub,"listener_id":listener.listener_id,"scope":scope])
@@ -539,11 +535,11 @@ extension Companion: NSMenuDelegate {
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
                     let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                    let displayTitle = nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true)
+                    let displayTitle = peer.use_app_title == true ? map[peer.harness]?.display_name ?? peer.harness : peer.display_title ?? peer.title
                     let info = textLabel("\(hostText) · \(displayTitle)\(branchSuffix)",
                         NSRect(x: 36, y: 8, width: 0, height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
-                    info.toolTip = peer.display_address + (distinctAbout(peer.about, title:peer.title, user:peer.user, otherTitle:displayTitle).map { " — \($0)" } ?? "")
+                    info.toolTip = peer.display_address + (peer.display_about.map { " — \($0)" } ?? "")
                     row.addSubview(info)
                     layoutBar(in: row, insetLeft: 16, y: 7, height: 20, leading: [hostIcon], flexible: info, trailing: [copy])
                     remoteRows.append((id: rowId, view: row))
@@ -584,7 +580,7 @@ extension Companion: NSMenuDelegate {
             let discoveryBusy = discovery.contains { $0.status == "scanning" || $0.status == "error" }
             for item in discovery where item.status == "scanning" || item.status == "error" {
                 let visual = resolveHarnessVisual(item.harness,harnesses:map)
-                let text = item.status == "scanning" ? "\(visual.name) · Scanning sessions…" : "\(visual.name) · " + presentationError(item.error ?? "Session discovery failed. Try refreshing.")
+                let text = item.status == "scanning" ? "\(visual.name) · Scanning sessions…" : "\(visual.name) · " + (item.error ?? "Session discovery failed. Try refreshing.")
                 let label = textLabel(text,NSRect(x:46,y:4,width:322,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
                 label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = text
                 label.frame.size.height = max(26, measureWrappedHeight(text, width: 322, font: label.font!) + 4)
@@ -678,7 +674,7 @@ extension Companion: NSMenuDelegate {
                         let shortCwd = compactHomePath(c.cwd)
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                        let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, harnessName: visual.name, customTitle: c.custom_title == true)
+                        let candidateTitle = c.generic_title == true || c.title_fallback_hubs?.contains(targetHub) == true ? visual.name : c.title
                         let info = textLabel(candidateTitle, NSRect(x:46,y:rowHeight-21,width:textWidth,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
                         let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix, maxWidth:textWidth),NSRect(x:46,y:needsReload ? hintHeight+7 : 6,width:textWidth,height:14),size:10.5,color:CitoPalette.secondaryText)
@@ -716,7 +712,6 @@ extension Companion: NSMenuDelegate {
                         location.frame.size.width = info.frame.width
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
-                            self.pendingMutation = true
                             listenBtn?.setLeadingSymbol(nil)
                             listenBtn?.label.stringValue = "…"
                             listenBtn?.isEnabled = false

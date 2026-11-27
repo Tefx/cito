@@ -15,13 +15,12 @@ impl Fixture {
         Self { hub, dir }
     }
     fn plugin(&self) -> ChannelPlugin {
-        ChannelPlugin {
-            id: "sample".into(),
-            dir: self.dir.clone(),
-            is_builtin: false,
-            command: vec![],
-            manifest: json!({"fields":[],"serviceIdentity":{"field":"credential","separator":":"}}),
-        }
+        hub_plugins::test_descriptor(
+            &self.dir,
+            "sample",
+            vec![],
+            json!({"serviceIdentity":{"field":"credential","separator":":"}}),
+        )
     }
 }
 impl Drop for Fixture {
@@ -154,9 +153,9 @@ fn public_identity_does_not_fall_back_to_credentials() {
     for malformed in ["secret", ":secret", "123:", ""] {
         assert!(project(&plugin, malformed).is_null());
     }
-    plugin.manifest["serviceIdentity"]["separator"] = json!("");
+    plugin.channel.service_identity["separator"] = json!("");
     assert!(project(&plugin, "123:secret").is_null());
-    plugin.manifest = json!({});
+    plugin.channel.service_identity = Value::Null;
     assert!(project(&plugin, "123:secret").is_null());
 }
 

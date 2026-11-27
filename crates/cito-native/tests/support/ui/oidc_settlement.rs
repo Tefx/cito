@@ -39,6 +39,262 @@ fn focus(f: &Fixture, p: usize, id: &str) {
     assert_eq!(inspect(f, p)["field_editors"][0]["id"], id);
 }
 
+fn assert_same_active_editor(before: &Value, after: &Value, field: &str, scroll: &str) {
+    let editor = &before["field_editors"][0];
+    assert_eq!(editor["id"], field);
+    assert_eq!(editor["attached"], true);
+    for key in [
+        "instance",
+        "id",
+        "attached",
+        "marked",
+        "can_undo",
+        "selection_location",
+        "selection_length",
+    ] {
+        assert_eq!(
+            after["field_editors"][0][key], editor[key],
+            "{field}: {key}"
+        );
+    }
+    assert_eq!(
+        after.settings(field)["instance"],
+        before.settings(field)["instance"]
+    );
+    for key in ["content_x", "content_y"] {
+        assert_eq!(
+            after.settings(scroll)[key],
+            before.settings(scroll)[key],
+            "{scroll}: {key}"
+        );
+    }
+}
+
+#[test]
+fn delayed_hub_save_failure_preserves_the_active_draft_editor() {
+    let _lock = serial();
+    for marked in [false, true] {
+        let (f, p) = ui_fixture();
+        let mut cfg = settings();
+        cfg["host_hub"]["enabled"] = json!(true);
+        open(&f, p, &cfg, "hubs");
+        control(&f, p, "open_add_hub");
+        control(&f, p, "settings_hub_auth:oidc");
+        let field = "settings_hub_url";
+        input(&f, p, field, "https://hub.example.com");
+        control(&f, p, "submit_add_hub");
+        let request = latest(&f, p, "setup_save_hub");
+        focus(&f, p, field);
+        f.send(
+            p,
+            json!({"op":"test_clipboard","text":"https://draft.example.com"}),
+        );
+        f.send(p, json!({"op":"test_settings_key","key":"command-v"}));
+        if marked {
+            f.send(p, json!({"op":"test_editor_marked","value":"/draft"}));
+        }
+        f.send(p, json!({"op":"test_settings_scroll","offset":0}));
+        let before = inspect(&f, p);
+        assert_eq!(before["field_editors"][0]["marked"], marked);
+        assert_eq!(before["field_editors"][0]["can_undo"], true);
+        assert_eq!(before["pending_hub_save"], request["request_id"]);
+        assert!(before.settings("add_hub_error").is_null());
+
+        let mut failure = json!({"op":"settings","source_op":"setup_save_hub","request_id":request["request_id"],"ok":false,"error":"Save failed"});
+        if marked {
+            failure["settings"] = cfg;
+        }
+        f.send(p, failure);
+        let after = inspect(&f, p);
+        let scroll = "settings_hubs_tab";
+        assert_same_active_editor(&before, &after, field, scroll);
+        assert_eq!(after["pending_hub_save"], "");
+        assert_eq!(after.settings("submit_add_hub")["enabled"], true);
+        let error = after.settings("add_hub_error");
+        assert_eq!(error["text"], "Save failed");
+        assert_eq!(error["hidden"], false);
+        let error_y =
+            after.settings("add_hub_form")["y"].as_f64().unwrap() + error["y"].as_f64().unwrap();
+        let viewport = after.settings(scroll);
+        let bottom = viewport["content_y"].as_f64().unwrap();
+        assert!(
+            error_y >= bottom
+                && error_y + error["height"].as_f64().unwrap()
+                    <= bottom + viewport["height"].as_f64().unwrap()
+        );
+        assert!(after.settings("settings_error_banner").is_null());
+        if !marked {
+            f.send(p, json!({"op":"test_settings_key","key":"command-z"}));
+            assert_eq!(
+                inspect(&f, p).settings(field)["text"],
+                "https://hub.example.com"
+            );
+        }
+
+        f.send(p, json!({"op":"test_end_editing"}));
+        let ended = inspect(&f, p);
+        assert_eq!(ended["settings_rebuild_deferred"], false);
+        assert_eq!(ended.settings("add_hub_error")["text"], "Save failed");
+        assert_eq!(ended.settings("settings_hub_issuer")["text"], "");
+    }
+}
+
+#[test]
+fn delayed_sibling_save_failures_keep_the_active_editor() {
+    let _lock = serial();
+    for marked in [false, true] {
+        for (tab, field, save, op, draft, error_id) in [
+            (
+                "hubs",
+                "host_hub_port",
+                "apply_host_hub_port",
+                "set_host_hub",
+                "5302",
+                "host_hub_error",
+            ),
+            (
+                "channels",
+                "channel_field:channel:account",
+                "save_channel:channel",
+                "channel_save",
+                "draft",
+                "settings_error_label",
+            ),
+        ] {
+            let (f, p) = ui_fixture();
+            let mut cfg = settings();
+            cfg["host_hub"]["enabled"] = json!(true);
+            open(&f, p, &cfg, tab);
+            if tab == "hubs" {
+                input(&f, p, field, "5301");
+            }
+            control(&f, p, save);
+            let request = latest(&f, p, op);
+            focus(&f, p, field);
+            f.send(p, json!({"op":"test_clipboard","text":draft}));
+            f.send(p, json!({"op":"test_settings_key","key":"command-v"}));
+            if marked {
+                f.send(p, json!({"op":"test_editor_marked","value":"3"}));
+            }
+            let before = inspect(&f, p);
+            assert_eq!(before["field_editors"][0]["marked"], marked);
+            assert_eq!(before["field_editors"][0]["can_undo"], true);
+            assert!(!before["pending_controls"].as_array().unwrap().is_empty());
+            let mut failure = json!({"op":"settings","source_op":op,"request_id":request["request_id"],"ok":false,"error":"Save failed"});
+            if tab == "hubs" && marked {
+                cfg["host_hub"]["error"] = json!("Save failed");
+                failure["settings"] = cfg;
+            }
+            f.send(p, failure);
+            let after = inspect(&f, p);
+            assert_same_active_editor(&before, &after, field, &format!("settings_{tab}_tab"));
+            assert_eq!(after["pending_controls"], json!([]));
+            assert_eq!(after.settings(save)["enabled"], true);
+            assert_eq!(after.settings(error_id)["text"], "Save failed");
+        }
+    }
+}
+
+#[test]
+fn delayed_save_failures_keep_the_refocused_unchanged_editor() {
+    let _lock = serial();
+    for (tab, field, save, op, value, error_id, full) in [
+        (
+            "hubs",
+            "settings_hub_url",
+            "submit_add_hub",
+            "setup_save_hub",
+            "https://hub.example.com",
+            "add_hub_error",
+            false,
+        ),
+        (
+            "hubs",
+            "settings_hub_url",
+            "submit_add_hub",
+            "setup_save_hub",
+            "https://hub.example.com",
+            "add_hub_error",
+            true,
+        ),
+        (
+            "channels",
+            "channel_field:channel:account",
+            "save_channel:channel",
+            "channel_save",
+            "alice",
+            "settings_error_label",
+            true,
+        ),
+    ] {
+        let (f, p) = ui_fixture();
+        let mut cfg = settings();
+        cfg["host_hub"]["enabled"] = json!(true);
+        if tab == "channels" {
+            let mut second = cfg["channels"][0].clone();
+            second["id"] = json!("second");
+            cfg["channels"].as_array_mut().unwrap().push(second);
+        }
+        open(&f, p, &cfg, tab);
+        if tab == "hubs" {
+            control(&f, p, "open_add_hub");
+            control(&f, p, "settings_hub_auth:oidc");
+        }
+        input(&f, p, field, value);
+        focus(&f, p, field);
+        control(&f, p, save);
+        let request = latest(&f, p, op);
+        if tab == "channels" {
+            f.send(p, json!({"op":"test_end_editing"}));
+        }
+        assert_eq!(inspect(&f, p)["field_editors"], json!([]));
+        focus(&f, p, field);
+        let offset = if tab == "hubs" { 12 } else { 10_000 };
+        f.send(p, json!({"op":"test_settings_scroll","offset":offset}));
+        let before = inspect(&f, p);
+        let scroll = format!("settings_{tab}_tab");
+        assert!(before.settings(&scroll)["content_y"].as_f64().unwrap() > 0.0);
+        assert_eq!(before["field_editors"][0]["marked"], false);
+        assert_eq!(before.settings(field)["text"], value);
+        assert_eq!(before.settings(save)["enabled"], false);
+        assert!(before.settings(error_id).is_null());
+
+        let mut failure = json!({"op":"settings","source_op":op,"request_id":request["request_id"],"ok":false,"error":"Save failed"});
+        if full {
+            failure["settings"] = cfg;
+        }
+        if tab == "channels" {
+            failure["hub"] = request["hub"].clone();
+            failure["channel_id"] = request["channel_id"].clone();
+        }
+        f.send(p, failure);
+        let after = inspect(&f, p);
+        assert_same_active_editor(&before, &after, field, &scroll);
+        assert_eq!(after.settings(field)["text"], value);
+        assert_eq!(after["pending_hub_save"], "");
+        assert_eq!(after["pending_controls"], json!([]));
+        assert_eq!(
+            after.settings(save)["instance"],
+            before.settings(save)["instance"]
+        );
+        assert_eq!(after.settings(save)["enabled"], true);
+        let error = after.settings(error_id);
+        assert_eq!(error["text"], "Save failed");
+        assert_eq!(error["hidden"], false);
+        if tab == "hubs" {
+            let error_y = after.settings("add_hub_form")["y"].as_f64().unwrap()
+                + error["y"].as_f64().unwrap();
+            let viewport = after.settings(&scroll);
+            let bottom = viewport["content_y"].as_f64().unwrap();
+            assert!(error_y >= bottom);
+            assert!(
+                error_y + error["height"].as_f64().unwrap()
+                    <= bottom + viewport["height"].as_f64().unwrap()
+            );
+        }
+    }
+}
+
 #[test]
 fn real_host_and_invite_receipts_settle_the_initiating_request() {
     let _lock = serial();
@@ -284,14 +540,24 @@ fn v49_passive_editor_refresh_preserves_undo_and_ime_until_end_editing() {
     cfg["launch_at_login"] = json!(true);
     f.send(p, json!({"op":"settings","settings":cfg}));
     let passive = inspect(&f, p);
-    assert_eq!(passive["settings_rebuild_deferred"], true);
+    assert_eq!(passive["settings_rebuild_deferred"], false);
+    assert_eq!(
+        passive.settings("settings_launch_at_login")["accessibility_value"],
+        1
+    );
     assert_eq!(passive["field_editors"], before["field_editors"]);
     f.send(p, json!({"op":"test_settings_key","key":"command-z"}));
-    assert_eq!(inspect(&f, p)["settings_rebuild_deferred"], true);
+    assert_eq!(inspect(&f, p).settings("settings_hub_name")["text"], "");
     f.send(p, json!({"op":"test_editor_marked","value":"composition"}));
     cfg["launch_at_login"] = json!(false);
     f.send(p, json!({"op":"settings","settings":cfg}));
-    assert_eq!(inspect(&f, p)["field_editors"][0]["marked"], true);
+    let composing = inspect(&f, p);
+    assert_eq!(composing["field_editors"][0]["marked"], true);
+    assert_eq!(composing["settings_rebuild_deferred"], false);
+    assert_eq!(
+        composing.settings("settings_launch_at_login")["accessibility_value"],
+        0
+    );
     f.send(p, json!({"op":"test_end_editing"}));
     let ended = inspect(&f, p);
     assert_eq!(ended["settings_rebuild_deferred"], false);
@@ -299,7 +565,7 @@ fn v49_passive_editor_refresh_preserves_undo_and_ime_until_end_editing() {
 }
 
 #[test]
-fn passive_bounded_hubs_preserve_complete_nested_attachments_and_update_scalars() {
+fn legacy_partial_hubs_preserve_complete_nested_attachments_and_update_scalars() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut frame = state();
@@ -308,30 +574,13 @@ fn passive_bounded_hubs_preserve_complete_nested_attachments_and_update_scalars(
     assert_eq!(inspect(&f, p)["hub_attachment_counts"]["personal"], 129);
     frame["unread_count"] = json!(9);
     frame["hubs"][0]["status"] = json!("disconnected");
-    // A normal 128-row preview fits on the wire. Force byte-budget shedding
-    // of the second Hub so the retained first row is a partial Hub projection.
-    let preview: Value =
-        serde_json::from_slice(&cito_native::core::daemon::bounded_frame(frame.clone()).unwrap())
-            .unwrap();
-    assert_eq!(
-        preview["hubs"][0]["attachments"].as_array().unwrap().len(),
-        128
-    );
-    assert!(preview.get("truncated").is_none());
-    frame["hubs"][1]["attachments"] = json!((0..128).map(|i| json!({"channel_id":format!("remote-{i}"),"location":"device","display_name":"x".repeat(2048),"availability":"ACTIVE","is_local":false})).collect::<Vec<_>>());
-    let bounded: Value =
-        serde_json::from_slice(&cito_native::core::daemon::bounded_frame(frame).unwrap()).unwrap();
-    assert_eq!(
-        bounded["hubs"][0]["attachments"].as_array().unwrap().len(),
-        128
-    );
-    assert_eq!(bounded["truncated"], true);
-    assert_eq!(bounded["hubs"].as_array().unwrap().len(), 1);
-    assert!(bounded["truncated_collections"]
-        .as_array()
+    frame["hubs"].as_array_mut().unwrap().truncate(1);
+    frame["hubs"][0]["attachments"]
+        .as_array_mut()
         .unwrap()
-        .contains(&json!("hubs")));
-    f.send(p, bounded);
+        .pop();
+    frame["truncated_collections"] = json!(["hubs"]);
+    f.send(p, frame);
     let s = inspect(&f, p);
     assert_eq!(s["hub_attachment_counts"]["personal"], 129);
     assert_eq!(s["unread_count"], 9);

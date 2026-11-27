@@ -127,9 +127,8 @@ fn passive_state_only_preserves_collections_named_by_the_frame_budget() {
 }
 
 #[test]
-fn wire_shedding_preserves_only_the_affected_hub_list() {
+fn legacy_partial_frame_preserves_only_the_affected_hub_list() {
     use super::lazy_rendering::render_state;
-    use cito_native::core::daemon::{bounded_frame, FRAME_LIMIT};
     let _lock = serial();
     let (f, p) = ui_fixture();
     let initial = state_with_settings(settings());
@@ -140,19 +139,16 @@ fn wire_shedding_preserves_only_the_affected_hub_list() {
         update["hubs"] = json!([]);
         update["settings"]["hubs"] = json!([]);
         update["listeners"] = json!([]);
-        let path = if nested { "/settings/hubs" } else { "/hubs" };
-        let mut row = initial.pointer(path).unwrap()[0].clone();
-        row["cwd"] = json!("x".repeat(FRAME_LIMIT));
-        *update.pointer_mut(path).unwrap() = json!([row]);
-        let wire = bounded_frame(update).unwrap();
-        f.send(p, serde_json::from_slice(&wire).unwrap());
+        let collection = if nested { "settings.hubs" } else { "hubs" };
+        update["truncated_collections"] = json!([collection]);
+        f.send(p, update);
         let new = render_state(&f, p);
         for (key, preserve) in [("hubs", !nested), ("settings.hubs", nested)] {
             assert!(old[key].as_u64().unwrap() > 0);
             assert_eq!(
                 new["collection_counts"][key],
                 if preserve { old[key].clone() } else { json!(0) },
-                "{path}: {key}"
+                "{collection}: {key}"
             );
         }
         assert_eq!(new["listeners"], 0);
@@ -246,21 +242,21 @@ fn v45_settings_dedup_scroll_editor_and_inventory_diagnostics() {
     let (f, p) = ui_fixture();
     let mut cfg = settings();
     let frame = state_with_settings(cfg.clone());
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:hubs");
     control(&f, p, "open_add_hub");
     f.send(p, json!({"op":"test_settings_scroll","offset":80}));
     let before = inspect(&f, p);
     let scroll = before.settings("settings_hubs_tab");
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    send_companion(&f, p, json!({"op":"settings","settings":cfg}));
     let same = inspect(&f, p);
     assert_eq!(
         same.settings("settings_hubs_tab")["instance"],
         scroll["instance"]
     );
     cfg["launch_at_login"] = json!(true);
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    send_companion(&f, p, json!({"op":"settings","settings":cfg}));
     let changed = inspect(&f, p);
     assert_eq!(
         changed.settings("settings_hubs_tab")["content_y"],
@@ -280,7 +276,7 @@ fn v45_settings_dedup_scroll_editor_and_inventory_diagnostics() {
     assert_eq!(editor["attached"], true);
     assert_eq!(editor["can_undo"], true);
     cfg["host_hub"]["token"] = json!("changed");
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    send_companion(&f, p, json!({"op":"settings","settings":cfg}));
     let refreshed = inspect(&f, p);
     for key in [
         "instance",
@@ -300,7 +296,7 @@ fn v45_settings_dedup_scroll_editor_and_inventory_diagnostics() {
     f.send(p, json!({"op":"test_end_editing"}));
     control(&f, p, "settings_tab:channels");
     cfg["channel_inventory_error"] = json!("Channel inventory temporarily unavailable. Try again.");
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    send_companion(&f, p, json!({"op":"settings","settings":cfg}));
     let diagnostic = inspect(&f, p);
     assert!(!diagnostic.settings("channel_inventory_error").is_null());
     assert!(!diagnostic.settings("settings_channel:channel").is_null());
@@ -313,7 +309,7 @@ fn v45_settings_dedup_scroll_editor_and_inventory_diagnostics() {
         1
     );
     cfg["channel_inventory_error"] = Value::Null;
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    send_companion(&f, p, json!({"op":"settings","settings":cfg}));
     assert!(inspect(&f, p).settings("channel_inventory_error").is_null());
 }
 
@@ -505,6 +501,92 @@ fn invalid_rename_shows_banner_without_replacing_the_focused_editor() {
     assert_eq!(
         dismissed["field_editors"][0]["instance"],
         before["field_editors"][0]["instance"]
+    );
+}
+
+#[test]
+fn app_receipt_updates_only_its_tab_while_a_channel_editor_is_composing() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    f.send(p, state_with_settings(cfg.clone()));
+    control(&f, p, "open_settings");
+    let app = cfg["apps"][0]["id"].as_str().unwrap();
+    let apply = format!("setup_app:{app}");
+    let status = format!("settings_app_status:{app}");
+    control(&f, p, &apply);
+    let request = latest(&f, p, "setup_apply");
+    assert_eq!(inspect(&f, p).settings(&apply)["text"], "Checking…");
+    control(&f, p, "settings_tab:channels");
+    let field = "channel_field:channel:account";
+    f.send(p, json!({"op":"test_focus_field","id":field}));
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"account".repeat(32)}),
+    );
+    f.send(p, json!({"op":"test_settings_key","key":"command-v"}));
+    f.send(
+        p,
+        json!({"op":"test_editor_marked","value":"draft","reveal_caret":true}),
+    );
+    let before = inspect(&f, p);
+    let editor = &before["field_editors"][0];
+    assert_eq!(editor["marked"], true);
+    assert_eq!(editor["can_undo"], true);
+    assert!(editor["visible_x"].as_f64().unwrap() > 0.0);
+    let assert_same_editor = |snapshot: &Value| {
+        // AppKit may end its event-driven undo group between frames.
+        for key in [
+            "instance",
+            "id",
+            "attached",
+            "marked",
+            "can_undo",
+            "selection_location",
+            "selection_length",
+            "visible_x",
+        ] {
+            assert_eq!(snapshot["field_editors"][0][key], editor[key], "{key}");
+        }
+    };
+
+    cfg["apps"][0]["detail"] = json!("Verified installation");
+    f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_apply","request_id":request["request_id"],"settings":cfg}));
+    let after = inspect(&f, p);
+    assert_same_editor(&after);
+    assert_eq!(
+        after.settings(field)["instance"],
+        before.settings(field)["instance"]
+    );
+    assert_eq!(
+        after["settings_rebuild_deferred"], false,
+        "an unrelated receipt must not queue a channel rebuild"
+    );
+    assert_eq!(after["pending_app_checks"], json!([]));
+    assert_eq!(
+        after.settings(&status)["text"],
+        "Connected · Verified installation"
+    );
+    let hub_row = after.settings("settings_hub:personal");
+    assert!(hub_row["instance"].is_string());
+    assert_eq!(
+        hub_row["instance"],
+        before.settings("settings_hub:personal")["instance"]
+    );
+
+    cfg["hubs"][0]["human_paused"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let paused = inspect(&f, p);
+    assert_eq!(paused["settings_rebuild_deferred"], true);
+    assert_same_editor(&paused);
+    assert_eq!(
+        paused.settings("settings_hub:personal")["instance"],
+        hub_row["instance"]
+    );
+    f.send(p, json!({"op":"test_end_editing"}));
+    assert_eq!(
+        inspect(&f, p).settings("inbox_control_summary")["text"],
+        "Inbox alerts paused"
     );
 }
 

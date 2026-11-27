@@ -241,7 +241,7 @@ fn v39_reload_hint_retains_full_tooltip_and_activity_reset_requeries() {
 fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_details() {
     let _lock = serial();
     let (f, p) = ui_fixture();
-    f.send(p, state());
+    send_companion(&f, p, state());
     control(&f, p, "open_directory");
     for (title, about, expected_title, expected_about) in [
         ("", "Human", "@bob", ""),
@@ -289,7 +289,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         .as_array_mut()
         .unwrap()
         .push(json!({"name":"local","status":"connected","auth_mode":"none","user":"bob"}));
-    f.send(p, frame.clone());
+    send_companion(&f, p, frame.clone());
     let mut agent = peer("home");
     agent["session_id"] = json!("home-session");
     agent["title"] = json!("bob");
@@ -308,7 +308,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         "mac-studio"
     ]);
     frame["my_remote_listeners"] = json!([agent.clone()]);
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     let remote = inspect(&f, p).menu("remote:personal:home");
     let remote_info = nodes(&remote["children"])
         .into_iter()
@@ -479,7 +479,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
     ] {
         let mut frame = state();
         frame["activity"] = json!([{"hub":"personal","signal_id":"legacy-human","listener_id":"target","from_user":"bob","from_host_name":"laptop","from_harness":"human","from_title":title,"target_harness":"fixture","target_title":"Agent","target_scoped_id":"personal:target","message":"Review complete","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
-        f.send(p, frame);
+        send_companion(&f, p, frame);
         assert_eq!(
             inspect(&f, p).directory("act_title:legacy-human")["text"],
             expected
@@ -961,7 +961,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     f.send(p, frame.clone());
     assert_eq!(inspect(&f, p).menu("available_scroll")["content_y"], 20);
     control(&f, p, "open_directory");
-    f.send(p,json!({"op":"error","source_op":"listen_session","error":"BRIDGE_UNAVAILABLE: Retry listening"}));
+    send_companion(
+        &f,
+        p,
+        json!({"op":"error","source_op":"listen_session","error":"BRIDGE_UNAVAILABLE: Retry listening"}),
+    );
     f.send(p, json!({"op":"test_directory_query","query":""}));
     f.send(p, json!({"op":"test_menu_open"}));
     assert!(!inspect(&f, p).menu("menu_error_row").is_null());
@@ -977,7 +981,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         .unwrap()
         .contains("work"));
     assert_eq!(warned.directory("directory_scroll")["height"], 306);
-    f.send(p,json!({"op":"error","source_op":"query_directory","error":"CONNECTION_FAILED: Remote Hub unavailable (os error 61)"}));
+    send_companion(
+        &f,
+        p,
+        json!({"op":"error","source_op":"query_directory","error":"CONNECTION_FAILED: Remote Hub unavailable (os error 61)"}),
+    );
     let failed = inspect(&f, p);
     assert!(failed.directory("directory_warning_label")["text"]
         .as_str()
@@ -1341,7 +1349,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     for frame in [
         json!({"op":"composer_result","ok":true}),
         json!({"op":"composer_result","ok":false,"error":"Untagged result"}),
-        json!({"op":"error","error":"INVALID_INPUT: Message is too large to send"}),
+        json!({"op":"error","error":"Message is too large to send"}),
         json!({"op":"error","source_op":"send_signal","error":"Untagged send error"}),
     ] {
         f.send(p, frame);
@@ -1592,8 +1600,6 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     let meta = f.provider("delivered_unconfirmed");
     let mut l = ClosedLoop::new(&f);
     l.until(|s| s.menu("header").is_object());
-    // Cache a complete listener collection before long activity previews mark
-    // subsequent passive snapshots truncated.
     let listening = f.tool("cito_listen", json!({"about":"Copy fixture"}), meta.clone());
     assert_eq!(listening["ok"], true, "{listening}");
     l.until(|s| {
@@ -1643,10 +1649,14 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         .iter()
         .filter(|f| f["op"] == "activity_message")
         .collect();
-    assert!(frames.len() > 1);
-    assert!(frames
-        .iter()
-        .all(|f| serde_json::to_vec(f).unwrap().len() < 262_144));
+    let requests: Vec<_> = f.frames_for(l.ui, "copy_activity_message").collect();
+    assert_eq!(frames.len(), requests.len());
+    for (frame, request) in frames.into_iter().zip(requests) {
+        assert_eq!(
+            frame,
+            &json!({"op":"activity_message","request_id":request["request_id"],"message":message.trim()})
+        );
+    }
     l.control(&control_id);
     let address = nodes(&restored["items"])
         .into_iter()
@@ -1658,7 +1668,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     assert_eq!(
         inspect(&f, l.ui)["clipboard"],
         expected,
-        "A newer clipboard action supersedes in-flight message chunks"
+        "A newer clipboard action supersedes an in-flight copy receipt"
     );
     assert_eq!(inspect(&f, l.ui)["composer_open"], false);
     l.control(&control_id);
@@ -1667,7 +1677,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         .next_back()
         .unwrap();
     l.control("dir_mode:directory");
-    f.send(l.ui,json!({"op":"activity_message","request_id":request["request_id"],"part":0,"message":message.trim(),"complete":true}));
+    f.send(l.ui,json!({"op":"activity_message","request_id":request["request_id"],"message":message.trim()}));
     let switched = inspect(&f, l.ui);
     assert_eq!(
         switched["clipboard"],
@@ -1690,17 +1700,21 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     l.control(address["id"].as_str().unwrap());
     l.control("dir_mode:activity");
     l.until(|s| !s.directory(&control_id).is_null());
-    for invalid_chunk in [false, true] {
+    for invalid_receipt in [false, true] {
         l.control(&control_id);
         let request = f
             .frames_for(l.ui, "copy_activity_message")
             .next_back()
             .unwrap();
-        f.send(l.ui, if invalid_chunk {
-            json!({"op":"activity_message","request_id":request["request_id"],"part":1,"message":"out of order","complete":true,"error":"COPY_FAILED: Message unavailable"})
-        } else {
-            json!({"op":"error","source_op":"copy_activity_message","request_id":request["request_id"],"error":"COPY_FAILED: Message unavailable"})
-        });
+        send_companion(
+            &f,
+            l.ui,
+            if invalid_receipt {
+                json!({"op":"activity_message","request_id":request["request_id"],"error":"COPY_FAILED: Message unavailable"})
+            } else {
+                json!({"op":"error","source_op":"copy_activity_message","request_id":request["request_id"],"error":"COPY_FAILED: Message unavailable"})
+            },
+        );
         let failed = inspect(&f, l.ui);
         assert_eq!(failed["clipboard"], expected);
         let status = failed.directory("directory_summary");
@@ -1730,8 +1744,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         l.control(address["id"].as_str().unwrap());
         assert_eq!(inspect(&f, l.ui)["clipboard"], expected);
     }
-    // This final clipboard arbitration section uses a complete synthetic menu
-    // snapshot; the daemon snapshot includes intentionally truncated activity.
+    // Add a hosted invite and reload control to exercise clipboard arbitration.
     let mut state = super::state();
     state["listeners"] = json!([]);
     state["settings"] = f.snapshot()["settings"].clone();
@@ -1761,7 +1774,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             .next_back()
             .unwrap();
         l.control(id);
-        f.send(l.ui, json!({"op":"activity_message","request_id":request["request_id"],"part":0,"message":"late full message","complete":true}));
+        f.send(l.ui, json!({"op":"activity_message","request_id":request["request_id"],"message":"late full message"}));
         let copied = inspect(&f, l.ui);
         assert_eq!(copied["clipboard"], expected, "{id}");
         if id == "copy_hub_invite" {

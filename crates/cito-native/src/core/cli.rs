@@ -262,8 +262,17 @@ pub fn parse_cli(
     Ok((Value::Object(input), Value::Object(meta)))
 }
 pub(super) fn presentation_error(raw: &str) -> String {
+    format_presentation_error(raw, false)
+}
+
+pub(super) fn companion_error(raw: &str) -> String {
+    format_presentation_error(raw, true)
+}
+
+fn format_presentation_error(raw: &str, companion: bool) -> String {
     let protocol_code = |code: &str| {
         code.len() >= 3
+            && (companion || !matches!(code, "HTTP" | "OIDC" | "TLS" | "DNS"))
             && ((code.starts_with(|c: char| c.is_ascii_uppercase())
                 && code
                     .bytes()
@@ -275,21 +284,6 @@ pub(super) fn presentation_error(raw: &str) -> String {
         if unwrapped.starts_with("CONTROL_REVISION_CONFLICT:") {
             return "Inbox changed on another device. Review the current state and try again."
                 .into();
-        }
-        let lower = unwrapped.to_ascii_lowercase();
-        if [
-            "sqlite_",
-            "sqlite3",
-            "(sqlite",
-            "unable to open database",
-            "database is locked",
-            "database disk image is malformed",
-            "no such table:",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-        {
-            return "App database is unavailable. Check the app and its data location.".into();
         }
         if unwrapped.starts_with(['{', '[']) {
             let detail = serde_json::from_str::<Value>(&unwrapped)
@@ -308,6 +302,23 @@ pub(super) fn presentation_error(raw: &str) -> String {
                 }
                 _ => return "The request failed. Try again.".into(),
             }
+        }
+        let lower = unwrapped.to_ascii_lowercase();
+        if [
+            "sqlite_",
+            "sqlite3 ",
+            "sqlite3:",
+            "unable to open database",
+            "database is locked",
+            "database disk image is malformed",
+            "no such table:",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+            || lower.contains("(sqlite ")
+            || lower.contains(": no such table:")
+        {
+            return "App database is unavailable. Check the app and its data location.".into();
         }
         let Some((code, rest)) = unwrapped.split_once(':') else {
             break;
@@ -338,7 +349,21 @@ pub(super) fn presentation_error(raw: &str) -> String {
                 word.push(chars.next().unwrap());
             }
             let mut after = chars.clone();
+            let http_status = !companion
+                && word.len() == 3
+                && word.bytes().all(|b| b.is_ascii_digit())
+                && stripped.ends_with(char::is_whitespace)
+                && stripped
+                    .trim_end()
+                    .strip_suffix("HTTP")
+                    .is_some_and(|prefix| {
+                        prefix
+                            .chars()
+                            .next_back()
+                            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                    });
             if protocol_code(&word)
+                && !http_status
                 && after.next() == Some(':')
                 && after.peek().is_none_or(|c| c.is_whitespace())
             {
@@ -361,6 +386,9 @@ pub(super) fn presentation_error(raw: &str) -> String {
         {
             message = prefix.trim_end();
         }
+    }
+    if !companion && message.starts_with("The local hub must use local://") {
+        return message.into();
     }
     if message.starts_with("Hub URL must use") {
         return "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
@@ -406,6 +434,23 @@ pub(super) fn presentation_error(raw: &str) -> String {
             message = replaced;
         } else {
             message = message.replace(token, copy);
+        }
+    }
+    if companion {
+        for (start, _) in message
+            .to_ascii_lowercase()
+            .match_indices("channel inventory")
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let end = start + "channel inventory".len();
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            if !message[..start].chars().next_back().is_some_and(word)
+                && !message[end..].chars().next().is_some_and(word)
+            {
+                message.replace_range(start..end, "Channel list");
+            }
         }
     }
     message
@@ -709,11 +754,35 @@ mod tests {
             ("Badge rejected: BADGE_UNAVAILABLE: Retry later","Retry later"),
             (r#"{"ok":false,"error_code":"OFFLINE","message":"Retry later"}"#,"Retry later"),
             ("SQLITE_CANTOPEN: unable to open database file (SQLite 14)","App database is unavailable. Check the app and its data location."),
+            ("unknown subcommand 'SQLITE_ERROR: no such table: private_name'", "App database is unavailable. Check the app and its data location."),
         ] { assert_eq!(presentation_error(input),expected,"{input}"); }
         let vectors: Vec<[String; 2]> =
             serde_json::from_str(include_str!("../../tests/support/diagnostics.json")).unwrap();
         for [input, expected] in vectors {
             assert_eq!(presentation_error(&input), expected, "{input}");
+        }
+    }
+    #[test]
+    fn diagnostics_preserve_operator_details() {
+        for message in [
+            "HTTP 409: Conflict",
+            "Hub returned HTTP 409: Conflict",
+            "Hub returned an error (HTTP 409: Conflict)",
+            "OIDC: Issuer rejected the request",
+            "TLS: Certificate verification failed",
+            "DNS: Could not resolve the Hub",
+            "The local hub must use local://",
+            "Unknown harness: sqlite3",
+        ] {
+            assert_eq!(presentation_error(message), message);
+            assert_eq!(
+                presentation_error(&format!("work: FAILED: {message}")),
+                message
+            );
+            assert_eq!(
+                presentation_error(&json!({"error":{"message":message}}).to_string()),
+                message
+            );
         }
     }
     #[test]

@@ -1,10 +1,10 @@
 //! HTTP authentication. Only cryptographically verified OIDC principals enter the engine.
+use super::transport::{http_request, HttpDeadline, HTTP_TLS};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Read;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub fn env_value(key: &str) -> Option<String> {
@@ -114,7 +114,7 @@ pub struct OidcVerifier {
     refreshed: Condvar,
     key_lifetime: Duration,
     refresh_cooldown: Duration,
-    agent: ureq::Agent,
+    tls: Arc<rustls::ClientConfig>,
 }
 
 impl OidcVerifier {
@@ -144,75 +144,79 @@ impl OidcVerifier {
             refreshed: Condvar::new(),
             key_lifetime,
             refresh_cooldown,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .timeout_connect(Duration::from_secs(5))
-                .redirects(0)
-                .build(),
+            tls: HTTP_TLS.clone(),
         })
     }
 
-    fn request_timeout(deadline: Option<Instant>) -> Result<Duration, String> {
-        match deadline {
-            Some(at) => at
-                .checked_duration_since(Instant::now())
-                .filter(|d| !d.is_zero())
-                .map(|d| d.min(Duration::from_secs(5)))
-                .ok_or_else(|| "OIDC_LOGIN_TIMEOUT: OIDC verification deadline exceeded".into()),
-            None => Ok(Duration::from_secs(5)),
+    fn check_deadline(deadline: Option<HttpDeadline<'_>>) -> Result<(), String> {
+        if let Some(deadline) = deadline {
+            if deadline.cancelled.is_some_and(|check| check()) {
+                return Err("OIDC_LOGIN_TIMEOUT: OIDC login cancelled".into());
+            }
+            if Instant::now() >= deadline.at {
+                return Err("OIDC_LOGIN_TIMEOUT: OIDC verification deadline exceeded".into());
+            }
         }
+        Ok(())
     }
 
-    fn refresh(&self, deadline: Option<Instant>) -> Result<JwkSet, String> {
-        let discovery_response = self
-            .agent
-            .get(&format!(
+    fn get_json(
+        &self,
+        raw: &str,
+        setting: &str,
+        endpoint: &str,
+        deadline: Option<HttpDeadline<'_>>,
+    ) -> Result<Value, String> {
+        validate_oidc_endpoint(raw, setting, false)
+            .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
+        let at = Instant::now() + Duration::from_secs(5);
+        let deadline = match deadline {
+            Some(deadline) => HttpDeadline {
+                at: at.min(deadline.at),
+                ..deadline
+            },
+            None => HttpDeadline::uncancelled(at),
+        };
+        let request_failed = || format!("AUTH_UNAVAILABLE: {endpoint} request failed");
+        let url = url::Url::parse(raw).map_err(|_| request_failed())?;
+        let response = http_request(&url, "GET", &[], None, deadline, &self.tls)
+            .map_err(|_| request_failed())?;
+        if response.status != 200 {
+            return Err(if response.status >= 400 {
+                request_failed()
+            } else {
+                format!("AUTH_UNAVAILABLE: {endpoint} did not return HTTP 200")
+            });
+        }
+        let invalid = || format!("AUTH_UNAVAILABLE: Invalid {endpoint} JSON");
+        let bytes = response.read_body(1_048_576).map_err(|_| invalid())?;
+        serde_json::from_slice(&bytes).map_err(|_| invalid())
+    }
+
+    fn refresh(&self, deadline: Option<HttpDeadline<'_>>) -> Result<JwkSet, String> {
+        let discovery = self.get_json(
+            &format!(
                 "{}/.well-known/openid-configuration",
                 self.issuer.trim_end_matches('/')
-            ))
-            .timeout(Self::request_timeout(deadline)?)
-            .call()
-            .map_err(|_| "AUTH_UNAVAILABLE: OIDC discovery request failed")?;
-        if discovery_response.status() != 200 {
-            return Err("AUTH_UNAVAILABLE: OIDC discovery did not return HTTP 200".into());
-        }
-        validate_oidc_endpoint(
-            discovery_response.get_url(),
+            ),
             "CITO_OIDC_ISSUER discovery URL",
-            false,
-        )
-        .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
-        let discovery: Value =
-            serde_json::from_reader(discovery_response.into_reader().take(1_048_576))
-                .map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC discovery JSON")?;
+            "OIDC discovery",
+            deadline,
+        )?;
         if discovery["issuer"] != self.issuer {
             return Err("AUTH_UNAVAILABLE: discovery issuer mismatch".into());
         }
         let uri = discovery["jwks_uri"]
             .as_str()
             .ok_or("AUTH_UNAVAILABLE: missing OIDC jwks_uri")?;
-        validate_oidc_endpoint(uri, "OIDC jwks_uri", false)
-            .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
-        let response = self
-            .agent
-            .get(uri)
-            .timeout(Self::request_timeout(deadline)?)
-            .call()
-            .map_err(|_| "AUTH_UNAVAILABLE: JWKS request failed")?;
-        if response.status() != 200 {
-            return Err("AUTH_UNAVAILABLE: JWKS did not return HTTP 200".into());
-        }
-        validate_oidc_endpoint(response.get_url(), "OIDC JWKS response URL", false)
-            .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
-        let keys: JwkSet = serde_json::from_reader(response.into_reader().take(1_048_576))
-            .map_err(|_| "AUTH_UNAVAILABLE: Invalid JWKS JSON")?;
-        Ok(keys)
+        serde_json::from_value(self.get_json(uri, "OIDC jwks_uri", "JWKS", deadline)?)
+            .map_err(|_| "AUTH_UNAVAILABLE: Invalid JWKS JSON".into())
     }
 
     fn verification_key(
         &self,
         header: &jsonwebtoken::Header,
-        deadline: Option<Instant>,
+        deadline: Option<HttpDeadline<'_>>,
         mut refresh_after: Option<Instant>,
     ) -> Result<(jsonwebtoken::jwk::Jwk, Instant), String> {
         let mut attempted = false;
@@ -221,7 +225,7 @@ impl OidcVerifier {
             .lock()
             .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?;
         loop {
-            Self::request_timeout(deadline)?;
+            Self::check_deadline(deadline)?;
             if let Some(at) = cache
                 .loaded_at
                 .filter(|at| Some(*at) > refresh_after && at.elapsed() < self.key_lifetime)
@@ -258,12 +262,10 @@ impl OidcVerifier {
                 }
             }
             if cache.refreshing {
-                cache = if let Some(at) = deadline {
-                    let remaining = at
-                        .checked_duration_since(Instant::now())
-                        .ok_or("OIDC_LOGIN_TIMEOUT: OIDC verification deadline exceeded")?;
+                cache = if let Some(deadline) = deadline {
+                    let remaining = deadline.at.saturating_duration_since(Instant::now());
                     self.refreshed
-                        .wait_timeout(cache, remaining)
+                        .wait_timeout(cache, remaining.min(Duration::from_millis(50)))
                         .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?
                         .0
                 } else {
@@ -291,16 +293,16 @@ impl OidcVerifier {
             drop(cache);
             // Network I/O owns no cache lock; cached-key verification stays available.
             let refreshed = self.refresh(deadline);
-            let expired = deadline.is_some_and(|at| Instant::now() >= at);
+            let interrupted = Self::check_deadline(deadline);
             cache = self
                 .cache
                 .lock()
                 .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?;
             cache.refreshing = false;
-            if expired {
+            if let Err(error) = interrupted {
                 cache.refresh_at = None;
                 self.refreshed.notify_all();
-                return Err("OIDC_LOGIN_TIMEOUT: OIDC verification deadline exceeded".into());
+                return Err(error);
             }
             match refreshed {
                 Ok(keys) => {
@@ -323,14 +325,22 @@ impl OidcVerifier {
         self.verify_inner(token, None)
     }
 
-    pub fn verify_with_deadline(&self, token: &str, deadline: Instant) -> Result<Value, String> {
-        Self::request_timeout(Some(deadline))?;
+    pub(super) fn verify_with_deadline(
+        &self,
+        token: &str,
+        deadline: HttpDeadline<'_>,
+    ) -> Result<Value, String> {
+        Self::check_deadline(Some(deadline))?;
         let result = self.verify_inner(token, Some(deadline));
-        Self::request_timeout(Some(deadline))?;
+        Self::check_deadline(Some(deadline))?;
         result
     }
 
-    fn verify_inner(&self, token: &str, deadline: Option<Instant>) -> Result<Value, String> {
+    fn verify_inner(
+        &self,
+        token: &str,
+        deadline: Option<HttpDeadline<'_>>,
+    ) -> Result<Value, String> {
         if !super::config::valid_hub_token(token) {
             return Err("AUTHORIZATION_VIOLATION: invalid bearer token".into());
         }

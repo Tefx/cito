@@ -77,7 +77,7 @@ fn plugin_request_owned(
         }
         if let Some((client, _)) = renew {
             if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("NATS_UNAVAILABLE: Hub disconnected during wake".into());
+                return Err("HUB_UNAVAILABLE: Hub disconnected during wake".into());
             }
         }
         if let Some((state, row)) = fence {
@@ -228,14 +228,9 @@ pub fn poll_listener(
             .transaction(|db| isolate_foreign_work(db, &current_listener(db, hub, id)?))
     })?;
     let name = format!("{}_{}", string(row, "host_id"), id);
-    let added=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
-    // A fallback response keeps its own clock observation, including time spent
-    // waiting for a failing backlog request.
-    let added_observed = std::time::Instant::now();
-    let (backlog, observed) = match client.rpc("consumer_backlog", &json!({"name":name})) {
-        Ok(backlog) => (backlog, std::time::Instant::now()),
-        Err(_) => (added, added_observed),
-    };
+    // Consumer enrollment already returns the first unconsumed page.
+    let backlog=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
+    let observed = std::time::Instant::now();
     let (hub_now, observed) = match backlog["server_now_ms"].as_u64() {
         Some(now) => (now, observed),
         None => (client.server_now(), std::time::Instant::now()),
@@ -591,7 +586,7 @@ fn dispatch_listener(
                     // when the independent open effect also reports confirmation.
                     let delivered = result["outcome"] == "delivered"
                         || ((confirmed || insertion_confirmed) && result["open_confirmed"] == true);
-                    if local.finish_wake_batch(
+                    local.finish_wake_batch(
                         row,
                         first,
                         "DISPATCHED",
@@ -600,16 +595,7 @@ fn dispatch_listener(
                         insertion_confirmed,
                         delivered,
                         false,
-                    )? && delivered
-                    {
-                        drop(commit);
-                        // The same transaction as completion persists pending_hub_acks.
-                        // Leave them for the daemon's durable flush if the Hub is offline.
-                        let _ = client.rpc(
-                            "signal_ack",
-                            &json!({"node_id":id,"signal_ids":ids,"channel_id":channel}),
-                        );
-                    }
+                    )?;
                 }
                 "session_switched" => {
                     drop(commit);

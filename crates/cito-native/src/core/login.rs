@@ -1,14 +1,19 @@
 //! OIDC browser authorization and refresh. Only verified identities enter the token cache.
-use super::{auth::OidcVerifier, identity::hash};
+use super::{
+    auth::OidcVerifier,
+    identity::hash,
+    transport::{http_request, HttpDeadline, HttpResponse, HTTP_TLS},
+};
 use crate::oidc_constants::OIDC_DEFAULT_SCOPES;
+use crate::support::FileLock;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
@@ -75,69 +80,66 @@ impl Deadline<'_> {
         crate::support::poll_until(fds, Some(until.min(self.at)))?;
         self.remaining().map(|_| ())
     }
-    fn request(&self, request: ureq::Request) -> Result<ureq::Request, String> {
-        Ok(request.timeout(self.remaining()?.min(Duration::from_secs(10))))
+    fn http_deadline(&self) -> HttpDeadline<'_> {
+        HttpDeadline {
+            at: self.at,
+            connect_at: None,
+            cancelled: Some(self.cancelled),
+        }
     }
-    fn network_error(&self, error: impl std::error::Error + 'static) -> String {
+    fn request<'a>(
+        &'a self,
+        raw: &str,
+        form: Option<&[(&str, &str)]>,
+    ) -> Result<HttpResponse<impl Read + 'a>, String> {
+        self.remaining()?;
+        let url = url::Url::parse(raw).map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC endpoint")?;
+        let deadline = HttpDeadline {
+            at: self.at.min(Instant::now() + Duration::from_secs(10)),
+            ..self.http_deadline()
+        };
+        let headers = [("Content-Type", "application/x-www-form-urlencoded")];
+        let encoded = form.map(|pairs| {
+            url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(pairs)
+                .finish()
+        });
+        let (method, headers) = if form.is_some() {
+            ("POST", headers.as_slice())
+        } else {
+            ("GET", &[][..])
+        };
+        http_request(
+            &url,
+            method,
+            headers,
+            encoded.as_deref().map(str::as_bytes),
+            deadline,
+            &HTTP_TLS,
+        )
+        .map_err(|e| self.network_error(e))
+    }
+    fn network_error(&self, error: io::Error) -> String {
         if let Err(error) = self.remaining() {
             return error;
         }
-        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-        while let Some(current) = cause {
-            if current
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| {
-                    matches!(
-                        error.kind(),
-                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                    )
-                })
-            {
-                return "OIDC_LOGIN_TIMEOUT: OIDC endpoint timed out".into();
-            }
-            cause = current.source();
+        match error.kind() {
+            io::ErrorKind::TimedOut => "OIDC_LOGIN_TIMEOUT: OIDC endpoint timed out",
+            io::ErrorKind::FileTooLarge => "AUTH_UNAVAILABLE: OIDC response too large",
+            _ => "AUTH_UNAVAILABLE: OIDC endpoint unavailable",
         }
-        "AUTH_UNAVAILABLE: OIDC endpoint unavailable".into()
+        .into()
     }
-}
-
-/// The open descriptor owns the flock. Never unlink a lockfile: queued users may own it.
-struct FileLock(File);
-impl FileLock {
-    fn acquire(path: &Path, deadline: &Deadline<'_>) -> Result<Self, String> {
-        deadline.remaining()?;
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| format!("AUTH_UNAVAILABLE: Cannot lock {}: {e}", path.display()))?;
+    fn lock(&self, path: &Path) -> Result<FileLock, String> {
+        self.remaining()?;
         let mut delay = Duration::from_millis(25);
-        loop {
-            deadline.remaining()?;
-            // SAFETY: file owns a valid descriptor; flock neither transfers nor closes it.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                deadline.remaining()?;
-                return Ok(Self(file));
-            }
-            let error = std::io::Error::last_os_error();
-            if !matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ) {
-                return Err(format!("AUTH_UNAVAILABLE: OIDC lock: {error}"));
-            }
-            deadline.wait(&mut Vec::new(), Instant::now() + delay)?;
+        let result = FileLock::acquire_interruptible(path, &mut || {
+            self.wait(&mut Vec::new(), Instant::now() + delay)?;
             delay = (delay * 2).min(Duration::from_secs(1));
-        }
-    }
-}
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // SAFETY: the descriptor is live until this guard's File is dropped next.
-        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+            Ok(())
+        });
+        self.remaining()?;
+        result.map_err(|error| format!("AUTH_UNAVAILABLE: OIDC lock: {error}"))
     }
 }
 
@@ -318,7 +320,7 @@ fn verify_cache(
         .as_str()
         .ok_or("UNAUTHORIZED: Invalid cache token")?;
     let identity = OidcVerifier::new(&settings.issuer, &settings.client)?
-        .verify_with_deadline(token, deadline.at)?;
+        .verify_with_deadline(token, deadline.http_deadline())?;
     deadline.remaining()?;
     Ok((token.to_owned(), identity))
 }
@@ -351,24 +353,24 @@ fn payload(token: &str) -> Result<Value, String> {
     serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())
 }
-fn response_json(response: ureq::Response, deadline: &Deadline<'_>) -> Result<Value, String> {
+fn response_json(
+    response: HttpResponse<impl Read>,
+    deadline: &Deadline<'_>,
+) -> Result<Value, String> {
     deadline.remaining()?;
-    if response.status() != 200 {
+    if response.status >= 400 {
+        return Err("AUTH_UNAVAILABLE: OIDC endpoint unavailable".into());
+    }
+    if response.status != 200 {
         return Err(format!(
             "AUTH_UNAVAILABLE: OIDC endpoint returned HTTP {}",
-            response.status()
+            response.status
         ));
     }
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_JSON + 1)
-        .read_to_end(&mut body)
+    let body = response
+        .read_body(MAX_JSON)
         .map_err(|e| deadline.network_error(e))?;
     deadline.remaining()?;
-    if body.len() as u64 > MAX_JSON {
-        return Err("AUTH_UNAVAILABLE: OIDC response too large".into());
-    }
     serde_json::from_slice(&body).map_err(|_| "AUTH_UNAVAILABLE: Invalid OIDC JSON".into())
 }
 fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), String> {
@@ -425,8 +427,7 @@ fn recover_inner(
 ) -> Result<LoginResult, String> {
     deadline.remaining()?;
     let path = cache_path(dir, hub)?;
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let _cache_lock = FileLock::acquire(&path.with_extension("json.lock"), deadline)?;
+    let _cache_lock = deadline.lock(&path.with_extension("json.lock"))?;
     let old = match read_cache(&path, settings) {
         Ok(cache) => cache,
         Err(e) if interactive && e.kind() == std::io::ErrorKind::PermissionDenied => None,
@@ -447,15 +448,14 @@ fn recover_inner(
         }
     }
     let verifier = OidcVerifier::new(&settings.issuer, &settings.client)?;
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
     let discovery = response_json(
-        deadline
-            .request(agent.get(&format!(
+        deadline.request(
+            &format!(
                 "{}/.well-known/openid-configuration",
                 settings.issuer.trim_end_matches('/')
-            )))?
-            .call()
-            .map_err(|e| deadline.network_error(e))?,
+            ),
+            None,
+        )?,
         deadline,
     )?;
     if discovery["issuer"] != settings.issuer {
@@ -465,17 +465,19 @@ fn recover_inner(
     let token_url = endpoint(&discovery, "token_endpoint")?;
     let authorization = endpoint(&discovery, "authorization_endpoint")?;
     let refreshed = if let Some(refresh) = old_refresh {
-        match deadline.request(agent.post(&token_url))?.send_form(&[
-            ("client_id", settings.client.as_str()),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh),
-        ]) {
-            Ok(response) => Some(response_json(response, deadline)?),
-            Err(ureq::Error::Status(400 | 401, _)) => {
-                deadline.remaining()?;
-                None
-            }
-            Err(error) => return Err(deadline.network_error(error)),
+        let response = deadline.request(
+            &token_url,
+            Some(&[
+                ("client_id", settings.client.as_str()),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh),
+            ]),
+        )?;
+        if matches!(response.status, 400 | 401) {
+            deadline.remaining()?;
+            None
+        } else {
+            Some(response_json(response, deadline)?)
         }
     } else {
         None
@@ -498,7 +500,7 @@ fn recover_inner(
                 "/tmp/cito-oidc-callback-{uid}-{}.lock",
                 settings.port
             ));
-            _port_lock = Some(FileLock::acquire(&lock_path, deadline)?);
+            _port_lock = Some(deadline.lock(&lock_path)?);
         }
         deadline.remaining()?;
         let listener = TcpListener::bind(("127.0.0.1", settings.port))
@@ -578,24 +580,23 @@ fn recover_inner(
             }
         };
         drop(listener);
-        response_json(
-            deadline
-                .request(agent.post(&token_url))?
-                .send_form(&[
-                    ("client_id", settings.client.as_str()),
-                    ("grant_type", "authorization_code"),
-                    ("code", &code),
-                    ("redirect_uri", &redirect),
-                    ("code_verifier", &pkce),
-                ])
-                .map_err(|error| match error {
-                    ureq::Error::Status(status, _) if status < 500 => {
-                        format!("UNAUTHORIZED: OIDC token exchange rejected (HTTP {status})")
-                    }
-                    error => deadline.network_error(error),
-                })?,
-            deadline,
-        )?
+        let response = deadline.request(
+            &token_url,
+            Some(&[
+                ("client_id", settings.client.as_str()),
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", &redirect),
+                ("code_verifier", &pkce),
+            ]),
+        )?;
+        if (400..500).contains(&response.status) {
+            return Err(format!(
+                "UNAUTHORIZED: OIDC token exchange rejected (HTTP {})",
+                response.status
+            ));
+        }
+        response_json(response, deadline)?
     };
     deadline.remaining()?;
     let token = body["id_token"]
@@ -608,7 +609,7 @@ fn recover_inner(
     {
         return Err("UNAUTHORIZED: Invalid refresh_token".into());
     }
-    let identity = verifier.verify_with_deadline(token, deadline.at)?;
+    let identity = verifier.verify_with_deadline(token, deadline.http_deadline())?;
     deadline.remaining()?;
     let claims = payload(token)?;
     if nonce.is_some_and(|nonce| claims["nonce"] != nonce) {

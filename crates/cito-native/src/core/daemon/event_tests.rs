@@ -61,6 +61,8 @@ print(json.dumps(result))
                 fields: Vec::new(),
                 post_setup_hint: None,
                 post_disconnect_hint: None,
+                reload_hint: None,
+                channel: Default::default(),
             });
         }
         let config = NativeConfig {

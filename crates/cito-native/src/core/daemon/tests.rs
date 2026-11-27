@@ -59,6 +59,8 @@ fn script_plugin(
         fields: vec![],
         post_setup_hint: None,
         post_disconnect_hint: None,
+        reload_hint: None,
+        channel: Default::default(),
     }
 }
 
@@ -134,34 +136,6 @@ impl Drop for ServiceCleanup {
             .unwrap_or_else(|poison| poison.into_inner())
             .shutdown();
     }
-}
-
-#[test]
-fn ui_frame_bounds_preserve_cwd_and_mailbox_liveness() {
-    let cwd = format!("/workspace/{}", "segment/".repeat(80));
-    let bytes = bounded_frame(json!({"op":"state","available":[{"cwd":cwd}]})).unwrap();
-    let frame: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(frame["available"][0]["cwd"], cwd);
-    for key in [
-        "token",
-        "invite_command",
-        "tailscale_invite_command",
-        "lan_invite_command",
-    ] {
-        let value = "x".repeat(8192);
-        let frame: Value =
-            serde_json::from_slice(&bounded_frame(json!({key:value})).unwrap()).unwrap();
-        assert_eq!(frame[key], value);
-    }
-    let mailbox = UiMailbox::default();
-    assert!(mailbox.emit(json!({"op":"settings","cwd":"x".repeat(FRAME_LIMIT)})));
-    let reduced: Value = serde_json::from_slice(&mailbox.next().unwrap()).unwrap();
-    assert_eq!(reduced["truncated"], true);
-    assert_eq!(reduced["truncated_collections"], json!([]));
-    assert!(reduced["cwd"].as_str().unwrap().ends_with('…'));
-    assert!(!mailbox.closed.load(Ordering::SeqCst));
-    mailbox.emit(json!({"op":"state","status":"idle"}));
-    assert_eq!(mailbox.pending.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -973,7 +947,8 @@ fn invite_join_settles_each_request_and_records_its_saved_hub() -> Result<(), St
                 let error = result.unwrap_err();
                 assert_eq!(s.last_hub_errors[target].0, error);
                 assert_eq!(frames.len(), 1);
-                assert_eq!(frames[0]["error"], error);
+                assert_eq!(error, "INVALID_INPUT: Hub token is required in token mode");
+                assert_eq!(frames[0]["error"], "Hub token is required in token mode");
             }
             _ => {
                 let result = result?;
@@ -1215,74 +1190,6 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
         Ok(())
     })();
     result
-}
-
-#[test]
-fn ipc_marks_only_collections_shed_to_fit_the_wire_budget() {
-    let frame = json!({"op":"state","activity":vec![json!({"message":"short"});81],"listeners":vec![json!({});65]});
-    let bounded: Value = serde_json::from_slice(&bounded_frame(frame).unwrap()).unwrap();
-    assert_eq!(bounded["activity"].as_array().unwrap().len(), 80);
-    assert_eq!(bounded["listeners"].as_array().unwrap().len(), 64);
-    assert!(bounded.get("truncated").is_none());
-    assert!(bounded.get("truncated_collections").is_none());
-
-    // The final newline counts toward the budget. One extra byte sheds the
-    // activity row; peers still fit with the resulting diagnostic fields.
-    let mut edge =
-        json!({"cwd":"", "activity":[{"message":"a".repeat(128)}], "peers":[{"name":"alice"}]});
-    let padding = FRAME_LIMIT - 2 - serde_json::to_vec(&edge).unwrap().len();
-    edge["cwd"] = json!("x".repeat(padding));
-    assert_eq!(
-        bounded_frame(edge.clone()).unwrap(),
-        serde_json::to_vec(&edge).unwrap()
-    );
-    edge["cwd"] = json!("x".repeat(padding + 1));
-    let partial: Value = serde_json::from_slice(&bounded_frame(edge.clone()).unwrap()).unwrap();
-    assert_eq!(partial["truncated"], true);
-    assert_eq!(partial["truncated_collections"], json!(["activity"]));
-    assert_eq!(partial["activity"], json!([]));
-    assert_eq!(partial["peers"], edge["peers"]);
-    assert_eq!(partial["cwd"], edge["cwd"]);
-
-    let keys = [
-        "activity",
-        "peers",
-        "my_remote_listeners",
-        "available",
-        "listeners",
-        "harnesses",
-        "hubs",
-        "apps",
-        "channels",
-    ];
-    let mut frame = json!({"settings":{"hubs":[1]},"cwd":"x".repeat(FRAME_LIMIT)});
-    for key in keys {
-        let root = if matches!(key, "apps" | "channels") {
-            &mut frame["settings"]
-        } else {
-            &mut frame
-        };
-        root[key] = json!([1, 2]);
-    }
-    let bytes = bounded_frame(frame).unwrap();
-    assert!(bytes.len() + 1 < FRAME_LIMIT);
-    let bounded: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(bounded["truncated"], true);
-    let mut shed = keys.to_vec();
-    shed.push("settings.hubs");
-    assert_eq!(bounded["truncated_collections"], json!(shed));
-    assert_eq!(bounded["settings"]["hubs"], json!([]));
-    for key in keys {
-        assert_eq!(
-            bounded.get(key).unwrap_or(&bounded["settings"][key]),
-            &json!([])
-        );
-    }
-    let bounded: Value = serde_json::from_slice(
-        &ui_ipc::bounded_frame(json!({"op":"state","activity":[{"message":"x".repeat(513)}],"listeners":[{"cwd":"x".repeat(129),"title":"x".repeat(513),"about":"x".repeat(257)}]})).unwrap(),
-    )
-    .unwrap();
-    assert!(bounded.get("truncated").is_none());
 }
 
 pub(super) fn settle_setup_inspections(service: &mut DaemonService) {
@@ -3934,6 +3841,41 @@ fn activity_pair() -> Result<(TestDirectory, TestService), String> {
 }
 
 #[test]
+fn activity_copy_emits_one_receipt_with_the_exact_stored_body() -> Result<(), String> {
+    let (_dir, mut service) = activity_pair()?;
+    let message = "quoted \"body\"\n🙂".repeat(90_000);
+    service.state.db.execute(
+        "UPDATE local_signals SET message=? WHERE signal_id='matching'",
+        &[json!(message)],
+    )?;
+    let mailbox = Arc::new(UiMailbox::default());
+    service.set_ui(mailbox.clone());
+    let snapshot: Value = serde_json::from_slice(&mailbox.next().unwrap()).unwrap();
+    let preview = snapshot["activity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["signal_id"] == "matching")
+        .unwrap();
+    assert_eq!(preview["message_truncated"], true);
+    assert!(preview["message"].as_str().unwrap().len() <= 512);
+    service.action(&json!({"op":"copy_activity_message","hub":"local","signal_id":"matching","request_id":"copy"}))?;
+    let receipts: Vec<Value> = mailbox
+        .pending
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(|(_, wire)| serde_json::from_slice(&wire).unwrap())
+        .filter(|frame: &Value| frame["request_id"] == "copy")
+        .collect();
+    assert_eq!(
+        receipts,
+        vec![json!({"op":"activity_message","request_id":"copy","message":message})]
+    );
+    Ok(())
+}
+
+#[test]
 fn bulk_acknowledgements_roll_back_on_queue_failure() -> Result<(), String> {
     let (_dir, service) = activity_pair()?;
     let state = &service.state;
@@ -4067,11 +4009,14 @@ fn settings_before_directory_retains_inventory_delivery_policy() -> Result<(), S
     service.channel_inventory(&remote).refresh(&remote, 0)?;
     server.join().unwrap()?;
     service.replace_slot(remote);
-    assert_eq!(
-        service.human_projection("local")["human_state_status"],
-        "unknown"
-    );
     let settings = service.settings_for_hub("local");
+    let hub = settings["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hub| hub["name"] == "local")
+        .unwrap();
+    assert_eq!(hub["human_state_status"], "unknown");
     assert_eq!(settings["channels"][0]["inbox_paused"], true);
     assert_eq!(settings["channels"][0]["delivery_enabled"], false);
     Ok(())
@@ -4584,7 +4529,7 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
     for i in 0..40 {
         mailbox.emit(json!({"op":"settings","hub":"local","revision":i}));
     }
-    let results = [
+    let mailbox_results = [
         json!({"op":"settings","hub":"local","request_id":"gateway-save"}),
         json!({"op":"settings","hub":"local","request_id":"personal-save"}),
         json!({"op":"settings","hub":"local","ok":true,"source_op":"setup_save_hub"}),
@@ -4593,8 +4538,14 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
         json!({"op":"composer_result","ok":true}),
         json!({"op":"pair_code","code":"123456"}),
     ];
+    let results: Vec<_> = mailbox_results
+        .into_iter()
+        .chain((0..82).map(
+            |i| json!({"op":"state","request_id":format!("save-{i}"),"ok":true,"committed":true}),
+        ))
+        .collect();
     for result in &results {
-        mailbox.emit(result.clone());
+        assert!(mailbox.emit(result.clone()));
     }
     let snapshot = json!({"op":"settings","hub":"local","revision":40});
     mailbox.emit(snapshot.clone());
@@ -4672,6 +4623,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
     assert_eq!(peer["human_state_status"], hub["human_state_status"]);
     assert_eq!(peer["human_can_set_scope"], hub["human_can_set_scope"]);
     assert_eq!(peer["attachments"], hub["attachments"]);
+    assert_eq!(hub["attachments"][0]["channel_id"], "remote:human");
     assert_eq!(peer["last_seen_at"], crate::core::identity::iso(1000));
     for current in [true, false] {
         let samples = service.hub_samples();
@@ -4716,52 +4668,6 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
     assert_eq!(hub["human_state_status"], peer["human_state_status"]);
     Ok(())
 }
-#[test]
-fn an_unrepresentable_receipt_closes_the_stream_instead_of_silently_dropping_it() {
-    let mailbox = UiMailbox::default();
-    mailbox.emit(json!({"op":"error","request_id":"x".repeat(FRAME_LIMIT+1),"error":"Cannot fit"}));
-    assert!(mailbox.closed.load(Ordering::SeqCst));
-    assert!(mailbox.next().is_none());
-}
-#[test]
-fn correlated_hub_save_never_sheds_the_row_needed_for_settlement() -> Result<(), String> {
-    let hubs = (0..150)
-        .map(|i| json!({"name":format!("hub-{i}"),"url":"https://id.example.com"}))
-        .collect::<Vec<_>>();
-    let frame: Value = serde_json::from_slice(&bounded_frame(json!({"op":"settings","request_id":"save","source_op":"setup_save_hub","settings":{"hubs":hubs}}))?).map_err(|e| e.to_string())?;
-    assert_eq!(frame["settings"]["hubs"][149]["name"], "hub-149");
-    let hubs = (0..150).map(|i| json!({"name":format!("hub-{i}"),"attachments":(0..30).map(|_|json!({"display_name":"long".repeat(100)})).collect::<Vec<_>>()})).collect::<Vec<_>>();
-    let frame: Value = serde_json::from_slice(&bounded_frame(json!({"op":"settings","request_id":"save","source_op":"setup_save_hub","settings":{"hubs":hubs}}))?).map_err(|e| e.to_string())?;
-    assert_eq!(frame["op"], "error");
-    assert_eq!(frame["request_id"], "save");
-    assert_eq!(frame["source_op"], "setup_save_hub");
-    Ok(())
-}
-#[test]
-fn root_hub_shedding_retains_correlated_receipt_and_terminates() -> Result<(), String> {
-    let f = json!({"op":"settings","request_id":"receipt","hub":"work","action":"save_hub_service","hubs":(0..80).map(|i|json!({"name":format!("hub-{i}"),"attachments":(0..20).map(|_|json!({"display_name":"long".repeat(100)})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
-    let bytes = bounded_frame(f)?;
-    assert!(bytes.len() <= FRAME_LIMIT);
-    let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    assert_eq!(frame["request_id"], "receipt");
-    assert_eq!(frame["hub"], "work");
-    Ok(())
-}
-#[test]
-fn channel_inventory_diagnostic_survives_collection_shedding() -> Result<(), String> {
-    let frame = json!({"op":"state","settings":{"channel_inventory_error":"Inventory unavailable","channels":(0..16).map(|i| json!({"id":format!("channel-{i}"),"fields":(0..12).map(|_|json!({"detail":"x".repeat(4096)})).collect::<Vec<_>>()})).collect::<Vec<_>>()}});
-    let bytes = bounded_frame(frame)?;
-    assert!(bytes.len() < FRAME_LIMIT);
-    let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    assert_eq!(frame["truncated"], true);
-    assert_eq!(frame["truncated_collections"], json!(["channels"]));
-    assert_eq!(
-        frame["settings"]["channel_inventory_error"],
-        "Inventory unavailable"
-    );
-    Ok(())
-}
-
 #[test]
 fn explicit_nested_pids_preserve_endpoint_errors_and_provider_fallback() -> Result<(), String> {
     let dir =
@@ -4828,18 +4734,33 @@ print(json.dumps(result))
 }
 
 #[test]
-fn canonical_editable_values_survive_ui_projection() -> Result<(), String> {
-    let title = "\u{4e2d}".repeat(64);
-    let long = "x".repeat(6000);
-    let frame = json!({"op":"state","listeners":[{"title":title}],
-        "settings":{"hubs":[{"url":format!("https://id.example.com/{long}"),"issuer":long,"client_id":long}],
-        "channels":[{"fields":[{"value":long}]}]}});
-    let projected: Value = serde_json::from_slice(&bounded_frame(frame.clone())?).unwrap();
-    assert_eq!(projected, frame);
-    let invite = json!({"op":"hub_invite","url":long,"token":long,"issuer":long,"client_id":long});
-    let projected: Value = serde_json::from_slice(&bounded_frame(invite.clone())?).unwrap();
-    assert_eq!(projected, invite);
-    Ok(())
+fn ui_mailbox_emits_complete_ndjson_snapshots_and_receipts() {
+    let command = "pair \"code\"\n".repeat(600);
+    let url = format!("https://id.example.com/pair?code={}", "x".repeat(6000));
+    let credential = "x".repeat(8192);
+    let attachments: Vec<_> = (0..129)
+        .map(|i| json!({"channel_id":format!("device-{i}"),"display_name":"é".repeat(1024)}))
+        .collect();
+    let listeners: Vec<_> = (0..65)
+        .map(|i| json!({"listener_id":format!("node-{i}"),"cwd":"/workspace"}))
+        .collect();
+    let snapshot = json!({"op":"state","listeners":listeners,"my_remote_listeners":listeners,
+        "hubs":[{"attachments":attachments}],"settings":{"host_hub":{"token":credential,"invite_command":command},
+        "channels":[{"id":"channel","pairing_command":command,"pairing_url":url}]}});
+    let pair = json!({"op":"pair_code","request_id":"pair","hub":"local","channel_id":"channel",
+        "pairing_command":command,"pairing_url":url});
+    let invite =
+        json!({"op":"hub_invite","request_id":"invite","config":{"url":url,"token":credential}});
+    let mailbox = UiMailbox::default();
+    for frame in [&snapshot, &pair, &invite] {
+        assert!(mailbox.emit(frame.clone()));
+    }
+    for frame in [snapshot, pair, invite] {
+        let wire = mailbox.next().unwrap();
+        assert_eq!(wire.split(|&byte| byte == b'\n').count(), 2);
+        assert_eq!(wire.last(), Some(&b'\n'));
+        assert_eq!(serde_json::from_slice::<Value>(&wire).unwrap(), frame);
+    }
 }
 
 #[test]
@@ -4889,23 +4810,5 @@ fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
             .unwrap_err()
             .starts_with("FORBIDDEN:"));
     }
-    Ok(())
-}
-
-#[test]
-fn bounded_empty_activity_with_multibyte_listeners() -> Result<(), String> {
-    let f = json!({"op":"state","activity":[],"listeners":(0..150).map(|_|json!({"title":"🦀".repeat(10000),"about":"🦀".repeat(10000)})).collect::<Vec<_>>(),"unread_count":200});
-    let bytes = bounded_frame(f)?;
-    assert!(bytes.len() < FRAME_LIMIT);
-    let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    assert_eq!(frame["unread_count"], 200);
-    assert_eq!(frame["listeners"].as_array().map(Vec::len), Some(64));
-    let title = "é".repeat(128);
-    let frame: Value = serde_json::from_slice(&bounded_frame(json!({"title":title}))?)
-        .map_err(|e| e.to_string())?;
-    // Valid editable titles preserve their canonical UTF-8 bytes.
-    let projected = frame["title"].as_str().ok_or("Missing title")?;
-    assert_eq!(projected, title);
-    assert!(projected.len() <= 512);
     Ok(())
 }

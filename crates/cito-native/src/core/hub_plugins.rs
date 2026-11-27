@@ -1,7 +1,7 @@
 //! Persistent, generic HumanChannel NDJSON subprocess transport.
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -13,20 +13,12 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[derive(Clone)]
-pub struct ChannelPlugin {
-    pub id: String,
-    pub dir: PathBuf,
-    pub manifest: Value,
-    pub command: Vec<String>,
-    pub is_builtin: bool,
-}
+use super::plugins::{load_plugins_from_roots, plugin_command, PluginDescriptor};
 
 pub fn discover(
     roots: &[(PathBuf, bool)],
     user_root: Option<&Path>,
-) -> Result<Vec<ChannelPlugin>, String> {
-    let mut plugins = Vec::new();
+) -> Result<Vec<PluginDescriptor>, String> {
     if let Some(state) = user_root.and_then(Path::parent) {
         super::plugins::cleanup_retired_companion(state)?;
     }
@@ -40,29 +32,8 @@ pub fn discover(
         .filter(|(_, builtin)| *builtin)
         .map(|(path, _)| path.clone())
         .collect();
-    let loaded = super::plugins::load_plugins_from_roots(&external, &builtin, user_root, true);
-    for descriptor in loaded.plugins {
-        let dir = descriptor.plugin_dir;
-        // Discovery owns validation and fallback selection. A concurrently removed
-        // manifest affects only this entry, never the other channel services.
-        let Some(m) = std::fs::read(dir.join("plugin.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-        else {
-            continue;
-        };
-        if descriptor.kind != "human-channel" || m["scope"] == "user" {
-            continue;
-        }
-        let command = descriptor.command;
-        plugins.push(ChannelPlugin {
-            id: descriptor.id,
-            dir,
-            command,
-            manifest: m,
-            is_builtin: descriptor.is_builtin,
-        });
-    }
+    let mut plugins = load_plugins_from_roots(&external, &builtin, user_root, true).plugins;
+    plugins.retain(|plugin| plugin.kind == "human-channel" && plugin.channel.hub_scoped);
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(plugins)
 }
@@ -71,12 +42,50 @@ pub fn discover(
 #[path = "../../tests/hub/hub_plugin_cases.rs"]
 mod tests;
 
+#[cfg(test)]
+pub(super) fn test_descriptor(
+    dir: &Path,
+    id: &str,
+    command: Vec<String>,
+    mut manifest: Value,
+) -> PluginDescriptor {
+    manifest["id"] = json!(id);
+    manifest["kind"] = json!("human-channel");
+    if manifest["displayName"].is_null() {
+        manifest["displayName"] = json!(id);
+    }
+    manifest["command"] = if command.is_empty() {
+        json!(["./unused"])
+    } else {
+        json!(command)
+    };
+    let mut descriptor = super::plugins::parse_manifest(&dir.join(id), false, &manifest).unwrap();
+    descriptor.plugin_dir = dir.to_path_buf();
+    descriptor
+}
+
 type Pending = Arc<Mutex<HashMap<String, mpsc::SyncSender<Value>>>>;
 // Monotonic: either pipe can fail; only an intentional shutdown suppresses the exit wake.
 const RUNNING: u8 = 0;
 const EXITED: u8 = 1;
 const STOPPING: u8 = 2;
 pub(super) const CHANNEL_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+fn read_stdout_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<usize> {
+    // A WouldBlock retains the prefix. Allow one sentinel byte to distinguish
+    // an oversized frame without reading the rest of it.
+    let remaining = MAX_STDOUT_LINE_BYTES + 1 - line.len();
+    let result = reader.take(remaining as u64).read_until(b'\n', line);
+    if line.len() > MAX_STDOUT_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Plugin frame exceeds 8 MiB",
+        ));
+    }
+    result
+}
+
 pub struct ChannelProcess {
     child: Mutex<Child>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -87,16 +96,11 @@ pub struct ChannelProcess {
 }
 impl ChannelProcess {
     pub fn spawn(
-        plugin: &ChannelPlugin,
+        plugin: &PluginDescriptor,
         callback: Arc<dyn Fn(Value) -> Option<Value> + Send + Sync>,
     ) -> Result<Self, String> {
         let shutdown_wake = Arc::new(crate::support::WakePipe::new()?);
-        let mut manifest = plugin.manifest.clone();
-        manifest["id"] = json!(plugin.id);
-        manifest["displayName"] = json!(plugin.id);
-        manifest["command"] = json!(plugin.command);
-        let descriptor = super::plugins::parse_manifest(&plugin.dir, plugin.is_builtin, &manifest)?;
-        let mut child = super::plugins::plugin_command(&descriptor)?
+        let mut child = plugin_command(plugin)?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -147,17 +151,8 @@ impl ChannelProcess {
             let mut reader = BufReader::new(stdout);
             let mut line = Vec::new();
             while reader_state.load(Ordering::SeqCst) == RUNNING {
-                // A broken plugin cannot grow a line indefinitely.
-                use std::io::Read;
-                match reader
-                    .by_ref()
-                    .take(8 * 1024 * 1024 + 1)
-                    .read_until(b'\n', &mut line)
-                {
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if line.len() > 8 * 1024 * 1024 {
-                            break;
-                        }
+                match read_stdout_line(&mut reader, &mut line) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         let mut fds = [
                             libc::pollfd {
                                 fd: reader.get_ref().as_raw_fd(),
@@ -184,8 +179,7 @@ impl ChannelProcess {
                         continue;
                     }
                     Ok(0) | Err(_) => break,
-                    _ if line.len() > 8 * 1024 * 1024 => break,
-                    _ => {}
+                    Ok(_) => {}
                 }
                 let parsed = serde_json::from_slice::<Value>(&line);
                 line.clear();

@@ -995,13 +995,15 @@ fn pending_business_ack_requires_original_url_and_principal() {
     assert_eq!(ack["principal_id"], human["principal_id"]);
     f.daemon(&[]);
     f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
-    assert!(state
-        .query(
-            "SELECT * FROM pending_hub_acks WHERE signal_id=?",
-            std::slice::from_ref(&delivered)
-        )
-        .unwrap()
-        .is_empty());
+    wait(|| {
+        state
+            .query(
+                "SELECT * FROM pending_hub_acks WHERE signal_id=?",
+                std::slice::from_ref(&delivered),
+            )
+            .unwrap()
+            .is_empty()
+    });
     assert!(!hub
         .query(
             "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
@@ -1045,6 +1047,15 @@ fn pending_business_ack_requires_original_url_and_principal() {
         Ok(())
     }).unwrap();
     f.tool("cito_inbox", json!({"ack_all":false}), meta);
+    wait(|| {
+        state
+            .query(
+                "SELECT * FROM pending_hub_acks WHERE signal_id=?",
+                std::slice::from_ref(&id),
+            )
+            .unwrap()
+            .is_empty()
+    });
     let retained = state.query("SELECT * FROM pending_hub_acks", &[]).unwrap();
     assert_eq!(
         retained.len(),
@@ -1753,6 +1764,24 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
             "INVALID_INPUT: Ambiguous target; use full listener_id"
         );
     }
+    let mut retained = row;
+    retained["updated_at_ms"] = json!(cito_native::core::plugins::now_ms() - 120_000);
+    f.db("hub.sqlite")
+        .execute(
+            "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+            &[json!(retained.to_string()), json!(duplicate)],
+        )
+        .unwrap();
+    wait(|| {
+        let page = f.tool(
+            "cito_find",
+            json!({"harness":"fixture","limit":1}),
+            json!({}),
+        );
+        page["matched_count"] == 2
+            && page["online_count"] == 1
+            && page["listeners"].as_array().unwrap().len() == 1
+    });
 }
 
 #[test]
@@ -1930,6 +1959,12 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
     let status = f.tool("cito_status", json!({}), meta.clone());
     assert_eq!(status["registered"], true);
     assert_eq!(status["title"], "Native fixture");
+    let address = format!(
+        "alice/fixture#{}",
+        &target["canonical_listener_id"].as_str().unwrap()[2..6]
+    );
+    assert_eq!(target["display_address"], address);
+    assert_eq!(status["display_address"], address);
     assert_eq!(status["unread_count"], 0);
     assert_eq!(status["hubs"][0]["is_default"], true);
     assert_eq!(
@@ -2026,7 +2061,8 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .unwrap()
         .iter()
         .any(|v| v["scoped_id"] == target["listener_id"]
-            && v["listener_id"] == target["canonical_listener_id"]));
+            && v["listener_id"] == target["canonical_listener_id"]
+            && v["display_address"] == address));
     let long = "Context payload segment ".repeat(100).trim().to_string();
     let args = json!({"to":target["listener_id"],"message":long,"idempotency_key":"stable"});
     let sent = send_human(&f, args.clone());
@@ -2039,7 +2075,25 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
     );
     let inbox = f.tool("cito_inbox", json!({}), meta.clone());
     assert_eq!(inbox["signals"][0]["message"], long);
+    assert_eq!(inbox["signals"][0]["from"]["display_address"], "@alice");
     assert_eq!(inbox["acknowledged_count"], 1);
+    wait(|| {
+        f.db("hub.sqlite")
+            .query(
+                "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+                std::slice::from_ref(&sent["signal_id"]),
+            )
+            .unwrap()
+            .first()
+            .is_some_and(|r| r["acked_at_ms"].is_number())
+    });
+    assert_eq!(
+        f.db("hub.sqlite")
+            .query("SELECT action FROM hub_audit_log WHERE action='ack'", &[])
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         f.tool("cito_inbox", json!({}), meta.clone())["signals"],
         json!([])
@@ -2138,6 +2192,14 @@ fn confirmed_delivery_business_ack_and_pending_hub_ack_reconciliation() {
             .len()
             == 1
     });
+    wait(|| f.rows("SELECT * FROM pending_hub_acks").is_empty());
+    assert_eq!(
+        f.db("hub.sqlite")
+            .query("SELECT action FROM hub_audit_log WHERE action='ack'", &[])
+            .unwrap()
+            .len(),
+        1
+    );
 }
 #[test]
 fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
@@ -2419,7 +2481,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
         let rejected = f.tool_result("cito_send", args, meta.clone());
         assert_eq!(rejected["isError"], true, "{rejected}");
         assert!(
-            rejected.to_string().contains("NATS_UNAVAILABLE"),
+            rejected.to_string().contains("HUB_UNAVAILABLE"),
             "{rejected}"
         );
     }
@@ -2483,7 +2545,7 @@ http.createServer(async(req,res)=>{
         json!({"hub":"local","to":"@self","message":"Local control"}),
         meta.clone(),
     );
-    reject(send.clone(), "NATS_UNAVAILABLE");
+    reject(send.clone(), "HUB_UNAVAILABLE");
     let pending = f.rows("SELECT * FROM local_sent_idempotency WHERE hub='work'");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["status"], "PENDING_PUBLISH");
@@ -2493,7 +2555,7 @@ http.createServer(async(req,res)=>{
         .unwrap();
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0]["signal_id"], pending[0]["signal_id"]);
-    reject(send.clone(), "NATS_UNAVAILABLE");
+    reject(send.clone(), "HUB_UNAVAILABLE");
     let mut changed = send.clone();
     changed["message"] = json!("Different payload");
     reject(changed, "IDEMPOTENCY_KEY_CONFLICT");
@@ -2517,7 +2579,7 @@ http.createServer(async(req,res)=>{
         committed
     );
     assert_eq!(http(proxy, "/disconnect", None).0, 200);
-    reject(send.clone(), "NATS_UNAVAILABLE");
+    reject(send.clone(), "HUB_UNAVAILABLE");
     let local = f.db("hub.sqlite");
     assert_eq!(
         local
@@ -2610,15 +2672,12 @@ fn implicit_send_reuses_local_reservations_after_default_hub_recovers() {
     let legacy_blocked = f.tool_result("cito_send", legacy.clone(), meta.clone());
     assert_eq!(legacy_blocked["isError"], true, "{legacy_blocked}");
     assert!(
-        legacy_blocked.to_string().contains("NATS_UNAVAILABLE"),
+        legacy_blocked.to_string().contains("HUB_UNAVAILABLE"),
         "{legacy_blocked}"
     );
     let blocked = f.tool_result("cito_send", pending.clone(), meta.clone());
     assert_eq!(blocked["isError"], true, "{blocked}");
-    assert!(
-        blocked.to_string().contains("NATS_UNAVAILABLE"),
-        "{blocked}"
-    );
+    assert!(blocked.to_string().contains("HUB_UNAVAILABLE"), "{blocked}");
     for (field, value) in [
         ("message", "Different payload"),
         ("to", "c_0123456789abcdef"),
@@ -2719,7 +2778,7 @@ fn implicit_send_fallback_requires_an_in_process_local_hub() {
     );
     assert_eq!(rejected["isError"], true, "{rejected}");
     assert!(
-        rejected.to_string().contains("NATS_UNAVAILABLE"),
+        rejected.to_string().contains("HUB_UNAVAILABLE"),
         "{rejected}"
     );
     assert!(f

@@ -1,4 +1,5 @@
 use crate::support::*;
+use cito_native::is_valid_transcript_uuid;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -274,45 +275,6 @@ fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool)
     }
     Ok(())
 }
-fn persist_hook_acks(req: &Value, sessions: &[String], wakes: &[Value]) -> Result<()> {
-    let local = crate::core::state::LocalState::open(&state(req))?;
-    for wake in wakes {
-        let rows = local.db.query("SELECT s.* FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.batch_id=? AND l.harness='claude'", &[wake["batch_id"].clone()])?;
-        if rows.is_empty() {
-            return Err("ACK continuation has no matching local batch".into());
-        }
-        for row in rows {
-            let listener = local
-                .listener(
-                    str_at(&row, "hub").unwrap_or(""),
-                    str_at(&row, "listener_id").unwrap_or(""),
-                )?
-                .ok_or("ACK listener missing")?;
-            if !sessions.iter().any(|sid| listener["session_id"] == *sid)
-                || listener["session_id"] != wake["ack_session"]
-            {
-                return Err("ACK session mismatch".into());
-            }
-            local.acknowledge(
-                str_at(&row, "hub").unwrap_or(""),
-                str_at(&row, "listener_id").unwrap_or(""),
-                &[row["signal_id"].clone()],
-                &format!("{}:claude", str_at(&listener, "host_id").unwrap_or("")),
-            )?;
-            let acked = local.db.query(
-                "SELECT acknowledged_at_ms FROM local_signals WHERE hub=? AND signal_id=?",
-                &[row["hub"].clone(), row["signal_id"].clone()],
-            )?;
-            if acked
-                .first()
-                .is_none_or(|signal| signal["acknowledged_at_ms"].is_null())
-            {
-                return Err("ACK signal authority changed".into());
-            }
-        }
-    }
-    Ok(())
-}
 fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
     let slug: String = cwd
         .chars()
@@ -566,7 +528,7 @@ fn resolve_session(
         for e in entries.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
             if let Some(s) = n.strip_suffix(".jsonl") {
-                if crate::is_valid_transcript_uuid(s) {
+                if is_valid_transcript_uuid(s) {
                     transcripts.push(s.to_string());
                 }
             }
@@ -628,7 +590,7 @@ fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
 #[cfg(test)]
 #[test]
 fn transcript_tail_only_projects_complete_records() {
-    let root = std::env::temp_dir().join(format!("cito-tail-{}", crate::plugins::random_hex(12)));
+    let root = std::env::temp_dir().join(format!("cito-tail-{}", random_hex(12)));
     let req = json!({"state_dir":root, "env":{"CITO_CLAUDE_HOME":root}});
     let project = transcript_dir(&req, "/repo");
     fs::create_dir_all(&project).unwrap();
@@ -1140,19 +1102,28 @@ pub fn hook_main() {
                 }
                 let mut confirmed = true;
                 for (expected, ack) in acks {
-                    let response = crate::plugins::http_post_mcp(
-                        port,
-                        &ack.to_string(),
-                        Duration::from_millis(500),
-                    )
-                    .ok()
-                    .filter(|r| r.status == 200)
-                    .and_then(|r| serde_json::from_str::<Value>(&r.body).ok());
+                    let response =
+                        http_post_mcp(port, &ack.to_string(), Duration::from_millis(500))
+                            .ok()
+                            .filter(|r| r.status == 200)
+                            .and_then(|r| serde_json::from_str::<Value>(&r.body).ok());
                     confirmed &= response
                         .as_ref()
                         .is_some_and(|r| hook_ack_confirmed(r, expected));
                 }
-                if confirmed || persist_hook_acks(&req, &sessions, &wakes).is_ok() {
+                if confirmed
+                    || acknowledge_queued_batches(
+                        &state(&req),
+                        "claude",
+                        wakes.iter().map(|wake| {
+                            (
+                                raw_str_at(wake, "ack_session").unwrap_or(""),
+                                wake["batch_id"].as_str().unwrap_or(""),
+                            )
+                        }),
+                    )
+                    .is_ok()
+                {
                     if let Err(error) = settle_wakes(&req, &sessions, &wakes, true) {
                         eprintln!("cito-claude-hook: {error}");
                     }
@@ -1317,7 +1288,7 @@ fn latest_transcript(req: &Value, cwd: &str) -> Option<(String, u64)> {
                 .to_str()?
                 .strip_suffix(".jsonl")?
                 .to_string();
-            if !crate::is_valid_transcript_uuid(&name) {
+            if !is_valid_transcript_uuid(&name) {
                 return None;
             }
             let time = transcript_time(&entry.path())?;

@@ -34,7 +34,7 @@ fn setup(req: &Value) -> Result<Value> {
                 })
             })
             .unwrap_or(false)
-            && !legacy.exists();
+            && matches!(fs::symlink_metadata(&legacy), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         for path in &mcp_paths {
             configured &= read_json(path)?["mcpServers"].get("cito").is_none();
         }
@@ -80,7 +80,7 @@ fn setup(req: &Value) -> Result<Value> {
             Ok(())
         })?);
     }
-    actions.push(mutate(req, "pi", &legacy, |_| Ok(None))?);
+    actions.push(remove_legacy_file(req, "pi", &legacy)?);
     remove_setup_runtime(req, "pi", Some("pi-pid-"))?;
     Ok(json!({"ok":true,"actions":actions}))
 }
@@ -274,7 +274,6 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         }
         if !allow_process_only(req) {
             v["needs_reload"] = json!(true);
-            v["reload_hint"] = json!("Run /reload in Pi to enable 1-click listen");
         }
         // Fence PID reuse while vnode and session metadata were read.
         match process_identity(p) {
@@ -454,7 +453,7 @@ pub fn handle(req: &Value) -> Result<Value> {
     };
     match op {
         "discover_sessions" => Ok(
-            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(req,*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c["reload_hint"]=v["reload_hint"].clone();c}).collect::<Vec<_>>()}),
+            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(req,*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c}).collect::<Vec<_>>()}),
         ),
         "resolve_caller" | "verify" => {
             if cs.iter().any(|(_, v)| v["needs_reload"] == true) {

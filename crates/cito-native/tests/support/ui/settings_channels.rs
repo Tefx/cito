@@ -110,17 +110,25 @@ fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner(
         cycle.until(|s| s.settings("settings_channel_detail:channel")["text"] == "Invalid token");
     assert!(failed.settings("settings_error_banner").is_null());
     assert_eq!(failed["pending_controls"], json!([]));
-    let action = &cycle
+    let request_id = cycle
         .results
         .iter()
         .rev()
         .find(|(a, _, _)| a["op"] == "channel_test")
         .unwrap()
-        .0;
+        .0["request_id"]
+        .clone();
+    wait(|| {
+        cycle.pump();
+        cycle
+            .frames
+            .iter()
+            .any(|frame| frame["request_id"] == request_id && frame["op"] == "settings")
+    });
     let frames: Vec<_> = cycle
         .frames
         .iter()
-        .filter(|frame| frame["request_id"] == action["request_id"])
+        .filter(|frame| frame["request_id"] == request_id)
         .collect();
     assert_eq!(frames[0]["op"], "channel_test_result");
     assert_eq!(frames[0]["ok"], false);
@@ -244,7 +252,7 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
     control(&f, p, "test_channel:channel");
     let test = latest(&f, p, "channel_test");
     f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","request_id":test["request_id"],"ok":false,"detail":"Current test failed"}));
-    cfg["channels"][0]["status"] = json!("error");
+    cfg["channels"][0]["warning"] = json!(true);
     cfg["channels"][0]["detail"] = json!("Older health observation");
     cfg["launch_at_login"] = json!(true);
     f.send(p, json!({"op":"settings","source_op":"channel_test","request_id":test["request_id"],"channel_id":"channel","settings":cfg,"ok":false}));
@@ -652,7 +660,7 @@ fn v41_new_test_receipts_override_health_until_the_next_changed_health_frame() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut cfg = settings();
-    cfg["channels"][0]["status"] = json!("error");
+    cfg["channels"][0]["warning"] = json!(true);
     cfg["channels"][0]["detail"] = json!("Credentials rejected. Update your token.");
     let frame = state_with_settings(cfg.clone());
     f.send(p, frame);
@@ -676,11 +684,11 @@ fn v41_new_test_receipts_override_health_until_the_next_changed_health_frame() {
         "Test accepted",
         "An unrelated settings change cannot displace the newer test receipt"
     );
-    cfg["channels"][0]["warning"] = json!(true);
+    cfg["channels"][0]["detail"] = json!("New gateway failure. Update your token.");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
         inspect(&f, p).settings("settings_channel_detail:channel")["text"],
-        "Credentials rejected. Update your token."
+        "New gateway failure. Update your token."
     );
     cfg["channels"][0]["warning"] = json!(false);
     cfg["channels"][0]["status"] = json!("ready");
@@ -817,9 +825,10 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     control(&f, p, "stop_all");
     let stop = latest(&f, p, "unlisten_all");
     assert_eq!(stop["hub"], "personal");
-    cfg["channels"][0]["status"] = json!("error");
-    cfg["channels"][0]["fields"] = json!([]);
     cfg["channels"][0]["warning"] = json!(true);
+    cfg["channels"][0]["error_origin"] = json!("user");
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["configured"] = json!(true);
     cfg["channels"][0]["detail"]=json!("Connection unavailable.\nThe remote gateway rejected the request.\nCheck credentials and try again.");
     f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "open_settings");
@@ -955,14 +964,15 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
     cfg["channels"][0]["fields"][1]["configured"] = json!(true);
     cfg["channels"][0]["fields"][1]["value"] = json!("42");
     let frame = state_with_settings(cfg.clone());
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     control(&f, p, "test_channel:channel");
     inspect(&f, p);
     assert!(f.frames_for(p, "channel_test").next().is_some());
     let tested = "Test message accepted by the channel";
-    f.send(
+    send_companion(
+        &f,
         p,
         json!({"op":"channel_test_result","channel_id":"channel","ok":true,"detail":tested}),
     );
@@ -970,30 +980,23 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
         inspect(&f, p).settings("settings_channel_detail:channel")["text"],
         tested
     );
-    for (status, warning, detail, presented) in [
+    for (detail, presented) in [
         (
-            "ready",
-            true,
             "HTTP 409: another polling request is active. Stop the other poller.",
             "HTTP another polling request is active. Stop the other poller.",
         ),
         (
-            "ready",
-            true,
             "Delivery outcome unknown. Check the destination before retrying.",
             "Delivery outcome unknown. Check the destination before retrying.",
         ),
         (
-            "error",
-            false,
             "HTTP 401: credentials rejected. Update the gateway token.",
             "HTTP credentials rejected. Update the gateway token.",
         ),
     ] {
-        cfg["channels"][0]["status"] = json!(status);
-        cfg["channels"][0]["warning"] = json!(warning);
+        cfg["channels"][0]["warning"] = json!(true);
         cfg["channels"][0]["detail"] = json!(detail);
-        f.send(p, json!({"op":"settings","settings":cfg}));
+        send_companion(&f, p, json!({"op":"settings","settings":cfg}));
         let s = inspect(&f, p);
         assert_eq!(
             s.settings("settings_channel_detail:channel")["text"],
@@ -1005,16 +1008,12 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
         );
         assert_eq!(
             s.settings("settings_channel_status:channel")["text"],
-            if status == "error" {
-                "⚠ Error"
-            } else {
-                "Connected"
-            }
+            "Connected"
         );
         cfg["channels"][0]["status"] = json!("ready");
         cfg["channels"][0]["warning"] = json!(false);
         cfg["channels"][0]["detail"] = json!("Connected");
-        f.send(p, json!({"op":"settings","settings":cfg}));
+        send_companion(&f, p, json!({"op":"settings","settings":cfg}));
         let s = inspect(&f, p);
         assert_eq!(
             s.settings("settings_channel_status:channel")["text"],
@@ -1095,7 +1094,7 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
     frame["settings"]["hubs"][1]["human_state_status"] = json!("current");
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
-    f.send(p, frame.clone());
+    send_companion(&f, p, frame.clone());
     let active = inspect(&f, p);
     assert!(active.menu("human_inbox_card").is_null());
     assert!(active.menu("inbox_paused_notice").is_null());
@@ -1118,7 +1117,7 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
     assert_eq!(selected.settings("toggle_inbox")["text"], "Resume Inbox");
     frame["hubs"][1]["status"] = json!("disconnected");
     frame["settings"]["hubs"][1]["status"] = json!("disconnected");
-    f.send(p, frame.clone());
+    send_companion(&f, p, frame.clone());
     let offline = inspect(&f, p);
     assert_eq!(offline.settings("toggle_inbox")["enabled"], false);
     assert_eq!(offline.menu("header_subtitle")["text"], "Hub unavailable");
@@ -1128,7 +1127,7 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
     assert_eq!(f.frames_for(p, "human_inbox_update").count(), before);
     frame["hubs"][1]["status"] = json!("connected");
     frame["settings"]["hubs"][1]["status"] = json!("connected");
-    f.send(p, frame);
+    send_companion(&f, p, frame);
     control(&f, p, "toggle_inbox");
     let pending = inspect(&f, p);
     assert_eq!(pending.settings("toggle_inbox")["text"], "Resuming…");

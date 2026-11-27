@@ -81,7 +81,7 @@ impl ChannelInventory {
     ) -> Result<Value, String> {
         let _serial = self.serial.lock().map_err(|e| e.to_string())?;
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
-            return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
+            return Err("HUB_UNAVAILABLE: Channel request cancelled".into());
         }
         let mut result = run_channel_action(slot, plugins, action);
         // The same owner spans schema lookup, mutation, and the post-mutation read.
@@ -94,13 +94,13 @@ impl ChannelInventory {
     // Both callers hold serial; cached is never held across remote I/O.
     fn fetch_locked(&self, slot: &HubClient) -> Result<(), String> {
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
-            return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
+            return Err("HUB_UNAVAILABLE: Channel request cancelled".into());
         }
         // An event during the read belongs to the next refresh.
         let event_revision = slot.event_revision();
         let result = channel_list(slot);
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
-            return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
+            return Err("HUB_UNAVAILABLE: Channel request cancelled".into());
         }
         let mut cached = self.cached.lock().map_err(|e| e.to_string())?;
         cached.completed_gen = cached
@@ -475,13 +475,20 @@ impl DaemonService {
             _ if authority_changed => {}
             Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
                 let mut frame = result.clone();
-                frame["op"] = json!(if rpc == "human_channel_pair_start" { "pair_code" } else { "channel_test_result" });
+                frame["op"] = json!(if rpc == "human_channel_pair_start" {
+                    "pair_code"
+                } else {
+                    "channel_test_result"
+                });
                 frame["channel_id"] = json!(id);
                 frame["hub"] = json!(hub);
+                frame["source_op"] = action["op"].clone();
                 frame["request_id"] = action["request_id"].clone();
                 self.emit(frame);
             }
-            Err(error) if rpc == "human_channels_test" => self.emit(json!({"op":"channel_test_result","channel_id":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
+            Err(error) if rpc == "human_channels_test" => {
+                self.emit(json!({"op":"channel_test_result","channel_id":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error}));
+            }
             _ => {}
         }
         let mut settlement = json!({"op":"settings","hub":hub,"channel_id":id,"action":action["op"],"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"authority_changed":authority_changed});

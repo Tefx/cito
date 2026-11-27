@@ -27781,7 +27781,7 @@ phases:
 - id: v70
   name: 'V70 Wave 1: Pi_down Surface Contraction, Substrate Unification & Lossless
     Local UI IPC [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: done
   gate: 'Wave 1 DELTA gate passes: cargo test --workspace, Node pi-bridge and site-clipboard
     tests, and packaging/release.py check are green; zero reverse lib.rs -> plugins/
     imports remain; HTTP/TLS and atomic-file substrates are unified; local ui_ipc
@@ -27793,7 +27793,7 @@ phases:
   - id: v70.decouple_core_plugin_surface
     name: Decouple core/plugin compilation, sink manifest capability metadata, and
       cache hub_plugins descriptors
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -27865,9 +27865,25 @@ phases:
     - crates/cito-native/tests/support/plugins.rs
     - crates/cito-native/tests/hub/hub_plugin_cases.rs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-26T20:22:27.697438Z'
+    done_at: '2026-11-26T20:47:28.695880+00:00'
+    evidence: 'Integrated 7cf4f4e4dde768a849494794c9bc956f5dc72b12 onto main (30 files,
+      +537/-377; worktree removed; 0 bin/* or plugins/*/bin/* or plan.yaml changes;
+      0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Removed #[path = "../../../plugins/claude/native.rs"]
+      from lib.rs and routed cito-claude-hook via public plugin_support/state seams;
+      sunk supportsOutboundOnly, service copy, and reload_hint into plugins.rs manifest
+      descriptors; replaced NATS_UNAVAILABLE with HUB_UNAVAILABLE (0 NATS_UNAVAILABLE
+      hits); cached hub_plugins.rs descriptor snapshot and subtracted retained partial-line
+      prefix from 8 MiB stdout take cap. Verified: cargo fmt, clippy -D warnings,
+      lib plugins (26 passed), hub_plugin (8 passed), core::hub (96 passed), core::transport
+      (17 passed), discovery_projects_manifest_reload_hint (1 passed), native claude_
+      (16 passed), cito-claude-hook/cito-plugin-claude (2 passed), implicit_send (3
+      passed), native plugins (79 passed, 1 pre-existing pi-bridge.mjs:203 failure
+      identical on base).'
   - id: v70.unify_http_and_file_substrates
     name: Unify bounded HTTP/TLS client transport and symlink-safe atomic file substrates
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -27938,9 +27954,24 @@ phases:
     - crates/cito-native/tests/hub/login_cases.rs
     - crates/cito-native/tests/support/daemon/config_and_hubs.rs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-26T20:22:27.697772Z'
+    done_at: '2026-11-26T20:58:00.635483+00:00'
+    evidence: 'Integrated cc95e02062001366e91ebd4349bc2e65f01a7641 onto main (12 files,
+      +1231/-701; rebased on 08681945; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Consolidated Hub
+      RPC, SSE, OIDC, and daemon outbound HTTP/TLS framing onto shared bounded transport.rs
+      using std::net::TcpStream::connect_timeout + existing libc (no socket2) with
+      cancellable connect/DNS deadlines, monotonic response-header deadlines, body
+      caps, and slot-close fences; unified symlink-safe flock + temp-file fsync +
+      atomic rename across config.rs and plugin_support.rs (rejecting .lock symlink
+      collisions and unlinking symlinked legacy files without target deletion). Verified:
+      cargo fmt, clippy -D warnings, core::transport (21), core::login (20), core::auth
+      (14), core::config (13), core::plugins (17), support:: (13), native config_and_hubs
+      (21), login (2), symlink legacy unlink (1), pi_package_setup (1) all passed.'
   - id: v70.debloat_hub_and_receiver_shadows
     name: Remove Hub/receiver/MCP shadow writes and canonicalize presentation diagnostics
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28014,10 +28045,24 @@ phases:
     depends_on:
     - v70.decouple_core_plugin_surface
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-26T20:47:33.947334Z'
+    done_at: '2026-11-26T21:07:55.917770+00:00'
+    evidence: 'Integrated 69b247384fdcc475d4add2ad9df47f888015bf31 (rebased 3a214e4b)
+      onto main (7 files, +280/-104; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Stopped writing
+      hub_channel_deliveries.external_msg_id shadow column (legacy backfill retained),
+      removed duplicate reset_hub attach loop, skipped signal stats on policy/metadata
+      stream_info reads; eliminated second consumer_backlog query in receiver.rs and
+      duplicate inline signal_ack in mcp.rs; locked display_address, matched_count,
+      online_count in mcp.rs; preserved HTTP statuses, OIDC/TLS/DNS acronyms, local://
+      hint, and unknown-harness text in cli.rs presentation_error. Verified: cargo
+      fmt, clippy -D warnings, receiver (34), cli (18), core::hub (96), native mcp_and_inbox
+      (33), core::daemon (85), transport (23) all passed.'
   - id: v70.lossless_local_ui_ipc
     name: Switch daemon-to-UI local IPC to lossless NDJSON framing and prune projection
       dead fields
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28088,10 +28133,23 @@ phases:
     depends_on:
     - v70.debloat_hub_and_receiver_shadows
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-26T21:08:00.472755Z'
+    done_at: '2026-11-26T21:25:01.360917+00:00'
+    evidence: 'Integrated 0356bec34a1b45b41a53ae28402e7e0b534aba2e onto main (13 files,
+      +239/-503; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Switched daemon-to-UI
+      local IPC to lossless NDJSON frames without 4 KiB ellipsis truncation, 128-attachment/64-listener
+      caps, or 82-chunk copy_activity_message streaming; preserved correlated receipts
+      without UiMailbox overflow eviction; locked matched_count pagination and /control
+      reopen_ui -> ui_ipc -> Swift companion seam; removed unreachable human_projection("local")
+      branch and dead RemotePeer.scope / HubConfigItem.human_availability fields while
+      preserving channel_id. Verified: cargo fmt, clippy -D warnings, core::daemon
+      (79), ui::settlement (17), ui::directory (13), legacy_partial (2) all passed.'
   - id: v70.split_settings_tabs_and_swift_debloat
     name: Split SettingsSurface into three tab controllers and remove dead Swift shadow
       state
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28165,9 +28223,23 @@ phases:
     depends_on:
     - v70.lossless_local_ui_ipc
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-26T21:25:04.503255Z'
+    done_at: '2026-11-26T22:45:44.097877+00:00'
+    evidence: 'Integrated 2bfbbf6b2c4496f5445f9dc84a665a04bd14e4a1 onto main (27 files,
+      +2373/-1942; worktree removed; 0 Cargo.toml/Cargo.lock/build.rs/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Decomposed SettingsSurface.swift
+      into SettingsAppsTab.swift, SettingsChannelsTab.swift, and SettingsHubsTab.swift
+      under thin SettingsSurface.swift; consolidated Companion.swift state structs
+      so background receipts update only affected tabs without remounting active editors;
+      removed statusImage, pendingMutation, and PaletteAndMetrics.swift duplicate
+      presentationError/generic-title helpers with daemon-side companion_projection.rs
+      normalization; updated 2 stale UI tests (oversized frame & footer-only launch-at-login).
+      Verified: cargo fmt, clippy -D warnings, Swift -warnings-as-errors, 153/153
+      UI tests (10 suites), core::daemon (79), cli (7) all passed.'
   - id: v70.gate_wave1
     name: Wave 1 consolidation DELTA gate before Wave 2 parallel fan-out
-    status: pending
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Wave 1 DELTA consolidation gate verifying all 5 `v70.*` Pi_down surface contractions\
       \ before Wave 2 (`v71.*`) fans out across 5 parallel tracks:\n  1. Zero reverse\
@@ -28200,10 +28272,21 @@ phases:
     - v70.unify_http_and_file_substrates
     - v70.split_settings_tabs_and_swift_debloat
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-26T22:45:51.028821Z'
+    done_at: '2026-11-26T23:38:26.608164+00:00'
+    evidence: 'Phase v70.gate_wave1 DELTA gate PASSED at 79bc14d92b8164c3a057a72a1fb9250bf29ce03a
+      (POSITIVE_GATE_EVIDENCE, valid:true, binding_checked:true). All 14/14 Wave 1
+      requirements PROVEN (W1-S1..W1-S5, INV-NO-BINARIES-RESTAGED, INV-ZERO-LARVA):
+      V70-01..V70-06 closed; full cargo test --workspace --locked (416 lib + 353 native
+      + 12 binary/other, 0 failed), standalone pi-bridge.mjs, site-clipboard.mjs,
+      packaging/release.py check, cargo fmt, clippy -D warnings, Swift -warnings-as-errors
+      all passed; Cargo.toml, Cargo.lock, bin/*, plugins/*/bin/* unchanged; version
+      0.22.3 unchanged.'
 - id: v71
   name: 'V71 Wave 2: Five Disjoint Parallel Contract-Closure Tracks (2A..2E) [REQUIRES_SKILL:
     contract-and-simplicity]'
-  status: locked
+  status: pending
   gate: Wave 2 full regression gate passes across all 5 merged disjoint tracks (2A
     macOS/Bundle/UI, 2B Pi/Claude/Codex/CLI, 2C Auth/OIDC/Hub/Telegram, 2D Hotpath/State/Daemon/SSE,
     2E Release/CI/Deploy/Docs/Site) with zero warnings and zero cross-track regressions.

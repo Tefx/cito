@@ -1210,7 +1210,11 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
                     )
                     .unwrap();
                     assert_eq!(
-                        channels.iter().find(|p| p.id == "telegram").unwrap().dir,
+                        channels
+                            .iter()
+                            .find(|p| p.id == "telegram")
+                            .unwrap()
+                            .plugin_dir,
                         source.join("telegram")
                     );
                 }
@@ -1337,9 +1341,12 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
             )
             .unwrap();
             let channel = loaded.iter().find(|p| p.id == "telegram").unwrap();
-            assert_eq!(channel.manifest["version"], plugins::CITO_VERSION);
-            assert!(channel.dir.ends_with("plugins/telegram"));
-            assert_ne!(channel.dir, user_root.join("telegram"));
+            assert_eq!(
+                read_json(channel.plugin_dir.join("plugin.json"))["version"],
+                plugins::CITO_VERSION
+            );
+            assert!(channel.plugin_dir.ends_with("plugins/telegram"));
+            assert_ne!(channel.plugin_dir, user_root.join("telegram"));
             assert!(!loaded.iter().any(|p| p.id == "human"));
         }
         for id in ids {
@@ -1391,7 +1398,11 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
             )
             .unwrap();
             assert_eq!(
-                channels.iter().find(|p| p.id == "telegram").unwrap().dir,
+                channels
+                    .iter()
+                    .find(|p| p.id == "telegram")
+                    .unwrap()
+                    .plugin_dir,
                 user_root.join("telegram")
             );
         }

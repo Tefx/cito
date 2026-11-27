@@ -3,8 +3,10 @@ use super::identity::{principal, string};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::net::{SocketAddr, TcpStream};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,24 +38,251 @@ fn authorization(bearer: Option<&str>) -> io::Result<Option<String>> {
         .transpose()
 }
 
-fn connect_http(url: &url::Url, deadline: Instant) -> io::Result<TcpStream> {
-    let mut error = io::Error::new(io::ErrorKind::NotConnected, "Hub address unavailable");
-    let addresses = url.socket_addrs(|| None)?;
-    let attempt = Duration::from_millis(if addresses.len() == 1 { 1500 } else { 500 });
-    for address in addresses {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
+const IO_SLICE: Duration = Duration::from_millis(50);
+const HEADER_LIMIT: u64 = 65_536;
+pub(super) const RPC_BODY_LIMIT: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) struct HttpDeadline<'a> {
+    pub at: Instant,
+    pub connect_at: Option<Instant>,
+    pub cancelled: Option<&'a dyn Fn() -> bool>,
+}
+
+impl HttpDeadline<'_> {
+    pub(super) fn uncancelled(at: Instant) -> Self {
+        Self {
+            at,
+            connect_at: None,
+            cancelled: None,
         }
-        match TcpStream::connect_timeout(&address, remaining.min(attempt)) {
+    }
+
+    fn check(self) -> io::Result<()> {
+        check_cancelled(self.cancelled)?;
+        if Instant::now() >= self.at {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        Ok(())
+    }
+}
+
+fn check_cancelled(cancelled: Option<&dyn Fn() -> bool>) -> io::Result<()> {
+    if cancelled.is_some_and(|check| check()) {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "HTTP request cancelled",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve(url: &url::Url, deadline: HttpDeadline<'_>) -> io::Result<Vec<SocketAddr>> {
+    deadline.check()?;
+    let address = |ip| {
+        Ok(vec![SocketAddr::new(
+            ip,
+            url.port_or_known_default()
+                .ok_or(io::ErrorKind::InvalidInput)?,
+        )])
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => return address(ip.into()),
+        Some(url::Host::Ipv6(ip)) => return address(ip.into()),
+        Some(url::Host::Domain(_)) => {}
+        None => return Err(io::ErrorKind::InvalidInput.into()),
+    }
+
+    // The system resolver can block inside getaddrinfo. Bound outstanding lookups
+    // without queuing work that would outlive the caller's deadline.
+    static RESOLVERS: AtomicUsize = AtomicUsize::new(0);
+    struct Reservation;
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            RESOLVERS.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    RESOLVERS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < 16).then_some(n + 1)
+        })
+        .map_err(|_| io::Error::other("HTTP resolver busy"))?;
+    let reservation = Reservation;
+    let url = url.clone();
+    let (send, receive) = mpsc::sync_channel(1);
+    thread::Builder::new().spawn(move || {
+        let _reservation = reservation;
+        let _ = send.send(url.socket_addrs(|| None));
+    })?;
+    loop {
+        deadline.check()?;
+        let slice = deadline
+            .at
+            .saturating_duration_since(Instant::now())
+            .min(IO_SLICE);
+        match receive.recv_timeout(slice) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("HTTP resolver stopped"))
+            }
+        }
+    }
+}
+
+fn socket_ready(fd: RawFd, events: i16, until: Instant) -> io::Result<bool> {
+    crate::support::poll_until(
+        &mut [libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        }],
+        Some(until),
+    )
+    .map_err(io::Error::other)
+}
+
+fn connect(address: SocketAddr, deadline: HttpDeadline<'_>) -> io::Result<TcpStream> {
+    deadline.check()?;
+    if deadline.cancelled.is_none() {
+        let now = Instant::now();
+        if now >= deadline.at {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let socket = TcpStream::connect_timeout(&address, deadline.at - now)?;
+        socket.set_nonblocking(true)?;
+        deadline.check()?;
+        return Ok(socket);
+    }
+    let domain = if address.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let kind = libc::SOCK_STREAM;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let kind = kind | libc::SOCK_CLOEXEC;
+    // SAFETY: only scalar socket parameters are passed; on success the new fd is owned here.
+    let fd = unsafe { libc::socket(domain, kind, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd is a new and exclusively owned TCP socket.
+    let socket = unsafe { TcpStream::from_raw_fd(fd) };
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    // SAFETY: socket owns fd; F_SETFD takes an integer argument and retains ownership.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        let on: libc::c_int = 1;
+        // SAFETY: socket owns fd; on is readable for the exact option length.
+        if unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&on as *const libc::c_int).cast(),
+                std::mem::size_of_val(&on) as libc::socklen_t,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    socket.set_nonblocking(true)?;
+    deadline.check()?;
+    let initiation = |ptr: *const libc::sockaddr, len: libc::socklen_t| {
+        // SAFETY: each caller supplies a live, initialized sockaddr of the matching family and length;
+        // socket owns fd and connect does not retain the pointer or take ownership.
+        if unsafe { libc::connect(fd, ptr, len) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    };
+    let result = match address {
+        SocketAddr::V4(address) => {
+            // SAFETY: zero is valid for every integer field and initializes platform-specific padding.
+            let mut raw: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            raw.sin_family = libc::AF_INET as libc::sa_family_t;
+            raw.sin_port = address.port().to_be();
+            raw.sin_addr.s_addr = u32::from_ne_bytes(address.ip().octets());
+            let len = std::mem::size_of_val(&raw) as libc::socklen_t;
+            #[cfg(target_vendor = "apple")]
+            {
+                raw.sin_len = len as u8;
+            }
+            initiation((&raw as *const libc::sockaddr_in).cast(), len)
+        }
+        SocketAddr::V6(address) => {
+            // SAFETY: zero is valid for every integer field and initializes platform-specific padding.
+            let mut raw: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            raw.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            raw.sin6_port = address.port().to_be();
+            raw.sin6_flowinfo = address.flowinfo().to_be();
+            raw.sin6_scope_id = address.scope_id();
+            raw.sin6_addr.s6_addr = address.ip().octets();
+            let len = std::mem::size_of_val(&raw) as libc::socklen_t;
+            #[cfg(target_vendor = "apple")]
+            {
+                raw.sin6_len = len as u8;
+            }
+            initiation((&raw as *const libc::sockaddr_in6).cast(), len)
+        }
+    };
+    match result {
+        Ok(()) => {}
+        Err(e)
+            if e.raw_os_error() == Some(libc::EINPROGRESS)
+                || e.kind() == io::ErrorKind::Interrupted =>
+        {
+            loop {
+                deadline.check()?;
+                if socket_ready(
+                    socket.as_raw_fd(),
+                    libc::POLLOUT,
+                    deadline.at.min(Instant::now() + IO_SLICE),
+                )? {
+                    if let Some(error) = socket.take_error()? {
+                        return Err(error);
+                    }
+                    break;
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    deadline.check()?;
+    Ok(socket)
+}
+
+fn connect_http(url: &url::Url, mut deadline: HttpDeadline<'_>) -> io::Result<TcpStream> {
+    if let Some(connect_at) = deadline.connect_at {
+        deadline.at = deadline.at.min(connect_at);
+    }
+    let addresses = resolve(url, deadline)?;
+    let attempt = Duration::from_millis(if addresses.len() == 1 { 1500 } else { 500 });
+    let mut error = io::Error::new(io::ErrorKind::NotConnected, "HTTP address unavailable");
+    for address in addresses {
+        deadline.check()?;
+        match connect(
+            address,
+            HttpDeadline {
+                at: deadline.at.min(Instant::now() + attempt),
+                ..deadline
+            },
+        ) {
             Ok(socket) => return Ok(socket),
             Err(e) => error = e,
         }
     }
+    deadline.check()?;
     Err(error)
 }
 
-static EVENT_TLS: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
+pub(super) static HTTP_TLS: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     Arc::new(
         rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::from_iter(
@@ -63,27 +292,153 @@ static EVENT_TLS: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     )
 });
 
-// Preserve partial chunk headers and terminators across idle socket timeouts.
-struct ChunkedEvents<R> {
-    reader: R,
+struct SocketIo<'a> {
+    socket: TcpStream,
+    deadline: HttpDeadline<'a>,
+    write_gate: Option<&'a Mutex<()>>,
+    streaming: bool,
+}
+
+impl SocketIo<'_> {
+    fn check(&self) -> io::Result<()> {
+        if self.streaming {
+            check_cancelled(self.deadline.cancelled)
+        } else {
+            self.deadline.check()
+        }
+    }
+
+    fn wait(&self, events: i16) -> io::Result<()> {
+        let slice = Instant::now() + IO_SLICE;
+        let until = if self.streaming {
+            slice
+        } else {
+            slice.min(self.deadline.at)
+        };
+        let ready = socket_ready(self.socket.as_raw_fd(), events, until)?;
+        self.check()?;
+        if self.streaming && !ready {
+            // Let the SSE consumer apply its own idle policy after the bounded prelude.
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        Ok(())
+    }
+}
+
+impl Read for SocketIo<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        loop {
+            self.check()?;
+            match self.socket.read(bytes) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.wait(libc::POLLIN)?,
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for SocketIo<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        loop {
+            let result = {
+                // Slot close and the actual nonblocking write share this fence, including TLS writes.
+                let _guard = self
+                    .write_gate
+                    .map(|gate| gate.lock())
+                    .transpose()
+                    .map_err(|_| io::Error::other("HTTP write gate poisoned"))?;
+                self.check()?;
+                self.socket.write(bytes)
+            };
+            match result {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.wait(libc::POLLOUT)?,
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check()
+    }
+}
+
+trait HttpIo: Read + Write {
+    fn start_streaming(&mut self);
+}
+impl HttpIo for SocketIo<'_> {
+    fn start_streaming(&mut self) {
+        self.streaming = true;
+    }
+}
+impl HttpIo for rustls::StreamOwned<rustls::ClientConnection, SocketIo<'_>> {
+    fn start_streaming(&mut self) {
+        self.sock.streaming = true;
+    }
+}
+
+pub(super) struct HttpResponse<R> {
+    pub status: u16,
+    body: ResponseBody<R>,
+}
+
+impl<R: Read> HttpResponse<R> {
+    pub(super) fn read_body(mut self, limit: u64) -> io::Result<Vec<u8>> {
+        let too_large =
+            || io::Error::new(io::ErrorKind::FileTooLarge, "HTTP body exceeds frame limit");
+        if matches!(self.body.framing, Framing::Length(n) if n > limit) {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::new();
+        self.body.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err(too_large());
+        }
+        Ok(bytes)
+    }
+}
+
+struct ResponseBody<R> {
+    reader: BufReader<R>,
+    framing: Framing,
+}
+
+enum Framing {
+    Length(u64),
+    CloseDelimited,
+    Chunked(Chunks),
+}
+
+#[derive(Default)]
+struct Chunks {
     remaining: u64,
     terminator: bool,
+    trailers: Option<u64>,
     line: Vec<u8>,
 }
-impl<R: BufRead> Read for ChunkedEvents<R> {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+
+impl Chunks {
+    // Preserve partial framing across SSE idle timeouts. The trailer budget
+    // bounds metadata after the last chunk separately from decoded body bytes.
+    fn read(&mut self, reader: &mut impl BufRead, out: &mut [u8]) -> io::Result<usize> {
         while self.remaining == 0 {
-            let budget = 8192 - self.line.len();
-            self.reader
+            let budget = self.trailers.unwrap_or(8192);
+            reader
                 .by_ref()
-                .take(budget as u64)
+                .take(budget - self.line.len() as u64)
                 .read_until(b'\n', &mut self.line)?;
             let line = self
                 .line
-                .strip_suffix(b"\r\n")
+                .strip_suffix(b"\n")
                 .ok_or(io::ErrorKind::InvalidData)?;
-            if self.terminator {
-                if !line.is_empty() {
+            if let Some(left) = &mut self.trailers {
+                *left -= self.line.len() as u64;
+                if line.is_empty() || line == b"\r" {
+                    return Ok(0);
+                }
+            } else if self.terminator {
+                if line != b"\r" {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 self.terminator = false;
@@ -91,86 +446,194 @@ impl<R: BufRead> Read for ChunkedEvents<R> {
                 let digits = line.split(|b| *b == b';').next().unwrap_or_default();
                 self.remaining = std::str::from_utf8(digits)
                     .ok()
-                    .and_then(|s| u64::from_str_radix(s, 16).ok())
+                    .and_then(|s| u64::from_str_radix(s.trim(), 16).ok())
                     .ok_or(io::ErrorKind::InvalidData)?;
                 if self.remaining == 0 {
-                    return Ok(0);
+                    self.trailers = Some(HEADER_LIMIT);
                 }
             }
             self.line.clear();
         }
-        let n = self.reader.by_ref().take(self.remaining).read(out)?;
-        self.remaining -= n as u64;
+        let n = read_exact_fragment(reader, out, &mut self.remaining)?;
         self.terminator = self.remaining == 0;
         Ok(n)
     }
 }
 
-struct InterruptibleStream<'a> {
-    socket: std::net::TcpStream,
-    client: &'a HubClient,
-    deadline: Instant,
-}
-impl InterruptibleStream<'_> {
-    fn check(&self) -> io::Result<()> {
-        if super::daemon::shutdown_requested() || self.client.closed.load(Ordering::SeqCst) {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "Hub request cancelled",
-            ));
-        }
-        if Instant::now() >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Hub request deadline exceeded",
-            ));
-        }
-        Ok(())
+fn read_exact_fragment(
+    reader: &mut impl Read,
+    out: &mut [u8],
+    remaining: &mut u64,
+) -> io::Result<usize> {
+    let limit = (*remaining).min(out.len() as u64) as usize;
+    if limit == 0 {
+        return Ok(0);
     }
+    let n = reader.read(&mut out[..limit])?;
+    if n == 0 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    *remaining -= n as u64;
+    Ok(n)
 }
-impl Read for InterruptibleStream<'_> {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        loop {
-            self.check()?;
-            match self.socket.read(bytes) {
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::TimedOut
-                            | io::ErrorKind::WouldBlock
-                            | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue
+
+impl<R: Read> Read for ResponseBody<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        match &mut self.framing {
+            Framing::Length(left) => read_exact_fragment(&mut self.reader, out, left),
+            Framing::CloseDelimited => self.reader.read(out),
+            Framing::Chunked(chunks) => {
+                let n = chunks.read(&mut self.reader, out)?;
+                if n == 0 {
+                    self.framing = Framing::Length(0);
                 }
-                result => return result,
+                Ok(n)
             }
         }
     }
 }
-impl Write for InterruptibleStream<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        loop {
-            self.check()?;
-            match self.socket.write(bytes) {
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::TimedOut
-                            | io::ErrorKind::WouldBlock
-                            | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue
-                }
-                result => return result,
+
+pub(super) fn read_response<R: Read>(stream: R) -> io::Result<HttpResponse<R>> {
+    let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+    let mut reader = BufReader::new(stream);
+    let mut headers = reader.by_ref().take(HEADER_LIMIT);
+    let mut line = String::new();
+    if headers.read_line(&mut line)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            super::http_boundary::PEER_CLOSED,
+        ));
+    }
+    let truncated = || invalid("Truncated or oversized HTTP headers");
+    if !line.ends_with('\n') {
+        return Err(truncated());
+    }
+    let mut parts = line.split_whitespace();
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+        return Err(invalid("Invalid HTTP version"));
+    }
+    let status = parts
+        .next()
+        .filter(|s| s.len() == 3)
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|s| (100..600).contains(s))
+        .ok_or_else(|| invalid("Invalid HTTP status"))?;
+    let mut length = None;
+    let mut chunked = false;
+    loop {
+        line.clear();
+        headers.read_line(&mut line)?;
+        if !line.ends_with('\n') {
+            return Err(truncated());
+        }
+        if matches!(line.as_str(), "\r\n" | "\n") {
+            break;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| invalid("Invalid HTTP header"))?;
+        if name.eq_ignore_ascii_case("content-length") {
+            let n = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| invalid("Invalid Content-Length"))?;
+            if length.replace(n).is_some() {
+                return Err(invalid("Duplicate Content-Length"));
             }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                return Err(invalid("Invalid Transfer-Encoding"));
+            }
+            chunked = true;
         }
     }
-    fn flush(&mut self) -> io::Result<()> {
-        self.check()?;
-        self.socket.flush()
+    let framing = match (chunked, length, status) {
+        (true, Some(_), _) => return Err(invalid("Conflicting HTTP body framing")),
+        (_, _, 100..=199 | 204 | 304) => Framing::Length(0),
+        (true, None, _) => Framing::Chunked(Chunks::default()),
+        (false, Some(n), _) => Framing::Length(n),
+        (false, None, _) => Framing::CloseDelimited,
+    };
+    Ok(HttpResponse {
+        status,
+        body: ResponseBody { reader, framing },
+    })
+}
+
+fn exchange<'a>(
+    url: &url::Url,
+    method: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    deadline: HttpDeadline<'a>,
+    tls: &Arc<rustls::ClientConfig>,
+    write_gate: Option<&'a Mutex<()>>,
+) -> io::Result<HttpResponse<Box<dyn HttpIo + 'a>>> {
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
     }
+    let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
+    let target = &url[url::Position::BeforePath..url::Position::AfterQuery];
+    let mut request = format!("{method} {target} HTTP/1.1\r\nHost: {authority}\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
+    for (key, value) in headers {
+        if value.bytes().any(|b| b.is_ascii_control()) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        use std::fmt::Write as _;
+        let _ = write!(request, "{key}: {value}\r\n");
+    }
+    if let Some(body) = body {
+        use std::fmt::Write as _;
+        let _ = write!(request, "Content-Length: {}\r\n", body.len());
+    }
+    request.push_str("\r\n");
+    let mut socket = SocketIo {
+        socket: connect_http(url, deadline)?,
+        deadline,
+        write_gate,
+        streaming: false,
+    };
+    let mut stream: Box<dyn HttpIo> = if url.scheme() == "https" {
+        // URL hosts bracket IPv6 literals; rustls expects the unbracketed IP.
+        let host = url
+            .host_str()
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .trim_matches(['[', ']']);
+        let name =
+            rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(io::Error::other)?;
+        let mut connection =
+            rustls::ClientConnection::new(tls.clone(), name).map_err(io::Error::other)?;
+        connection.complete_io(&mut socket)?;
+        Box::new(rustls::StreamOwned::new(connection, socket))
+    } else {
+        Box::new(socket)
+    };
+    deadline.check()?;
+    stream.write_all(request.as_bytes())?;
+    if let Some(body) = body {
+        stream.write_all(body)?;
+    }
+    stream.flush()?;
+    let response = read_response(stream)?;
+    deadline.check()?;
+    Ok(response)
+}
+
+pub(super) fn http_request<'a>(
+    url: &url::Url,
+    method: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    deadline: HttpDeadline<'a>,
+    tls: &Arc<rustls::ClientConfig>,
+) -> io::Result<HttpResponse<impl Read + 'a>> {
+    exchange(url, method, headers, body, deadline, tls, None)
 }
 
 #[derive(Clone)]
@@ -194,13 +657,12 @@ pub struct HubClient {
     event_revision: Arc<AtomicU64>,
     event_wait: Arc<(Mutex<()>, std::sync::Condvar)>,
     local_event_wake: Arc<Mutex<Option<Arc<crate::support::WakePipe>>>>,
-    event_socket: Arc<Mutex<Option<TcpStream>>>,
     directory_observed_at: Arc<Mutex<Option<Instant>>>,
     human_observed_at: Arc<Mutex<Option<Instant>>>,
     event_credentials: Arc<Mutex<Option<String>>>,
     pub closed: Arc<AtomicBool>,
     pub(super) commit_gate: Arc<Mutex<()>>,
-    agent: ureq::Agent,
+    tls: Arc<rustls::ClientConfig>,
 }
 impl HubClient {
     pub fn new(name: String, config: Value, user: &str, local: Option<Arc<HubEngine>>) -> Self {
@@ -232,20 +694,16 @@ impl HubClient {
             event_revision: Arc::new(AtomicU64::new(1)),
             event_wait: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
             local_event_wake: Arc::new(Mutex::new(None)),
-            event_socket: Arc::default(),
             directory_observed_at: Arc::new(Mutex::new(None)),
             human_observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             commit_gate: Arc::default(),
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .timeout_connect(Duration::from_secs(5))
-                .build(),
+            tls: HTTP_TLS.clone(),
         }
     }
     pub fn rpc(&self, op: &str, params: &Value) -> Result<Value, String> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err("NATS_UNAVAILABLE: Hub disconnected".into());
+            return Err("HUB_UNAVAILABLE: Hub disconnected".into());
         }
         if let Some(local) = &self.local {
             return local.rpc(op, params, Some(&self.identity));
@@ -256,43 +714,54 @@ impl HubClient {
             .map_err(|_| "STATE_ERROR: Credentials lock poisoned")?
             .clone();
         let auth = authorization(bearer.as_deref()).map_err(|e| format!("INVALID_INPUT: {e}"))?;
-        if string(&self.config, "url").starts_with("http://") {
-            let reply = self.rpc_http(op, params, auth.as_deref())?;
-            return self.parse_rpc_response(reply.status, reply.body.as_bytes(), &bearer);
+        let url = url::Url::parse(&format!(
+            "{}/v1/rpc",
+            string(&self.config, "url").trim_end_matches('/')
+        ))
+        .map_err(|e| self.disconnected(e))?;
+        let mut headers = vec![
+            ("Content-Type", "application/json"),
+            ("X-Cito-User", string(&self.identity, "owner_user")),
+        ];
+        if let Some(value) = auth.as_deref() {
+            headers.push(("Authorization", value));
         }
-        let mut request = self
-            .agent
-            .post(&format!(
-                "{}/v1/rpc",
-                string(&self.config, "url").trim_end_matches('/')
-            ))
-            .timeout(Duration::from_secs(5))
-            .set("X-Cito-User", string(&self.identity, "owner_user"));
-        if let Some(value) = auth {
-            request = request.set("Authorization", &value);
-        }
-        let result = match request.send_json(json!({"op":op,"params":params})) {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
-            Err(error) => return Err(self.disconnected(error)),
+        let cancelled = || self.request_cancelled();
+        let deadline = HttpDeadline {
+            at: Instant::now() + Duration::from_secs(if url.scheme() == "http" { 10 } else { 5 }),
+            connect_at: None,
+            cancelled: Some(&cancelled),
         };
-        let status = result.status();
-        let mut bytes = Vec::new();
-        result
-            .into_reader()
-            .take(8 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| self.disconnected(e))?;
-        if bytes.len() > 8 * 1024 * 1024 {
-            return Err(self.disconnected("Hub response exceeds frame limit"));
-        }
+        let body = json!({"op":op,"params":params}).to_string();
+        let response = exchange(
+            &url,
+            "POST",
+            &headers,
+            Some(body.as_bytes()),
+            deadline,
+            &self.tls,
+            Some(&self.event_wait.0),
+        )
+        .map_err(|e| self.disconnected(e))?;
+        let status = response.status;
+        let bytes = if status == 202 && url.scheme() == "http" {
+            Vec::new()
+        } else {
+            response
+                .read_body(RPC_BODY_LIMIT)
+                .map_err(|e| self.disconnected(e))?
+        };
+        deadline.check().map_err(|e| self.disconnected(e))?;
         self.parse_rpc_response(status, &bytes, &bearer)
+    }
+    fn request_cancelled(&self) -> bool {
+        super::daemon::shutdown_requested() || self.closed.load(Ordering::SeqCst)
     }
     fn disconnected(&self, error: impl std::fmt::Display) -> String {
         if let Ok(mut status) = self.status.lock() {
             *status = "disconnected".into();
         }
-        format!("NATS_UNAVAILABLE: {error}")
+        format!("HUB_UNAVAILABLE: {error}")
     }
     fn parse_rpc_response(
         &self,
@@ -309,13 +778,13 @@ impl HubClient {
         let response: Value = match serde_json::from_slice(bytes) {
             Ok(value) => value,
             Err(_) if status != 200 => Value::Null,
-            Err(_) => return Err("NATS_UNAVAILABLE: Invalid Hub response JSON".into()),
+            Err(_) => return Err("HUB_UNAVAILABLE: Invalid Hub response JSON".into()),
         };
         if status != 200 || response["ok"] == false || !response["error"].is_null() {
             let fallback = match status {
                 401 => "UNAUTHORIZED",
                 403 => "FORBIDDEN",
-                200 | 500..=599 => "NATS_UNAVAILABLE",
+                200 | 500..=599 => "HUB_UNAVAILABLE",
                 _ => "INVALID_INPUT",
             };
             return Err(hub_error(
@@ -327,48 +796,12 @@ impl HubClient {
             ));
         }
         if response["ok"] != true {
-            return Err("NATS_UNAVAILABLE: Invalid Hub RPC envelope".into());
+            return Err("HUB_UNAVAILABLE: Invalid Hub RPC envelope".into());
         }
         response
             .get("result")
             .cloned()
-            .ok_or_else(|| "NATS_UNAVAILABLE: Missing Hub RPC result".into())
-    }
-    fn rpc_http(
-        &self,
-        op: &str,
-        params: &Value,
-        authorization: Option<&str>,
-    ) -> Result<crate::plugins::HttpResponse, String> {
-        let url = url::Url::parse(&format!(
-            "{}/v1/rpc",
-            string(&self.config, "url").trim_end_matches('/')
-        ))
-        .map_err(|e| e.to_string())?;
-        let host = url.host_str().ok_or("Invalid Hub URL")?;
-        let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let result = (|| {
-            let socket = connect_http(&url, deadline).map_err(|e| e.to_string())?;
-            socket
-                .set_read_timeout(Some(Duration::from_millis(100)))
-                .map_err(|e| e.to_string())?;
-            socket
-                .set_write_timeout(Some(Duration::from_millis(100)))
-                .map_err(|e| e.to_string())?;
-            let mut stream = InterruptibleStream {
-                socket,
-                client: self,
-                deadline,
-            };
-            let body = json!({"op":op,"params":params}).to_string();
-            let bearer = authorization
-                .map(|v| format!("Authorization: {v}\r\n"))
-                .unwrap_or_default();
-            write!(stream,"POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nX-Cito-User: {}\r\n{bearer}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",url.path(),string(&self.identity,"owner_user"),body.len()).map_err(|e| e.to_string())?;
-            crate::plugins::read_http_response(&mut stream)
-        })();
-        result.map_err(|e| self.disconnected(e))
+            .ok_or_else(|| "HUB_UNAVAILABLE: Missing Hub RPC result".into())
     }
     fn reject_token(&self, bearer: &Option<String>) {
         // An old in-flight request must not reject a newly verified credential.
@@ -390,7 +823,6 @@ impl HubClient {
         self.event_revision = old.event_revision.clone();
         self.event_wait = old.event_wait.clone();
         self.local_event_wake = old.local_event_wake.clone();
-        self.event_socket = old.event_socket.clone();
         self.rejected_bearer = old.rejected_bearer.clone();
         self.directory_observed_at = old.directory_observed_at.clone();
         self.human_observed_at = old.human_observed_at.clone();
@@ -528,14 +960,6 @@ impl HubClient {
     pub fn close(&self) {
         if let Ok(_guard) = self.event_wait.0.lock() {
             self.closed.store(true, Ordering::SeqCst);
-            if let Some(socket) = self
-                .event_socket
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-            {
-                let _ = socket.shutdown(Shutdown::Both);
-            }
             self.event_wait.1.notify_all();
             if let Ok(wake) = self.local_event_wake.lock() {
                 if let Some(wake) = &*wake {
@@ -544,121 +968,40 @@ impl HubClient {
             }
         }
     }
-    fn open_events(
-        &self,
+    fn open_events<'a>(
+        &'a self,
         url: &url::Url,
         bearer: Option<&str>,
         tls: &Arc<rustls::ClientConfig>,
-    ) -> io::Result<(u16, Box<dyn Read>)> {
-        let user = string(&self.identity, "owner_user");
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> io::Result<(u16, impl Read + 'a)> {
         let auth = authorization(bearer)?;
-        if !matches!(url.scheme(), "http" | "https") || user.chars().any(char::is_control) {
-            return Err(io::ErrorKind::InvalidInput.into());
+        let mut headers = vec![
+            ("Accept", "text/event-stream"),
+            ("X-Cito-User", string(&self.identity, "owner_user")),
+        ];
+        if let Some(value) = auth.as_deref() {
+            headers.push(("Authorization", value));
         }
-        let socket = connect_http(url, Instant::now() + Duration::from_secs(5))?;
-        {
-            // Publish before any request I/O. A concurrent close either takes
-            // this socket or wins first and prevents its publication.
-            let mut active = self.event_socket.lock().unwrap_or_else(|e| e.into_inner());
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(io::ErrorKind::ConnectionAborted.into());
-            }
-            *active = Some(socket.try_clone()?);
-        }
-        socket.set_write_timeout(Some(Duration::from_secs(1)))?;
-        if url.scheme() == "https" {
-            socket.set_read_timeout(Some(Duration::from_millis(150)))?;
-            // URL hosts bracket IPv6 literals; rustls expects the unbracketed IP.
-            let host = url
-                .host_str()
-                .ok_or(io::ErrorKind::InvalidInput)?
-                .trim_matches(['[', ']']);
-            let name = rustls::pki_types::ServerName::try_from(host.to_owned())
-                .map_err(io::Error::other)?;
-            let conn =
-                rustls::ClientConnection::new(tls.clone(), name).map_err(io::Error::other)?;
-            Self::event_response(
-                rustls::StreamOwned::new(conn, socket),
-                url,
-                user,
-                auth.as_deref(),
-            )
-        } else {
-            socket.set_read_timeout(Some(Duration::from_secs(1)))?;
-            Self::event_response(socket, url, user, auth.as_deref())
-        }
-    }
-
-    // Both transports expose raw HTTP bytes here, before any chunk decoding.
-    fn event_response(
-        mut stream: impl Read + Write + 'static,
-        url: &url::Url,
-        user: &str,
-        auth: Option<&str>,
-    ) -> io::Result<(u16, Box<dyn Read>)> {
-        let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
-        write!(stream, "GET {} HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\nAccept-Encoding: identity\r\nX-Cito-User: {user}\r\nConnection: close\r\n", &url[url::Position::BeforePath..url::Position::AfterQuery])?;
-        if let Some(value) = auth {
-            write!(stream, "Authorization: {value}\r\n")?;
-        }
-        stream.write_all(b"\r\n")?;
-        stream.flush()?;
-
-        let mut reader = BufReader::new(stream);
-        let mut headers = reader.by_ref().take(65_536);
-        let mut line = String::new();
-        headers.read_line(&mut line)?;
-        let (version, rest) = line.split_once(' ').ok_or(io::ErrorKind::InvalidData)?;
-        if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        let status: u16 = rest
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse().ok())
-            .ok_or(io::ErrorKind::InvalidData)?;
-        let mut length = None;
-        let mut chunked = false;
-        loop {
-            line.clear();
-            headers.read_line(&mut line)?;
-            if line == "\r\n" {
-                break;
-            }
-            let (name, value) = line
-                .strip_suffix("\r\n")
-                .and_then(|s| s.split_once(':'))
-                .ok_or(io::ErrorKind::InvalidData)?;
-            if name.eq_ignore_ascii_case("content-length") {
-                let n = value
-                    .trim()
-                    .parse::<u64>()
-                    .map_err(|_| io::ErrorKind::InvalidData)?;
-                if length.replace(n).is_some() {
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-            } else if name.eq_ignore_ascii_case("transfer-encoding") {
-                if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-                chunked = true;
-            }
-        }
-        let body: Box<dyn Read> = match (chunked, length) {
-            (true, None) => Box::new(ChunkedEvents {
-                reader,
-                remaining: 0,
-                terminator: false,
-                line: Vec::new(),
-            }),
-            (false, Some(n)) => Box::new(reader.take(n)),
-            (false, None) => Box::new(reader),
-            (true, Some(_)) => return Err(io::ErrorKind::InvalidData.into()),
+        let deadline = HttpDeadline {
+            at: Instant::now() + Duration::from_secs(5),
+            connect_at: None,
+            cancelled: Some(cancelled),
         };
-        Ok((status, body))
+        let mut response = exchange(
+            url,
+            "GET",
+            &headers,
+            None,
+            deadline,
+            tls,
+            Some(&self.event_wait.0),
+        )?;
+        response.body.reader.get_mut().start_streaming();
+        Ok((response.status, response.body))
     }
     pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
-        self.start_events_with(Duration::from_secs(90), EVENT_TLS.clone())
+        self.start_events_with(Duration::from_secs(90), self.tls.clone())
     }
     fn start_events_with(
         &self,
@@ -720,13 +1063,14 @@ impl HubClient {
         let client = self.clone();
         Some(thread::spawn(move || {
             let mut backoff = crate::support::RetryBackoff::default();
-            while !client.closed.load(Ordering::SeqCst) {
+            let cancelled = || client.request_cancelled();
+            while !client.request_cancelled() {
                 let bearer = client
                     .event_credentials
                     .lock()
                     .ok()
                     .and_then(|token| token.clone());
-                let response = client.open_events(&url, bearer.as_deref(), &tls);
+                let response = client.open_events(&url, bearer.as_deref(), &tls, &cancelled);
                 let status = response.as_ref().ok().map(|(status, _)| *status);
                 if let Some(body) = response
                     .ok()
@@ -773,11 +1117,6 @@ impl HubClient {
                         }
                     }
                 }
-                client
-                    .event_socket
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
                 client.stream_live.store(false, Ordering::SeqCst);
                 if bearer.is_some() && status == Some(401) {
                     client.reject_token(&bearer);
@@ -833,7 +1172,7 @@ impl HubClient {
             }
         };
         if !result["record"].is_object() || !result["record"]["listener_id"].is_string() {
-            return Err("NATS_UNAVAILABLE: Invalid Human response".into());
+            return Err("HUB_UNAVAILABLE: Invalid Human response".into());
         }
         self.cache_human(&result);
         Ok(result)
@@ -896,12 +1235,12 @@ impl HubClient {
         loop {
             let raw = self.rpc("kv_snapshot", &json!({"after_key":cursor}))?;
             if !raw["next_cursor"].is_null() && !raw["next_cursor"].is_string() {
-                return Err("NATS_UNAVAILABLE: Invalid snapshot cursor".into());
+                return Err("HUB_UNAVAILABLE: Invalid snapshot cursor".into());
             }
             let items = raw
                 .as_array()
                 .or_else(|| raw["entries"].as_array())
-                .ok_or("NATS_UNAVAILABLE: Missing directory entries")?;
+                .ok_or("HUB_UNAVAILABLE: Missing directory entries")?;
             for item in items {
                 if let Some(id) = item["listener_id"].as_str() {
                     if !id.is_empty() {
@@ -916,7 +1255,7 @@ impl HubClient {
                     .decode(
                         item["value_b64"]
                             .as_str()
-                            .ok_or("NATS_UNAVAILABLE: Missing directory record")?,
+                            .ok_or("HUB_UNAVAILABLE: Missing directory record")?,
                     )
                     .map_err(|e| e.to_string())?;
                 // KV also carries arbitrary bytes and non-registration JSON.
@@ -928,7 +1267,7 @@ impl HubClient {
             }
             let next = raw["next_cursor"].as_str().map(str::to_owned);
             if next.is_some() && next <= cursor {
-                return Err("NATS_UNAVAILABLE: Snapshot cursor did not advance".into());
+                return Err("HUB_UNAVAILABLE: Snapshot cursor did not advance".into());
             }
             cursor = next;
             if cursor.is_none() {

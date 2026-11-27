@@ -13,7 +13,7 @@ fn silent_established_sse_reconnects_without_peer_eof() {
         None,
     );
     let worker = client
-        .start_events_with(Duration::from_millis(150), EVENT_TLS.clone())
+        .start_events_with(Duration::from_millis(150), HTTP_TLS.clone())
         .unwrap();
     let accept = || {
         let mut fds = [libc::pollfd {
@@ -302,7 +302,7 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
         .starts_with("INVALID_INPUT:"));
     let url = url::Url::parse(old.config["url"].as_str().unwrap()).unwrap();
     assert!(
-        matches!(old.open_events(&url, renewed.bearer.as_deref(), &EVENT_TLS), Err(e) if e.kind() == io::ErrorKind::InvalidInput)
+        matches!(old.open_events(&url, renewed.bearer.as_deref(), &HTTP_TLS, &|| false), Err(e) if e.kind() == io::ErrorKind::InvalidInput)
     );
 }
 
@@ -440,7 +440,7 @@ fn loopback_tls() -> (Arc<rustls::ServerConfig>, Arc<rustls::ClientConfig>) {
 fn https_events_require_a_trusted_certificate_for_the_requested_host() {
     let (server_config, fixture_trust) = loopback_tls();
     // The fixture certificate is self-signed and covers localhost, not the IP literal.
-    for (host, trust) in [("localhost", &*EVENT_TLS), ("127.0.0.1", &fixture_trust)] {
+    for (host, trust) in [("localhost", &*HTTP_TLS), ("127.0.0.1", &fixture_trust)] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = url::Url::parse(&format!(
             "https://{host}:{}/v1/events",
@@ -462,7 +462,7 @@ fn https_events_require_a_trusted_certificate_for_the_requested_host() {
         });
         let client = HubClient::new("work".into(), json!({}), "alice", None);
         let error = client
-            .open_events(&url, Some("private"), trust)
+            .open_events(&url, Some("private"), trust, &|| false)
             .err()
             .expect("TLS peer must be rejected");
         client.close();
@@ -506,7 +506,7 @@ fn https_events_resume_a_chunk_size_split_across_a_read_timeout() {
         tls.flush().unwrap();
     });
     let client = HubClient::new("work".into(), json!({}), "alice", None);
-    let (status, mut body) = client.open_events(&url, None, &tls).unwrap();
+    let (status, mut body) = client.open_events(&url, None, &tls, &|| false).unwrap();
     assert_eq!(status, 200);
     let error = body.read(&mut [0; 64]).unwrap_err();
     assert!(matches!(
@@ -573,10 +573,10 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
         tls: None,
     };
     let mut url = format!("http://{}", f.server.address);
-    let mut agent = ureq::agent();
+    let mut client_tls = HTTP_TLS.clone();
     if https {
         let (config, tls) = loopback_tls();
-        agent = ureq::AgentBuilder::new().tls_config(tls).build();
+        client_tls = tls;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         url = format!(
             "https://localhost:{}",
@@ -634,20 +634,22 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
                     input["op"].as_str(),
                     Some("fixture_short" | "fixture_oversized")
                 ) {
-                    let body = if input["op"] == "fixture_short" {
-                        vec![b'x'; 1]
+                    let length = if input["op"] == "fixture_short" {
+                        2
                     } else {
-                        vec![b'x'; 8 * 1024 * 1024 + 1]
+                        RPC_BODY_LIMIT + 1
                     };
                     write!(
                         tls,
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len().max(2)
+                        length
                     )
                     .unwrap();
-                    tls.write_all(&body).unwrap();
-                    tls.conn.send_close_notify();
-                    tls.flush().unwrap();
+                    if input["op"] == "fixture_short" {
+                        tls.write_all(b"x").unwrap();
+                        tls.conn.send_close_notify();
+                        tls.flush().unwrap();
+                    }
                     continue;
                 }
                 if matches!(input["op"].as_str(), Some("fixture_error" | "fixture_null")) {
@@ -684,8 +686,172 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
         f.tls = Some((stop, worker));
     }
     let mut client = HubClient::new("work".into(), json!({"url":url}), "alice", None);
-    client.agent = agent;
+    client.tls = client_tls;
     (f, client)
+}
+
+#[test]
+fn slot_close_fences_http_write_on_an_already_connected_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = HubClient::new("work".into(), json!({}), "alice", None);
+    let cancelled = || client.request_cancelled();
+    let deadline = HttpDeadline {
+        at: Instant::now() + Duration::from_secs(2),
+        connect_at: None,
+        cancelled: Some(&cancelled),
+    };
+    let socket = connect(listener.local_addr().unwrap(), deadline).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut transport = SocketIo {
+        socket,
+        deadline,
+        write_gate: Some(&client.event_wait.0),
+        streaming: false,
+    };
+    client.close();
+    assert_eq!(
+        transport
+            .write_all(b"POST /v1/rpc HTTP/1.1\r\n")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::ConnectionAborted
+    );
+    drop(transport);
+    assert_eq!(server.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn slot_close_cancels_https_rpc_during_handshake_before_request_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (_, tls) = loopback_tls();
+    let mut client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("https://localhost:{}", listener.local_addr().unwrap().port())}),
+        "alice",
+        None,
+    );
+    client.tls = tls;
+    let (sent, received) = mpsc::channel();
+    let worker = client.clone();
+    let thread = thread::spawn(move || sent.send(worker.rpc("fixture", &json!({}))).unwrap());
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let mut record = [0; 5];
+    peer.read_exact(&mut record).unwrap();
+    assert_eq!(record[0], 22, "expected a TLS handshake record");
+    let size = u16::from_be_bytes([record[3], record[4]]);
+    let mut hello = vec![0; usize::from(size)];
+    peer.read_exact(&mut hello).unwrap();
+    assert_eq!(hello[0], 1, "expected ClientHello");
+    client.close();
+    let outcome = received.recv_timeout(Duration::from_secs(1));
+    drop(peer);
+    thread.join().unwrap();
+    let error = outcome.unwrap().unwrap_err();
+    assert!(
+        error.starts_with("HUB_UNAVAILABLE: ") && error.contains("cancelled"),
+        "{error}"
+    );
+}
+
+#[test]
+fn progressing_http_and_https_headers_cannot_extend_the_prelude_deadline() {
+    fn drip(mut server: impl Read + Write) {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            server.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(request.starts_with(b"GET /fixture HTTP/1.1\r\n"));
+        for part in std::iter::once(b"HTTP/1.1 200 OK\r\nX-Progress: ".as_slice())
+            .chain(std::iter::repeat_n(b"x".as_slice(), 75))
+        {
+            if server.write_all(part).and_then(|_| server.flush()).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        let _ = server.write_all(b"\r\nContent-Length: 0\r\n\r\n");
+    }
+    for https in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (server_tls, client_tls) = loopback_tls();
+        let (scheme, host) = if https {
+            ("https", "localhost")
+        } else {
+            ("http", "127.0.0.1")
+        };
+        let url = url::Url::parse(&format!(
+            "{scheme}://{host}:{}/fixture",
+            listener.local_addr().unwrap().port()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            if https {
+                drip(rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(server_tls).unwrap(),
+                    socket,
+                ));
+            } else {
+                drip(socket);
+            }
+        });
+        let start = Instant::now();
+        let result = exchange(
+            &url,
+            "GET",
+            &[],
+            None,
+            HttpDeadline::uncancelled(start + Duration::from_millis(350)),
+            &client_tls,
+            None,
+        );
+        let elapsed = start.elapsed();
+        let error = result.err().expect("Response prelude should time out");
+        server.join().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{scheme}: {error}");
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "{scheme}: {elapsed:?}"
+        );
+    }
+}
+
+#[test]
+fn response_body_budget_applies_to_all_framing_modes() {
+    for (wire, expected) in [
+        ("Content-Length: 4\r\n\r\nbody", b"body".as_slice()),
+        (
+            "Transfer-Encoding: chunked\r\n\r\n2\r\nbo\r\n2\r\ndy\r\n0\r\nX-End: ok\r\n\r\n",
+            b"body".as_slice(),
+        ),
+        ("\r\nbody", b"body".as_slice()),
+    ] {
+        let response = format!("HTTP/1.1 200 OK\r\n{wire}");
+        assert_eq!(
+            read_response(response.as_bytes())
+                .unwrap()
+                .read_body(4)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            read_response(response.as_bytes())
+                .unwrap()
+                .read_body(3)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::FileTooLarge
+        );
+    }
 }
 
 #[test]
@@ -707,7 +873,10 @@ fn https_transport_failures_mark_rpc_disconnected() {
         client.rpc("fixture_null", &json!({})).unwrap();
         assert_eq!(client.capabilities()["rpc_status"], "connected");
         let error = client.rpc(op, &json!({})).unwrap_err();
-        assert!(error.starts_with("NATS_UNAVAILABLE: "), "{error}");
+        assert!(error.starts_with("HUB_UNAVAILABLE: "), "{error}");
+        if op == "fixture_oversized" {
+            assert!(error.contains("exceeds frame limit"), "{error}");
+        }
         assert_eq!(client.capabilities()["rpc_status"], "disconnected");
     }
     client.rpc("fixture_null", &json!({})).unwrap();
@@ -715,7 +884,7 @@ fn https_transport_failures_mark_rpc_disconnected() {
     assert!(client
         .rpc("fixture_null", &json!({}))
         .unwrap_err()
-        .starts_with("NATS_UNAVAILABLE: "));
+        .starts_with("HUB_UNAVAILABLE: "));
     assert_eq!(client.capabilities()["rpc_status"], "disconnected");
 }
 // Check the outgoing RPC as well as its response, including the cursor used for later pages.
@@ -768,19 +937,19 @@ fn http_rpc_response_status_and_error_envelopes() {
         (
             200,
             json!({"ok":false,"message":"Retry"}),
-            Err("NATS_UNAVAILABLE: Retry"),
+            Err("HUB_UNAVAILABLE: Retry"),
             "connected",
         ),
         (
             200,
             json!({}),
-            Err("NATS_UNAVAILABLE: Invalid Hub RPC envelope"),
+            Err("HUB_UNAVAILABLE: Invalid Hub RPC envelope"),
             "connected",
         ),
         (
             200,
             json!({"ok":true}),
-            Err("NATS_UNAVAILABLE: Missing Hub RPC result"),
+            Err("HUB_UNAVAILABLE: Missing Hub RPC result"),
             "connected",
         ),
         (
@@ -798,7 +967,7 @@ fn http_rpc_response_status_and_error_envelopes() {
         (
             500,
             json!({"message":"Retry"}),
-            Err("NATS_UNAVAILABLE: Retry"),
+            Err("HUB_UNAVAILABLE: Retry"),
             "connected",
         ),
         (
@@ -875,10 +1044,10 @@ fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
     for later in [false, true] {
         let encoding_error = STANDARD.decode("%%%").unwrap_err().to_string();
         let mut invalid = vec![
-            (json!({}), "NATS_UNAVAILABLE: Missing directory entries"),
+            (json!({}), "HUB_UNAVAILABLE: Missing directory entries"),
             (
                 json!({"entries":[],"next_cursor":7}),
-                "NATS_UNAVAILABLE: Invalid snapshot cursor",
+                "HUB_UNAVAILABLE: Invalid snapshot cursor",
             ),
             (
                 json!({"entries":[{"value_b64":"%%%"}]}),
@@ -886,13 +1055,13 @@ fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
             ),
             (
                 json!({"entries":[{"value_b64":null}]}),
-                "NATS_UNAVAILABLE: Missing directory record",
+                "HUB_UNAVAILABLE: Missing directory record",
             ),
         ];
         if later {
             invalid.push((
                 json!({"entries":[],"next_cursor":"middle"}),
-                "NATS_UNAVAILABLE: Snapshot cursor did not advance",
+                "HUB_UNAVAILABLE: Snapshot cursor did not advance",
             ));
         }
         for (mut bad, expected) in invalid {

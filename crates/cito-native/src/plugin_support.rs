@@ -274,9 +274,22 @@ pub fn one_shot(handler: fn(&Value) -> Result<Value>) {
 
 // Unlink only while holding the lock. Waiters retry if the path no longer names
 // their locked inode, so cleanup cannot split concurrent read/modify/write owners.
-pub struct FileLock(File);
+pub struct FileLock {
+    _file: File,
+}
 impl FileLock {
     pub fn acquire(path: &Path) -> Result<Self> {
+        Self::acquire_inner(path, None)
+    }
+
+    pub(crate) fn acquire_interruptible(
+        path: &Path,
+        wait: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        Self::acquire_inner(path, Some(wait))
+    }
+
+    fn acquire_inner(path: &Path, mut wait: Option<&mut dyn FnMut() -> Result<()>>) -> Result<Self> {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
@@ -287,29 +300,42 @@ impl FileLock {
                 .read(true)
                 .write(true)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                 .open(path)
-                .map_err(|e| e.to_string())?;
-            // SAFETY: flock borrows this live descriptor; Drop releases it.
-            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error().to_string());
+                .map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
+            let held = f.metadata().map_err(|e| e.to_string())?;
+            if !held.is_file() {
+                return Err("Lock is not a regular file".into());
             }
-            let lock = Self(f);
-            let held = lock.0.metadata().map_err(|e| e.to_string())?;
-            if fs::metadata(path).is_ok_and(|m| m.dev() == held.dev() && m.ino() == held.ino()) {
-                return Ok(lock);
+            let flags = libc::LOCK_EX | if wait.is_some() { libc::LOCK_NB } else { 0 };
+            // SAFETY: flock borrows this live descriptor; closing it releases the lock.
+            if unsafe { libc::flock(f.as_raw_fd(), flags) } != 0 {
+                let error = std::io::Error::last_os_error();
+                match (error.kind(), wait.as_deref_mut()) {
+                    (std::io::ErrorKind::Interrupted, None) => continue,
+                    (std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock, Some(wait)) => {
+                        wait()?;
+                        continue;
+                    }
+                    _ => return Err(error.to_string()),
+                }
+            }
+            match fs::symlink_metadata(path) {
+                Ok(m) if m.is_file() && m.dev() == held.dev() && m.ino() == held.ino() => {
+                    return Ok(Self { _file: f });
+                }
+                Ok(m) if m.file_type().is_symlink() => return Err("Lock path is a symlink".into()),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+            if let Some(wait) = wait.as_deref_mut() {
+                wait()?;
             }
         }
     }
 }
 use std::os::unix::fs::OpenOptionsExt;
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // SAFETY: the owned file remains live during unlock.
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
 fn clean_sidecars(path: &Path) {
     let Some(parent) = path.parent() else { return };
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -522,6 +548,22 @@ pub fn mutate_with_mode(
         json!({"target":id,"path":path,"status":old.0,"backupPath":old.1,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
     )
 }
+/// Remove an obsolete entry, not the target it might point to.
+pub fn remove_legacy_file(req: &Value, id: &str, path: &Path) -> Result<Value> {
+    let dry = req["dry_run"] == true;
+    let result = if dry {
+        fs::symlink_metadata(path).map(|_| ())
+    } else {
+        fs::remove_file(path)
+    };
+    let status = match result {
+        Ok(()) => "updated",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "unchanged",
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(json!({"target":id,"path":path,"status":status,"backupPath":null,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}))
+}
+
 pub fn json_mutate(
     req: &Value,
     id: &str,
