@@ -29358,7 +29358,7 @@ phases:
 - id: v72
   name: 'V72 Wave 3: Release Binary Staging, v0.23.0 Bump, Dual-Host + GCP Live Verification
     & Tag'
-  status: in_progress
+  status: done
   gate: 'Wave 3 FULL acceptance gate passes: v0.23.0 release manifests and signed
     macOS arm64 binaries are staged cleanly, full test suites and CI pass with zero
     warnings, live smoke verification passes across both Macs and GCP agentic-hub
@@ -29483,7 +29483,7 @@ phases:
   - id: v72.live_smoke_sync_and_release_tag
     name: Deploy & live-smoke both Macs + GCP agentic-hub and publish annotated v0.23.0
       tag
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: runtime_state_only\n\
       \nDeliver:\n- [W3-MAC-SMOKE] Rebuild and install signed `/Applications/Cito.app`\
       \ on both Macs (`Zhaomengs-MacBook-Pro-16.local` and `Zhaomengs-MacBook-Air.local`),\
@@ -29521,9 +29521,44 @@ phases:
     agent: devops-engineer
     claimed_by: devops-engineer
     claimed_at: '2026-11-27T03:44:59.907862Z'
+    done_at: '2026-11-27T06:09:44.089880+00:00'
+    evidence: 'Artifact:
+
+      - Release Commit: d4da4dff3655685c219b6aec4d4a471edf6adb88 (pushed to origin/main,
+      0 mcp:/vectl: commits)
+
+      - Annotated Tag: v0.23.0 -> d4da4dff3655685c219b6aec4d4a471edf6adb88 (pushed
+      to origin)
+
+      - CI Run: https://github.com/Tefx/cito/actions/runs/45947942447 (conclusion:
+      success, 0 Rust/Swift compiler warnings, 457/457 lib + 348/348 native + release
+      build + candidate verification passed)
+
+
+      Verification:
+
+      - MBP (Zhaomengs-MacBook-Pro-16.local): /Applications/Cito.app installed from
+      d4da4df, codesign --verify --deep --strict passed, /health (4290/4291) ok:true
+      version:0.23.0 (PID 25775), nested one.tefx.cito.ui running, reopen_ui preserves
+      daemon PID, background CLI silent, LaunchAgent AssociatedBundleIdentifiers=["one.tefx.cito"].
+
+      - MBA (Zhaomengs-MacBook-Air.local, via tefx/pi#954c): HEAD=d4da4dff3655685c219b6aec4d4a471edf6adb88,
+      /Applications/Cito.app rebuilt & codesign --verify --deep --strict passed, /health
+      (4290) ok:true version:0.23.0 (PID 12823), nested cito-ui (PID 12824) running,
+      Pi streaming wake steer + post-JSONL ACK verified live.
+
+      - GCP agentic-hub (34.1.134.239 / https://cito.internal.rda.ai, via tefx/pi#954c):
+      Docker linux/amd64 build 0 warnings, /health ok:true version:0.23.0 (PID 369800),
+      inbound_mode="outbound_only", journalctl -u cito-hub.service 0 Telegram 409
+      conflicts since 04:29:32 UTC.
+
+
+      Spec link:
+
+      - docs/RELEASING.md & plan.yaml#v72.live_smoke_sync_and_release_tag'
   - id: v72.gate_final
     name: Final FULL acceptance gate for Wave 1-3 closure and v0.23.0 release
-    status: pending
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Final FULL acceptance gate for `v70`–`v72` (`v0.23.0`) verifying:\n  1. All\
       \ Wave 1 (`v70.*`), Wave 2 (`v71.*`), and Wave 3 (`v72.*`) contracts and evidence\
@@ -29546,3 +29581,12 @@ phases:
     depends_on:
     - v72.live_smoke_sync_and_release_tag
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-27T06:09:58.517209Z'
+    done_at: '2026-11-27T06:10:34.581754+00:00'
+    evidence: 'v72.gate_final PASSED (gate.report.v2 valid=true, binding_checked=true,
+      evidence_disposition=POSITIVE_GATE_EVIDENCE, 7/7 requirements PROVEN at git:8e7e562e7180391f0db0b6aeb3eaff3992dd8fad).
+      Report: /tmp/cito-v72-gate-report.json. Release commit d4da4dff3655685c219b6aec4d4a471edf6adb88,
+      annotated tag v0.23.0 -> d4da4df, CI #45947942447 passed with 0 warnings, 35/35
+      packaging tests + release.py check (0.23.0) + 7/7 signed arm64 binaries + MBP/MBA/GCP
+      live 0.23.0 & 0 Telegram 409 verified.'
