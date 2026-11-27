@@ -31283,3 +31283,411 @@ phases:
 
       - plan.yaml#v73.fix_reserved_invite_boundary (V73-R1-InviteTrustBoundary, Tests,
       Staging)'
+- id: v74
+  name: V74 Menu Progressive Disclosure, Pi 💬 Statusbar Badge & Full-Stack Metadata/Badge
+    DSE Closure
+  status: pending
+  gate: All V74-* obligations closed (Pi 💬 badge & duplicate-slicer removal, symmetric
+    TS/Rust promptAbout sanitization, format_badge owner-slug fallback, readable CLI
+    AVAILABLE SESSIONS, macOS Menu progressive disclosure & ghost-state removal, tests
+    & English/vendor-neutral docs), all 7 signed arm64 binaries staged at v0.23.0,
+    refreshed site/assets/screenshots/menu-dark.png verified, zero Larva/PI_PERSONA/internal-name
+    leaks, clean git status, and full workspace test suite green.
+  context: 'Pinned against commit c28f9b148adeedc02c3d2f9924b5b2595e6fbe98. Product
+    version remains 0.23.0 on unreleased main (do NOT move tag v0.23.0; do NOT modify
+    completed phases v1..v73). Upstream architecture/DSE discovery is converged into
+    the Admitted Finding Ledger (MUST_FIX #1-#5 + SIMPLIFY_SURFACE #6a/#6b). Wave
+    1 runs two strictly file-disjoint implementation tracks in parallel with fast
+    inner verification (debug cargo test builds cito-ui into OUT_DIR without mutating
+    bin/ or plugins/*/bin/); Wave 2 stages release binaries, refreshes site/assets/screenshots/menu-dark.png,
+    and runs full workspace regression before the independent FULL gate.'
+  depends_on:
+  - v73
+  steps:
+  - id: v74.rust_ts_metadata_and_badges
+    name: 'Wave 1 Track A: Pi 💬 Badge, Symmetric Prompt Sanitization, Badge Owner-Slug
+      & CLI Status Closure'
+    status: pending
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Base commit: c28f9b148adeedc02c3d2f9924b5b2595e6fbe98 (product version stays
+      0.23.0; do NOT bump version or mutate bin/ or plugins/*/bin/).
+
+
+      Deliver:
+
+      - [V74-PiChatEmojiBadge] `plugins/pi/cito-bridge.ts:renderBadge`: replace `"📡"`
+      with `"💬"` (`unread === 0` renders `ctx.ui.theme.fg("dim", "💬")`; `unread >
+      0` renders `ctx.ui.theme.fg("accent", \`💬 ${count}\`)` capped at `"99+"`), preserving
+      raw `session.activeBadge` and `identify.badge` wire strings unchanged.
+
+      - [V74-PiDuplicateSlugRemoval] `plugins/pi/cito-bridge.ts:execute("cito_listen")`
+      (Pi_down): delete the duplicate 4-line `publicId` `lastIndexOf("-")` slug slicer
+      and replace with `session.activeBadge ??= "Cito";`.
+
+      - [V74-PromptAboutSanitization] `plugins/pi/cito-bridge.ts` & `plugins/pi/native.rs`:
+      symmetrically sanitize first-user-message `promptAbout` / `prompt_about` across
+      TS and Rust — strip `<skill\b[\s\S]*?</skill>` XML blocks and trailing `Nunc
+      working memory (session-local` reference blocks, then extract only the first
+      meaningful non-empty line (collapsed internal whitespace, capped at 80 Unicode
+      chars; empty string if none) so raw skill/memory prompt dumps never leak into
+      `about` or promote into `display_title` via `companion_projection::node_presentation`.
+      Enforce zero Larva / `PI_PERSONA` coupling.
+
+      - [V74-CoreFormatBadgeOwnerSlugFix] `crates/cito-native/src/core/session_activity.rs:format_badge`:
+      fix stale v40 `public_id` (`"{owner_user_slug}-{16hex}"`) handling — compute
+      normalized owner slug from `owner_user` (falling back to `user`); use `public_id`''s
+      prefix before the last `''-''` ONLY when non-empty AND unequal to the owner
+      slug (preserving explicit custom non-owner `public_id` tests); otherwise resolve
+      from `[tag, custom title (when custom_title == true), repo short name, cwd basename,
+      non-generic title, harness]` (skipping generic `"session"` / owner-slug values
+      before `harness`).
+
+      - [V74-CliStatusReadableAvailable] `crates/cito-native/src/core/cli.rs:format_status`:
+      format `AVAILABLE SESSIONS` rows with human-readable non-generic `title` (falling
+      back to compact `session_id` prefix rather than raw 36-char UUIDs), compact
+      `$HOME`-prefixed `cwd` to `~/...`, keep `· Reload the app integration` when
+      `needs_reload == true`, and render `  (none)` under empty `LISTENING AGENT SESSIONS`
+      or `AVAILABLE SESSIONS` (preserving `"AVAILABLE SESSIONS"` header and existing
+      `cli.rs` / `mcp_and_inbox.rs` contract substrings).
+
+      - [V74-TrackATests] `crates/cito-native/tests/support/pi-bridge.mjs`, `plugins/pi/native.rs`,
+      `crates/cito-native/src/core/session_activity.rs`, `crates/cito-native/src/core/cli.rs`:
+      update `💬` assertions and add discriminating unit tests for `<skill>...</skill>`
+      & `Nunc working memory` sanitization in TS & Rust, duplicate-slicer removal,
+      owner-slug vs custom `public_id` `format_badge` fallback, and readable `format_status`
+      output.
+
+
+      Implementation Notes:
+
+      - Inspect `plugins/pi/cito-bridge.ts:81-87,327-332,653-656`, `plugins/pi/native.rs:166-197`,
+      `crates/cito-native/src/core/session_activity.rs:902-942`, and `crates/cito-native/src/core/cli.rs:475-525`
+      completely (`entry..exit`).
+
+      - Ensure TS and Rust `promptAbout` / `prompt_about` sanitizers handle multi-line
+      `<skill ...>...</skill>` blocks (including multiple blocks), trailing `Nunc
+      working memory (session-local...` suffix, and Unicode scalar/char boundary capping
+      at 80 characters without panicking on multibyte UTF-8.
+
+      - Keep all code comments, error messages, and fixtures English-only and vendor-neutral.
+
+
+      Boundary:
+
+      - Owner: `software-engineer` (Wave 1 parallel Track A, strictly disjoint from
+      Track B).
+
+      - `scope.allowed_paths`: `plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`,
+      `crates/cito-native/src/core/session_activity.rs`, `crates/cito-native/src/core/cli.rs`,
+      `crates/cito-native/tests/support/pi-bridge.mjs`.
+
+      - `scope.blocked_paths`: `plan.yaml`, `bin/**`, `plugins/*/bin/**`, `Cargo.toml`,
+      `Cargo.lock`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - All listed fast inner verification commands pass with zero warnings and zero
+      skipped regressions.
+
+      - Confirmed zero Larva/`PI_PERSONA` references introduced and raw `identify.badge`
+      / `activeBadge` wire contract preserved.
+
+
+      Recovery:
+
+      - If a pre-existing `cli.rs` or `mcp_and_inbox.rs` assertion conflicts with
+      `format_status` wording, preserve the contract substring and verify with `cargo
+      test --package cito-native --lib --locked`; escalate only if an external contract
+      contradicts the accepted obligations.'
+    verification: node --experimental-strip-types crates/cito-native/tests/support/pi-bridge.mjs
+      && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked
+      -- -D warnings && cargo test --package cito-native --lib --locked && cargo test
+      --package cito-plugin-pi --locked
+    evidence_template: Commands run + pass counts (pi-bridge.mjs, cargo fmt, clippy,
+      cito-native --lib, cito-plugin-pi); modified files list; confirmation of V74-PiChatEmojiBadge,
+      V74-PiDuplicateSlugRemoval, V74-PromptAboutSanitization (TS+Rust parity), V74-CoreFormatBadgeOwnerSlugFix,
+      V74-CliStatusReadableAvailable, and zero Larva/PI_PERSONA refs.
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    agent: software-engineer
+  - id: v74.macos_menu_progressive_disclosure
+    name: 'Wave 1 Track B: macOS Menu Progressive Disclosure, Ghost-State De-Bloat
+      & UI Tests/Docs'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nBase commit: c28f9b148adeedc02c3d2f9924b5b2595e6fbe98\
+      \ (product version stays 0.23.0; do NOT bump version or mutate bin/ or plugins/*/bin/\
+      \ — debug `cargo test` builds `cito-ui` into `OUT_DIR`).\n\nDeliver:\n- [V74-MenuProgressiveDisclosure]\
+      \ `src/macos/Companion.swift` & `src/macos/MenuSurface.swift`:\n  1. Set `myRemoteCollapsed\
+      \ = true` by default in `Companion.swift` (`▸ MY OTHER HOSTS · N`).\n  2. Add\
+      \ top-level `availableCollapsed = true` by default in `Companion.swift` and\
+      \ render a collapsible `availHeader` (`height: 26`) in `MenuSurface.swift` with\
+      \ `toggle_available` (`MenuControl(\"AVAILABLE SESSIONS · \\(available.count)\"\
+      , leadingSymbol: availableCollapsed ? \"chevron.right\" : \"chevron.down\")`,\
+      \ `.subtleHeader`, `10pt semibold`, cleanly left of `toggle_auto_listen` while\
+      \ keeping `toggle_auto_listen` right-aligned with invariant `reservedWidth`\
+      \ and `x` across `\"Auto-Listen\"` / `\"Auto-Listen: On\"`).\n  3. When `autoListen\
+      \ && reloadCount > 0`, preserve actionable reload visibility (`auto_listen_reload_status`\
+      \ banner or clear reload indicator) even while `availableCollapsed == true`;\
+      \ do NOT alter `candidateIsOpen` (`pid_bound == false` remains `\"open\"` per\
+      \ `docs/DESIGN.md` and `capabilities.rs:256`).\n  4. When `!availableCollapsed`,\
+      \ replace per-harness `176pt` nested scroll views with at most ONE unified bounded\
+      \ `available_scroll` (`height <= 200pt` when expanded content exceeds `200pt`,\
+      \ preserving scroll offset across rebuilds via `\"available_scroll\"`), and\
+      \ tighten Zone 1 `active_scroll` threshold from `> 4` cards (`256pt`) to `>\
+      \ 3` cards (`220pt`).\n- [V74-MenuGhostStateDeBloat] `src/macos/Companion.swift`\
+      \ & `src/macos/MenuSurface.swift` (Pi_down): delete obsolete `autoCollapsedRecentGroups`\
+      \ state and multi-scroll `expandedGroupCount` / `available_scroll:<harness>`\
+      \ split-ID branches superseded by top-level `availableCollapsed` + unified `available_scroll`.\n\
+      - [V74-MenuTestsAndDocs] `crates/cito-native/tests/support/ui/{menu.rs,directory.rs,capabilities.rs,render_stability.rs,oidc_settlement.rs,oracle_e2e.rs}`,\
+      \ `docs/DESIGN.md`, `README.md`: update existing UI tests inspecting `remote:*`\
+      \ / `candidate:*` / `toggle_group:*` / `listen:*` rows on initial open to expand\
+      \ `toggle_my_remote` / `toggle_available` where appropriate; add discriminating\
+      \ tests for `toggle_available` default-collapsed, expand/collapse toggle, unified\
+      \ `available_scroll` (`<= 200pt` + scroll preservation), `> 3` `active_scroll`\
+      \ (`220pt`), reload banner visibility while collapsed, and invariant `toggle_auto_listen`\
+      \ geometry; sync `docs/DESIGN.md` and `README.md` (English-only, vendor-neutral\
+      \ examples).\n\nImplementation Notes:\n- Inspect `src/macos/Companion.swift`\
+      \ and `src/macos/MenuSurface.swift` completely (`entry..exit`), plus `HeadlessOracle.swift`\
+      \ (read-only) if needed to confirm how `toggle_available` / `available_scroll`\
+      \ IDs are reported in menu snapshots.\n- Verify no overlapping siblings, clipped\
+      \ views, or truncated labels in light and dark appearances when `toggle_available`\
+      \ and `toggle_auto_listen` share `availHeader`.\n- Keep all UI strings, comments,\
+      \ tests, and docs strictly English-only with vendor-neutral examples (`personal`,\
+      \ `work`, `alice`, `bob`, `acme/service`).\n\nBoundary:\n- Owner: `frontend-engineer`\
+      \ (Wave 1 parallel Track B, strictly disjoint from Track A).\n- `scope.allowed_paths`:\
+      \ `src/macos/Companion.swift`, `src/macos/MenuSurface.swift`, `crates/cito-native/tests/support/ui/menu.rs`,\
+      \ `crates/cito-native/tests/support/ui/directory.rs`, `crates/cito-native/tests/support/ui/capabilities.rs`,\
+      \ `crates/cito-native/tests/support/ui/render_stability.rs`, `crates/cito-native/tests/support/ui/oidc_settlement.rs`,\
+      \ `crates/cito-native/tests/support/ui/oracle_e2e.rs`, `docs/DESIGN.md`, `README.md`.\n\
+      - `scope.blocked_paths`: `plan.yaml`, `bin/**`, `plugins/*/bin/**`, `Cargo.toml`,\
+      \ `Cargo.lock`, secrets/credentials.\n- Rollback: standard git revert within\
+      \ worktree.\n\nAdmit:\n- All 6 targeted UI test suites plus `cargo fmt` and\
+      \ `cargo clippy` pass cleanly with zero warnings.\n- `autoCollapsedRecentGroups`\
+      \ and `available_scroll:<harness>` split-ID branches are completely deleted;\
+      \ `candidateIsOpen` semantics remain unchanged.\n\nRecovery:\n- If an existing\
+      \ headless UI test relies on `menu_site` fixture layout, keep `menu_site` valid\
+      \ and note any screenshot dimension impact for Wave 2 `v74.stage_and_screenshots`."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --package cito-native --test native ui::menu
+      --locked -- --test-threads=1 && cargo test --package cito-native --test native
+      ui::capabilities --locked -- --test-threads=1 && cargo test --package cito-native
+      --test native ui::directory --locked -- --test-threads=1 && cargo test --package
+      cito-native --test native ui::render_stability --locked -- --test-threads=1
+      && cargo test --package cito-native --test native ui::oidc_settlement --locked
+      -- --test-threads=1 && cargo test --package cito-native --test native ui::oracle_e2e
+      --locked -- --test-threads=1
+    evidence_template: Commands run + pass counts (fmt, clippy, ui::menu, ui::capabilities,
+      ui::directory, ui::render_stability, ui::oidc_settlement, ui::oracle_e2e); modified
+      files list; confirmation of default-collapsed myRemoteCollapsed & availableCollapsed,
+      unified available_scroll (<=200pt), >3 active_scroll (220pt), reload banner
+      while collapsed, invariant toggle_auto_listen geometry, deleted autoCollapsedRecentGroups
+      & available_scroll:<harness>, and English/vendor-neutral docs updates.
+    refs:
+    - src/macos/Companion.swift
+    - src/macos/MenuSurface.swift
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/ui/capabilities.rs
+    - crates/cito-native/tests/support/ui/render_stability.rs
+    - crates/cito-native/tests/support/ui/oidc_settlement.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - docs/DESIGN.md
+    - README.md
+    agent: frontend-engineer
+  - id: v74.stage_and_screenshots
+    name: 'Wave 2 Consolidation: Stage Signed arm64 Binaries, Refresh menu-dark.png
+      & Full Workspace Regression'
+    status: pending
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Post-merge Wave 2 consolidation after `v74.rust_ts_metadata_and_badges` and
+      `v74.macos_menu_progressive_disclosure`. Product version MUST remain `0.23.0`
+      on unreleased `main`; do NOT move tag `v0.23.0` or bump Cargo/package versions.
+
+
+      Deliver:
+
+      - [V74-StageBinaries] Run `cargo build --release --locked` to stage all 7 signed
+      Darwin `arm64` binaries (`bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`,
+      `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,
+      `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`)
+      and verify for every binary: `lipo -archs` equals `arm64`, `codesign -v --strict`
+      passes, and `./bin/cito-native-darwin-arm64 --version` outputs `cito v0.23.0`.
+
+      - [V74-RefreshMenuScreenshot] Regenerate `site/assets/screenshots/menu-dark.png`
+      (and any affected dark screenshot fixture if needed, via the `oracle_e2e.rs`
+      `menu_site` screenshot capture harness) so the website menu screenshot reflects
+      the new progressive-disclosure Menu layout; visually inspect the regenerated
+      PNG via `read` to confirm crisp layout, zero clipping/truncation, and update
+      `crates/cito-native/tests/support/distribution.rs` expected pixel dimensions
+      only if `menu-dark.png` height legitimately changed.
+
+      - [V74-FullWorkspaceRegression] Run the full workspace regression suite (Node
+      Pi bridge test, `cargo fmt --check`, `cargo clippy --workspace --all-targets
+      --locked -- -D warnings`, and `cargo test --workspace --locked -- --test-threads=2`)
+      and close any cross-step `[DEFER_TO_CONSOLIDATE]` cleanup if present.
+
+
+      Implementation Notes:
+
+      - Check `crates/cito-native/tests/support/ui/mod.rs` and `oracle_e2e.rs` (`menu_site`)
+      for the `CITO_SCREENSHOT_DIR` capture mechanism so the regenerated PNG comes
+      directly from the live `cito-ui` renderer rather than hand-editing.
+
+      - Check `crates/cito-native/tests/support/distribution.rs:674` where `("assets/screenshots/menu-dark.png",
+      width, height)` is verified against PNG metadata and decoded BMP dimensions.
+
+      - Preserve incremental `target/` during iterations; remove any temporary screenshot
+      staging directories outside `site/assets/screenshots/` before completion.
+
+
+      Boundary:
+
+      - Owner: `devops-engineer` (Wave 2 consolidation).
+
+      - `scope.allowed_paths`: `bin/**`, `plugins/*/bin/**`, `site/assets/screenshots/**`,
+      `crates/cito-native/tests/support/ui/**` (only if screenshot fixture adjustment
+      is required), `crates/cito-native/tests/support/distribution.rs` (only if `menu-dark.png`
+      dimensions change).
+
+      - `scope.blocked_paths`: `plan.yaml`, `Cargo.toml`, `Cargo.lock`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - All 7 staged binaries pass `lipo -archs` (`arm64`), `codesign -v --strict`,
+      and `./bin/cito-native-darwin-arm64 --version` (`cito v0.23.0`).
+
+      - `site/assets/screenshots/menu-dark.png` visually verified via `read` and passing
+      `distribution.rs` checks.
+
+      - Full workspace regression suite passes with zero failures and zero warnings.
+
+
+      Recovery:
+
+      - If `cargo test --workspace` exposes a cross-track integration failure outside
+      allowed paths, record exact failing test and diagnostics and stop without touching
+      Wave 1 source files outside scope.'
+    verification: cargo build --release --locked && ./bin/cito-native-darwin-arm64
+      --version && for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      lipo -archs "$b" && codesign -v --strict "$b"; done && node --experimental-strip-types
+      crates/cito-native/tests/support/pi-bridge.mjs && cargo fmt --all -- --check
+      && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test
+      --workspace --locked -- --test-threads=2
+    evidence_template: All 7 binary paths with lipo -archs + codesign -v --strict
+      receipts; `./bin/cito-native-darwin-arm64 --version` output (`cito v0.23.0`);
+      visual read inspection receipt + pixel dimensions of `site/assets/screenshots/menu-dark.png`;
+      full regression command outputs and pass counts (pi-bridge.mjs, fmt, clippy,
+      cargo test --workspace).
+    refs:
+    - site/assets/screenshots/menu-dark.png
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/distribution.rs
+    depends_on:
+    - v74.rust_ts_metadata_and_badges
+    - v74.macos_menu_progressive_disclosure
+    agent: devops-engineer
+  - id: v74.gate_final
+    name: Final FULL Verification Gate for Phase v74
+    status: pending
+    description: 'step_type: gate
+
+      repo_change_policy: no_repo_change
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Independent FULL verification gate for Phase `v74` (diff range `c28f9b148adeedc02c3d2f9924b5b2595e6fbe98..HEAD`).
+
+
+      Deliver:
+
+      - Audit every `V74-*` obligation across the integrated diff (`V74-PiChatEmojiBadge`,
+      `V74-PiDuplicateSlugRemoval`, `V74-PromptAboutSanitization` TS+Rust parity,
+      `V74-CoreFormatBadgeOwnerSlugFix`, `V74-CliStatusReadableAvailable`, `V74-TrackATests`,
+      `V74-MenuProgressiveDisclosure`, `V74-MenuGhostStateDeBloat`, `V74-MenuTestsAndDocs`,
+      `V74-StageBinaries`, `V74-RefreshMenuScreenshot`, `V74-FullWorkspaceRegression`)
+      for `(D, S, E)` closure, sibling symmetry, and Law II `Pi_down` de-bloat completeness.
+
+      - Verify policy invariants: zero `Larva` / `PI_PERSONA` / internal company or
+      environment names in diff and modified files; strictly English-only UI/UX strings,
+      comments, errors, and docs (`README.md`, `docs/DESIGN.md`); product version
+      remains `0.23.0` and git tag `v0.23.0` is untouched; `git status` is clean.
+
+      - Verify all 7 staged Darwin `arm64` binaries pass `lipo -archs`, `codesign
+      -v --strict`, and `./bin/cito-native-darwin-arm64 --version` (`cito v0.23.0`),
+      visually inspect refreshed `site/assets/screenshots/menu-dark.png` via `read`,
+      and confirm full workspace test suite green (reusing fresh `v74.stage_and_screenshots`
+      pass evidence if `HEAD` is unchanged and running live verification checks).
+
+
+      Boundary:
+
+      - Owner: `gate-reviewer` (read-only FULL gate; modify zero files).
+
+      - `scope.allowed_paths`: none (read-only).
+
+      - `scope.blocked_paths`: all repository files (read-only audit).
+
+
+      Admit:
+
+      - Zero blocking Tier 1 `[CONTRACT / WIRE]` or `[SIMPLICITY / DE-BLOAT]` findings;
+      all `V74-*` obligations verified with file:symbol and command receipts; `PASS`
+      or `FAIL` verdict with explicit Coverage Receipt.
+
+
+      Recovery:
+
+      - On any blocking finding, emit `FAIL` with exact `file:line`, violated invariant,
+      counterexample, and smallest closure fix without modifying repository files.'
+    verification: git status --short && git rev-parse v0.23.0 && ./bin/cito-native-darwin-arm64
+      --version && for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      lipo -archs "$b" && codesign -v --strict "$b"; done && rg -n "Larva|PI_PERSONA"
+      plugins/pi/cito-bridge.ts plugins/pi/native.rs crates/cito-native/src/core/session_activity.rs
+      crates/cito-native/src/core/cli.rs src/macos/Companion.swift src/macos/MenuSurface.swift
+      docs/DESIGN.md README.md || true
+    evidence_template: Verdict (PASS/FAIL); Coverage Receipt across all V74-* obligations
+      and modified files; grep receipts confirming zero Larva/PI_PERSONA/internal
+      names and English-only UI/code/docs; binary version (`cito v0.23.0`) + lipo/codesign
+      receipts for all 7 arm64 binaries; visual read check of `site/assets/screenshots/menu-dark.png`;
+      clean `git status` and full workspace test suite green receipt.
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/cli.rs
+    - src/macos/Companion.swift
+    - src/macos/MenuSurface.swift
+    - site/assets/screenshots/menu-dark.png
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v74.stage_and_screenshots
+    agent: gate-reviewer
