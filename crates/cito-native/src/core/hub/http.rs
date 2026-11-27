@@ -3,8 +3,33 @@ use super::*;
 use crate::core::{config::advertised_name, login::CITO_CARD_STYLE};
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 
-/// Stopping the listener never closes its shared engine. The daemon closes the engine last.
+const MAX_RPC_WORKERS: usize = 256;
+const MAX_SSE_WORKERS: usize = 256;
+type SseWorkers = Arc<Mutex<Vec<JoinHandle<()>>>>;
+
+struct ConnectionSlot {
+    id: u64,
+    sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
+}
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if let Ok(mut sockets) = self.sockets.lock() {
+            sockets.remove(&self.id);
+        }
+    }
+}
+
+fn reap_finished(workers: &mut Vec<JoinHandle<()>>) {
+    for i in (0..workers.len()).rev() {
+        if workers[i].is_finished() {
+            let _ = workers.swap_remove(i).join();
+        }
+    }
+}
+
+/// Stopping the listener never closes its shared engine.
 pub struct HubServer {
     pub address: SocketAddr,
     listener: std::sync::Weak<TcpListener>,
@@ -127,10 +152,10 @@ impl PreparedHubServer {
             sockets.clone(),
         );
         let handle = thread::spawn(move || {
-            let mut workers: Vec<JoinHandle<()>> = Vec::new();
+            let mut workers = Vec::new();
+            let sse_workers = SseWorkers::default();
             let mut next_socket = 0u64;
             while lifetime.0.load(Ordering::Acquire) {
-                use std::os::fd::AsRawFd;
                 let mut ready = [
                     libc::pollfd {
                         fd: listener.as_raw_fd(),
@@ -148,18 +173,14 @@ impl PreparedHubServer {
                 {
                     break;
                 }
-                for i in (0..workers.len()).rev() {
-                    if workers[i].is_finished() {
-                        let _ = workers.swap_remove(i).join();
-                    }
-                }
+                reap_finished(&mut workers);
                 match listener.accept() {
                     Ok((stream, _)) => {
                         if !lifetime.0.load(Ordering::Acquire) {
                             let _ = stream.shutdown(Shutdown::Both);
                             break;
                         }
-                        if workers.len() >= 256 {
+                        if workers.len() >= MAX_RPC_WORKERS {
                             let mut stream = stream;
                             let _ = http_json(
                                 &mut stream,
@@ -170,20 +191,38 @@ impl PreparedHubServer {
                         }
                         next_socket += 1;
                         let socket_id = next_socket;
-                        if let Ok(clone) = stream.try_clone() {
-                            if let Ok(mut list) = ss.lock() {
-                                list.insert(socket_id, clone);
+                        let Ok(clone) = stream.try_clone() else {
+                            continue;
+                        };
+                        let Ok(mut list) = ss.lock() else {
+                            break;
+                        };
+                        list.insert(socket_id, clone);
+                        drop(list);
+                        let (e, a, s) = (engine.clone(), auth.clone(), lifetime.0.clone());
+                        let shutdown_wake = lifetime.1.clone();
+                        let sse = sse_workers.clone();
+                        let connection = ConnectionSlot {
+                            id: socket_id,
+                            sockets: ss.clone(),
+                        };
+                        match thread::Builder::new()
+                            .name("cito-hub-rpc".into())
+                            .spawn(move || {
+                                handle_http(
+                                    stream,
+                                    e,
+                                    a,
+                                    s,
+                                    address,
+                                    (shutdown_wake, &sse, connection),
+                                );
+                            }) {
+                            Ok(worker) => workers.push(worker),
+                            Err(error) => {
+                                eprintln!("cito hub: cannot start request worker: {error}")
                             }
                         }
-                        let (e, a, s, connections) =
-                            (engine.clone(), auth.clone(), lifetime.0.clone(), ss.clone());
-                        let shutdown_wake = lifetime.1.clone();
-                        workers.push(thread::spawn(move || {
-                            handle_http(stream, e, a, s, address, shutdown_wake);
-                            if let Ok(mut list) = connections.lock() {
-                                list.remove(&socket_id);
-                            }
-                        }));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) => {
@@ -199,6 +238,12 @@ impl PreparedHubServer {
                 }
             }
             for worker in workers {
+                let _ = worker.join();
+            }
+            // No RPC worker can hand off another stream after this point.
+            let streams =
+                std::mem::take(&mut *sse_workers.lock().unwrap_or_else(|e| e.into_inner()));
+            for worker in streams {
                 let _ = worker.join();
             }
         });
@@ -245,10 +290,15 @@ fn handle_http(
     auth: Arc<HubAuth>,
     running: Arc<AtomicBool>,
     bound: SocketAddr,
-    shutdown_wake: Arc<crate::support::WakePipe>,
+    (shutdown_wake, sse_workers, connection): (
+        Arc<crate::support::WakePipe>,
+        &SseWorkers,
+        ConnectionSlot,
+    ),
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let mut connection = Some(connection);
     let result = (|| -> Result<(), String> {
         // Darwin accept() inherits the listener's O_NONBLOCK. Client workers use
         // blocking reads with timeouts, including between fragmented headers.
@@ -306,76 +356,31 @@ fn handle_http(
         }
         let principal = auth.authenticate(&headers)?;
         if path == "/v1/events" && method == "GET" {
+            let mut workers = sse_workers.lock().map_err(|_| "SSE worker lock poisoned")?;
+            reap_finished(&mut workers);
+            if workers.len() >= MAX_SSE_WORKERS || !running.load(Ordering::Acquire) {
+                return Err("UNAVAILABLE: Event stream capacity unavailable".into());
+            }
             let expires_at = principal["token_expires_at"].as_f64();
             let events = engine.subscribe(Some(principal))?;
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n\r\n:ok\n\n").map_err(|e|e.to_string())?;
-            while running.load(Ordering::Acquire)
-                && !engine.inner.closed.load(Ordering::SeqCst)
-                && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
-            {
-                use std::os::fd::AsRawFd;
-                let wait = sse_wait(expires_at, now_ms());
-                let mut fds = [
-                    libc::pollfd {
-                        fd: events.wake.read_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: stream.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                    libc::pollfd {
-                        fd: shutdown_wake.read_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    },
-                ];
-                let event = match events.try_recv() {
-                    Ok(frame) => Ok(frame),
-                    Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
-                    Err(mpsc::TryRecvError::Empty) => {
-                        events.wake.drain();
-                        // Recheck after draining so a concurrent commit cannot lose its wake byte.
-                        match events.try_recv() {
-                            Ok(frame) => Ok(frame),
-                            Err(mpsc::TryRecvError::Disconnected) => {
-                                Err(mpsc::TryRecvError::Disconnected)
-                            }
-                            Err(mpsc::TryRecvError::Empty) => {
-                                crate::support::poll_until(
-                                    &mut fds,
-                                    Some(std::time::Instant::now() + wait),
-                                )?;
-                                if fds[1].revents != 0 || !running.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                events.try_recv()
-                            }
-                        }
-                    }
-                }
-                .map_err(|error| match error {
-                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
-                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
-                });
-                if expires_at.is_some_and(|exp| now_ms().max(0) as f64 / 1000.0 >= exp) {
-                    break;
-                }
-                match event {
-                    Ok(frame) => {
-                        write!(stream, "data: {frame}\n\n").map_err(|e| e.to_string())?;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        stream
-                            .write_all(b":keepalive\n\n")
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Err(_) => break,
-                }
-                stream.flush().map_err(|e| e.to_string())?;
-            }
+            let mut stream = stream.try_clone().map_err(|e| e.to_string())?;
+            let connection = connection.take();
+            workers.push(
+                thread::Builder::new()
+                    .name("cito-hub-sse".into())
+                    .spawn(move || {
+                        let _connection = connection;
+                        let _ = serve_events(
+                            &mut stream,
+                            engine,
+                            running,
+                            shutdown_wake,
+                            events,
+                            expires_at,
+                        );
+                    })
+                    .map_err(|e| format!("UNAVAILABLE: Cannot start event worker: {e}"))?,
+            );
             return Ok(());
         }
         if path != "/v1/rpc" || method != "POST" {
@@ -399,8 +404,86 @@ fn handle_http(
     })();
     if let Err(err) = result {
         http_error(&mut stream, &err);
+    } else if connection.is_none() {
+        return; // The SSE worker now owns the connection.
     }
-    let _ = stream.shutdown(Shutdown::Both);
+    crate::core::http_boundary::finish_http(&mut stream);
+}
+
+fn serve_events(
+    stream: &mut TcpStream,
+    engine: HubEngine,
+    running: Arc<AtomicBool>,
+    shutdown_wake: Arc<crate::support::WakePipe>,
+    events: Subscription,
+    expires_at: Option<f64>,
+) -> Result<(), String> {
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n\r\n:ok\n\n").map_err(|e|e.to_string())?;
+    while running.load(Ordering::Acquire)
+        && !engine.inner.closed.load(Ordering::SeqCst)
+        && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
+    {
+        let wait = sse_wait(expires_at, now_ms());
+        let mut fds = [
+            libc::pollfd {
+                fd: events.wake.read_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: shutdown_wake.read_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let event = match events.try_recv() {
+            Ok(frame) => Ok(frame),
+            Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
+            Err(mpsc::TryRecvError::Empty) => {
+                events.wake.drain();
+                // Recheck after draining so a concurrent commit cannot lose its wake byte.
+                match events.try_recv() {
+                    Ok(frame) => Ok(frame),
+                    Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
+                    Err(mpsc::TryRecvError::Empty) => {
+                        crate::support::poll_until(
+                            &mut fds,
+                            Some(std::time::Instant::now() + wait),
+                        )?;
+                        if fds[1].revents != 0 || !running.load(Ordering::Acquire) {
+                            break;
+                        }
+                        events.try_recv()
+                    }
+                }
+            }
+        }
+        .map_err(|error| match error {
+            mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
+            mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
+        });
+        if expires_at.is_some_and(|exp| now_ms().max(0) as f64 / 1000.0 >= exp) {
+            break;
+        }
+        match event {
+            Ok(frame) => {
+                write!(stream, "data: {frame}\n\n").map_err(|e| e.to_string())?;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                stream
+                    .write_all(b":keepalive\n\n")
+                    .map_err(|e| e.to_string())?;
+            }
+            Err(_) => break,
+        }
+        stream.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

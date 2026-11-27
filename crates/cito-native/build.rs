@@ -56,7 +56,12 @@ fn main() {
         private
     };
     let temporary = output.with_extension(format!("{}.tmp", std::process::id()));
-    let mut args = vec!["-O", "-target", "arm64-apple-macos13.0"];
+    let mut args = vec![
+        "-O",
+        "-warnings-as-errors",
+        "-target",
+        "arm64-apple-macos13.0",
+    ];
     args.extend(sources.iter().map(|source| source.to_str().unwrap()));
     args.extend(["-o", temporary.to_str().unwrap()]);
     run("/usr/bin/swiftc", &args);

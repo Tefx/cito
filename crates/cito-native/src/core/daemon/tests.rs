@@ -2087,7 +2087,8 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
     let raw = json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://","authMode":"oidc","issuer":issuer,"clientId":"client"}}});
     fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
     let sign = |expires: u64| {
-        let claims = json!({"iss":issuer,"sub":"alice","aud":"client","exp":expires as f64 + 0.5});
+        let issued = expires.min(now_ms() / 1000).saturating_sub(1);
+        let claims = json!({"iss":issuer,"sub":"alice","aud":"client","iat":issued,"exp":expires as f64 + 0.5});
         jsonwebtoken::encode(
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
             &claims,
@@ -2098,7 +2099,9 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
         )
         .unwrap()
     };
-    let cache = json!({"id_token":"expired","refresh_token":"refresh","issuer":issuer,"client_id":"client","token_sha256":super::super::identity::hash("expired"),"expires_at":0,"verified_user":"alice","verified_principal_id":format!("oidc:{issuer}|alice")});
+    let expired_at = now_ms() / 1000 - 60;
+    let expired = sign(expired_at);
+    let cache = json!({"id_token":expired,"refresh_token":"refresh","issuer":issuer,"client_id":"client","token_sha256":super::super::identity::hash(&expired),"expires_at":expired_at as f64 + 0.5,"verified_user":"alice","verified_principal_id":format!("oidc:{issuer}|alice")});
     crate::support::atomic_write_with_mode(
         &config.state_dir.join("oidc-token-work.json"),
         cache.to_string().as_bytes(),
@@ -2111,9 +2114,8 @@ fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacem
         serve_responses(
             listener,
             [
-                (200, discovery.clone()),
-                (200, json!({"id_token":token,"refresh_token":"refresh"})),
                 (200, discovery),
+                (200, json!({"id_token":token,"refresh_token":"refresh"})),
                 (200, json!({"keys":[jwk]})),
             ],
         )
@@ -2612,6 +2614,28 @@ fn builtin_channel_inventory_drives_reuse_and_ui_revisions() -> Result<(), Strin
     let _cleanup = ServiceCleanup {
         service: service.clone(),
     };
+    let mailbox = Arc::new(UiMailbox::default());
+    {
+        let mut daemon = service.lock().unwrap();
+        assert_eq!(
+            daemon.snapshot()?["settings"]["channels"][0]["id"],
+            "fixture"
+        );
+        daemon.set_ui(mailbox.clone());
+        assert_eq!(
+            take_state_frame(&mailbox)["settings"]["channels"],
+            json!([])
+        );
+        daemon.action(
+            &json!({"op":"setup_reorder_hub","hub":"work","direction":"up","request_id":"reorder"}),
+        )?;
+        let frame = take_state_frame(&mailbox);
+        assert_eq!(frame["request_id"], "reorder");
+        assert_eq!(frame["settings"]["hubs"][0]["name"], "work");
+        assert_eq!(frame["settings"]["channels"], json!([]));
+        daemon.action(&json!({"op":"setup_reorder_hub","hub":"work","direction":"down"}))?;
+        daemon.disconnect_ui();
+    }
     let destination = "d".repeat(5 * 1024);
     for action in [
         json!({
@@ -4038,7 +4062,7 @@ fn human_send_preserves_the_raw_reply_id_after_source_retention() -> Result<(), 
     )?;
     let source = service.local.rpc(
         "js_publish",
-        &json!({"subject":format!("cito.signal.{human}"),"data":{"signal_id":"thread:source"}}),
+        &json!({"subject":format!("cito.signal.{human}"),"data":{"signal_id":"thread:source","from":{"listener_id":target["listener_id"]}}}),
         None,
     )?;
     let mut check = |reference: &str, expected: &str| -> Result<(), String> {
@@ -4523,6 +4547,175 @@ fn local_http_enforces_host_origin_content_type_and_framing() -> Result<(), Stri
     }
 }
 
+#[derive(Default)]
+struct HttpAttributionTrace {
+    lookups: usize,
+    requests: Vec<(Option<u64>, usize, usize)>,
+    cache_checks: usize,
+}
+
+thread_local! {
+    static HTTP_ATTRIBUTION_TRACE: std::cell::RefCell<Option<HttpAttributionTrace>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn observe_http_peer_lookup() {
+    HTTP_ATTRIBUTION_TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            trace.lookups += 1;
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn observe_http_peer_cache_check() {
+    HTTP_ATTRIBUTION_TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            trace.cache_checks += 1;
+        }
+    });
+}
+
+pub(super) fn observe_http_attribution(pid: Option<&Value>) {
+    HTTP_ATTRIBUTION_TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            trace.requests.push((
+                pid.and_then(Value::as_u64),
+                trace.lookups,
+                trace.cache_checks,
+            ));
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn local_http_reuses_verified_pid_only_on_the_same_connection() -> Result<(), String> {
+    let (_dir, service) = TestService::local()?;
+    let shared = Arc::new(Mutex::new(service.into_inner()));
+    let _cleanup = ServiceCleanup {
+        service: shared.clone(),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let mut previous_pid = None;
+    for scenario in ["explicit", "find", "transfer", "shared"] {
+        // A separate process is necessary: the daemon deliberately excludes its own PID.
+        let mut command = std::process::Command::new("python3");
+        command.args([
+            "-c",
+            r#"
+import http.client, json, os, sys, traceback
+conn = http.client.HTTPConnection("127.0.0.1", int(sys.argv[1]), timeout=5)
+conn.auto_open = False
+conn.connect()
+
+def request(request_id, scenario=None):
+    name = "cito_find" if scenario == "find" else "cito_status"
+    meta = {"_http_client": 1}
+    if scenario == "explicit":
+        meta["pid"] = os.getpid()
+    body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                       "params": {"name": name, "_meta": meta}})
+    headers = {"Content-Type": "application/json"}
+    if scenario and scenario != "shared":
+        headers["Connection"] = "close"
+    conn.request("POST", "/mcp", body, headers)
+    response = conn.getresponse()
+    assert response.status == 200 and json.load(response)["id"] == request_id
+    connection = response.getheader("Connection")
+    assert connection == ("close" if scenario else "keep-alive"), (sys.argv[2], request_id, connection)
+
+try:
+    scenario = sys.argv[2]
+    for request_id in range(3):
+        request(request_id)
+    print(os.getpid(), flush=True)
+    if scenario in ("transfer", "shared"):
+        # Release the child only after the parent has chosen whether to keep its FD.
+        ready, release = os.pipe()
+        child = os.fork()
+        if child == 0:
+            try:
+                os.close(release)
+                assert os.read(ready, 1) == b"\x01"
+                os.close(ready)
+                request(3, scenario)
+            except BaseException:
+                traceback.print_exc()
+                os._exit(1)
+            os._exit(0)
+        os.close(ready)
+        try:
+            if scenario == "transfer":
+                conn.close()
+            os.write(release, b"\x01")
+        finally:
+            os.close(release)
+            _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        print(child)
+    else:
+        request(3, scenario)
+finally:
+    conn.close()
+"#,
+            &port.to_string(),
+            scenario,
+        ]);
+        let path = std::env::var_os("PATH").ok_or("Missing PATH for the HTTP peer fixture")?;
+        command
+            .env_clear()
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null());
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let peer = thread::spawn(move || {
+            crate::support::run_command_with_timeout(command, Duration::from_secs(8))
+        });
+        let accepted = crate::core::http_boundary::accept_test_client(&listener);
+        HTTP_ATTRIBUTION_TRACE
+            .with_borrow_mut(|trace| *trace = Some(HttpAttributionTrace::default()));
+        if let Ok(stream) = accepted {
+            super::http_actions::handle_http(stream, shared.clone(), Arc::new(json!({})));
+        }
+        let trace = HTTP_ATTRIBUTION_TRACE
+            .with_borrow_mut(Option::take)
+            .unwrap();
+        let output = peer
+            .join()
+            .map_err(|_| "HTTP peer worker panicked")??
+            .ok_or("HTTP peer timed out")?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pids = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        // Each trace entry includes the attribution and cumulative counts of
+        // subprocess lookups and checks of an unexpired cached PID.
+        let fourth = match (scenario, pids.as_slice()) {
+            ("transfer", [parent, child]) if parent != child => (Some(*child), 2, 3),
+            ("shared", [parent, child]) if parent != child => (None, 2, 3),
+            ("explicit" | "find", [_]) => (None, 1, 2),
+            _ => return Err(format!("Unexpected fixture PIDs for {scenario}: {pids:?}")),
+        };
+        let pid = Some(pids[0]);
+        assert_ne!(previous_pid, pid);
+        assert_eq!(
+            trace.requests,
+            [(pid, 1, 0), (pid, 1, 1), (pid, 1, 2), fourth],
+            "{scenario}"
+        );
+        previous_pid = pid;
+    }
+    Ok(())
+}
+
 #[test]
 fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
     let mailbox = UiMailbox::default();
@@ -4633,7 +4826,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
             client.clone().inherit_authority(&client);
         }
         assert_ne!(client.human_observation_current(), current);
-        let frame = service.snapshot_from(&samples)?;
+        let frame = service.snapshot_from(&samples, true)?;
         for (key, name_field) in [("hubs", "name"), ("my_remote_listeners", "hub")] {
             let projected = frame[key]
                 .as_array()
@@ -4810,5 +5003,111 @@ fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
             .unwrap_err()
             .starts_with("FORBIDDEN:"));
     }
+    Ok(())
+}
+
+#[test]
+fn setup_remove_hub_requires_explicit_hub_and_retires_runtime_on_credential_warning(
+) -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-remove-hub-{}", random_uuid_v4())));
+    let config = profile_config(
+        &dir,
+        json!({"default_hub":"work","hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    for bad in [
+        json!({"op":"setup_remove_hub"}),
+        json!({"op":"setup_remove_hub","hub":Value::Null}),
+        json!({"op":"setup_remove_hub","hub":"   "}),
+    ] {
+        assert!(service
+            .action(&bad)
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+    }
+    assert!(service.slots.contains_key("work"));
+    // Make token cleanup fail with EISDIR while removing work.
+    fs::create_dir_all(service.config.state_dir.join("oidc-token-work.json"))
+        .map_err(|e| e.to_string())?;
+    let removed = service.action(&json!({"op":"setup_remove_hub","hub":"work"}))?;
+    assert_eq!(removed["committed"], true);
+    assert!(removed["warning"].is_string(), "{removed}");
+    assert!(!service.slots.contains_key("work"));
+    assert!(!service.hub_controls.contains_key("work"));
+    service.reload_slots()?;
+    Ok(())
+}
+
+#[test]
+fn stop_replaces_fenced_binding_without_reviving_previous_hub_activity() -> Result<(), String> {
+    let (_dir, mut service) = TestService::local()?;
+    let slot = service.slot("local")?;
+    let principal = string(&slot.identity, "principal_id");
+    let id = listener_id(principal, "agent", "session");
+    service.state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,hub_url,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES('local',?,?,'https://old.example.com','alice','host','host','agent','session','','Old','','self','FENCED_INACTIVE')", &[json!(id),json!(principal)])?;
+    service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,hub_url,principal_id) VALUES('local','old-signal',?,1,1,'bob','host','Sender','Work','now',?,'STORED_PASSIVE','https://old.example.com',?)", &[json!(id),json!(now_ms()+60_000),json!(principal)])?;
+    service.action(
+        &json!({"op":"unlisten_session","hub":"local","harness":"agent","session_id":"session"}),
+    )?;
+    let row = service
+        .state
+        .listener("local", &id)?
+        .ok_or("Missing Stop row")?;
+    assert_eq!(row["status"], "UNLISTENED");
+    assert_eq!(row["hub_url"], "local://");
+    assert_eq!(row["user_stopped"], 1);
+    assert_eq!(service.state.query_activity("all", "")?.1, 0);
+    assert_eq!(
+        service.state.db.query(
+            "SELECT hub_url FROM local_signals WHERE signal_id='old-signal'",
+            &[]
+        )?,
+        vec![json!({"hub_url":"https://old.example.com"})]
+    );
+    Ok(())
+}
+
+#[test]
+fn control_scope_damaged_unlisten_all_and_auto_listen_profile_lock() -> Result<(), String> {
+    let dir = TestDirectory(
+        std::env::temp_dir().join(format!("cito-control-scope-{}", random_uuid_v4())),
+    );
+    let config = profile_config(
+        &dir,
+        json!({"default_hub":"local","hubs":{"local":{"url":"local://","autoListen":true}}}),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    service.action(&json!({"op":"cli_human_device","attach":true}))?;
+    for bad_scope in [json!("invalid"), json!(""), json!(123)] {
+        assert!(service
+            .action(&json!({"op":"human_inbox_update","scope":bad_scope}))
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+    }
+    assert_eq!(
+        service.action(&json!({"op":"human_inbox_update","scope":"self"}))?["committed"],
+        true
+    );
+
+    // Concurrent profile change on disk before set_auto_listen acquires config lock.
+    let profile = service.auto_listen_profile("local")?;
+    let mut raw = service.raw_config()?;
+    raw["hubs"]["local"]["url"] = json!("http://127.0.0.1:1");
+    fs::write(&service.config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+    let stale = service
+        .set_auto_listen_locked("local", false, &profile, &mut mcp::Detaches::default())
+        .unwrap_err();
+    assert!(stale.starts_with("STALE_GENERATION:"), "{stale}");
+    assert_eq!(service.raw_config()?["hubs"]["local"]["autoListen"], true);
+
+    // Damaged config.json during unscoped unlisten_all emits a warning.
+    fs::write(&service.config.config_path, "{").map_err(|e| e.to_string())?;
+    let stopped = service.action(&json!({"op":"unlisten_all"}))?;
+    assert_eq!(stopped["ok"], true);
+    assert!(
+        string(&stopped, "warning").contains("config.json"),
+        "{stopped}"
+    );
     Ok(())
 }

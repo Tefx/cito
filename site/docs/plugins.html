@@ -64,7 +64,7 @@
         <h1>Subprocess Plugin Authoring Guide</h1>
       </div>
       <p>
-        Cito launches agent harness and external human channel integrations as subprocesses. The native macOS companion is an app helper at <code>Cito.app/Contents/Helpers/cito-ui</code>, outside plugin discovery; <code>human</code> is a reserved Node identity and cannot be used as a plugin ID. A declarative <code>plugin.json</code> supplies the executable command, UI metadata, and configuration fields. Implement the protocol in any language; no in-process adapter or external SDK package is required. Write one JSON object per line to <code>stdout</code>, read requests from <code>stdin</code>, and send diagnostic logs to <code>stderr</code>.
+        Cito launches agent harness and external human channel integrations as subprocesses. The native macOS companion is packaged as <code>Cito.app/Contents/Helpers/Cito.app</code>, outside plugin discovery; <code>human</code> is a reserved Node identity and cannot be used as a plugin ID. A declarative <code>plugin.json</code> supplies the executable command, UI metadata, and configuration fields. Implement the protocol in any language; no in-process adapter or external SDK package is required. Write one JSON object per line to <code>stdout</code>, read requests from <code>stdin</code>, and send diagnostic logs to <code>stderr</code>.
       </p>
 
       <h2 id="overview">1. Plugin Discovery &amp; Manifests</h2>
@@ -98,7 +98,7 @@
       <p>Create <code>~/.cito/plugins/sample-agent/plugin.json</code> and place your executable at <code>bin/cito-plugin-sample-agent</code>:</p>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code data-plugin-manifest>{
+        <pre tabindex="0"><code data-plugin-manifest>{
   "id": "sample-agent",
   "kind": "agent-harness",
   "displayName": "Sample Agent",
@@ -110,7 +110,7 @@
 }</code></pre>
       </div>
       <p>
-        For each one-shot operation, Cito writes a single JSON line to <code>stdin</code> and closes <code>stdin</code>; the plugin writes a single JSON response line to <code>stdout</code> and exits. Requests include <code>state_dir</code> and <code>env</code> (except <code>probe</code>, which receives <code>session_id</code>, <code>endpoint_pid</code>, <code>cwd</code>, and <code>state_dir</code>; setup requests also include <code>plugin_dir</code>). Timeouts are <code>1.5s</code> for <code>discover_sessions</code>, <code>update_badge</code>, and <code>resolve_caller</code>, <code>10s</code> for <code>setup_*</code> and <code>probe</code>, and <code>120s</code> for <code>wake</code>. Non-zero exits or invalid JSON produce <code>PLUGIN_EXEC_FAILED</code>.
+        For each one-shot operation, Cito writes a single JSON line to <code>stdin</code> and closes <code>stdin</code>; the plugin writes a single JSON response line to <code>stdout</code> and exits. Requests include <code>state_dir</code>. The <code>setup_inspect</code>, <code>setup_apply</code>, and <code>setup_remove</code> requests include <code>plugin_dir</code> and omit <code>env</code>; read defaults such as <code>HOME</code> from the plugin process environment. Session operations may supply explicit values in <code>env</code>; <code>probe</code> receives <code>session_id</code>, <code>endpoint_pid</code>, and <code>cwd</code> alongside <code>state_dir</code>, without <code>env</code>. Timeouts are <code>1.5s</code> for <code>discover_sessions</code>, <code>update_badge</code>, and <code>resolve_caller</code>, <code>10s</code> for <code>setup_*</code> and <code>probe</code>, and <code>120s</code> for <code>wake</code>. Non-zero exits or invalid JSON produce <code>PLUGIN_EXEC_FAILED</code>.
       </p>
       <div class="docs-table-wrap" role="region" aria-label="Reference table" tabindex="0">
       <table class="docs-table">
@@ -129,7 +129,7 @@
       </div>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>{"op":"wake","session_id":"session-1","cwd":"/Users/alice/repo","endpoint_pid":1234,"batch_id":"b_1","wake":true,"checkpoint_only":true,"queue_written":false,"queue_confirmed":false,"text":"Review needed","signals":[{"signal_id":"s_1","from_listener_id":"bob-8a4f2c9011b4e3d2","from_user":"bob","from_harness":"sample-agent","from_title":"Review","message":"Please review","created_at":"2026-09-01T00:00:00Z","in_reply_to":null}],"state_dir":"/Users/alice/.cito","env":{}}
+        <pre tabindex="0"><code>{"op":"wake","session_id":"session-1","cwd":"/Users/alice/repo","endpoint_pid":1234,"batch_id":"b_1","wake":true,"checkpoint_only":true,"queue_written":false,"queue_confirmed":false,"text":"Review needed","signals":[{"signal_id":"s_1","from_listener_id":"bob-8a4f2c9011b4e3d2","from_user":"bob","from_harness":"sample-agent","from_title":"Review","message":"Please review","created_at":"2026-09-01T00:00:00Z","in_reply_to":null}],"state_dir":"/Users/alice/.cito","env":{}}
 {"ok":true,"outcome":"delivered","reason":null}</code></pre>
       </div>
       <p>
@@ -146,7 +146,7 @@
       </p>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code data-plugin-manifest>{
+        <pre tabindex="0"><code data-plugin-manifest>{
   "id": "sample-chat",
   "kind": "human-channel",
   "displayName": "Sample Chat",
@@ -174,7 +174,7 @@
       </ul>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>{"op":"configure","hub_config":{"apiToken":"example-token"},"bindings":[{"principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"}}],"cursor":"100"}
+        <pre tabindex="0"><code>{"op":"configure","hub_config":{"apiToken":"example-token"},"bindings":[{"principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"}}],"cursor":"100"}
 {"op":"deliver","delivery_id":"d_1","principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"},"claim_until_ms":1700000060000,"already_sent_ids":["101"],"signal":{"signal_id":"s_1","from":{"principal_id":"none#bob","user":"bob","host_id":"mac-1","host_name":"Bob-Mac","harness":"sample-agent","listener_id":"bob-8a4f2c9011b4e3d2","title":"Review","about":"Release check"},"to":{"listener_id":"c_9f0e1d2c3b4a5968"},"target_generation":1,"sender_endpoint_key":"ep_1","message":"Please review","in_reply_to":null,"created_at_ms":1700000000000}}</code></pre>
       </div>
       <h3>Plugin → Hub (stdout NDJSON)</h3>
@@ -182,13 +182,13 @@
         <li><code>health</code>: report <code>{"op":"health","error":null | string}</code>.</li>
         <li><code>delivered</code>: report <code>delivery_id</code>, <code>ok</code>, <code>external_msg_id</code>, all confirmed <code>external_msg_ids</code> (including on failure), and <code>error</code>. Set <code>retryable: false</code> for permanent rejection and <code>effect_unknown: true</code> when a transmitted request may have succeeded. The Hub quarantines uncertain effects and subprocess crashes; confirmed retryable rejections use bounded exponential backoff. A multipart sender can checkpoint each confirmed prefix with <code>progress: true</code> before its final result; progress frames keep the reservation in flight.</li>
         <li><code>pair_redeem</code>: provide <code>code</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>is_private_chat</code>, <code>display_label</code>, and <code>user_config_patch</code>.</li>
-        <li><code>inbound_reply</code>: provide <code>update_id</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>reply_to_external_msg_id</code>, and <code>text</code>. The Hub resolves the reply target and routes a regular signal.</li>
+        <li><code>inbound_reply</code>: provide <code>update_id</code>, <code>external_chat_id</code>, <code>external_user_id</code>, and <code>text</code>. Supply the optional <code>reply_to_external_msg_id</code> string to reply to a specific delivery; omit it or send <code>null</code> for unthreaded routing. Unthreaded routing requires one matching account binding and one distinct sender in the preceding seven days. An unknown message ID does not fall back to unthreaded routing. The Hub routes a resolved reply as a regular signal.</li>
         <li><code>cursor_save</code>: persist the channel's external update <code>cursor</code> after receiving <code>reply_ack</code>.</li>
         <li><code>rpc_result</code>: echo <code>req_id</code>, <code>ok</code>, and <code>error</code>; pair formatting returns <code>instruction</code>, an exact copyable <code>pairing_command</code> (for example, <code>/start cito-ABCDEF2345</code>), and optionally <code>bot_username</code> and <code>pairing_url</code>, while testing returns <code>detail</code>.</li>
       </ul>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>{"op":"delivered","delivery_id":"d_1","ok":true,"external_msg_id":"102","external_msg_ids":["101","102"],"error":null}
+        <pre tabindex="0"><code>{"op":"delivered","delivery_id":"d_1","ok":true,"external_msg_id":"102","external_msg_ids":["101","102"],"error":null}
 {"op":"inbound_reply","update_id":"u_99","external_chat_id":"room-1","external_user_id":"user-1","reply_to_external_msg_id":"102","text":"Ship it"}
 {"op":"cursor_save","cursor":"101"}</code></pre>
       </div>
@@ -202,7 +202,7 @@
       </p>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>{"op":"format_pair","req_id":"r_1","code":"cito-ABCDEF2345","hub_config":{"apiToken":"example-token"}}
+        <pre tabindex="0"><code>{"op":"format_pair","req_id":"r_1","code":"cito-ABCDEF2345","hub_config":{"apiToken":"example-token"}}
 {"op":"rpc_result","req_id":"r_1","ok":true,"instruction":"Send /start cito-ABCDEF2345 in a private chat","pairing_command":"/start cito-ABCDEF2345","error":null}
 {"op":"pair_redeem","code":"cito-ABCDEF2345","external_chat_id":"room-1","external_user_id":"user-1","is_private_chat":true,"display_label":"alice","user_config_patch":{"recipientId":"room-1"}}
 {"op":"pair_ack","code":"cito-ABCDEF2345","ok":true,"owner_user":"alice","error":null}</code></pre>

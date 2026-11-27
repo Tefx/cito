@@ -150,6 +150,14 @@ fn plugin_request_owned(
                                 .into(),
                         );
                     }
+                    Err(error) if error.starts_with("STALE_GENERATION:") => {
+                        if let Some((state, row)) = fence {
+                            client.with_current(|| {
+                                state.fence_listener_for(row, "fenced_before_dispatch")
+                            })?;
+                        }
+                        return Err(error);
+                    }
                     Err(_) => {
                         return Err(
                             "Wake lease renewal failed; delivery is at-least-once under partition"
@@ -227,52 +235,49 @@ pub fn poll_listener(
             .db
             .transaction(|db| isolate_foreign_work(db, &current_listener(db, hub, id)?))
     })?;
-    let name = format!("{}_{}", string(row, "host_id"), id);
-    // Consumer enrollment already returns the first unconsumed page.
-    let backlog=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
+    let name = format!("{}_{}_{}", string(row, "host_id"), id, local.instance_id);
+    // Consumer enrollment already returns the first unconsumed page. A deleted
+    // registration can deny enrollment, so still check the binding in that case.
+    let backlog=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}));
+    if let Err(error) = &backlog {
+        if !error.starts_with("FORBIDDEN:") {
+            return backlog.map(|_| ());
+        }
+    }
     let observed = std::time::Instant::now();
+    let registration = local.registration_lock(hub)?;
+    let registration_guard = registration
+        .lock()
+        .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+    // Read policy after the backlog: a remote promotion may have enabled these
+    // very signals. A pre-backlog snapshot can silently drop and acknowledge them.
+    let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
+    let Some((remote, _)) = client.kv_get(id)?.filter(|(remote, _)| {
+        remote_matches_listener(remote, row, &channel)
+            && remote["channels"][&channel]["state"] == "ACTIVE"
+    }) else {
+        client.with_current(|| local.fence_listener_for(row, "fenced_before_dispatch"))?;
+        return Err("STALE_GENERATION: Listener attachment missing or superseded".into());
+    };
+    let backlog = backlog?;
     let (hub_now, observed) = match backlog["server_now_ms"].as_u64() {
         Some(now) => (now, observed),
         None => (client.server_now(), std::time::Instant::now()),
     };
-    let registration = local.registration_lock(hub)?;
-    let registration_guard = if row["harness"] == "human" {
-        let guard = registration
-            .lock()
-            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-        // Read policy after the backlog: a remote scope promotion may have enabled
-        // these very signals. A pre-backlog snapshot can silently drop and ack them.
-        let (remote, _) = client
-            .kv_get(id)?
-            .ok_or("LISTENER_NOT_FOUND: Human inbox missing")?;
-        let channel = format!("{}:human", string(row, "host_id"));
-        if !remote_matches_listener(&remote, row, &channel)
-            || remote["channels"][&channel]["state"] != "ACTIVE"
-        {
-            client.with_current(|| local.fence_listener_for(row, "fenced_before_dispatch"))?;
-            return Err("STALE_GENERATION: Human attachment superseded".into());
-        }
+    if row["harness"] == "human" {
         super::daemon::DaemonService::reconcile_human_scope(
             local,
             client,
             string(row, "host_id"),
             &remote,
         )?;
-        Some(guard)
     } else {
-        let remote = client
-            .kv_get(id)?
-            .ok_or("LISTENER_NOT_FOUND: Listener missing")?
-            .0;
-        let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
-        if !remote_matches_listener(&remote, row, &channel)
-            || remote["channels"][&channel]["state"] != "ACTIVE"
-        {
-            client.with_current(|| local.fence_listener_for(row, "fenced_before_dispatch"))?;
-            return Err("STALE_GENERATION: Listener attachment superseded".into());
-        }
-        None
-    };
+        client.with_current(|| local.db.execute(
+            "UPDATE local_listeners SET scope=?1 WHERE hub=?2 AND listener_id=?3 AND status='ACTIVE' AND binding_generation=?4 AND owner_token=?5 AND scope IS NOT ?1",
+            &[remote["scope"].clone(),json!(hub),json!(id),row["binding_generation"].clone(),row["owner_token"].clone()],
+        ))?;
+    }
+    drop(registration_guard);
     for item in backlog["backlog"].as_array().into_iter().flatten() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         // An unaddressable envelope cannot be acknowledged; still drain its peers.
@@ -320,7 +325,6 @@ pub fn poll_listener(
             &json!({"stream":"CITO_SIGNALS","name":name,"seq":seq}),
         )?;
     }
-    drop(registration_guard);
     // Business acknowledgments can arrive after transport cursor advancement. Reconcile
     // unread rows from durable stream metadata even when no new backlog item is emitted.
     // Sweep downwards, wrapping at the oldest sequence. New arrivals cannot
@@ -472,10 +476,14 @@ fn dispatch_listener(
     }
     let first = &batch[0];
     let ids: Vec<Value> = batch.iter().map(|r| r["signal_id"].clone()).collect();
-    let claim = json!({"node_id":id,"signal_ids":ids,"channel_id":channel,"lease_ms":30_000});
+    let claim = json!({"node_id":id,"signal_ids":ids,"channel_id":channel,"lease_ms":30_000,"owner_token":row["owner_token"],"binding_generation":row["binding_generation"]});
     // This RPC is unconditional, even with one channel. Transport errors fail closed.
     let claimed = match client.rpc("signal_claim_dispatch", &claim) {
         Ok(v) => v,
+        Err(error) if error.starts_with("STALE_GENERATION:") => {
+            client.with_current(|| local.fence_listener_for(row, "fenced_before_dispatch"))?;
+            return Err(error);
+        }
         Err(e) => {
             client.with_current(|| {
                 local
@@ -584,18 +592,24 @@ fn dispatch_listener(
                 "delivered" | "delivered_unconfirmed" => {
                     // A retry of a confirmed queue insertion can acknowledge only
                     // when the independent open effect also reports confirmation.
-                    let delivered = result["outcome"] == "delivered"
-                        || ((confirmed || insertion_confirmed) && result["open_confirmed"] == true);
+                    let retry = result["delivered"] == false;
+                    let delivered = !retry
+                        && (result["outcome"] == "delivered"
+                            || ((confirmed || insertion_confirmed)
+                                && result["open_confirmed"] == true));
                     local.finish_wake_batch(
                         row,
                         first,
-                        "DISPATCHED",
+                        if retry { "DISPATCHING" } else { "DISPATCHED" },
                         None,
                         written,
                         insertion_confirmed,
                         delivered,
                         false,
                     )?;
+                    if retry {
+                        local.schedule_wake_retry_for(row, 1500)?;
+                    }
                 }
                 "session_switched" => {
                     drop(commit);

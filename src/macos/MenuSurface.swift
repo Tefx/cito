@@ -79,6 +79,9 @@ extension Companion: NSMenuDelegate {
         let tooltip = statusTooltip
         guard lastStatusPresentation?.icon != icon || lastStatusPresentation?.unread != unreadCount || lastStatusPresentation?.tooltip != tooltip,
               let button = status?.button ?? headlessStatusButton else { return }
+        if !headless && lastStatusPresentation?.unread != unreadCount {
+            NSApp.dockTile.badgeLabel = unreadCount > 0 ? String(unreadCount) : nil
+        }
         formatStatusButton(button, unreadCount: unreadCount, image: Self.statusIcons[icon])
         button.toolTip = tooltip
         button.setAccessibilityLabel(tooltip)
@@ -211,6 +214,9 @@ extension Companion: NSMenuDelegate {
         _ = host(header, id: "header")
         updateMenuErrorRow()
         var drawerItems: [String: NSMenuItem] = [:]
+        func needsAttention(_ hub: Hub) -> Bool {
+            (hub.status != "connected" && hub.status != "connecting") || hub.error != nil
+        }
         let showHubControls = hubs.count != 1 || hubs.contains {
             !($0.is_builtin == true && $0.status == "connected" && $0.error == nil)
         }
@@ -243,12 +249,14 @@ extension Companion: NSMenuDelegate {
                 control.identifier = NSUserInterfaceItemIdentifier("\(action):\(hub.name)")
                 control.pressed = run; drawer.addSubview(control); drawerControls.append(control)
             }
-            let statusText: String
-            if let error = hub.error { statusText = error }
-            else if hub.status == "connected" { statusText = hub.auth_mode == "oidc" ? "Connected as \(hub.user ?? "user")" : "Connected · \(hub.user ?? "local")" }
-            else if hub.status == "connecting" { statusText = "Connecting to hub…" }
-            else if hub.status == "auth_required" { statusText = "Authentication required" }
-            else { statusText = "Offline · Disconnected" }
+            let autoExpand = needsAttention(hub)
+            let status: String
+            if let error = hub.error { status = error }
+            else if hub.status == "connected" { status = hub.auth_mode == "oidc" ? "Connected as \(hub.user ?? "user")" : "Connected · \(hub.user ?? "local")" }
+            else if hub.status == "connecting" { status = "Connecting to hub…" }
+            else if hub.status == "auth_required" { status = "Authentication required" }
+            else { status = "Offline · Disconnected" }
+            let statusText = autoExpand && hub.auth_mode == "oidc" ? "\(hub.name) · \(status)" : status
             let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: 40, height: 16),
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
@@ -268,7 +276,6 @@ extension Companion: NSMenuDelegate {
                 layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
             }
             let item = host(drawer, id: "drawer:\(hub.name)")
-            let autoExpand = (hub.status != "connected" && hub.status != "connecting") || hub.error != nil
             item.isHidden = !(hubDrawerVisibility[hub.name] ?? autoExpand)
             drawerItems[hub.name] = item
         }
@@ -318,8 +325,10 @@ extension Companion: NSMenuDelegate {
                 if self.hubs.count > 1 {
                     let alreadySelected = self.effectiveTargetHub == hub.name
                     self.selectedTargetHub = hub.name
-                    if alreadySelected || hub.status != "connected" || hub.error != nil {
+                    if alreadySelected {
                         self.hubDrawerVisibility[hub.name] = drawer.isHidden
+                    } else if needsAttention(hub) {
+                        self.hubDrawerVisibility[hub.name] = true
                     }
                     self.rebuild(preservingEditor: false)
                     return
@@ -705,8 +714,14 @@ extension Companion: NSMenuDelegate {
                         }
                         let listenBtn = MenuControl("Listen", frame: NSRect(x: actionX, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
-                        listenBtn.toolTip = "Start listening in \(candidateTitle)"
-                        listenBtn.isEnabled = !targetHub.isEmpty
+                        listenBtn.isEnabled = !targetHub.isEmpty && targetHubObj?.status != "auth_required" && candidateIsOpen(c)
+                        if targetHubObj?.status == "auth_required" {
+                            listenBtn.toolTip = "Sign in to \(targetHub) to listen"
+                        } else if !candidateIsOpen(c) {
+                            listenBtn.toolTip = "Open this session to listen"
+                        } else {
+                            listenBtn.toolTip = "Start listening in \(candidateTitle)"
+                        }
                         pendingLabel(listenBtn,isPending("listen_session",hub:targetHub,target:"\(c.harness):\(c.session_id)"),"Listening…")
                         info.frame.size.width = min(textWidth, listenBtn.frame.minX - info.frame.minX - 8)
                         location.frame.size.width = info.frame.width

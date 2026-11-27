@@ -1600,7 +1600,7 @@ mod tests {
     fn documented_subprocess_manifests_load() {
         let html = include_str!("../../../../site/docs/plugins.html");
         let examples: Vec<_> = html
-            .split("<pre><code data-plugin-manifest>")
+            .split("<code data-plugin-manifest>")
             .skip(1)
             .map(|part| {
                 serde_json::from_str::<Value>(part.split("</code>").next().unwrap()).unwrap()

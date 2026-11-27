@@ -43,6 +43,7 @@
     "manualDisclosure": true,
     "openUrlLabel": "Open in Telegram ↗",
     "privateIdentityField": "chatId",
+    "deliveryVerificationHelpText": "Send /start to the bot or re-pair your account to verify delivery.",
     "actionLabel": "Pair Account…",
     "helpText": "Generate a one-time /start code to link your Telegram chat (expires in 10 minutes)."
   },

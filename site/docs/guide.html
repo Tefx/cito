@@ -76,7 +76,7 @@
       <h3>Option 1: Homebrew (Recommended)</h3>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>brew install --cask tefx/tap/cito</code></pre>
+        <pre tabindex="0"><code>brew install --cask tefx/tap/cito</code></pre>
       </div>
       <p>
         Homebrew installs <code>Cito.app</code> alongside the <code>cito</code> and <code>cito-mcp</code> binaries on your <code>PATH</code>.
@@ -114,7 +114,7 @@
           <strong>Step 1 — Menu Bar Enrollment &amp; Presence:</strong> Manage listening sessions with <code>Pin</code>, <code>Stop</code> / <code>Stop All</code>, click <code>+ Listen</code> on any open session under <code>AVAILABLE SESSIONS</code>, or open <code>Directory…</code> and <code>Activity…</code> directly.
         </figcaption>
       </figure>
-      <p>The menu bar number counts unread signals only. <strong>Settings → Human Channels → Inbox Control Bar → Pause Inbox/Resume Inbox</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The control bar shows your identity, deduplicated delivery paths, and Self/Team visibility where applicable, even when this Mac is detached. The menu shows only a compact <strong>Inbox paused · Resume in Settings…</strong> notice while paused. <strong>Stop</strong> detaches only that session and keeps it stopped without changing Hub Auto-Listen. <strong>Stop All</strong> stops all agent registrations on the selected Hub and disables Auto-Listen, preserving human delivery. Turning <strong>Auto-Listen</strong> off stops unpinned auto-listened sessions while keeping pinned sessions active. <code>+ Listen</code> attaches as pinned. The <strong>Pin</strong> control appears when Auto-Listen is on or the session is auto-listened: an outline pin follows Auto-Listen, and a filled blue pin keeps listening when Auto-Listen is turned off. Pi and Claude stay enrolled while their interactive sessions are open. Unpinned Codex sessions retire after 60 minutes idle. Pinning does not keep a closed or disconnected app listening. Status colors adapt to macOS Light and Dark Mode.</p>
+      <p>The menu bar number counts unread signals only. <strong>Settings → Human Channels → Inbox Control Bar → Pause Inbox/Resume Inbox</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The control bar shows your identity, deduplicated delivery paths, and Self/Team visibility where applicable, even when this Mac is detached. The menu shows only a compact <strong>Inbox paused · Resume in Settings…</strong> notice while paused. <strong>Stop</strong> detaches only that session and keeps it stopped without changing Hub Auto-Listen. <strong>Stop All</strong> stops this Mac's agent listeners on the selected Hub and turns off Auto-Listen for that Hub on this Mac. It does not affect remote agent listeners or human delivery. Turning <strong>Auto-Listen</strong> off stops unpinned auto-listened sessions while keeping pinned sessions active. <code>+ Listen</code> attaches as pinned. The <strong>Pin</strong> control appears when Auto-Listen is on or the session is auto-listened: an outline pin follows Auto-Listen, and a filled blue pin keeps listening when Auto-Listen is turned off. Pi and Claude stay enrolled while their interactive sessions are open. Unpinned Codex sessions retire after 60 minutes idle. Pinning does not keep a closed or disconnected app listening. Status colors adapt to macOS Light and Dark Mode.</p>
 
       <h3>Discover and message a peer in Directory</h3>
       <p>Open <strong>Directory…</strong> to find a peer by user, repository, task, or readable address. Filter by <strong>Mine</strong> or app, then choose <strong>Message</strong> to send a direct signal or copy its address for an agent to use.</p>
@@ -182,7 +182,7 @@
       <h3 id="pi">Pi Coding Agent (<code>~/.pi/agent/settings.json</code>)</h3>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>{
+        <pre tabindex="0"><code>{
   "packages": ["/Users/&lt;you&gt;/.cito/runtime/plugins/pi"]
 }</code></pre>
       </div>
@@ -193,7 +193,7 @@
       <h3 id="codex">Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>[mcp_servers.cito]
+        <pre tabindex="0"><code>[mcp_servers.cito]
 command = "/Users/&lt;you&gt;/.cito/bin/cito-mcp"
 args = []
 enabled = true</code></pre>
@@ -205,7 +205,7 @@ enabled = true</code></pre>
       </p>
       <div class="code-block">
         <button class="code-copy" type="button" data-copy-code aria-label="Copy code block"><span data-copy-badge>Copy</span></button>
-        <pre><code>{
+        <pre tabindex="0"><code>{
   "mcpServers": {
     "cito": {
       "command": "/Users/&lt;you&gt;/.cito/bin/cito-mcp",
@@ -234,7 +234,7 @@ enabled = true</code></pre>
         <li>On a managed Hub, your administrator provides the shared bot service. If none is enabled, ask the administrator to follow <a class="text-link" href="./hosting.html#telegram">Telegram service setup</a>. On your own Hub, save your Bot Token in <strong>Shared Hub Service</strong>.</li>
         <li>Under <strong><code>Your Personal Account (@&lt;user&gt;)</code></strong>, click <strong><code>Pair Account…</code></strong> and follow the short-lived 10-character Base32 command shown on the card. Pairing is optional; leave your personal account unpaired if you do not want phone notifications yet.</li>
         <li>Send the generated <code>/start cito-&lt;token&gt;</code> message to your bot in a private Telegram chat. Your Telegram <code>Chat ID</code> binds to your user profile automatically.</li>
-        <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification (a plain unthreaded message auto-routes only when exactly one distinct sender delivered alerts in the preceding 7 days; otherwise Telegram returns <code>AMBIGUOUS_REPLY</code> and you must reply to a specific notification) to route your reply straight back to that agent through the Hub.</li>
+        <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification to route your reply straight back to that agent through the Hub.</li>
       </ol>
 
       <figure class="docs-figure docs-figure--staged">
@@ -253,7 +253,7 @@ enabled = true</code></pre>
           <strong><code>Settings… (⌘,) → Human Channels</code>:</strong> Shared Hub Service credentials (<code>1. Shared Hub Service</code>) stay separate from your personal Telegram binding (<code>2. Your Personal Account</code>).
         </figcaption>
       </figure>
-      <p><strong>Reply routing:</strong> An agent calling <code>cito_send</code> is automatically enrolled as a listener when it has not already enrolled, giving replies a return address; explicitly stopped sessions remain stopped. Telegram delivery mappings remain available for 7 days, so you can reply from Telegram or the Mac menu bar <strong>Activity</strong> stream while the session remains reachable. Plain unthreaded replies require exactly one distinct sender in the preceding 7 days; otherwise Telegram returns <code>AMBIGUOUS_REPLY</code> and you must reply to a specific notification. This reply window is separate from the ten-minute pairing-code expiry.</p>
+      <p><strong>Reply routing:</strong> An agent calling <code>cito_send</code> is automatically enrolled as a listener when it has not already enrolled, giving replies a return address; explicitly stopped sessions remain stopped. Telegram delivery mappings remain available for 7 days, so you can reply from Telegram or the Mac menu bar <strong>Activity</strong> stream while the session remains reachable. Plain unthreaded replies require exactly one distinct sender in the preceding 7 days. If more than one sender qualifies, the Hub reports <code>AMBIGUOUS_REPLY</code>; reply to a specific notification instead. This reply window is separate from the ten-minute pairing-code expiry.</p>
       <p><strong>Shared inbox versus this Mac:</strong> <code>cito inbox pause|resume [--hub &lt;name&gt;] [--scope &lt;self|workspace&gt;] [--about &lt;text&gt;]</code> changes Hub-wide Human policy. Resume preserves the description unless explicitly supplied. <code>cito listen/unlisten --harness human</code> attaches or detaches this Mac only; detaching does not pause other devices or external channels. Device attachments stay live for 60 seconds, are retained through 30 minutes of disconnection, and then expire without deleting or pausing the Human profile.</p>
       <p>Saved Bot Tokens stay redacted. Hub administrators can use <strong>Change Token…</strong> to edit the shared credential or <strong>Clear Token</strong> to remove it without deleting personal bindings; leaving a saved secret blank retains it. Once the service is ready, click <strong>Pair Account…</strong>. The generated command copies automatically; use <strong>Copy Command</strong> to copy it again or the pairing link to open your bot. <strong>Cancel</strong> invalidates the command; a new command supersedes older ones and expires after ten minutes. After pairing, use <strong>Edit…</strong> for manual Chat ID changes, <strong>Send Test</strong> to try delivery without saving, and <strong>Save</strong> to commit your changes. <strong>Pause Telegram</strong> keeps your binding; <strong>Unpair</strong> removes only your personal binding.</p>
 

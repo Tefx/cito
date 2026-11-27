@@ -152,6 +152,8 @@ pub struct HubAccess {
     pub state: LocalState,
     pub slots: HashMap<String, HubClient>,
     host_id: String,
+    caller_cache: Arc<Mutex<HashMap<u64, Value>>>,
+    directory_flights: Arc<mcp::DirectoryFlights>,
 }
 
 impl std::ops::Deref for DaemonService {
@@ -172,7 +174,6 @@ pub struct DaemonService {
     hub_controls: HashMap<String, HubControl>,
     events: Vec<thread::JoinHandle<()>>,
     receivers: HashMap<String, thread::JoinHandle<()>>,
-    caller_cache: Mutex<HashMap<u64, Value>>,
     probes: HashMap<String, EndpointProbe>,
     observations: HashMap<String, (u64, Instant)>,
     session_activity: Option<super::session_activity::SessionActivity>,
@@ -188,6 +189,8 @@ pub struct DaemonService {
     menu_open: bool,
     directory_open: bool,
     directory_request: u64,
+    directory_pending: Option<(u64, u64, Value)>,
+    directory_worker: Option<thread::JoinHandle<()>>,
     last_ui_revision: Mutex<Option<Value>>,
     last_ui_frame: Mutex<Option<Value>>,
     ack_backoff: Arc<Mutex<HashMap<String, (Instant, crate::support::RetryBackoff)>>>,
@@ -302,7 +305,9 @@ fn run_daemon_inner(
             match accept(&listener) {
                 Ok((stream, _)) => {
                     let s = service.clone();
-                    if calls.iter().filter(|call| !call.is_finished()).count() >= 64 {
+                    // Reserve framing capacity for health when all 64 work slots
+                    // are occupied. Every connection still has a hard outer bound.
+                    if calls.iter().filter(|call| !call.is_finished()).count() >= 80 {
                         let mut stream = stream;
                         respond(
                             &mut stream,
@@ -428,9 +433,14 @@ fn run_daemon_inner(
         let _ = worker.join();
     }
     // Set closing before draining calls, then close the final host server after drain.
-    if let Ok(mut s) = service.lock() {
+    let directory_worker = service.lock().ok().and_then(|mut s| {
         s.closing = true;
+        s.directory_pending = None;
         s.cancel_logins();
+        s.directory_worker.take()
+    });
+    if let Some(worker) = directory_worker {
+        let _ = worker.join();
     }
     for call in calls {
         let _ = call.join();
@@ -523,12 +533,13 @@ impl DaemonService {
                 state,
                 slots: HashMap::new(),
                 host_id,
+                caller_cache: Arc::default(),
+                directory_flights: Arc::default(),
             },
             local,
             hub_controls: HashMap::new(),
             events: Vec::new(),
             receivers: HashMap::new(),
-            caller_cache: Mutex::new(HashMap::new()),
             probes: HashMap::new(),
             observations: HashMap::new(),
             session_activity: Some(super::session_activity::SessionActivity::new(
@@ -546,6 +557,8 @@ impl DaemonService {
             menu_open: false,
             directory_open: false,
             directory_request: 0,
+            directory_pending: None,
+            directory_worker: None,
             last_ui_revision: Mutex::new(None),
             last_ui_frame: Mutex::new(None),
             ack_backoff: Arc::default(),
@@ -1046,7 +1059,7 @@ impl DaemonService {
         if self
             .active_settings_hub
             .as_ref()
-            .is_some_and(|hub| !self.slots.contains_key(hub))
+            .is_some_and(|hub| !self.hub_controls.contains_key(hub))
         {
             self.active_settings_hub = None;
         }
@@ -1328,11 +1341,12 @@ impl DaemonService {
                 let slot = slot.clone();
                 let state = self.state.clone();
                 let host_id = self.host_id.clone();
+                let flights = self.directory_flights.clone();
                 self.receivers.insert(
                     key,
                     thread::spawn(move || {
                         let refreshed = (|| -> Result<(), String> {
-                            slot.directory()?;
+                            flights.refresh(&slot)?;
                             let registration = state.registration_lock(&slot.name)?;
                             let _registration = registration
                                 .lock()
@@ -1440,10 +1454,115 @@ impl DaemonService {
             .unwrap_or(false);
         self.auto_listen()?;
         if changed || inventory_finished || self.last_ui.elapsed() >= Duration::from_secs(1) {
-            self.push_ui();
+            if self.should_poll_push_ui() {
+                self.push_ui();
+            }
             self.last_ui = Instant::now();
         }
         Ok(())
+    }
+
+    fn should_poll_push_ui(&self) -> bool {
+        if self.ui.is_none() {
+            return false;
+        }
+        if self.active_settings_hub.is_some() {
+            return true;
+        }
+        let Ok(previous) = self.last_ui_revision.lock() else {
+            return true;
+        };
+        let Some(prev) = previous.as_ref() else {
+            return true;
+        };
+        // Compare the inexpensive fields of projection::ui_revision first;
+        // embedded channel inventory cannot invalidate a closed Settings view.
+        if prev["state"][11] != self.menu_open
+            || prev["state"][12] != self.directory_open
+            || !prev["state"][13].is_null()
+            || prev["state"][9] != self.config.default_hub
+            || prev["state"][0]
+                != self
+                    .host_server
+                    .as_ref()
+                    .is_some_and(super::hub::HubServer::is_running)
+            || prev["state"][5] != json!(self.host_hub_error.as_ref().map(HostHubError::message))
+            || prev["state"][4] != json!(self.last_hub_errors)
+            || prev["state"][10]
+                != json!(self
+                    .session_activity
+                    .as_ref()
+                    .map(|a| a.completion_revision()))
+        {
+            return true;
+        }
+        let inspections: std::collections::BTreeMap<_, _> = self
+            .setup_inspections
+            .iter()
+            .map(|(id, entry)| (id, &entry.value))
+            .collect();
+        if prev["inspections"] != json!(inspections) {
+            return true;
+        }
+        let Ok(changes) = self
+            .state
+            .db
+            .query("SELECT total_changes() AS changes", &[])
+        else {
+            return true;
+        };
+        let Ok(external) = self.state.db.query("PRAGMA data_version", &[]) else {
+            return true;
+        };
+        if prev["state"][6] != json!(changes) || prev["state"][7] != json!(external) {
+            return true;
+        }
+        let mut hubs: Vec<_> = self
+            .slots
+            .iter()
+            .map(|(name, slot)| {
+                json!([
+                    name,
+                    slot.event_revision(),
+                    slot.directory_revision(),
+                    slot.capabilities()
+                ])
+            })
+            .collect();
+        hubs.sort_by_key(Value::to_string);
+        if prev["state"][8] != json!(hubs) {
+            return true;
+        }
+        let (order, _, _) = self.hub_projection_config();
+        if prev["state"][3] != json!(order) {
+            return true;
+        }
+        let Ok(mut inventories) = self
+            .channel_inventories
+            .iter()
+            .map(|(name, entry)| {
+                entry
+                    .cached
+                    .lock()
+                    .map(|cached| {
+                        let current = self
+                            .slots
+                            .get(name)
+                            .is_some_and(|slot| cached.current_for(slot));
+                        json!([
+                            name,
+                            current,
+                            crate::core::identity::hash(&cached.value.to_string())
+                        ])
+                    })
+                    .map_err(|_| ())
+            })
+            .collect::<Result<Vec<_>, ()>>()
+        else {
+            return true;
+        };
+        inventories.sort_by_key(Value::to_string);
+        prev["state"][1] != json!(inventories)
     }
 
     fn heartbeat_agent(
@@ -1630,26 +1749,48 @@ impl DaemonService {
         Ok(())
     }
 
+    fn normalized_hub_profile(&self, raw: &Value, hub: &str) -> Result<Option<Value>, String> {
+        let mut raw = raw.clone();
+        repair_default_hub(&mut raw);
+        let (_, mut hubs, _) =
+            crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+        hubs.remove(hub)
+            .map(|mut profile| {
+                crate::plugins::apply_hub_url_override(
+                    hub,
+                    &self.config.default_hub,
+                    &mut profile,
+                )?;
+                Ok(profile)
+            })
+            .transpose()
+    }
+
+    fn auto_listen_profile(&self, hub: &str) -> Result<Value, String> {
+        match self.slots.get(hub) {
+            Some(slot) => Ok(slot.config.clone()),
+            None => self
+                .normalized_hub_profile(&self.raw_config()?, hub)?
+                .ok_or_else(|| format!("INVALID_INPUT: Unknown hub: {hub}")),
+        }
+    }
+
     // The outer result owns the config commit; the inner result owns only its
     // secondary local projection, which cannot turn a confirmed save into failure.
     fn set_auto_listen_locked(
         &mut self,
         hub: &str,
         enabled: bool,
+        expected: &Value,
         detaches: &mut mcp::Detaches,
     ) -> Result<Result<(), String>, String> {
-        if !self.slots.contains_key(hub) {
-            let raw = self.raw_config()?;
-            let (_, hubs, _) =
-                crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
-            if !hubs.contains_key(hub) {
-                return Err(format!("INVALID_INPUT: Unknown hub: {hub}"));
-            }
-        }
-        // The captured policy edit owns registration until all local intents commit.
+        // Compare before changing the shape of the implicit local profile.
         self.mutate_config(|v| {
-            if v["hubs"].is_null() {
-                v["hubs"] = json!({"local":{"url":"local://"}});
+            if self.normalized_hub_profile(v, hub)?.as_ref() != Some(expected) {
+                return Err("STALE_GENERATION: Hub configuration changed; retry".into());
+            }
+            if v["hubs"][hub].is_null() && hub == "local" {
+                v["hubs"][hub] = json!({"url":"local://"});
             }
             v["hubs"][hub]["autoListen"] = json!(enabled);
             Ok(())
@@ -2032,6 +2173,7 @@ impl DaemonService {
         }
         self.menu_open = false;
         self.directory_open = false;
+        self.directory_pending = None;
         self.active_settings_hub = None;
         self.update_discovery_demand();
     }
@@ -2175,8 +2317,7 @@ impl DaemonService {
                 let _ = probe.join();
             }
         }
-        self.host_server.take();
-        self.local.shutdown();
+        self.local.shutdown_before(|| drop(self.host_server.take()));
         if let Some(ui) = self.ui.take() {
             ui.close();
         }

@@ -12,18 +12,15 @@
 
   --text-primary: #F3F4F6;
   --text-secondary: #9CA3AF;
-  --text-muted: #9CA3AF;
 
   --accent-primary: #38BDF8;
   --accent-primary-soft: rgba(56, 189, 248, 0.14);
-  --accent-blue: var(--accent-primary);
 
   /* Typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", system-ui, sans-serif;
   --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
 
   /* Generous Spatial Rhythm (>= 50% Negative Space) */
-  --space-xs: 0.5rem;
   --space-sm: 0.875rem;
   --space-md: 1.5rem;
   --space-lg: 2.5rem;

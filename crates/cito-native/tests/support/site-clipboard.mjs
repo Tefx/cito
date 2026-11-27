@@ -69,101 +69,107 @@ await missing.click();
 assert.equal(missing.badge.textContent, 'Copy failed');
 assert.equal(missing.button.disabled, false);
 
-const pages = ['index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)];
+const pages = readdirSync(site, {recursive: true}).filter(name => name.endsWith('.html')).sort();
 for (const required of ['index.html', 'docs/guide.html', 'docs/hosting.html', 'docs/plugins.html', 'docs/architecture.html']) {
   assert.ok(pages.includes(required), `Missing required page: ${required}`);
 }
-const documents = new Map(pages.map(page => [new URL(page, site).href, readFileSync(new URL(page, site), 'utf8')]));
-// Compare variable-name cells within each environment table, not mentions elsewhere.
-function environmentVars(text, section, html = false) {
+const documents = new Map(pages.map(page => [page, readFileSync(new URL(page, site), 'utf8')]));
+const homepage = documents.get('index.html');
+const hosting = documents.get('docs/hosting.html');
+const deployment = readFileSync(new URL('../deploy/hub/README.md', site), 'utf8');
+const readme = readFileSync(new URL('../README.md', site), 'utf8');
+
+// Compare names and behavior within each reference table, not mentions elsewhere.
+function environmentRows(text, section, label, html = false) {
   const heading = html ? section.replaceAll('&', '&amp;') : section;
   const table = html
     ? text.match(new RegExp(`<h3>${heading}</h3>\\s*<div\\b[^>]*><table\\b[^>]*>([\\s\\S]*?)</table>`))
-    : text.match(new RegExp(`^### ${heading}\\s*\\n([\\s\\S]*?)(?=^### |^## |(?![\\s\\S]))`, 'm'));
-  assert.ok(table, `Missing ${section} table`);
+    : text.match(new RegExp(`^### ${heading}\\s*\\n([\\s\\S]*?)(?=^#{1,3} |(?![\\s\\S]))`, 'm'));
+  const source = `${label}: ${section}`;
+  assert.ok(table, `${source}: missing table`);
   const rows = html
-    ? [...table[1].matchAll(/<tr>\s*<td><code>(CITO_[^<]+)<\/code><\/td>/g)]
-    : [...table[1].matchAll(/^\|\s*`(CITO_[^\x60]+)`\s*\|/gm)];
-  const vars = rows.map(row => row[1].replaceAll('&lt;', '<').replaceAll('&gt;', '>')).sort();
-  assert.ok(vars.length > 0, `Empty ${section} table`);
-  assert.equal(new Set(vars).size, vars.length, `Duplicate ${section} variable`);
-  return vars;
+    ? [...table[1].matchAll(/<tr>\s*<td><code>(CITO_[^<]+)<\/code><\/td>\s*<td>(.*?)<\/td>\s*<\/tr>/gs)]
+    : [...table[1].matchAll(/^\|\s*`(CITO_[^\x60]+)`\s*\|\s*(.*?)\s*\|$/gm)];
+  assert.ok(rows.length > 0, `${source}: empty table`);
+  const entries = new Map(rows.map(([, name, behavior]) => html
+    ? [decodeHtml(name), decodeHtml(behavior.replace(/<\/?code>/g, '`'))]
+    : [name, behavior]));
+  assert.equal(entries.size, rows.length, `${source}: duplicate variable`);
+  return entries;
 }
-const hubTables = [
-  ['README.md', readFileSync(new URL('../README.md', site), 'utf8'), false],
-  ['deploy/hub/README.md', readFileSync(new URL('../deploy/hub/README.md', site), 'utf8'), false],
-  ['site/docs/hosting.html', documents.get(new URL('docs/hosting.html', site).href), true]
-];
-for (const [section, sample] of [
-  ['Hub Server', 'CITO_HUB_PORT'],
-  ['Client & Daemon', 'CITO_STATE_DIR'],
-  ['Agent & Channel Plugins', 'CITO_PLUGIN_PATH']
-]) {
-  const tables = hubTables.map(([name, text, html]) => [name, environmentVars(text, section, html)]);
-  if (section === 'Hub Server') assert.ok(tables[0][1].includes('CITO_OIDC_REDIRECT_PORT'), 'Hub Server redirect port missing');
-  for (const [name, vars] of tables.slice(1)) assert.deepEqual(vars, tables[0][1], `${name}: ${section} variables differ from README.md`);
-  for (const [name, text, html] of hubTables) {
-    const cell = html ? `<td><code>${sample}</code></td>` : `| \`${sample}\` |`;
-    assert.ok(text.includes(cell), `${name}: missing ${section} test row`);
-    const missing = text.replace(cell, html ? '<td>removed</td>' : '| removed |');
-    assert.notDeepEqual(environmentVars(missing, section, html), tables[0][1], `${name}: missing ${section} row must be detected`);
-  }
+for (const section of ['Hub Server', 'Client & Daemon', 'Agent & Channel Plugins']) {
+  const expected = environmentRows(readme, section, 'README.md');
+  if (section === 'Hub Server') assert.ok(expected.has('CITO_OIDC_REDIRECT_PORT'), 'Hub Server redirect port missing');
+  assert.deepEqual(environmentRows(deployment, section, 'deploy/hub/README.md'), expected, `Deploy reference: ${section} differs from README.md`);
+  assert.deepEqual(environmentRows(hosting, section, 'hosting.html', true), expected, `Hosting reference: ${section} differs from README.md`);
 }
+assert.match(hosting, /Linux, use kernel 5\.3 or newer with <code>pidfd_open<\/code>/);
+assert.match(hosting, /<code>libsqlite3-dev<\/code> and <code>pkg-config<\/code> for source builds and <code>libsqlite3-0<\/code> on the runtime host/);
 
-const homepage = documents.get(new URL('index.html', site).href);
+const attributes = markup => Object.fromEntries([...markup.matchAll(/(?:^|\s)([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
+const publishedSite = new URL('.', homepage.match(/<link rel="canonical" href="([^"]+)"/)[1]);
+const anchorIds = new Map();
+for (const [page, html] of documents) {
+  const ids = [...html.matchAll(/<[a-z][\w-]*\b([^>]*)>/gi)]
+    .map(([, attrs]) => attributes(attrs).id).filter(id => id !== undefined).map(decodeHtml);
+  assert.equal(new Set(ids).size, ids.length, `${page}: duplicate IDs`);
+  anchorIds.set(page, new Set(ids));
+}
 const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
 for (const [page, html] of documents) {
-  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
-  assert.equal(new Set(ids).size, ids.length, `${page}: duplicate IDs`);
   assert.doesNotMatch(html, /class="[^"]*\bdocs-figure-stage--compact\b/, page);
   for (const control of html.matchAll(/<(?:button|input)\b([^>]*)(?:>([\s\S]*?)<\/button>|\s*\/?>)/g)) {
     assert.doesNotMatch(`${control[1]} ${control[2] || ''}`, /Paste Invite Code|My Macs|Desktop Banner|BannerWindow/, page);
   }
-  for (const link of html.matchAll(/<(a|link)\b([^>]*)>(?:([\s\S]*?)<\/a>)?/g)) {
-    const attrs = Object.fromEntries([...link[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
-    assert.ok(attrs.href, `${page}: ${link[1]} missing href`);
-    const target = new URL(attrs.href.replaceAll('&amp;', '&'), page);
-    if (target.protocol === 'file:') {
+  for (const [, anchor, label, link] of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>|<link\b([^>]*)>/g)) {
+    const attrs = attributes(anchor ?? link);
+    assert.ok(attrs.href, `${page}: ${anchor === undefined ? 'link' : 'a'} missing href`);
+    const href = decodeHtml(attrs.href);
+    const target = new URL(href, new URL(page, publishedSite));
+    if (target.origin === publishedSite.origin && target.pathname.startsWith(publishedSite.pathname)) {
+      const path = target.pathname.slice(publishedSite.pathname.length).replace(/(^|\/)$/, '$1index.html');
       const fragment = decodeURIComponent(target.hash.slice(1));
-      target.hash = '';
-      target.search = '';
-      assert.ok(existsSync(target), `${page}: broken link ${attrs.href}`);
+      assert.ok(existsSync(new URL(path, site)), `${page}: broken link ${href}`);
       if (fragment) {
-        const destination = documents.get(target.href);
-        assert.ok(destination, `${page}: fragment points outside site pages: ${attrs.href}`);
-        assert.ok([...destination.matchAll(/\bid="([^"]+)"/g)].some(match => match[1] === fragment), `${page}: missing anchor ${attrs.href}`);
+        assert.ok(anchorIds.get(decodeURIComponent(path))?.has(fragment), `${page}: missing anchor ${href}`);
       }
     } else {
-      assert.ok(['https:', 'http:', 'mailto:'].includes(target.protocol), `${page}: unsupported link ${attrs.href}`);
+      assert.ok(/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href), `${page}: link escapes the site root: ${href}`);
+      assert.ok(['https:', 'http:', 'mailto:'].includes(target.protocol), `${page}: unsupported link ${href}`);
     }
-    if (link[1] === 'a' && attrs.href.startsWith('https://github.com/Tefx/cito')) {
+    if (anchor !== undefined && href.startsWith('https://github.com/Tefx/cito')) {
       assert.equal(attrs.target, '_blank', page);
       assert.ok(attrs.rel?.split(/\s+/).includes('noopener') && attrs.rel?.split(/\s+/).includes('noreferrer'), page);
-      if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(link[3] || '')) assert.equal(attrs.href, download, page);
+      if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(label)) assert.equal(href, download, page);
     }
   }
 }
-// Exercise every shipped documentation code block through the shared handler.
-// Decode HTML text as the browser does, so copying escaped examples proves the boundary.
-function decodedCode(html) {
+// Decode the supported HTML references before comparing text as seen by the browser.
+function decodeHtml(html) {
   return html.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_match, entity) => {
     const named = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"};
     if (entity.startsWith('#')) return String.fromCodePoint(entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : Number(entity.slice(1)));
     return named[entity];
   });
 }
+// Check scroll-region focus and exercise every shipped documentation copy control.
+const hostingExamples = [];
 for (const [page, html] of documents) {
   assert.match(html, /<a class="skip-link" href="#main-content">/);
-  if (!page.includes('/docs/')) continue;
-  const blocks = [...html.matchAll(/<div class="code-block">\s*<button\b([^>]*)>([\s\S]*?)<\/button>\s*<pre><code(?: [^>]*)?>([\s\S]*?)<\/code><\/pre>\s*<\/div>/g)];
-  assert.equal(blocks.length, [...html.matchAll(/<pre>/g)].length, `${page}: every pre needs a copy control`);
+  const pres = [...html.matchAll(/<pre\b([^>]*)>/g)];
+  for (const [, attrs] of pres) {
+    assert.equal(attributes(attrs).tabindex, '0', `${page}: every pre must be keyboard focusable`);
+  }
+  if (!page.startsWith('docs/')) continue;
+  const blocks = [...html.matchAll(/<div class="code-block">\s*<button\b([^>]*)>([\s\S]*?)<\/button>\s*<pre\b[^>]*><code(?: [^>]*)?>([\s\S]*?)<\/code><\/pre>\s*<\/div>/g)];
+  assert.equal(blocks.length, pres.length, `${page}: every pre needs a copy control`);
   assert.ok(blocks.length > 0, `${page}: no code examples`);
   for (const [, attrs, label, code] of blocks) {
     assert.match(attrs, /\bdata-copy-code\b/);
     assert.match(attrs, /type="button"/);
     assert.match(attrs, /aria-label="Copy code block"/);
     assert.match(label, /<span data-copy-badge>Copy<\/span>/);
-    const expected = decodedCode(code);
+    const expected = decodeHtml(code);
     const writes = [];
     const block = fixture(async text => writes.push(text), null, expected);
     await block.click();
@@ -173,7 +179,14 @@ for (const [page, html] of documents) {
     assert.equal(block.badge.textContent, 'Copied ✓');
     block.advance(1);
     assert.equal(block.badge.textContent, 'Copy');
+    if (page === 'docs/hosting.html') hostingExamples.push(writes[0]);
   }
+}
+const nginx = hostingExamples.find(example => example.startsWith('location / {'));
+assert.ok(nginx, 'hosting.html: missing Nginx location example');
+assert.match(nginx, /^\s*client_max_body_size 8m;$/m);
+for (const [, language, example] of deployment.matchAll(/^```(\w+)\n([\s\S]*?)\n```$/gm)) {
+  assert.ok(hostingExamples.includes(example), `hosting.html: ${language} example differs from deploy/hub/README.md`);
 }
 const exact = '<tag key="value"> & text\n  indented\n';
 let finishCode;
@@ -210,11 +223,9 @@ const expected = [
   ['menu-dark.png', 'activity-dark.png'],
   ['settings-apps-dark.png', 'settings-channels-dark.png', 'settings-hubs-dark.png']
 ];
-const ids = [...homepage.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
-assert.equal(new Set(ids).size, ids.length, 'Page IDs must be unique across workflow previews');
 let focused;
 function element(markup) {
-  const attrs = Object.fromEntries([...markup.matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
+  const attrs = attributes(markup);
   const handlers = {};
   return {
     getAttribute: name => attrs[name],
@@ -295,7 +306,7 @@ for (const [index, preview] of previews.entries()) {
   preview.tabs[selected[index]].dispatch('keydown', {key: 'Tab', preventDefault() { assert.fail('Tab must keep native focus navigation'); }});
   active(preview, selected[index]);
 }
-const guide = readFileSync(new URL('docs/guide.html', site), 'utf8');
+const guide = documents.get('docs/guide.html');
 const headings = [...guide.matchAll(/<h2 id="([^"]+)">/g)];
 const sections = Object.fromEntries(headings.map((heading, index) => [
   heading[1], guide.slice(heading.index, headings[index + 1]?.index ?? guide.length)

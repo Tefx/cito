@@ -6,6 +6,7 @@ use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -29,11 +30,13 @@ fn output(lock: &Mutex<()>, v: &Value) -> Result<(), String> {
 }
 struct Sidecar {
     child: Child,
-    input: Option<ChildStdin>,
+    input: Arc<Mutex<Option<ChildStdin>>>,
 }
 impl Drop for Sidecar {
     fn drop(&mut self) {
-        self.input.take();
+        if let Ok(mut input) = self.input.lock() {
+            input.take();
+        }
         let _ = cito_native::support::wait_child_exit(&self.child, Duration::from_millis(100));
         let _ = cito_native::support::teardown_child_group(&mut self.child);
     }
@@ -69,6 +72,12 @@ fn read_sidecar_line(reader: &mut impl BufRead) -> std::io::Result<Option<String
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "Sidecar line exceeds 1 MiB",
+        ));
+    }
+    if n > 0 && !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Sidecar closed before newline",
         ));
     }
     Ok((n > 0).then_some(line))
@@ -197,6 +206,7 @@ fn run_mcp_stdio() -> Result<(), String> {
         unsafe { libc::getppid() as u32 },
     );
     let lock = Arc::new(Mutex::new(()));
+    let initialized = Arc::new(AtomicBool::new(false));
     let mut capabilities = json!({});
     let mut sidecars = vec![];
     for plugin in plugins.agent_plugins() {
@@ -220,8 +230,9 @@ fn run_mcp_stdio() -> Result<(), String> {
                 .stderr(Stdio::inherit())
                 .spawn()
                 .map_err(|e| e.to_string())?;
+            let input = child.stdin.take();
             let mut sidecar = Sidecar {
-                input: child.stdin.take(),
+                input: Arc::new(Mutex::new(None)),
                 child,
             };
             let stdout = sidecar
@@ -230,7 +241,7 @@ fn run_mcp_stdio() -> Result<(), String> {
                 .take()
                 .ok_or("Plugin stdout unavailable")?;
             let request = json!({"op":"stdio_sidecar","endpoint_pid":endpoint,"cwd":env::current_dir().ok(),"state_dir":config.state_dir,"env":env::vars().collect::<std::collections::BTreeMap<_,_>>()});
-            let input = sidecar.input.as_mut().ok_or("Plugin stdin unavailable")?;
+            let mut input = input.ok_or("Plugin stdin unavailable")?;
             let fd = input.as_raw_fd();
             // SAFETY: input owns this live descriptor for the entire bounded write.
             unsafe {
@@ -268,6 +279,12 @@ fn run_mcp_stdio() -> Result<(), String> {
                     Err(error) => return Err(error.to_string()),
                 }
             }
+            *sidecar
+                .input
+                .lock()
+                .map_err(|_| "Plugin stdin lock poisoned")? = Some(input);
+            let input = sidecar.input.clone();
+            let initialized = initialized.clone();
             let (tx, rx) = mpsc::channel();
             let ready_wake = Arc::new(cito_native::support::WakePipe::new()?);
             let ready_notice = ready_wake.clone();
@@ -287,23 +304,39 @@ fn run_mcp_stdio() -> Result<(), String> {
                 if !active || sent.is_err() {
                     return;
                 }
-                let result = (|| -> Result<(), String> {
-                    while let Some(line) = read_sidecar_line(&mut reader)
-                        .map_err(|e| format!("Sidecar framing: {e}"))?
-                    {
-                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                            if v["jsonrpc"] == "2.0" && v.get("method").is_some() {
-                                output(&out, &v)
-                                    .map_err(|e| format!("MCP stdout write failed: {e}"))?;
-                            }
+                loop {
+                    let frame = match read_sidecar_line(&mut reader) {
+                        Ok(Some(line)) => {
+                            serde_json::from_str::<Value>(&line).map_err(|error| error.to_string())
                         }
+                        Ok(None) => break,
+                        Err(error) => Err(error.to_string()),
+                    };
+                    let v = match frame {
+                        Ok(v) => v,
+                        Err(error) => {
+                            eprintln!("cito-mcp sidecar framing: {error}");
+                            break;
+                        }
+                    };
+                    let Some(method) = v["method"].as_str() else {
+                        continue;
+                    };
+                    if v["jsonrpc"] != "2.0"
+                        || (method == "notifications/claude/channel"
+                            && !initialized.load(Ordering::Acquire))
+                    {
+                        continue;
                     }
-                    Ok(())
-                })();
-                if let Err(e) = result {
-                    let _ = failures.send(e);
-                    STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-                    wake.notify();
+                    if let Err(error) = output(&out, &v) {
+                        let _ = failures.send(format!("MCP stdout write failed: {error}"));
+                        STDIO_STOP.store(true, Ordering::Relaxed);
+                        wake.notify();
+                        break;
+                    }
+                }
+                if let Ok(mut input) = input.lock() {
+                    input.take();
                 }
             });
             let mut fds = [
@@ -354,6 +387,12 @@ fn run_mcp_stdio() -> Result<(), String> {
                 continue;
             }
         };
+        if req["jsonrpc"] == "2.0"
+            && req["method"] == "notifications/initialized"
+            && req.get("id").is_none()
+        {
+            initialized.store(true, Ordering::Release);
+        }
         if req["method"] == "tools/call" {
             if !req["params"].is_object() {
                 req["params"] = json!({})

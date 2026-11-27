@@ -231,6 +231,18 @@ pub(super) fn valid_hub_token(token: &str) -> bool {
         && !token.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
+fn validate_hub_token(token: Option<&Value>) -> Result<(), String> {
+    if let Some(value) = token {
+        let token = value
+            .as_str()
+            .ok_or("INVALID_INPUT: Hub token must be a string")?;
+        if !token.is_empty() && !valid_hub_token(token) {
+            return Err("INVALID_INPUT: Invalid Hub token".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
     let mode = raw.trim().to_ascii_lowercase();
     if matches!(mode.as_str(), "none" | "token" | "oidc") {
@@ -298,13 +310,7 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
             .ok_or_else(|| format!("Expected object for hub {name}"))?;
         let auth =
             canonical_auth_mode(hm.get("authMode").and_then(Value::as_str).unwrap_or("none"))?;
-        if hm
-            .get("token")
-            .and_then(Value::as_str)
-            .is_some_and(|token| !token.is_empty() && !valid_hub_token(token))
-        {
-            return Err("INVALID_INPUT: Invalid Hub token".into());
-        }
+        validate_hub_token(hm.get("token"))?;
         hm.remove("request_id");
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));
@@ -400,27 +406,38 @@ pub fn merge_hub_config(base: &Value, patch: &Value) -> Value {
     canonicalize_hub_aliases(&mut base);
     canonicalize_hub_aliases(&mut patch);
     let mut merged = base.as_object().cloned().unwrap_or_default();
+    if let Some(fields) = patch.as_object_mut() {
+        if let Some(url) = fields.remove("natsUrl") {
+            fields.entry("url").or_insert(url);
+        }
+    }
     let changed_url = patch
         .get("url")
-        .is_some_and(|url| base.get("url") != Some(url));
+        .is_some_and(|url| url.as_str() != Some(configured_hub_url(&base)));
     if changed_url {
-        for key in ["authMode", "natsUrl", "issuer", "clientId", "redirectPort"] {
+        for key in [
+            "authMode",
+            "natsUrl",
+            "issuer",
+            "clientId",
+            "redirectPort",
+            "token",
+        ] {
             merged.remove(key);
         }
     }
     if let Some(patch) = patch.as_object() {
         for (key, value) in patch {
-            if changed_url && key == "natsUrl" {
-                continue;
-            }
             if matches!(
                 key.as_str(),
-                "token" | "clientSecret" | "client_secret" | "oidcClientSecret"
+                "clientSecret" | "client_secret" | "oidcClientSecret"
             ) && value.as_str().is_none_or(str::is_empty)
+                || key == "token" && value.as_str() == Some("")
             {
                 continue;
             }
-            if value.is_null() {
+            // Keep a submitted non-string token for the validator to reject.
+            if value.is_null() && key != "token" {
                 merged.remove(key);
             } else {
                 merged.insert(key.clone(), value.clone());
@@ -508,12 +525,7 @@ pub(super) fn apply_hub_auth(mut config: Value, health: &Value) -> Result<Value,
         fields.remove("discovered_name");
     }
     let nonempty = |key: &str| config[key].as_str().is_some_and(|s| !s.trim().is_empty());
-    if config["token"]
-        .as_str()
-        .is_some_and(|s| !s.is_empty() && !valid_hub_token(s))
-    {
-        return Err("INVALID_INPUT: Invalid Hub token".into());
-    }
+    validate_hub_token(config.get("token"))?;
     let configured = config["authMode"].as_str().unwrap_or_else(|| {
         if nonempty("token") {
             "token"
@@ -756,6 +768,35 @@ mod tests {
             {
                 assert_eq!(cleared[preserved], base[preserved]);
             }
+        }
+    }
+
+    #[test]
+    fn token_is_bound_to_the_configured_endpoint() {
+        let base = json!({"natsUrl":"https://old.example.com","authMode":"token","token":"old-token","autoListen":true});
+        let rejoin = merge_hub_config(&base, &json!({"url":"https://old.example.com"}));
+        assert_eq!(rejoin["token"], "old-token");
+        assert_eq!(rejoin["autoListen"], true);
+        for url_key in ["url", "natsUrl"] {
+            let patch = json!({url_key:"https://new.example.com"});
+            let changed = merge_hub_config(&base, &patch);
+            assert_eq!(changed["url"], "https://new.example.com");
+            assert!(changed.get("token").is_none());
+            let mut patch = patch;
+            patch["token"] = json!("new-token");
+            let changed = merge_hub_config(&base, &patch);
+            assert_eq!(changed["token"], "new-token");
+        }
+        for invalid in [Value::Null, json!(true), json!(42)] {
+            let patch = json!({"url":"local://","token":invalid});
+            let merged = merge_hub_config(&base, &patch);
+            assert!(discover_hub_config(merged)
+                .unwrap_err()
+                .contains("must be a string"));
+            let raw = json!({"hubs":{"work":patch}}).to_string();
+            assert!(try_normalize_existing_config(Some(&raw))
+                .unwrap_err()
+                .contains("must be a string"));
         }
     }
 

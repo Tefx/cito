@@ -60,34 +60,45 @@ pub fn reconcile_registration_state(reg: &mut Value, now: u64) {
     }
     // Keep generation high-water marks after pruning so delayed attach retries
     // cannot resurrect an expired or superseded device incarnation.
-    let channels = reg["channels"].as_object().cloned().unwrap_or_default();
-    for (id, channel) in &channels {
-        if !id.ends_with(":human") || channel["host_id"] == "hub" {
-            continue;
-        }
-        let availability = attachment_availability(channel, now);
-        let superseded = availability == "UNLISTENED"
-            && channel["host_name"]
-                .as_str()
-                .is_some_and(|name| !name.trim().is_empty())
-            && channels.iter().any(|(other_id, other)| {
-                other_id != id
-                    && other["host_name"] == channel["host_name"]
-                    && matches!(
-                        attachment_availability(other, now),
-                        "ACTIVE" | "DISCONNECTED_RETAINED"
+    let removed: Vec<_> = reg["channels"]
+        .as_object()
+        .into_iter()
+        .flat_map(|channels| {
+            channels.iter().filter_map(|(id, channel)| {
+                let human_device = id.ends_with(":human") && channel["host_id"] != "hub";
+                let availability = attachment_availability(channel, now);
+                let superseded = human_device
+                    && availability == "UNLISTENED"
+                    && channel["host_name"]
+                        .as_str()
+                        .is_some_and(|name| !name.trim().is_empty())
+                    && channels.iter().any(|(other_id, other)| {
+                        other_id != id
+                            && other["host_name"] == channel["host_name"]
+                            && matches!(
+                                attachment_availability(other, now),
+                                "ACTIVE" | "DISCONNECTED_RETAINED"
+                            )
+                    });
+                (availability == "EXPIRED" || superseded).then(|| {
+                    (
+                        id.clone(),
+                        human_device.then(|| channel["binding_generation"].as_u64().unwrap_or(0)),
                     )
-            });
-        if availability == "EXPIRED" || superseded {
+                })
+            })
+        })
+        .collect();
+    for (id, generation) in removed {
+        if let Some(generation) = generation {
             if !reg["device_generation_fences"].is_object() {
                 reg["device_generation_fences"] = json!({});
             }
-            let previous = reg["device_generation_fences"][id].as_u64().unwrap_or(0);
-            reg["device_generation_fences"][id] =
-                json!(previous.max(channel["binding_generation"].as_u64().unwrap_or(0)));
-            if let Some(entries) = reg["channels"].as_object_mut() {
-                entries.remove(id);
-            }
+            let previous = reg["device_generation_fences"][&id].as_u64().unwrap_or(0);
+            reg["device_generation_fences"][&id] = json!(previous.max(generation));
+        }
+        if let Some(entries) = reg["channels"].as_object_mut() {
+            entries.remove(&id);
         }
     }
     reg["state"] = json!(if matches!(
@@ -210,7 +221,6 @@ mod tests {
             (60_999, "ACTIVE"),
             (61_000, "DISCONNECTED_RETAINED"),
             (1_801_000, "DISCONNECTED_RETAINED"),
-            (1_801_001, "EXPIRED"),
         ] {
             assert_eq!(evaluate_node_lease(&reg, now), expected);
             reconcile_registration_state(&mut reg, now);
@@ -225,7 +235,13 @@ mod tests {
         assert!(projected[0].get("owner_token").is_none());
         reg["channels"]["hub:messenger"] =
             json!({"host_id":"hub","state":"ACTIVE","updated_at_ms":1});
-        reconcile_registration_state(&mut reg, 4_000_000);
+        assert_eq!(
+            attachment_availability(&reg["channels"]["a"], 1_801_001),
+            "EXPIRED"
+        );
+        reconcile_registration_state(&mut reg, 1_801_001);
+        assert!(reg["channels"].get("a").is_none());
+        assert!(reg.get("device_generation_fences").is_none());
         assert_eq!(reg["state"], "ACTIVE");
         reg["human_paused"] = json!(true);
         reconcile_registration_state(&mut reg, 4_000_000);

@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn appearance_overrides_are_scoped_to_one_observation() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, json!({"op":"test_appearance","appearance":"light"}));
+    settlement::open_settings(&f, p, &settings(), "apps");
+
+    let track = |snapshot: Value| snapshot.menu("header_hub_strip");
+    let baseline = track(inspect(&f, p));
+    assert!(baseline["background"][0].as_f64().unwrap() < 0.1);
+    let png = |name: &str, appearance| {
+        let path = f.home.join(name);
+        capture_png(&f, p, "settings", &path, appearance);
+        fs::read(path).unwrap()
+    };
+    let light = png("light.png", None);
+    for op in ["test_inspect", "test_inspect_menu"] {
+        let dark = track(inspect_command(&f, p, op, Some("dark")));
+        assert!(dark["background"][0].as_f64().unwrap() > 0.9, "{op}");
+        assert_eq!(dark["instance"], baseline["instance"], "{op}");
+        let after = track(inspect(&f, p));
+        assert_eq!(after["instance"], baseline["instance"], "{op}");
+        assert_eq!(after["background"], baseline["background"], "{op}");
+        assert!(png(&format!("after_{op}.png"), None) == light, "{op}");
+    }
+
+    let dark = png("dark_observation.png", Some("dark"));
+    assert!(dark != light, "The PNG override must be visible");
+    assert!(png("after_png.png", None) == light, "PNG override leaked");
+    f.send(p, json!({"op":"test_appearance","appearance":"dark"}));
+    assert_eq!(track(inspect(&f, p))["background"][0], 1.0);
+    assert!(png("dark_baseline.png", None) == dark);
+}
+
+#[test]
 fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -136,7 +170,7 @@ fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discov
         frame["hubs"][0]["error"] = json!(raw);
         send_companion(&f, p, frame);
         let s = inspect(&f, p);
-        assert_eq!(s.menu("hub_error:personal")["text"], expected, "{raw}");
+        assert_eq!(s.menu("hub_error:personal")["text"], format!("personal · {expected}"), "{raw}");
     }
     let vectors: Vec<[String; 2]> =
         serde_json::from_str(include_str!("../diagnostics.json")).unwrap();
@@ -145,7 +179,11 @@ fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discov
         frame["hubs"][0]["error"] = json!(raw);
         send_companion(&f, p, frame);
         let s = inspect(&f, p);
-        assert_eq!(s.menu("hub_error:personal")["text"], expected, "{raw}");
+        assert_eq!(
+            s.menu("hub_error:personal")["text"],
+            format!("personal · {expected}"),
+            "{raw}"
+        );
     }
     let clean = "Cannot scan the session directory. Check the app data location and permissions, then refresh discovery to try again. ".repeat(4);
     for appearance in ["light", "dark"] {
@@ -181,14 +219,14 @@ fn hub_drawer_renders_the_presented_error_as_visible_text() {
     assert_eq!(drawer["hidden"], false);
     assert!(nodes(&drawer["children"])
         .iter()
-        .any(|n| n["text"] == "Port already in use" && n["hidden"] != true));
+        .any(|n| n["text"] == "personal · Port already in use" && n["hidden"] != true));
     let mut frame = state();
     frame["hubs"][0]["error"] = json!("INVALID_INPUT: Hub URL must use HTTP or HTTPS");
     send_companion(&f, ui, frame);
     let snapshot = inspect(&f, ui);
     assert_eq!(
         snapshot.menu("hub_error:personal")["text"],
-        "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
+        "personal · Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
     );
 }
 #[test]
@@ -992,7 +1030,14 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(s.menu("toggle_group:fixture")["symbol"], "chevron.right");
     assert!(s.menu("candidate:fixture:recent").is_null());
     control(&f, p, "toggle_group:fixture");
-    assert!(!inspect(&f, p).menu("candidate:fixture:recent").is_null());
+    let recent = inspect(&f, p).menu("listen:fixture:recent");
+    assert_eq!(recent["enabled"], false);
+    assert_eq!(recent["tooltip"], "Open this session to listen");
+    control(&f, p, "listen:fixture:recent");
+    inspect(&f, p);
+    assert!(!f
+        .frames_for(p, "listen_session")
+        .any(|frame| frame["session_id"] == "recent"));
     frame["unread_count"] = json!(1);
     f.send(p, frame.clone());
     assert!(!inspect(&f, p).menu("candidate:fixture:recent").is_null());
@@ -1024,6 +1069,25 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         .any(|v| { v["op"] == "listen_session" && v["session_id"] == "candidate-2" }));
 }
 #[test]
+fn badge_artwork_uses_the_configured_plugin_directory() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let plugins = f.home.join("custom plugins");
+    let icon = plugins.join("fixture/icon.png");
+    fs::create_dir_all(icon.parent().unwrap()).unwrap();
+    fs::copy(root().join("site/apple-touch-icon.png"), icon).unwrap();
+    f.env.insert(
+        "CITO_PLUGIN_DIR".into(),
+        plugins.to_string_lossy().into_owned(),
+    );
+    let p = start(&f);
+    f.send(p, state());
+    let snapshot = inspect(&f, p);
+    assert!(!snapshot.menu("plugin_icon:fixture").is_null());
+    assert!(snapshot.menu("plugin_symbol:fixture").is_null());
+}
+
+#[test]
 fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -1041,8 +1105,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     let mut unscoped = peer("unscoped");
     unscoped.as_object_mut().unwrap().remove("hub");
     initial["my_remote_listeners"] = json!([peer("remote"), other_network, unscoped]);
-    initial["available"] =
-        json!([{"harness":"fixture","session_id":"candidate","title":"alice","cwd":"/tmp"}]);
+    initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","cwd":"/tmp","endpoint_pid":4242}]);
     send_companion(&f, p, initial);
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
@@ -1067,7 +1130,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     initial = state();
     initial["source_op"] = json!("listen_session");
     initial["request_id"] = f.frames_for(p, "listen_session").next().unwrap()["request_id"].clone();
-    initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","custom_title":true,"cwd":"/tmp"}]);
+    initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","custom_title":true,"cwd":"/tmp","endpoint_pid":4242}]);
     send_companion(&f, p, initial);
     let custom = inspect(&f, p);
     assert_eq!(

@@ -1,9 +1,9 @@
 use crate::support::*;
 use cito_native::is_valid_transcript_uuid;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,7 @@ fn clean_hooks(v: &mut Value) {
 fn setup(req: &Value) -> Result<Value> {
     let dir = config_home(req, "CITO_CLAUDE_HOME", "~/.claude");
     let path = dir.join("settings.json");
+    let registration = home(req).join(".claude.json");
     let op = str_at(req, "op").unwrap_or("");
     let command = state(req).join("bin/cito-mcp");
     let hook = raw_str_at(req, "plugin_dir")
@@ -77,7 +78,8 @@ fn setup(req: &Value) -> Result<Value> {
     } else {
         format!("'{}'", hook.replace('\'', "'\\''"))
     };
-    let desired = json!({"command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
+    let desired =
+        json!({"type":"stdio","command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
     if op == "setup_inspect" {
         let v = read_json(&path)?;
         let hooks_ok = EVENTS.iter().all(|e| {
@@ -97,32 +99,58 @@ fn setup(req: &Value) -> Result<Value> {
                 })
                 .unwrap_or(false)
         });
+        let scoped = read_json(&registration)?;
         return Ok(
-            json!({"ok":true,"installed":dir.exists(),"configured":v["mcpServers"]["cito"]==desired&&hooks_ok,"paths":[path]}),
+            json!({"ok":true,"installed":dir.exists() || registration.exists(),"configured":scoped["mcpServers"]["cito"]==desired&&hooks_ok,"paths":[registration,path]}),
         );
     }
     let remove = op == "setup_remove";
-    let action = json_mutate(req, "claude", &path, |v| {
-        check_mcp_command(
-            req,
-            str_at(&v["mcpServers"]["cito"], "command"),
-            command.to_str().unwrap_or(""),
-        )?;
-        clean_hooks(v);
+    let owned = |entry: &Value| {
+        str_at(entry, "command").is_some_and(|cmd| {
+            Some(cmd) == command.to_str()
+                || (entry["env"]["CITO_CLAUDE_CHANNEL"] == "1"
+                    && (cmd == "cito-mcp" || cmd.ends_with("/cito-mcp")))
+        })
+    };
+    let remove_owned = |v: &mut Value| {
         if let Some(servers) = v.get_mut("mcpServers").and_then(Value::as_object_mut) {
-            servers.remove("cito");
-            if servers.is_empty() {
-                v.as_object_mut().map(|o| o.remove("mcpServers"));
+            if servers.get("cito").is_some_and(owned) {
+                servers.remove("cito");
+                if servers.is_empty() {
+                    v.as_object_mut().map(|o| o.remove("mcpServers"));
+                }
             }
         }
-        if !remove {
+    };
+    let server_action = json_mutate(req, "claude", &registration, |v| {
+        if remove {
+            remove_owned(v);
+        } else {
             if v.get("mcpServers").is_none() {
-                v["mcpServers"] = json!({})
+                v["mcpServers"] = json!({});
             }
-            if !v["mcpServers"].is_object() {
-                return Err("mcpServers must be an object".into());
-            }
-            v["mcpServers"]["cito"] = desired;
+            let servers = v["mcpServers"]
+                .as_object_mut()
+                .ok_or("mcpServers must be an object")?;
+            check_mcp_command(
+                req,
+                servers
+                    .get("cito")
+                    .filter(|entry| !owned(entry))
+                    .map(|_| ""),
+                command.to_str().ok_or("MCP command must be valid UTF-8")?,
+            )?;
+            servers.insert("cito".into(), desired);
+        }
+        Ok(())
+    })?;
+    if server_action["status"] == "conflict" {
+        return Ok(json!({"ok":true,"actions":[server_action]}));
+    }
+    let hook_action = json_mutate(req, "claude", &path, |v| {
+        clean_hooks(v);
+        remove_owned(v);
+        if !remove {
             if v.get("hooks").is_none() {
                 v["hooks"] = json!({})
             }
@@ -142,7 +170,7 @@ fn setup(req: &Value) -> Result<Value> {
         Ok(())
     })?;
     remove_setup_runtime(req, "claude", Some("claude-pid-"))?;
-    Ok(json!({"ok":true,"actions":[action]}))
+    Ok(json!({"ok":true,"actions":[server_action,hook_action]}))
 }
 fn queue(req: &Value, sid: &str) -> Result<PathBuf> {
     Ok(state(req)
@@ -173,7 +201,10 @@ pub fn append_wake(req: &Value, sid: &str) -> Result<()> {
             f.write_all(b"\n").map_err(|e| e.to_string())?;
         }
     }
-    let row = json!({"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"created_at_ms":now_ms(),"expected_ack_count":req["signals"].as_array().map(|signals|signals.len().max(1)).unwrap_or(1)});
+    let signals = req["signals"].as_array();
+    let tracked =
+        signals.is_some_and(|signals| signals.iter().any(|s| raw_str_at(s, "hub").is_some()));
+    let row = json!({"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"created_at_ms":now_ms(),"expected_ack_count":signals.map_or(1, |signals| signals.len().max(1)),"tracked":tracked});
     writeln!(f, "{row}").map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
@@ -218,11 +249,14 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
     let mut rows = vec![];
     let mut seen = HashSet::new();
     for (source_session, p) in paths {
-        let Some(s) = read_optional(&p)? else {
+        let Some(bytes) = read_queue(&p)? else {
             continue;
         };
-        for line in s.lines() {
-            if let Ok(mut v) = serde_json::from_str::<Value>(line) {
+        for line in bytes.split_inclusive(|&byte| byte == b'\n') {
+            if !line.ends_with(b"\n") {
+                break;
+            }
+            if let Ok(mut v) = serde_json::from_slice::<Value>(line) {
                 if let (Some(id), Some(_)) = (str_at(&v, "batch_id"), v["content"].as_str()) {
                     if seen.insert((source_session.clone(), id.to_string())) {
                         v["ack_session"] = json!(source_session);
@@ -233,6 +267,13 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
         }
     }
     Ok(rows)
+}
+fn read_queue(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }
 fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool) -> Result<()> {
     let ids: HashSet<_> = wakes
@@ -248,28 +289,33 @@ fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool)
         .collect::<Result<Vec<_>>>()?;
     for sid in sessions {
         for path in wake_queue_paths(req, &sid)? {
-            let Some(content) = read_optional(&path)? else {
+            let Some(content) = read_queue(&path)? else {
                 continue;
             };
             let mut retained = Vec::new();
-            for line in content.lines() {
-                if let Ok(mut value) = serde_json::from_str::<Value>(line) {
-                    if str_at(&value, "batch_id")
-                        .is_some_and(|id| ids.contains(&(sid.as_str(), id)))
-                    {
-                        if !retire {
-                            value["output_delivered"] = json!(true);
-                            retained.push(value.to_string());
+            for line in content.split_inclusive(|&byte| byte == b'\n') {
+                if line.ends_with(b"\n") {
+                    if let Ok(mut value) = serde_json::from_slice::<Value>(line) {
+                        if str_at(&value, "batch_id")
+                            .is_some_and(|id| ids.contains(&(sid.as_str(), id)))
+                        {
+                            if !retire {
+                                value["output_delivered"] = json!(true);
+                                writeln!(retained, "{value}").map_err(|e| e.to_string())?;
+                            }
+                            continue;
                         }
-                        continue;
                     }
                 }
-                retained.push(line.to_owned());
+                retained.extend_from_slice(line);
+            }
+            if retained == content {
+                continue;
             }
             if retained.is_empty() {
                 fs::remove_file(&path).map_err(|e| e.to_string())?;
             } else {
-                atomic_write(&path, format!("{}\n", retained.join("\n")).as_bytes())?;
+                atomic_write(&path, &retained)?;
             }
         }
     }
@@ -334,7 +380,19 @@ fn same_binding(path: &Path, snapshot: Option<&fs::File>) -> bool {
         .zip(fs::metadata(path).ok())
         .is_some_and(|(a, b)| (a.dev(), a.ino()) == (b.dev(), b.ino()))
 }
-fn remove_rejected_binding(path: &Path, snapshot: Option<&fs::File>) -> Result<()> {
+fn remove_rejected_binding(
+    path: &Path,
+    snapshot: Option<&fs::File>,
+    response: &Value,
+) -> Result<()> {
+    // Framing, identity lookup and persistence failures are not binding rejections.
+    let definitive = matches!(
+        response["error"].as_str(),
+        Some("SESSION_MISMATCH" | "SESSION_NOT_OPEN")
+    ) || (response.get("error").is_none() && response.get("error_code").is_none());
+    if response["ok"] != false || !definitive {
+        return Ok(());
+    }
     let _lock = FileLock::acquire(&path.with_extension("lock"))?;
     if same_binding(path, snapshot) {
         fs::remove_file(path).map_err(|e| e.to_string())?;
@@ -360,11 +418,19 @@ fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Va
     {
         return Err("SESSION_MISMATCH: A descendant hook cannot claim a parent endpoint".into());
     }
-    let identity = process_identity(p).ok();
+    let identity = if channel {
+        Some(process_identity(p)?)
+    } else {
+        process_identity(p).ok()
+    };
     let start = identity.as_ref().and_then(|v| str_at(v, "started_at"));
     let path = binding_path(req, p);
     let _lock = FileLock::acquire(&path.with_extension("lock"))?;
-    let previous = read_json(&path).ok();
+    let previous = if channel {
+        Some(read_json(&path)?)
+    } else {
+        read_json(&path).ok()
+    };
     if channel {
         if let Some(previous) = &previous {
             // Canonical hooks own the identity across workspace changes.
@@ -662,7 +728,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 let before = fs::File::open(&binding_path).ok();
                 let response = match socket_call(path, &json!({"op":"identify"})) {
                     Ok(v) if v["ok"] != true => {
-                        remove_rejected_binding(&binding_path, before.as_ref()).ok()?;
+                        remove_rejected_binding(&binding_path, before.as_ref(), &v).ok()?;
                         return None;
                     }
                     response => response,
@@ -866,7 +932,11 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ),
                 Ok(v) => {
                     if let Some(p) = pid(req) {
-                        remove_rejected_binding(&binding_path(req, p), binding_before.as_ref())?;
+                        remove_rejected_binding(
+                            &binding_path(req, p),
+                            binding_before.as_ref(),
+                            &v,
+                        )?;
                     }
                     Ok(
                         json!({"ok":true,"status":"transient_error","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
@@ -936,6 +1006,65 @@ pub fn handle(req: &Value) -> Result<Value> {
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
     }
 }
+fn check_stop_wakes(req: &Value, wakes: Vec<Value>) -> Result<(Vec<Value>, Vec<Value>)> {
+    let batches = wakes
+        .iter()
+        .filter(|wake| wake["output_delivered"] != true)
+        .filter_map(|wake| str_at(wake, "batch_id"))
+        .collect::<Vec<_>>();
+    let path = state(req).join("state.sqlite");
+    let mut membership = HashMap::<String, Vec<Value>>::new();
+    if !batches.is_empty() && path.try_exists().map_err(|error| error.to_string())? {
+        let db = ReadOnlySqlite::open(&path, Duration::from_millis(500))?;
+        let rows = db.rows_params(
+            "SELECT s.batch_id,s.acknowledged_at_ms,s.hub_url,l.hub_url AS target_url,s.principal_id,l.principal_id AS target_principal,s.binding_generation,l.binding_generation AS target_generation,l.session_id,l.status FROM local_signals s JOIN local_listeners l ON s.hub=l.hub AND s.listener_id=l.listener_id WHERE s.batch_id IN (SELECT value FROM json_each(?)) AND l.harness='claude'",
+            &[&json!(batches).to_string()],
+        )?;
+        for row in rows {
+            if let Some(id) = str_at(&row, "batch_id") {
+                membership.entry(id.to_string()).or_default().push(row);
+            }
+        }
+    }
+    let mut current = Vec::new();
+    let mut stale = Vec::new();
+    for wake in wakes {
+        if wake["output_delivered"] == true {
+            current.push(wake);
+            continue;
+        }
+        let rows = str_at(&wake, "batch_id")
+            .and_then(|id| membership.get(id))
+            .map_or(&[][..], Vec::as_slice);
+        // Inbox ACKs and batch reassignment commit to this same SQLite authority.
+        // A rendered card is indivisible: never re-emit it with acknowledged rows
+        // or ACK its remaining unread rows without displaying them.
+        let unread = if rows.is_empty() {
+            wake["tracked"] == false // Explicit standalone entries have no DB batch.
+        } else {
+            rows.len() as u64 == wake["expected_ack_count"].as_u64().unwrap_or(1)
+                && rows.iter().all(|row| {
+                    row["acknowledged_at_ms"].is_null()
+                        && row["status"] == "ACTIVE"
+                        && row["session_id"] == wake["ack_session"]
+                        && str_at(row, "hub_url").is_some()
+                        && row["hub_url"] == row["target_url"]
+                        && row["binding_generation"] == row["target_generation"]
+                        && cito_native::core::auth::principal_ids_equal(
+                            str_at(row, "principal_id").unwrap_or(""),
+                            str_at(row, "target_principal").unwrap_or(""),
+                        )
+                })
+        };
+        if unread {
+            current.push(wake);
+        } else {
+            stale.push(wake);
+        }
+    }
+    Ok((current, stale))
+}
+
 fn hook_ack_confirmed(response: &Value, expected: usize) -> bool {
     response.get("error").is_none()
         && response["result"]["isError"] != true
@@ -1021,7 +1150,18 @@ pub fn hook_main() {
                 &queue(&req, session)?.with_extension("delivery.lock"),
             )?);
         }
-        let wakes = drain_wakes(&req, &sessions)?;
+        let mut wakes = drain_wakes(&req, &sessions)?;
+        let owned_sessions = sessions.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        if event == "Stop" {
+            wakes.retain(|wake| wake["wake"] != false);
+            if !wakes.is_empty() {
+                let (current, stale) = check_stop_wakes(&req, wakes)?;
+                if !stale.is_empty() {
+                    settle_wakes(&req, &owned_sessions, &stale, true)?;
+                }
+                wakes = current;
+            }
+        }
         if wakes.is_empty() {
             return Ok(json!({}));
         }
@@ -1066,20 +1206,10 @@ pub fn hook_main() {
                 .fold(0usize, usize::saturating_add);
             Some((expected, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":ids},"_meta":{"claudeSessionId":session,"cwd":req["cwd"]}}})))
         }).collect();
-        continuation = Some((
-            req.clone(),
-            sessions.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            wakes.clone(),
-            port,
-            acks,
-        ));
+        continuation = Some((req.clone(), owned_sessions, wakes, port, acks));
         if content.is_empty() {
             Ok(json!({}))
-        } else if event == "Stop"
-            && wakes
-                .iter()
-                .any(|v| v["wake"] != false && v["output_delivered"] != true)
-        {
+        } else if event == "Stop" {
             Ok(json!({"decision":"block","reason":content}))
         } else {
             Ok(json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":content}}))
@@ -1296,6 +1426,34 @@ fn latest_transcript(req: &Value, cwd: &str) -> Option<(String, u64)> {
         })
         .max_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
 }
+// Frame connections independently; only complete requests enter the serialized
+// endpoint state machine. An idle connection cannot spend another caller's deadline.
+fn read_bridge_request(stream: &mut UnixStream) -> Result<Value> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut line = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("Socket request timed out".into());
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| e.to_string())?;
+        let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Socket closed before newline".into());
+        }
+        let end = buf[..n].iter().position(|&byte| byte == b'\n');
+        line.extend_from_slice(&buf[..end.map_or(n, |i| i + 1)]);
+        if line.len() > 4 * 1024 * 1024 {
+            return Err("Socket request exceeds 4 MiB".into());
+        }
+        if end.is_some() {
+            return serde_json::from_slice(&line).map_err(|e| e.to_string());
+        }
+    }
+}
 fn sidecar(req: Value) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     use std::sync::{Arc, Mutex};
@@ -1353,20 +1511,34 @@ fn sidecar(req: Value) -> Result<()> {
             let _ = submitted.try_send(());
         }
     });
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-        let mut line = String::new();
-        let result = (|| -> Result<Value> {
-            BufReader::new(&mut stream)
-                .take(4 * 1024 * 1024)
-                .read_line(&mut line)
-                .map_err(|e| e.to_string())?;
-            if !line.ends_with('\n') {
-                return Err("Socket closed before newline".into());
+    let (framed_tx, framed_rx) = std::sync::mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let active = Arc::new(AtomicUsize::new(0));
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            if active.load(Relaxed) >= 16 {
+                continue;
             }
-            let v: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            active.fetch_add(1, Relaxed);
+            let readers = active.clone();
+            let framed = framed_tx.clone();
+            if std::thread::Builder::new()
+                .spawn(move || {
+                    if let Ok(request) = read_bridge_request(&mut stream) {
+                        let _ = framed.try_send((stream, request));
+                    }
+                    readers.fetch_sub(1, Relaxed);
+                })
+                .is_err()
+            {
+                active.fetch_sub(1, Relaxed);
+            }
+        }
+    });
+    for (mut stream, v) in framed_rx {
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+        let result = (|| -> Result<Value> {
             if v["op"] == "ping" {
                 return Ok(json!({"ok":true}));
             }
@@ -1377,10 +1549,8 @@ fn sidecar(req: Value) -> Result<()> {
             let mut cwd = cwd;
             let initial;
             if next.is_none() {
-                initial = read_json(&binding_path(&req, p)).ok();
-                if let Some((sid, workspace)) =
-                    initial.as_ref().and_then(|v| canonical_hook_identity(v, p))
-                {
+                initial = read_json(&binding_path(&req, p))?;
+                if let Some((sid, workspace)) = canonical_hook_identity(&initial, p) {
                     let published = published_session(&req, sid, p)?;
                     alias_active = published != sid;
                     first_transcript = alias_active.then(|| sid.to_owned());
@@ -1503,11 +1673,8 @@ fn sidecar(req: Value) -> Result<()> {
         })();
         let mut response =
             result.unwrap_or_else(|e| json!({"ok":false,"error":"DELIVERY_FAILED","message":e}));
-        if let Some(id) = serde_json::from_str::<Value>(&line)
-            .ok()
-            .and_then(|v| v.get("id").cloned())
-        {
-            response["id"] = id;
+        if let Some(id) = v.get("id") {
+            response["id"] = id.clone();
         }
         let _ = writeln!(stream, "{response}");
     }

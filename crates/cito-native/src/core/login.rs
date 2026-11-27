@@ -300,6 +300,9 @@ fn read_cache(path: &Path, settings: &Settings) -> std::io::Result<Option<Value>
         || cache
             .get("refresh_token")
             .is_some_and(|value| !value.is_null() && !value.is_string())
+        || cache
+            .get("original_nonce")
+            .is_some_and(|nonce| !nonce.is_string())
     {
         return Ok(None);
     }
@@ -319,7 +322,7 @@ fn verify_cache(
     let token = cache["id_token"]
         .as_str()
         .ok_or("UNAUTHORIZED: Invalid cache token")?;
-    let identity = OidcVerifier::new(&settings.issuer, &settings.client)?
+    let (identity, _) = OidcVerifier::new(&settings.issuer, &settings.client)?
         .verify_with_deadline(token, deadline.http_deadline())?;
     deadline.remaining()?;
     Ok((token.to_owned(), identity))
@@ -386,7 +389,14 @@ fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), St
         return Err("AUTH_UNAVAILABLE: OIDC token cache exceeds 1 MiB".into());
     }
     crate::support::atomic_write_checked(path, data.as_bytes(), Some(0o600), || {
-        deadline.remaining().map(|_| ())
+        deadline.remaining()?;
+        if cache["expires_at"]
+            .as_f64()
+            .is_none_or(|exp| exp <= crate::plugins::now_ms() as f64 / 1000.0)
+        {
+            return Err("UNAUTHORIZED: OIDC id_token already expired".into());
+        }
+        Ok(())
     })
 }
 
@@ -427,43 +437,68 @@ fn recover_inner(
 ) -> Result<LoginResult, String> {
     deadline.remaining()?;
     let path = cache_path(dir, hub)?;
-    let _cache_lock = deadline.lock(&path.with_extension("json.lock"))?;
-    let old = match read_cache(&path, settings) {
-        Ok(cache) => cache,
-        Err(e) if interactive && e.kind() == std::io::ErrorKind::PermissionDenied => None,
-        Err(e) => return Err(format!("AUTH_UNAVAILABLE: Cannot read OIDC cache: {e}")),
+    let lock_path = path.with_extension("json.lock");
+    let read = || match read_cache(&path, settings) {
+        Ok(cache) => Ok(cache),
+        Err(e) if interactive && e.kind() == io::ErrorKind::PermissionDenied => Ok(None),
+        Err(e) => Err(format!("AUTH_UNAVAILABLE: Cannot read OIDC cache: {e}")),
+    };
+    let mut discovery = None;
+    let (old, discovery, _cache_lock) = loop {
+        deadline.remaining()?;
+        let old = read()?;
+        if let Some(cache) = old.as_ref().filter(|cache| {
+            !force_account_select && fresh(cache) && cache["token_sha256"].as_str() != rejected
+        }) {
+            match verify_cache(cache, settings, deadline) {
+                Err(error)
+                    if cache["refresh_token"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+                        && error.starts_with("AUTHORIZATION_VIOLATION:") => {}
+                result if old == read()? => return result,
+                _ => continue,
+            }
+        }
+        if discovery.is_none() {
+            let discovered = response_json(
+                deadline.request(
+                    &format!(
+                        "{}/.well-known/openid-configuration",
+                        settings.issuer.trim_end_matches('/')
+                    ),
+                    None,
+                )?,
+                deadline,
+            )?;
+            if discovered["issuer"] != settings.issuer {
+                return Err("AUTH_UNAVAILABLE: Discovery issuer mismatch".into());
+            }
+            discovery = Some(discovered);
+        }
+        // Serialize the credential exchange, but discover and verify reusable
+        // generations without blocking other users of the cache lock.
+        let lock = deadline.lock(&lock_path)?;
+        if old == read()? {
+            break (
+                old,
+                discovery
+                    .take()
+                    .ok_or("AUTH_UNAVAILABLE: Missing OIDC discovery")?,
+                lock,
+            );
+        }
     };
     let old_refresh = old
         .as_ref()
         .filter(|_| !force_account_select)
         .and_then(|cache| cache["refresh_token"].as_str())
         .filter(|s| !s.is_empty());
-    if let Some(cache) = old.as_ref().filter(|cache| {
-        !force_account_select && fresh(cache) && cache["token_sha256"].as_str() != rejected
-    }) {
-        match verify_cache(cache, settings, deadline) {
-            Err(error)
-                if old_refresh.is_some() && error.starts_with("AUTHORIZATION_VIOLATION:") => {}
-            result => return result,
-        }
-    }
-    let verifier = OidcVerifier::new(&settings.issuer, &settings.client)?;
-    let discovery = response_json(
-        deadline.request(
-            &format!(
-                "{}/.well-known/openid-configuration",
-                settings.issuer.trim_end_matches('/')
-            ),
-            None,
-        )?,
-        deadline,
-    )?;
-    if discovery["issuer"] != settings.issuer {
-        return Err("AUTH_UNAVAILABLE: Discovery issuer mismatch".into());
-    }
     let scopes = settings.scopes(&discovery)?;
     let token_url = endpoint(&discovery, "token_endpoint")?;
     let authorization = endpoint(&discovery, "authorization_endpoint")?;
+    let verifier = OidcVerifier::new(&settings.issuer, &settings.client)?
+        .with_jwks_uri(endpoint(&discovery, "jwks_uri")?);
     let refreshed = if let Some(refresh) = old_refresh {
         let response = deadline.request(
             &token_url,
@@ -482,7 +517,6 @@ fn recover_inner(
     } else {
         None
     };
-    let is_refresh = refreshed.is_some();
     let mut nonce = None;
     // Keep the fixed-port lock until verified publication, including token exchange.
     let mut _port_lock = None;
@@ -516,6 +550,17 @@ fn recover_inner(
         nonce = Some(request_nonce.clone());
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.as_bytes()));
         let mut url = url::Url::parse(&authorization).map_err(|e| e.to_string())?;
+        if force_account_select {
+            let pairs: Vec<_> = url
+                .query_pairs()
+                .into_owned()
+                .filter(|(name, _)| name != "prompt")
+                .collect();
+            url.query_pairs_mut()
+                .clear()
+                .extend_pairs(pairs)
+                .append_pair("prompt", "select_account");
+        }
         url.query_pairs_mut().extend_pairs([
             ("response_type", "code"),
             ("client_id", settings.client.as_str()),
@@ -526,10 +571,6 @@ fn recover_inner(
             ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
         ]);
-        if force_account_select {
-            url.query_pairs_mut()
-                .append_pair("prompt", "select_account");
-        }
         let opener = std::env::var("CITO_BROWSER_BIN").unwrap_or_else(|_| {
             if cfg!(target_os = "macos") {
                 "/usr/bin/open".into()
@@ -609,24 +650,40 @@ fn recover_inner(
     {
         return Err("UNAUTHORIZED: Invalid refresh_token".into());
     }
-    let identity = verifier.verify_with_deadline(token, deadline.http_deadline())?;
+    let (identity, claims) = verifier.verify_with_deadline(token, deadline.http_deadline())?;
     deadline.remaining()?;
-    let claims = payload(token)?;
-    if nonce.is_some_and(|nonce| claims["nonce"] != nonce) {
-        return Err("UNAUTHORIZED: OIDC nonce mismatch".into());
-    }
-    let same_principal = old
-        .as_ref()
-        .and_then(|cache| cache["verified_principal_id"].as_str())
-        .is_some_and(|prev| super::auth::principal_matches(prev, &identity));
-    let refresh = body["refresh_token"].as_str().or({
-        if is_refresh && same_principal {
-            old_refresh
-        } else {
-            None
+    let (refresh, carried_nonce) = if let Some(nonce) = nonce {
+        if claims["nonce"] != nonce {
+            return Err("UNAUTHORIZED: OIDC nonce mismatch".into());
         }
-    });
-    let cache = json!({"issuer":settings.issuer,"client_id":settings.client,"id_token":token,"refresh_token":refresh,"token_sha256":hash(token),"expires_at":claims["exp"],"verified_principal_id":identity["principal_id"],"verified_user":identity["owner_user"]});
+        (body["refresh_token"].as_str(), None)
+    } else {
+        let previous = old.as_ref().ok_or("UNAUTHORIZED: Missing OIDC cache")?;
+        let previous_claims = payload(
+            previous["id_token"]
+                .as_str()
+                .ok_or("UNAUTHORIZED: Invalid cache token")?,
+        )
+        .map_err(|_| "UNAUTHORIZED: Invalid cache token claims")?;
+        if claims["sub"] != previous_claims["sub"] {
+            return Err("UNAUTHORIZED: OIDC refresh subject mismatch".into());
+        }
+        let expected = previous_claims["nonce"]
+            .as_str()
+            .or_else(|| previous["original_nonce"].as_str());
+        // OIDC permits a refresh to omit nonce. Carry the original only when
+        // it would otherwise be lost from the newly verified claims.
+        let carried = match claims.get("nonce") {
+            Some(returned) if expected.is_some() && returned.as_str() == expected => None,
+            Some(_) => return Err("UNAUTHORIZED: OIDC nonce mismatch".into()),
+            None => expected.map(str::to_owned),
+        };
+        (body["refresh_token"].as_str().or(old_refresh), carried)
+    };
+    let mut cache = json!({"issuer":settings.issuer,"client_id":settings.client,"id_token":token,"refresh_token":refresh,"token_sha256":hash(token),"expires_at":claims["exp"],"verified_principal_id":identity["principal_id"],"verified_user":identity["owner_user"]});
+    if let Some(nonce) = carried_nonce {
+        cache["original_nonce"] = json!(nonce);
+    }
     publish(&path, &cache, deadline)?;
     Ok((token.to_owned(), identity))
 }

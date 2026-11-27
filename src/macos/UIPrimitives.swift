@@ -198,10 +198,14 @@ func pluginIconImage(for id: String) -> NSImage? {
         return URL(fileURLWithPath:expanded)
     }
     var roots = (env["CITO_PLUGIN_PATH"] ?? "").split(separator: ":").compactMap { rootURL(String($0)) }
+    if let override = env["CITO_PLUGIN_DIR"], !override.isEmpty { roots.append(URL(fileURLWithPath: override)) }
     let state = rootURL(env["CITO_STATE_DIR"] ?? NSHomeDirectory()+"/.cito") ?? URL(fileURLWithPath:NSHomeDirectory()+"/.cito")
     roots += [state.appendingPathComponent("plugins"),state.appendingPathComponent("runtime/plugins")]
     if let builtin = env["CITO_BUILTIN_PLUGINS_DIR"].flatMap(rootURL) { roots.append(builtin) }
     let executable = URL(fileURLWithPath:CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
+    if executable.deletingLastPathComponent().deletingLastPathComponent().pathExtension == "app" {
+        roots.append(executable.appendingPathComponent("../../../../Resources/plugins"))
+    }
     roots += [executable.appendingPathComponent("../Resources/plugins"),executable.appendingPathComponent("../../plugins")]
     for root in roots {
         if let image = NSImage(contentsOf:root.appendingPathComponent(id).appendingPathComponent("icon.png")) {
@@ -511,10 +515,8 @@ final class MenuControl: NSControl {
         return frame.contains(point) ? self : nil
     }
     override func mouseDown(with event: NSEvent) {
-        guard isEnabled, pressed != nil else { return }
-        // Custom NSMenuItem views must handle the press without ending menu tracking.
-        if enclosingMenuItem != nil { performClick(nil); return }
-        guard let window else { return }
+        guard let window, visibleRect.contains(convert(event.locationInWindow, from: nil)) else { return }
+        // Capture the release in the custom view rather than letting the menu select the item.
         trackWindowPress {
             window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true)
         }
@@ -522,11 +524,12 @@ final class MenuControl: NSControl {
     func trackWindowPress(nextEvent: () -> NSEvent?) {
         guard isEnabled, pressed != nil, let trackingWindow = window else { return }
         let capturedToken = gestureToken
-        trackingWindow.makeFirstResponder(self)
+        if enclosingMenuItem == nil { trackingWindow.makeFirstResponder(self) }
         isPressed = true
         defer { isPressed = false }
-        while let event = nextEvent(), window === trackingWindow, isEnabled, !isHiddenOrHasHiddenAncestor {
-            let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        while let event = nextEvent(), event.windowNumber == trackingWindow.windowNumber,
+              window === trackingWindow, isEnabled, !isHiddenOrHasHiddenAncestor, enclosingMenuItem?.isHidden != true {
+            let inside = visibleRect.contains(convert(event.locationInWindow, from: nil))
             if event.type == .leftMouseUp {
                 isPressed = false
                 if capturedToken == gestureToken && inside { performClick(nil) }
@@ -599,7 +602,12 @@ final class MenuControl: NSControl {
         hoverWatchTimer = timer
         RunLoop.main.add(timer, forMode: .eventTracking)
     }
-    override var isEnabled: Bool { didSet { applyVisualState() } }
+    override var isEnabled: Bool {
+        didSet {
+            if oldValue != isEnabled { invalidatePress() }
+            applyVisualState()
+        }
+    }
     func applyVisualState() {
         alphaValue = isEnabled ? 1 : 0.45
         let fill: NSColor

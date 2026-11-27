@@ -1,7 +1,10 @@
 //! Shared browser boundary for the native HTTP listeners.
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
+use url::{Host, Url};
 
 pub(super) const PEER_CLOSED: &str = "Connection closed by peer before HTTP response";
 
@@ -106,7 +109,37 @@ pub(super) fn write_json(stream: &mut impl Write, status: u16, body: &[u8]) -> s
     stream.write_all(body)?;
     stream.flush()
 }
-use url::{Host, Url};
+
+/// Finish a response on a connection that will not be reused.
+pub(super) fn finish_http(stream: &mut TcpStream) {
+    // Send the response and FIN before draining the kernel receive queue.
+    // Unread bytes there can turn the final close into a reset.
+    if stream.shutdown(Shutdown::Write).is_err() || stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut buffer = [0; 8192];
+    let mut remaining = 128 * 1024;
+    let mut readable = [libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    while remaining > 0 && Instant::now() < deadline {
+        let size = remaining.min(buffer.len());
+        match stream.read(&mut buffer[..size]) {
+            Ok(0) => break,
+            Ok(count) => remaining -= count,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if !crate::support::poll_until(&mut readable, Some(deadline)).unwrap_or(false) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
 
 fn authority(value: &str) -> Option<Url> {
     let url = Url::parse(&format!("http://{value}")).ok()?;
@@ -177,7 +210,6 @@ pub(super) fn validate_hub(
 pub(super) fn accept_test_client(
     listener: &std::net::TcpListener,
 ) -> Result<std::net::TcpStream, String> {
-    use std::os::fd::AsRawFd;
     let mut fd = [libc::pollfd {
         fd: listener.as_raw_fd(),
         events: libc::POLLIN,

@@ -1,15 +1,18 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, watch } from "node:fs";
+import { chmodSync, closeSync, constants, createReadStream, existsSync, fchmodSync, fstatSync, mkdirSync, openSync, readFileSync, unlinkSync, watch } from "node:fs";
+import { createInterface } from "node:readline";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
-/** Structural subset of Pi 1.5.0's public API: no host package is needed to load this file. */
+/** Structural subset of Pi's public API: no host package is needed to load this file. */
 export interface BridgeContext {
   cwd: string;
+  isIdle?(): boolean;
   sessionManager: {
     getSessionId(): string | undefined;
     getSessionName(): string | undefined;
+    getSessionFile?(): string | undefined;
     getBranch?(): SessionEntry[];
     getEntries?(): SessionEntry[];
   };
@@ -18,10 +21,15 @@ export interface BridgeContext {
     notify?(message: string, type?: "info" | "warning" | "error"): void;
   };
 }
-interface SessionEntry { type: string; message?: { role: string; content?: unknown } }
+interface SessionEntry {
+  id?: string; type: string; message?: { role: string; content?: unknown };
+  customType?: string; details?: { citoBatchId?: string };
+}
 interface SessionState {
   sessionId?: string; cwd: string; sessionName: string; about: string;
-  batches: Map<string, Set<string>>;
+  activeBadge?: string; commandGen: number; context?: BridgeContext;
+  commands: Map<string, Promise<void>>;
+  renderBadge?: () => void;
 }
 const sessionKey = Symbol.for("cito.pi.sessionState");
 const host = globalThis as typeof globalThis & { [sessionKey]?: SessionState };
@@ -43,9 +51,9 @@ export interface BridgeAPI {
   registerMessageRenderer?(customType: string, renderer: NotificationRenderer): void;
   registerToolRenderer?(resolve: (name: string, next: () => ToolRenderers | undefined) => ToolRenderers | undefined): void;
   registerCommand?(name: string, options: BridgeCommandOptions): void;
-  on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree",
+  on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree" | "agent_settled",
     handler: (event: unknown, ctx: BridgeContext) => void | Promise<void>): unknown;
-  sendMessage(message: { customType: string; content: string; display: boolean },
+  sendMessage(message: { customType: string; content: string; display: boolean; details: { citoBatchId: string } },
     options: { triggerTurn: boolean; deliverAs: "steer" | "followUp" }): void;
 }
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -109,8 +117,57 @@ const notificationRenderer: NotificationRenderer = (message, options, theme) => 
 
 interface ToolRenderers {
   renderShell?: "default" | "self";
-  renderCall?(args: Record<string, unknown>, theme: NotificationTheme, context: { expanded: boolean; outputPad: number }): ReturnType<NotificationRenderer>;
-  renderResult?(result: { content: unknown }, options: { expanded: boolean }, theme: NotificationTheme, context: { isError: boolean; outputPad: number }): ReturnType<NotificationRenderer>;
+  renderCall?(args: Record<string, unknown>, theme: NotificationTheme, context: { expanded: boolean; outputPad: number; state: ToolRenderState }): ReturnType<NotificationRenderer>;
+  renderResult?(result: { content: unknown }, options: { expanded: boolean }, theme: NotificationTheme, context: { isError: boolean; outputPad: number; state: ToolRenderState }): ReturnType<NotificationRenderer>;
+}
+interface ToolRenderState { call?: string; showResult?: boolean }
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+function toolSummary(body: string): string {
+  const receipt = object(JSON.parse(body));
+  if (!receipt || receipt.ok === false || receipt.error) return body;
+  const addresses = (rows: unknown[]) => rows.flatMap(row => {
+    const address = object(row)?.display_address;
+    return typeof address === "string" && address ? [address] : [];
+  });
+  const list = (rows: string[]) => [...rows.slice(0, 5), ...(rows.length > 5 ? [`And ${rows.length - 5} more`] : [])];
+  const summary = Array.isArray(receipt.listeners)
+    ? [`${receipt.matched_count ?? receipt.listeners.length} listeners · ${receipt.online_count ?? 0} online`, ...list(addresses(receipt.listeners))]
+    : Array.isArray(receipt.signals) ? [`${receipt.signals.length} signals · ${receipt.acknowledged_count ?? 0} acknowledged`]
+    : typeof receipt.registered === "boolean" ? [`${receipt.registered ? "Listening" : "Not listening"} · ${receipt.unread_count ?? 0} unread`, ...addresses([receipt])]
+    : [receipt.signal_id ?? receipt.display_address ?? receipt.listener_id ?? receipt.status].filter((value): value is string => typeof value === "string");
+  const warnings = new Set<string>();
+  for (const warning of [receipt.warning, receipt.maintenance_warning, ...(Array.isArray(receipt.warnings) ? receipt.warnings : [])]) {
+    const row = object(warning);
+    if (typeof warning === "string" && warning) warnings.add(warning);
+    else if (typeof row?.message === "string") warnings.add(`${typeof row.hub === "string" ? `${row.hub}: ` : ""}${row.message}`);
+  }
+  for (const hub of Array.isArray(receipt.hubs) ? receipt.hubs : []) {
+    const row = object(hub);
+    const warning = row?.status === "auth_required" ? "Sign in required" : row?.status === "disconnected" ? "Disconnected" : undefined;
+    if (warning && typeof row?.name === "string") warnings.add(`${row.name}: ${warning}`);
+  }
+  if (receipt.replay_gap_detected === true) warnings.add("Some earlier signals may be missing");
+  return [...summary, ...Array.from(warnings, warning => `Warning: ${warning}`)].join("\n") || body;
+}
+
+async function writtenBatch(path: string, entryId: string, batchId: string, signal: AbortSignal): Promise<boolean> {
+  const source = createReadStream(path, { signal });
+  const lines = createInterface({ input: source, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.includes('"citoBatchId"')) continue;
+      try {
+        const row: SessionEntry = JSON.parse(line);
+        if (row.type === "custom_message" && row.customType === "cito-notification"
+          && row.id === entryId && row.details?.citoBatchId === batchId) return true;
+      } catch { /* Ignore an incomplete JSONL row. */ }
+    }
+  } catch { /* A session without a readable transcript cannot confirm delivery. */ }
+  finally { lines.close(); source.destroy(); }
+  return false;
 }
 
 function expandHome(path: string): string {
@@ -118,6 +175,9 @@ function expandHome(path: string): string {
 }
 
 export default function citoBridge(pi: BridgeAPI): void {
+  const stateDir = process.env.CITO_STATE_DIR ?? "~/.cito";
+  if (!stateDir) throw new Error("CITO_STATE_DIR must not be empty");
+  const resolvedStateDir = expandHome(stateDir);
   pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
   pi.registerToolRenderer?.((name, next) => {
     const action = /^mcp__cito__cito_(send|find|listen|unlisten|inbox|status)$/.exec(name)?.[1];
@@ -126,25 +186,23 @@ export default function citoBridge(pi: BridgeAPI): void {
       renderShell: "self",
       renderCall(args, theme, context) {
         const subject = args.to ?? args.query ?? args.about ?? args.hub;
-        return notificationRenderer({ content: `Cito · ${action}${typeof subject === "string" ? ` · ${subject}` : ""}` }, context, theme);
+        const title = `Cito · ${action}${typeof subject === "string" ? ` · ${subject}` : ""}`;
+        context.state.call = title;
+        const card = notificationRenderer({ content: title }, context, theme);
+        return { ...card, render: width => context.state.showResult ? [] : card.render(width) };
       },
       renderResult(result, options, theme, context) {
         let body = contentText(result.content);
         if (!options.expanded && !context.isError) {
-          try {
-            const receipt = JSON.parse(body);
-            const summary = receipt.signal_id ?? receipt.listener_id ?? receipt.status
-              ?? (Array.isArray(receipt.signals) ? `${receipt.signals.length} signals · ${receipt.acknowledged_count ?? 0} acknowledged`
-                : Array.isArray(receipt.listeners) ? `${receipt.matched_count} listeners · ${receipt.online_count} online`
-                : typeof receipt.registered === "boolean" ? `${receipt.registered ? "Listening" : "Not listening"} · ${receipt.unread_count} unread` : undefined);
-            if (typeof summary === "string" && receipt.ok !== false && !receipt.error && !receipt.warning && !receipt.maintenance_warning && !receipt.warnings?.length && !receipt.replay_gap_detected) body = summary;
-          } catch { /* Preserve non-JSON results and diagnostics. */ }
+          try { body = toolSummary(body); }
+          catch { /* Preserve non-JSON results and diagnostics. */ }
         }
-        return notificationRenderer({ content: `Cito · ${action} ${context.isError ? "error" : "result"}\n${body}` }, { ...options, outputPad: context.outputPad }, theme);
+        const title = context.state.call ?? `Cito · ${action}`;
+        context.state.showResult = true;
+        return notificationRenderer({ content: `${title}${context.isError ? " · Error" : ""}\n${body}` }, { ...options, outputPad: context.outputPad }, theme);
       },
     };
   });
-  const resolvedStateDir = expandHome(process.env.CITO_STATE_DIR ?? "~/.cito");
   const shim = join(resolvedStateDir, "bin", "cito-mcp");
   let mcpRegistered = false;
   function registerMcpServer(): void {
@@ -163,19 +221,18 @@ export default function citoBridge(pi: BridgeAPI): void {
   // Some hosts initialize the registry after synchronous extension loading.
   try { registerMcpServer(); }
   catch { /* session_start retries and surfaces any persistent failure. */ }
-  const session: SessionState = host[sessionKey] ??= { cwd: "", sessionName: "", about: "", batches: new Map() };
-  let commandGen = 0;
-  let activeBadge: string | undefined;
+  const session: SessionState = host[sessionKey] ??= { cwd: "", sessionName: "", about: "", commandGen: 0, commands: new Map() };
+  const pending = new Set<string>();
   let lastActiveMs = Date.now();
-  let context: BridgeContext | undefined;
   let server: Server | undefined;
   let ownsSocket = false;
   const connections = new Set<Socket>();
   const directory = join(resolvedStateDir, "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
+  const watchFile = join(resolvedStateDir, "pi", "endpoints", `pi-pid-${process.pid}.watch`);
   const piHome = expandHome(process.env.CITO_PI_HOME ?? "~/.pi/agent");
   const subcommands = ["on", "private", "team", "off"];
-  const commands = new Map<string, Promise<void>>();
+  const commands = session.commands;
   const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
   const hubUsage = "Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]";
@@ -246,30 +303,28 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (next?.trim() && next !== session.sessionId) {
       session.sessionId = next;
       session.about = "";
-      activeBadge = undefined;
-      commandGen++;
+      session.activeBadge = undefined;
+      session.commandGen++;
+      pending.clear();
       lastActiveMs = Date.now();
     }
     if (next?.trim()) {
       session.cwd = ctx.cwd;
       session.sessionName = ctx.sessionManager.getSessionName() ?? "";
       if (!session.about) session.about = promptAbout(ctx.sessionManager);
-      const delivered = session.batches.get(next) ?? new Set<string>();
-      session.batches.delete(next);
-      session.batches.set(next, delivered);
-      // Keep recent inactive sessions for deduplication without unbounded growth.
-      while (session.batches.size > 128) session.batches.delete(session.batches.keys().next().value!);
     }
-    context = ctx;
-    renderBadge(ctx);
+    session.context = ctx;
+    session.renderBadge = renderBadge;
+    renderBadge();
   }
   let renderedBadge: string | undefined;
   let renderedContext: BridgeContext | undefined;
-  function renderBadge(ctx: BridgeContext | undefined): void {
-    if (ctx && (ctx !== renderedContext || renderedBadge !== activeBadge)) {
-      ctx.ui.setStatus("cito", activeBadge);
+  function renderBadge(): void {
+    const ctx = session.context;
+    if (ctx && (ctx !== renderedContext || renderedBadge !== session.activeBadge)) {
+      ctx.ui.setStatus("cito", session.activeBadge);
       renderedContext = ctx;
-      renderedBadge = activeBadge;
+      renderedBadge = session.activeBadge;
     }
   }
   function unlinkSocket(): void {
@@ -278,59 +333,75 @@ export default function citoBridge(pi: BridgeAPI): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     ownsSocket = false;
   }
-  function handle(req: Record<string, unknown>): Record<string, unknown> {
-    const ctx = context;
+  async function handle(req: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const ctx = session.context;
     if (ctx) update(ctx);
     if (req.op === "ping") return { ok: true };
     if (req.op !== "identify" && req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
     const currentId = session.sessionId;
     if (!currentId) return { ok: false, error: "SESSION_NOT_READY" };
     if (req.op === "identify") return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid,
-      session_id: currentId, session_name: session.sessionName, cwd: session.cwd, about: session.about, badge: activeBadge ?? null, updated_at_ms: lastActiveMs };
+      session_id: currentId, session_name: session.sessionName, cwd: session.cwd, about: session.about, badge: session.activeBadge ?? null, updated_at_ms: lastActiveMs };
     if (req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
-      activeBadge = (req.badge as string | undefined) ?? undefined;
-      renderBadge(ctx);
+      session.activeBadge = typeof req.badge === "string" ? req.badge : undefined;
+      renderBadge();
       return { ok: true };
     }
-    const processedBatchIds = session.batches.get(currentId)!;
-    if (typeof req.batch_id !== "string" || !req.batch_id) return { ok: false, error: "INVALID_REQUEST" };
-    if (processedBatchIds.has(req.batch_id)) return { ok: true, delivered: true, deduplicated: true };
-    if (typeof req.content !== "string" || typeof req.wake !== "boolean") return { ok: false, error: "INVALID_REQUEST" };
-    // Pi 1.5.0 sendMessage is synchronous. No await between the effect and recording its ID.
-    pi.sendMessage({ customType: "cito-notification", content: req.content, display: true },
+    const batchId = req.batch_id;
+    if (typeof batchId !== "string" || !batchId || typeof req.content !== "string" || typeof req.wake !== "boolean") return { ok: false, error: "INVALID_REQUEST" };
+    const manager = ctx?.sessionManager;
+    const unconfirmed = { ok: true, delivered: false, delivered_unconfirmed: true };
+    const file = manager?.getSessionFile?.();
+    if (!file || manager?.getSessionId() !== currentId) return unconfirmed;
+    const epoch = session.commandGen;
+    const entry = () => (manager.getEntries?.() ?? manager.getBranch?.())?.findLast(row =>
+      row.type === "custom_message" && row.customType === "cito-notification" && row.details?.citoBatchId === batchId);
+    const confirm = async (row: SessionEntry, deduplicated: boolean) => {
+      // Pi may emit message_end before persistence, and a new session can buffer
+      // entries until its first conversation. Only the active JSONL settles delivery.
+      const written = !!row.id && await writtenBatch(file, row.id, batchId, signal);
+      return written && !signal.aborted && !shuttingDown && session.commandGen === epoch && manager.getSessionId() === currentId
+        && manager.getSessionFile?.() === file ? { ok: true, delivered: true, persisted_batch_id: batchId, deduplicated } : unconfirmed;
+    };
+    const existing = entry();
+    if (existing) return confirm(existing, true);
+    // An idle host no longer owns the steering queue (for example after Escape).
+    // While running, suppress repeated injection until settlement, not delivery.
+    if (pending.has(batchId) && !ctx?.isIdle?.()) return unconfirmed;
+    pi.sendMessage({ customType: "cito-notification", content: req.content, display: true, details: { citoBatchId: batchId } },
       { triggerTurn: req.wake, deliverAs: req.wake ? "steer" : "followUp" });
     lastActiveMs = Date.now();
-    processedBatchIds.add(req.batch_id);
-    if (processedBatchIds.size > 200) processedBatchIds.delete(processedBatchIds.values().next().value!);
-    return { ok: true, delivered: true, deduplicated: false };
+    pending.add(batchId);
+    if (pending.size > 200) pending.delete(pending.values().next().value!);
+    const appended = entry();
+    return appended ? confirm(appended, false) : unconfirmed;
   }
 
   const headless = process.argv.some(arg => ["-p", "--print", "--no-session", "--mode=rpc", "--mode=json"].includes(arg))
     || process.argv.some((arg, i) => arg === "--mode" && ["rpc", "json"].includes(process.argv[i + 1]));
   const discoveryAllowed = process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY === "1" || !headless && !!process.stdin.isTTY;
-  const initialRepairDelay = 50;
-  let repairDelay = initialRepairDelay;
-  let retry: ReturnType<typeof setTimeout> | undefined;
-  let repairing = false;
+  let repair: Promise<void> | undefined;
   let serverReady: Promise<void> | undefined;
   let shuttingDown = false;
   function ensureServer(): Promise<void> {
-    return serverReady ??= startServer().catch(error => { serverReady = undefined; throw error; });
+    return serverReady ??= startServer().then(watchForRepair).catch(error => { serverReady = undefined; throw error; });
   }
   async function startServer(): Promise<void> {
     if (server || shuttingDown || !discoveryAllowed) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
-    const instance = createServer(socket => {
+    const instance = createServer({ allowHalfOpen: true }, socket => {
+      const request = new AbortController();
       connections.add(socket);
-      socket.on("close", () => connections.delete(socket));
+      socket.on("close", () => { connections.delete(socket); request.abort(); });
       socket.on("error", () => socket.destroy());
       socket.setTimeout(3000, () => socket.destroy());
       let buffer = Buffer.alloc(0);
       let answered = false;
-      socket.on("data", chunk => {
+      socket.on("end", () => { if (!answered) socket.end(); });
+      socket.on("data", async chunk => {
         if (answered) return;
         buffer = Buffer.concat([buffer, chunk]);
         if (buffer.length > MAX_REQUEST_BYTES) { socket.destroy(); return; }
@@ -344,7 +415,7 @@ export default function citoBridge(pi: BridgeAPI): void {
           if (!req || typeof req !== "object" || Array.isArray(req)) throw new Error("Expected object");
           const record = req as Record<string, unknown>;
           id = record.id;
-          response = handle(record);
+          response = await handle(record, request.signal);
         } catch { response = { ok: false, error: "BRIDGE_ERROR" }; }
         socket.end(JSON.stringify({ ...(id === undefined ? {} : { id }), ...response }) + "\n");
       });
@@ -392,9 +463,6 @@ export default function citoBridge(pi: BridgeAPI): void {
         await listen();
       }
       chmodSync(socketPath, 0o600);
-      repairDelay = initialRepairDelay;
-      clearTimeout(retry);
-      retry = undefined;
       // Listen errors after startup must not become unhandled process errors.
       instance.on("error", () => { for (const socket of connections) socket.destroy(); });
     } catch (error) {
@@ -404,11 +472,22 @@ export default function citoBridge(pi: BridgeAPI): void {
       throw error;
     }
   }
-  process.once("exit", unlinkSocket);
-  // Load-time startup also serves hosts that loaded the extension after session_start.
-  void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
+  let directoryWatcher: ReturnType<typeof watch> | undefined;
+  let sentinelWatcher: ReturnType<typeof watch> | undefined;
+  let ownsSentinel = false;
+  function cleanupEndpoint(): void {
+    try { unlinkSocket(); }
+    finally {
+      if (ownsSentinel) {
+        try { unlinkSync(watchFile); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        ownsSentinel = false;
+      }
+    }
+  }
+  process.once("exit", cleanupEndpoint);
   function repairMissingSocket(): void {
-    if (shuttingDown || repairing || retry || existsSync(socketPath)) return;
+    if (shuttingDown || repair || existsSync(socketPath)) return;
     let configured = false;
     try {
       const settings = JSON.parse(readFileSync(join(piHome, "settings.json"), "utf8")) as { packages?: unknown[] };
@@ -421,8 +500,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       }) === true;
     } catch {} // Disconnected packages must not recreate their sockets.
     if (!configured) return;
-    repairing = true;
-    void (async () => {
+    repair = (async () => {
       await serverReady?.catch(() => {});
       if (shuttingDown || existsSync(socketPath)) return;
       const stale = server;
@@ -433,39 +511,50 @@ export default function citoBridge(pi: BridgeAPI): void {
       if (shuttingDown) return;
       serverReady = undefined;
       await ensureServer();
-    })().catch(() => {}).finally(() => {
-      repairing = false;
-      // Recheck even when the last unlink was delivered during bind/chmod.
-      // Back off on failed binds; no timer is armed for a healthy socket.
-      if (!shuttingDown && !existsSync(socketPath) && !retry) {
-        retry = setTimeout(() => { retry = undefined; repairMissingSocket(); }, repairDelay).unref();
-        repairDelay = Math.min(repairDelay * 2, 5000);
-      }
-    });
+    })().then(() => {
+      repair = undefined;
+      repairMissingSocket(); // Catch an unlink that raced a successful bind.
+    }, () => { repair = undefined; }); // The next kernel or host event can retry a failed bind.
   }
-  let repairWatcher: ReturnType<typeof watch> | undefined;
   function watchForRepair(): void {
-    if (!discoveryAllowed || repairWatcher) return;
-    try {
-      repairWatcher = watch(directory, { persistent: false }, repairMissingSocket).on("error", () => {
-        repairWatcher?.close();
-        repairWatcher = undefined;
-        repairMissingSocket();
-      });
-    } catch {} // Retry acquisition on the next session start.
+    if (!discoveryAllowed || shuttingDown) return;
+    if (!directoryWatcher) {
+      const invalidate = () => { directoryWatcher?.close(); directoryWatcher = undefined; repairMissingSocket(); };
+      directoryWatcher = watch(directory, { persistent: false }, event => {
+        if (event === "rename" && !existsSync(directory)) invalidate();
+        else repairMissingSocket();
+      }).on("error", invalidate);
+    }
+    if (!sentinelWatcher) {
+      mkdirSync(join(resolvedStateDir, "pi", "endpoints"), { recursive: true, mode: 0o700 });
+      const fd = openSync(watchFile, constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+      try {
+        if (!fstatSync(fd).isFile()) throw new Error("Pi endpoint sentinel is not a regular file");
+        ownsSentinel = true;
+        fchmodSync(fd, 0o600);
+      } finally { closeSync(fd); }
+      // On Darwin, a regular-file watch uses kqueue and does not depend on directory FSEvents.
+      const invalidate = () => { sentinelWatcher?.close(); sentinelWatcher = undefined; repairMissingSocket(); };
+      sentinelWatcher = watch(watchFile, { persistent: false }, event => {
+        if (event === "rename") invalidate();
+        else repairMissingSocket();
+      }).on("error", invalidate);
+    }
   }
-  watchForRepair();
+  // Load-time startup also serves hosts that loaded the extension after session_start.
+  void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
   pi.on("session_start", async (_event, ctx) => {
     registerMcpServer();
     lastActiveMs = Date.now();
     update(ctx);
     await ensureServer();
-    if (!shuttingDown && discoveryAllowed) {
+    if (discoveryAllowed) {
       watchForRepair();
-      // A filesystem watcher can coalesce or miss an unlink. A host lifecycle
-      // event is also a repair opportunity; never poll a healthy, idle session.
       repairMissingSocket();
     }
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    if (ctx.sessionManager.getSessionId() === session.sessionId) pending.clear();
   });
   pi.registerCommand?.("cito", {
     description: "Toggle or configure Cito session listening",
@@ -486,9 +575,9 @@ export default function citoBridge(pi: BridgeAPI): void {
       update(ctx);
       const id = session.sessionId;
       if (!id) { ctx.ui.notify?.("Session not ready", "warning"); return; }
-      const epoch = commandGen;
+      const epoch = session.commandGen;
       const run = async () => {
-        if (!shuttingDown && session.sessionId === id && epoch === commandGen) await execute(args, ctx, id, epoch);
+        if (session.sessionId === id && epoch === session.commandGen) await execute(args, session.context ?? ctx, id, epoch);
       };
       const previous = commands.get(id);
       const next = previous ? previous.then(run, run) : run();
@@ -504,7 +593,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       let targetHub: string | undefined;
       const about = session.about || "Pi session";
       if (!trimmed) {
-        if (activeBadge) {
+        if (session.activeBadge) {
           tool = "cito_unlisten";
           toolArgs = {};
         } else {
@@ -558,41 +647,45 @@ export default function citoBridge(pi: BridgeAPI): void {
       }
       try {
         const payload = await callMcpTool(tool, toolArgs, commandSessionId);
-        if (shuttingDown || session.sessionId !== commandSessionId || generation !== commandGen) return;
+        if (session.sessionId !== commandSessionId || generation !== session.commandGen) return;
+        const ui = session.context?.ui;
         if (tool === "cito_listen") {
           const publicId = String(payload.listener_id).trim().split(":").at(-1)!;
           const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
           const short = Array.from(slug).slice(0, 12).join("").replace(/-+$/, "") || "cito";
-          activeBadge ??= `Cito · ${short}`;
-          ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
+          session.activeBadge ??= `Cito · ${short}`;
+          ui?.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
         } else if (targetHub) {
-          ctx.ui.notify?.(`Cito stopped listening on ${targetHub}`, "info");
+          ui?.notify?.(`Cito stopped listening on ${targetHub}`, "info");
         } else {
-          activeBadge = undefined;
-          ctx.ui.notify?.("Cito stopped listening", "info");
+          session.activeBadge = undefined;
+          ui?.notify?.("Cito stopped listening", "info");
         }
       } catch (error) {
-        if (shuttingDown || session.sessionId !== commandSessionId || generation !== commandGen) return;
-        ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
+        if (session.sessionId !== commandSessionId || generation !== session.commandGen) return;
+        session.context?.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
-      renderBadge(ctx);
+      session.renderBadge?.();
   }
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); session.about = ""; update(ctx); });
   pi.on("session_shutdown", async event => {
-    if ((event as { reason?: string })?.reason !== "reload") delete host[sessionKey];
     shuttingDown = true;
-    commandGen++;
-    repairWatcher?.close();
-    clearTimeout(retry);
+    session.context = undefined;
+    session.renderBadge = undefined;
+    if ((event as { reason?: string })?.reason !== "reload") {
+      session.commandGen++;
+      delete host[sessionKey];
+    }
+    directoryWatcher?.close();
+    sentinelWatcher?.close();
+    await repair;
     await serverReady?.catch(() => {});
-    context = undefined;
-    activeBadge = undefined;
     for (const socket of connections) socket.destroy();
     const instance = server;
     server = undefined;
     if (instance) await new Promise<void>(resolve => instance.close(() => resolve()));
-    unlinkSocket();
-    process.removeListener("exit", unlinkSocket);
+    cleanupEndpoint();
+    process.removeListener("exit", cleanupEndpoint);
   });
 }

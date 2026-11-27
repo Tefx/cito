@@ -4,7 +4,7 @@ use super::{
     resolve_bundled_plugins_root, resolve_package_root, Candidate,
 };
 use crate::plugins::{resolve_builtin_plugins_dir, same_plugin_root, LoadedPlugins, CITO_VERSION};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -18,7 +18,7 @@ fn finalize_bundle(path: &Path) -> std::io::Result<u64> {
     if meta.file_type().is_symlink() {
         return Ok(meta.len());
     }
-    let executable = meta.is_dir() || meta.permissions().mode() & 0o111 != 0;
+    let executable = meta.is_dir() || meta.permissions().mode() & 0o100 != 0;
     fs::set_permissions(
         path,
         fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
@@ -59,19 +59,20 @@ pub(super) fn build_mac_app_bundle_from_root(
     fs::create_dir_all(&helpers_dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
 
-    let info_plist = format!(
+    let info_plist = |identifier: &str, executable: &str| {
+        format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
            <key>CFBundleIdentifier</key>\n\
-           <string>one.tefx.cito</string>\n\
+           <string>{identifier}</string>\n\
            <key>CFBundleName</key>\n\
            <string>Cito</string>\n\
            <key>CFBundleDisplayName</key>\n\
            <string>Cito</string>\n\
            <key>CFBundleExecutable</key>\n\
-           <string>Cito</string>\n\
+           <string>{executable}</string>\n\
            <key>CFBundleIconFile</key>\n\
            <string>AppIcon</string>\n\
            <key>CFBundleIconName</key>\n\
@@ -88,8 +89,13 @@ pub(super) fn build_mac_app_bundle_from_root(
            <string>13.0</string>\n\
          </dict>\n\
          </plist>\n"
-    );
-    fs::write(contents_dir.join("Info.plist"), info_plist).map_err(|e| e.to_string())?;
+    )
+    };
+    fs::write(
+        contents_dir.join("Info.plist"),
+        info_plist("one.tefx.cito", "Cito"),
+    )
+    .map_err(|e| e.to_string())?;
 
     let launcher = r#"#!/bin/sh
 set -e
@@ -105,6 +111,7 @@ while [ -L "$SOURCE" ]; do
 done
 APP_CONTENTS="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}"
+export CITO_UI_BINARY="${CITO_UI_BINARY:-$APP_CONTENTS/Helpers/Cito.app/Contents/MacOS/cito-ui}"
 if [ "$INVOKED_AS" = "cito-mcp" ]; then
   export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
   if [ "$#" -eq 0 ]; then
@@ -112,15 +119,14 @@ if [ "$INVOKED_AS" = "cito-mcp" ]; then
   fi
   exec "$APP_CONTENTS/Helpers/cito-native" "$@"
 fi
+case "$INVOKED_AS:${1:-}" in
+  Cito:|Cito:-psn_*)
+    exec "$APP_CONTENTS/Helpers/cito-native" setup --open-app
+    ;;
+esac
 if [ "$#" -eq 0 ]; then
   exec "$APP_CONTENTS/Helpers/cito-native" daemon
 fi
-case "$1" in
-  -psn_*)
-    shift
-    exec "$APP_CONTENTS/Helpers/cito-native" daemon "$@"
-    ;;
-esac
 exec "$APP_CONTENTS/Helpers/cito-native" "$@"
 "#;
     let launcher_path = macos_dir.join("Cito");
@@ -134,22 +140,36 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
     fs::set_permissions(&helper_native, fs::Permissions::from_mode(0o755))
         .map_err(|e| e.to_string())?;
 
-    for ui_cand in [
+    let ui_relative = "Cito.app/Contents/MacOS/cito-ui";
+    let ui_contents = helpers_dir.join("Cito.app/Contents");
+    let helper_ui = helpers_dir.join(ui_relative);
+    let ui_source = [
         pkg_root.join("bin/cito-ui-darwin-arm64"),
+        pkg_root.join("Helpers").join(ui_relative),
         pkg_root.join("Helpers/cito-ui"),
-    ] {
-        if ui_cand.is_file() {
-            let helper_ui = helpers_dir.join("cito-ui");
-            fs::copy(&ui_cand, &helper_ui).map_err(|e| e.to_string())?;
-            fs::set_permissions(&helper_ui, fs::Permissions::from_mode(0o755))
-                .map_err(|e| e.to_string())?;
-            break;
-        }
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or("App bundle requires cito-ui")?;
+    fs::create_dir_all(ui_contents.join("MacOS")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(ui_contents.join("Resources")).map_err(|e| e.to_string())?;
+    fs::copy(&ui_source, &helper_ui).map_err(|e| e.to_string())?;
+    if fs::metadata(&helper_ui)
+        .map_err(|e| e.to_string())?
+        .permissions()
+        .mode()
+        & 0o100
+        == 0
+    {
+        return Err("App bundle requires cito-ui to be executable by its owner".into());
     }
-
-    if !helpers_dir.join("cito-ui").is_file() {
-        return Err("App bundle requires cito-ui".into());
-    }
+    fs::write(
+        ui_contents.join("Info.plist"),
+        info_plist("one.tefx.cito.ui", "cito-ui"),
+    )
+    .map_err(|e| e.to_string())?;
+    // Preserve the daemon and release tooling's existing helper path without a second binary.
+    symlink(ui_relative, helpers_dir.join("cito-ui")).map_err(|e| e.to_string())?;
 
     for icon_cand in [
         pkg_root.join("bin/AppIcon.icns"),
@@ -176,7 +196,12 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
         copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"))?;
     }
 
-    ensure_cli_shims_native(state_dir, plugins)?;
+    fs::copy(
+        resources_dir.join("AppIcon.icns"),
+        ui_contents.join("Resources/AppIcon.icns"),
+    )
+    .map_err(|e| e.to_string())?;
+
     let _ = Command::new("/usr/bin/xattr")
         .args(["-cr", &app_path.to_string_lossy()])
         .status();
@@ -212,6 +237,8 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
 
     let bytes = finalize_bundle(&app_path).map_err(|e| e.to_string())?;
     publish_directory(&app_path, &destination)?;
+    ensure_cli_shims_native(state_dir, plugins)
+        .map_err(|e| format!("Application published; CLI shim update incomplete: {e}"))?;
     // The candidate guard removes the exchanged previous generation non-fatally.
     Ok((destination, bytes))
 }

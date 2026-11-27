@@ -37,14 +37,14 @@ code, pre {
   font-family: var(--font-mono);
 }
 
-.docs-content p, .docs-content li, .docs-table td, pre { overflow-wrap: break-word; }
-.step-tab, .preview-tabs button, .text-link,
+.docs-content p, .docs-content li { overflow-wrap: break-word; }
+.step-tab, .text-link,
 .nav-cta, .secondary-button, .eyebrow, .moment-index, .harness-tag,
 .copy-command-pill .copy-badge { white-space: nowrap; flex-shrink: 0; }
 .step-num { flex-shrink: 0; }
 .docs-content a.text-link code { color: var(--accent-primary); }
 
-:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 3px; }
 
 /* Top Navigation */
 .site-header {
@@ -242,7 +242,7 @@ code, pre {
 .install-caption {
   margin-top: 0.875rem;
   font-size: 0.84rem;
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 /* Section 2: Three Everyday Moments */
@@ -340,8 +340,7 @@ code, pre {
   width: 100%;
 }
 
-.step-tab,
-.preview-tabs button {
+.step-tab {
   appearance: none;
   display: inline-flex;
   align-items: center;
@@ -359,14 +358,12 @@ code, pre {
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.step-tab:hover,
-.preview-tabs button:hover {
+.step-tab:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
 }
 
-.step-tab[aria-selected="true"],
-.preview-tabs button[aria-selected="true"] {
+.step-tab[aria-selected="true"] {
   background: var(--accent-primary-soft);
   border-color: var(--border-accent);
   color: var(--accent-primary);
@@ -583,7 +580,7 @@ code, pre {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 0.875rem;
 }
 
@@ -615,7 +612,6 @@ code, pre {
 .docs-table-wrap { overflow-x: auto; max-width: 100%; }
 .docs-table-wrap .docs-table { min-width: 32rem; }
 .docs-table td:first-child code { white-space: nowrap; }
-.docs-table-wrap:focus-visible { outline: 2px solid var(--accent-primary); }
 .code-block { min-width: 0; max-width: 100%; }
 .code-copy {
   display: block;
@@ -632,7 +628,7 @@ code, pre {
   cursor: pointer;
 }
 .code-copy:hover { border-color: var(--accent-primary); }
-.code-copy:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.code-copy:focus-visible { outline-offset: 2px; }
 .code-copy:disabled { cursor: wait; }
 
 /* Technical Documentation Pages Layout (site/docs/*.html) */
@@ -667,7 +663,7 @@ code, pre {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   margin-bottom: 0.25rem;
 }
 
@@ -740,6 +736,10 @@ code, pre {
   color: var(--text-primary);
 }
 
+.docs-content pre:focus-visible {
+  outline-offset: -2px;
+}
+
 .docs-content code {
   font-size: 0.88em;
   background: var(--bg-surface);
@@ -797,8 +797,7 @@ code, pre {
   .screenshot-stage-viewport,
   .docs-figure-stage { padding: 0.85rem; }
   .screenshot-stage-viewport { padding: calc(0.85rem * 460 / 560) 0.85rem; }
-  .step-tab,
-  .preview-tabs button { min-height: 2.75rem; }
+  .step-tab { min-height: 2.75rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

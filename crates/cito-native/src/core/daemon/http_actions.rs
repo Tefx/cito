@@ -199,6 +199,35 @@ pub(super) fn dispatch_action(
     action: &Value,
     ui_generation: Option<u64>,
 ) -> Result<Value, String> {
+    if let Some(generation) = ui_generation
+        .filter(|_| matches!(string(action, "op"), "open_directory" | "query_directory"))
+    {
+        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        if let Err(error) = s.check_action(ui_generation) {
+            s.emit(json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}));
+            return Err(error);
+        }
+        s.directory_open = true;
+        s.directory_request = s.directory_request.wrapping_add(1);
+        s.directory_pending = Some((generation, s.directory_request, action.clone()));
+        if s.directory_worker
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+        {
+            let service = Arc::clone(service);
+            s.directory_worker = Some(std::thread::spawn(move || {
+                while let Ok(mut guard) = service.lock() {
+                    let Some((generation, request, action)) = guard.directory_pending.take() else {
+                        guard.directory_worker.take();
+                        break;
+                    };
+                    drop(guard);
+                    run_directory_action(&service, &action, Some(generation), request);
+                }
+            }));
+        }
+        return Ok(json!({"ok":true}));
+    }
     let serial = if matches!(
         string(action, "op"),
         "setup_apply" | "setup_disconnect_all" | "setup_remove_app" | "setup_uninstall_all"
@@ -261,6 +290,65 @@ pub(super) fn dispatch_action(
     drop(s);
     wake_daemon();
     result
+}
+
+fn run_directory_action(
+    service: &Arc<Mutex<DaemonService>>,
+    action: &Value,
+    ui_generation: Option<u64>,
+    request: u64,
+) {
+    let outcome = (|| -> Result<(), String> {
+        let (work, access, hub) = {
+            let mut guard = service.lock().map_err(|_| "Daemon lock poisoned")?;
+            if guard.check_action(ui_generation).is_err()
+                || !guard.directory_open
+                || guard.directory_request != request
+            {
+                return Ok(());
+            }
+            // Periodic maintenance owns slot reconciliation. Keystrokes use
+            // the installed authority and recheck it before publishing.
+            guard.update_discovery_demand();
+            if string(action, "op") == "open_directory" {
+                if let Some(activity) = guard.session_activity.as_mut() {
+                    activity.refresh_discovery();
+                }
+            }
+            let hub = action["hub"]
+                .as_str()
+                .unwrap_or(&guard.config.default_hub)
+                .to_owned();
+            let work = guard.prepare_directory_call(action, &hub)?;
+            let access = guard.access.clone();
+            (work, access, hub)
+        };
+        let result = run_captured(service, access.clone(), &work);
+        let guard = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        if guard.check_action(ui_generation).is_err()
+            || !guard.directory_open
+            || guard.directory_request != request
+            || !work.current(&guard, &access)
+        {
+            return Ok(());
+        }
+        let value = result?;
+        guard.directory_result(action, &hub, &value)?;
+        guard.push_ui();
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        if let Ok(guard) = service.lock() {
+            if guard.check_action(ui_generation).is_ok()
+                && guard.directory_open
+                && guard.directory_request == request
+            {
+                guard.emit(json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}));
+                guard.push_ui();
+            }
+        }
+    }
+    wake_daemon();
 }
 
 fn dispatch_action_inner(
@@ -721,6 +809,14 @@ pub(super) fn hub_control(
         Ok(committed_projection(result, projection))
     };
     if action["op"] == "human_inbox_update" {
+        if action.get("scope").is_some_and(|v| {
+            !v.is_null()
+                && !v
+                    .as_str()
+                    .is_some_and(|s| matches!(s, "self" | "workspace"))
+        }) {
+            return Err("INVALID_INPUT: Invalid scope".into());
+        }
         let id = slot
             .cached_directory()
             .into_iter()
@@ -807,6 +903,9 @@ impl DaemonService {
         }
     }
     fn teardown_hub_runtime(&mut self, hub: &str) -> Result<(), String> {
+        if self.active_settings_hub.as_deref() == Some(hub) {
+            self.active_settings_hub = None;
+        }
         self.cancel_hub_interaction(hub);
         self.remove_slot(hub)?;
         self.stop_hub_recovery(hub);
@@ -849,13 +948,13 @@ impl DaemonService {
             Ok(())
         })?;
         let token = self.config.state_dir.join(format!("oidc-token-{hub}.json"));
-        match fs::remove_file(token) {
+        let token_cleanup = match fs::remove_file(token) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.to_string()),
-        }?;
+        };
         self.hub_controls.remove(hub);
-        Ok(())
+        token_cleanup
     }
 
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
@@ -1355,9 +1454,14 @@ impl DaemonService {
     fn prepare_directory(&mut self, action: &Value, hub: &str) -> Result<ToolCall, String> {
         self.directory_open = true;
         self.directory_request = self.directory_request.wrapping_add(1);
+        self.directory_pending = None;
         if action["op"] == "open_directory" {
             self.refresh_available()?;
         }
+        self.prepare_directory_call(action, hub)
+    }
+
+    fn prepare_directory_call(&mut self, action: &Value, hub: &str) -> Result<ToolCall, String> {
         self.activity_filter = action["filter"].as_str().unwrap_or("all").into();
         self.activity_query = if action["mode"] == "activity" {
             string(action, "query").into()
@@ -1431,9 +1535,6 @@ impl DaemonService {
     }
 
     fn cancel_hub_interaction(&mut self, hub: &str) {
-        if self.active_settings_hub.as_deref() == Some(hub) {
-            self.active_settings_hub = None;
-        }
         if let Some(attempt) = self.hub_controls.get_mut(hub).and_then(|c| c.login.take()) {
             attempt.cancelled.store(true, Ordering::SeqCst);
             // The lock guards no data; wait for any in-flight publication to finish.
@@ -1484,7 +1585,10 @@ impl DaemonService {
                 match op {
                     "quit" => request_shutdown(),
                     "close_settings" => self.active_settings_hub = None,
-                    "close_directory" => self.directory_open = false,
+                    "close_directory" => {
+                        self.directory_open = false;
+                        self.directory_pending = None;
+                    }
                     _ => self.menu_open = false,
                 }
                 return Ok(ToolCall::Ready(json!({"ok":true})));
@@ -1517,8 +1621,10 @@ impl DaemonService {
                 return Err("INVALID_INPUT: Human session must be default".into());
             }
         }
-        if op == "setup_remove_hub"
-            || (op == "hub_action" && action["action"] == "disconnect")
+        if op == "setup_remove_hub" {
+            let hub = action_hub(action)?.to_owned();
+            self.cancel_hub_interaction(&hub);
+        } else if (op == "hub_action" && action["action"] == "disconnect")
             || (op == "setup_toggle_hub" && action["enabled"] == false)
         {
             let hub = action["hub"]
@@ -1542,10 +1648,19 @@ impl DaemonService {
                     | "setup_uninstall_all"
             )
         {
+            let hubs = self.registration_targets(action)?;
+            let expected_profile = (op == "set_auto_listen")
+                .then(|| {
+                    self.auto_listen_profile(
+                        action["hub"].as_str().unwrap_or(&self.config.default_hub),
+                    )
+                })
+                .transpose()?;
             return Ok(ToolCall::RegistrationEdit {
-                hubs: self.registration_targets(action)?,
+                hubs,
                 action: action.clone(),
                 ui_generation,
+                expected_profile,
             });
         }
         let hub = action["hub"]
@@ -1574,6 +1689,23 @@ impl DaemonService {
                 });
             }
             "set_scope" | "human_inbox_update" => {
+                if op == "set_scope"
+                    && !action["scope"]
+                        .as_str()
+                        .is_some_and(|s| matches!(s, "self" | "workspace"))
+                {
+                    return Err("INVALID_INPUT: Invalid scope".into());
+                }
+                if op == "human_inbox_update"
+                    && action.get("scope").is_some_and(|v| {
+                        !v.is_null()
+                            && !v
+                                .as_str()
+                                .is_some_and(|s| matches!(s, "self" | "workspace"))
+                    })
+                {
+                    return Err("INVALID_INPUT: Invalid scope".into());
+                }
                 self.slot(&hub)?;
                 return Ok(ToolCall::HubControl {
                     hub,
@@ -1667,6 +1799,7 @@ impl DaemonService {
                 }
             }
             "setup_remove_hub" => {
+                let hub = action_hub(action)?.to_owned();
                 if hub == "local" {
                     return Err("INVALID_INPUT: Cannot remove the local hub".into());
                 }
@@ -1680,7 +1813,13 @@ impl DaemonService {
                     repair_default_hub(v);
                     Ok(())
                 })?;
-                let projection = self.purge_hub_state(&hub).and_then(|_| self.reload_slots());
+                let purge = self.purge_hub_state(&hub);
+                let reload = self.reload_slots();
+                let projection = match (purge, reload) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+                    (Err(e1), Err(e2)) => Err(format!("{e1}; {e2}")),
+                };
                 return Ok(ToolCall::Ready(committed_projection(
                     json!({"ok":true}),
                     projection,
@@ -1967,6 +2106,7 @@ impl DaemonService {
         &mut self,
         action: &Value,
         hub: String,
+        expected_profile: Option<&Value>,
     ) -> Result<ToolCall, String> {
         let op = string(action, "op");
         let mut detaches = Detaches::default();
@@ -2069,16 +2209,18 @@ impl DaemonService {
             "unlisten_all" => {
                 // Bulk stop owns Hub policy even when no listener is active.
                 let selected_hub = action.get("hub").filter(|hub| !hub.is_null());
-                let (targets, damaged) = match configured_hubs(&self.config_snapshot()?) {
+                let (targets, damaged_error) = match configured_hubs(&self.config_snapshot()?) {
                     Ok(configured) => (
                         configured
                             .into_iter()
                             .map(|(name, _)| name)
                             .filter(|name| selected_hub.is_none_or(|hub| hub == name.as_str()))
                             .collect::<Vec<_>>(),
-                        false,
+                        None,
                     ),
-                    Err(_) if selected_hub.is_none() => (self.registration_targets(action)?, true),
+                    Err(error) if selected_hub.is_none() => {
+                        (self.registration_targets(action)?, Some(error))
+                    }
                     Err(error) => return Err(error),
                 };
                 if targets.is_empty() && action["hub"].is_string() {
@@ -2106,7 +2248,7 @@ impl DaemonService {
                     self.state.db.execute("UPDATE local_listeners SET user_stopped=1,retirement_reason=NULL WHERE hub=? AND harness!='human' AND status!='FENCED_INACTIVE'", &[json!(name)])?;
                     // A damaged profile cannot safely receive a policy patch. Keep
                     // the file intact and stop enrollment in the running authority.
-                    if damaged {
+                    if damaged_error.is_some() {
                         if let Some(slot) = self.slots.get_mut(&name) {
                             slot.config["autoListen"] = json!(false);
                         }
@@ -2114,7 +2256,10 @@ impl DaemonService {
                     }
                     // Bulk stop reports incomplete detaches across all targets.
                     if let Err(error) = self
-                        .set_auto_listen_locked(&name, false, &mut detaches)
+                        .auto_listen_profile(&name)
+                        .and_then(|profile| {
+                            self.set_auto_listen_locked(&name, false, &profile, &mut detaches)
+                        })
                         .and_then(|projection| projection)
                     {
                         detach_errors.push(format!("{name}: {error}"));
@@ -2123,7 +2268,17 @@ impl DaemonService {
                 if !detach_errors.is_empty() {
                     return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
                 }
-                Ok(detaches.settle(json!({"ok":true,"removed":removed}), true))
+                let mut value = json!({"ok":true,"removed":removed});
+                if let Some(error) = damaged_error {
+                    super::mcp::add_warning(
+                        &mut value,
+                        "warning",
+                        &format!(
+                            "Active listeners stopped; config.json could not be updated: {error}"
+                        ),
+                    );
+                }
+                Ok(detaches.settle(value, true))
             }
             "set_listen_mode" => {
                 let mode = string(action, "listen_mode");
@@ -2178,7 +2333,10 @@ impl DaemonService {
                 let enabled = action["enabled"]
                     .as_bool()
                     .ok_or("INVALID_INPUT: enabled must be a boolean")?;
-                let projection = self.set_auto_listen_locked(&hub, enabled, &mut detaches)?;
+                let expected =
+                    expected_profile.ok_or("STATE_ERROR: Auto-listen profile missing")?;
+                let projection =
+                    self.set_auto_listen_locked(&hub, enabled, expected, &mut detaches)?;
                 Ok(detaches.settle(committed_projection(json!({"ok":true}), projection), false))
             }
             _ => Err(format!("INVALID_INPUT: Unknown registration edit: {op}")),

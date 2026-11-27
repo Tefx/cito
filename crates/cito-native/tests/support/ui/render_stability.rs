@@ -346,7 +346,11 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
     );
     assert_eq!(copy["text"], "✓ Copied");
     assert_eq!(copy["hovered"], true);
-    f.send(p, json!({"op":"test_reconfigure_rows"}));
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[remote.clone(),peer("sibling")],"online_count":2,"matched_count":2,"warnings":[]}),
+    );
     let reconfigured = inspect(&f, p);
     let copy = reconfigured.directory("copy_dir:personal:stable");
     assert_eq!(copy["hovered"], true);

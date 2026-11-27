@@ -15,11 +15,9 @@ cask "cito" do
   binary "#{appdir}/Cito.app/Contents/MacOS/Cito", target: "cito"
   binary "#{appdir}/Cito.app/Contents/MacOS/Cito", target: "cito-mcp"
 
-  uninstall quit: "one.tefx.cito"
+  uninstall launchctl: "com.tefx.cito.daemon",
+            quit:      ["one.tefx.cito", "one.tefx.cito.ui"],
+            delete:    "~/Library/LaunchAgents/com.tefx.cito.daemon.plist"
 
-  zap trash: [
-    "~/.cito",
-    "~/Applications/Cito.app",
-    "~/Library/LaunchAgents/com.tefx.cito.daemon.plist",
-  ]
+  zap trash: "~/.cito"
 end

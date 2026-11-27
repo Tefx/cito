@@ -101,14 +101,18 @@ impl Fixture {
         }
         Ok(f)
     }
-    fn seed(&self, id: &str) -> Result<(), String> {
+    fn publish(&self, id: &str) -> Result<(Value, u64), String> {
         let signal = json!({"signal_id":id,"to":self.row["listener_id"],"target_generation":self.row["binding_generation"],"sender_endpoint_key":"fixture","from":{"principal_id":"none#bob","user":"bob","host_id":"other","host_name":"other.local","harness":"fixture","listener_id":null,"title":"Sender","about":null},"message":format!("message <{id}>"),"in_reply_to":null});
         let published = self.client.rpc("js_publish", &json!({"subject":format!("cito.signal.{}", string(&self.row,"listener_id")),"data_b64":STANDARD.encode(signal.to_string()),"opts":{"msgID":id}}))?;
+        Ok((signal, published["seq"].as_u64().ok_or("Missing sequence")?))
+    }
+    fn seed(&self, id: &str) -> Result<(), String> {
+        let (signal, seq) = self.publish(id)?;
         self.state.admit(
             "local",
             &self.row,
             &signal,
-            published["seq"].as_u64().ok_or("Missing sequence")?,
+            seq,
             "2026-01-01T00:00:00.000Z",
             now_ms() + 120_000,
             &Value::Null,
@@ -294,10 +298,11 @@ fn poll_settles_over_budget_delivery_and_admits_the_following_signal() -> Result
     }
     assert_eq!(admitted, [json!("healthy")]);
     assert_eq!(f.state.unread_count("local", f.listener_id(), false)?, 1);
-    let backlog = f.client.rpc(
-        "consumer_backlog",
-        &json!({"name":format!("host_{}", f.listener_id())}),
-    )?;
+    let consumers = f.hub_db()?.query("SELECT name FROM hub_consumers", &[])?;
+    assert_eq!(consumers.len(), 1);
+    let backlog = f
+        .client
+        .rpc("consumer_backlog", &json!({"name":consumers[0]["name"]}))?;
     assert_eq!(backlog["backlog"], json!([]));
     Ok(())
 }
@@ -522,6 +527,90 @@ fn hard_exit_rebind_restores_only_unread_current_authority_work() -> Result<(), 
 }
 
 #[test]
+fn poll_fences_a_deleted_registration_before_admitting_backlog() -> Result<(), String> {
+    let f = Fixture::seeded(&["pending"])?;
+    f.client.rpc("kv_delete", &json!({"key":f.listener_id()}))?;
+    let error = poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {
+        panic!("Delivered through a deleted registration")
+    })
+    .unwrap_err();
+    assert!(error.starts_with("STALE_GENERATION:"));
+    assert_eq!(f.listener()?["status"], "FENCED_INACTIVE");
+    assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    assert!(f.retries()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn poll_uses_current_scope_and_respects_local_pause_at_admission() -> Result<(), String> {
+    let f = Fixture::new()?;
+    let update_scope = |scope| -> Result<(), String> {
+        let (mut remote, revision) = f.binding()?;
+        remote["scope"] = json!(scope);
+        f.client.kv_save(f.listener_id(), &remote, Some(revision))?;
+        Ok(())
+    };
+    f.publish("before-demotion")?;
+    update_scope("self")?;
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {
+        panic!("Admitted a private message")
+    })?;
+    assert!(f.rows()?.is_empty());
+    assert_eq!(f.listener()?["scope"], "self");
+
+    update_scope("workspace")?;
+    f.publish("after-promotion")?;
+    f.publish("after-pause")?;
+    let mut admitted = Vec::new();
+    let result = poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |signal| {
+        admitted.push(signal["signal_id"].clone());
+        assert!(f.state.pause_listener_for(&f.row).unwrap());
+    });
+    assert!(result.unwrap_err().starts_with("STALE_GENERATION:"));
+    assert_eq!(f.listener()?["status"], "UNLISTENED");
+    assert_eq!(f.rows()?.len(), 1);
+    assert_eq!(admitted, ["after-promotion"]);
+    Ok(())
+}
+
+#[test]
+fn durable_consumer_is_stable_across_reopen_but_changes_with_a_new_database() -> Result<(), String>
+{
+    let f = Fixture::seeded(&["pending"])?;
+    let poll = |state: &LocalState, row: &Value| {
+        poll_listener(state, &f.client, row, None, &f.dir, |_| {})
+    };
+    let consumers = || {
+        f.hub_db()?
+            .query("SELECT name FROM hub_consumers ORDER BY name", &[])
+    };
+    poll(&f.state, &f.row)?;
+    let original = consumers()?;
+    assert_eq!(original.len(), 1);
+    poll(&LocalState::open(&f.dir)?, &f.row)?;
+    assert_eq!(consumers()?, original);
+
+    let replacement = LocalState::open(&f.dir.join("new-state"))?;
+    register_endpoint(
+        &replacement,
+        &f.client,
+        "host",
+        &json!({"about":"Replacement"}),
+        &f.row,
+    )?;
+    let row = replacement
+        .listener("local", f.listener_id())?
+        .ok_or("Missing replacement listener")?;
+    poll(&replacement, &row)?;
+    assert_eq!(consumers()?.len(), 2);
+    assert_eq!(
+        replacement.unread_count("local", f.listener_id(), false)?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Result<(), String> {
     let f = Fixture::new()?;
     let id = string(&f.row, "listener_id");
@@ -595,7 +684,7 @@ fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> 
     assert_eq!(requests[0]["text"], failed[0]["batch_card"]);
     assert_eq!(
         requests[0]["text"],
-        "Cito · bob@other · Sender [signal_id: s] · auto-acknowledged on delivery\n\nmessage &lt;s&gt;"
+        "Cito · bob@other · Sender [signal_id: s]\n\nmessage <s>"
     );
     assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
@@ -793,6 +882,34 @@ fn failed_subprocess_retries_frozen_batch_without_mixing_new_arrivals() -> Resul
     assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
     assert_eq!(f.rows()?[1]["state"], "RECEIVED");
+    Ok(())
+}
+
+#[test]
+fn explicit_non_delivery_retries_even_when_queue_and_open_were_confirmed() -> Result<(), String> {
+    let f = Fixture::seeded(&["first"])?;
+    let plugin = f.plugin("n=sum(1 for _ in open(os.path.join(root,'requests.jsonl')))\nprint(json.dumps({'ok':True,'outcome':'delivered_unconfirmed','delivered':n>1,'queue_written':True,'queue_confirmed':True,'open_confirmed':True}))");
+    f.dispatch(&plugin)?;
+    let rows = f.rows()?;
+    assert_eq!(rows[0]["state"], "DISPATCHING");
+    assert!(rows[0]["acknowledged_at_ms"].is_null());
+    assert!(f
+        .state
+        .db
+        .query("SELECT signal_id FROM pending_hub_acks", &[])?
+        .is_empty());
+    assert_eq!(
+        f.state
+            .db
+            .query("SELECT retry_at_ms FROM wake_retries", &[])?
+            .len(),
+        1
+    );
+    f.dispatch(&plugin)?;
+    let requests = f.requests()?;
+    assert_eq!(requests[0]["batch_id"], requests[1]["batch_id"]);
+    assert_eq!(requests[1]["queue_confirmed"], true);
+    assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
     Ok(())
 }
 
@@ -1143,7 +1260,9 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
     registration["updated_at_ms"] = json!(initial_heartbeat - 55_000);
     registration["channels"]["sibling:fixture"] = json!({"state":"ACTIVE","updated_at_ms":1});
     registration["owner_token"] = json!("legacy-sibling-owner");
-    let sibling = registration["channels"]["sibling:fixture"].clone();
+    registration["channels"]["active-sibling:fixture"] =
+        json!({"state":"ACTIVE","updated_at_ms":initial_heartbeat});
+    let active_sibling = registration["channels"]["active-sibling:fixture"].clone();
     // Age persisted Hub timestamps directly; a normal write renews on the Hub clock.
     db.execute(
         "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
@@ -1166,7 +1285,8 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
                         .unwrap_or(0)
                         >= initial_heartbeat + 100
                         && r["updated_at_ms"] == r["channels"][channel]["updated_at_ms"]
-                        && r["channels"]["sibling:fixture"] == sibling
+                        && r["channels"].get("sibling:fixture").is_none()
+                        && r["channels"]["active-sibling:fixture"] == active_sibling
                         && r["binding_generation"] == registration["binding_generation"]
                         && r["owner_token"] == registration["owner_token"]
                         && super::super::lease::evaluate_node_lease(&r, now_ms()) == "ACTIVE"
@@ -1182,6 +1302,33 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
     assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
     assert_eq!(f.requests()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn wake_claim_rejects_replaced_hub_attachment_before_spawning() -> Result<(), String> {
+    for (key, replacement) in [
+        ("owner_token", json!("successor")),
+        ("binding_generation", json!(99)),
+    ] {
+        let f = Fixture::seeded(&["s"])?;
+        let (mut registration, _) = f.binding()?;
+        registration["channels"]["host:fixture"][key] = replacement;
+        let db = f.hub_db()?;
+        db.execute(
+            "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+            &[json!(registration.to_string()), json!(f.listener_id())],
+        )?;
+        let error = f.dispatch(&f.plugin(DELIVER)).unwrap_err();
+        assert!(error.starts_with("STALE_GENERATION:"), "{key}: {error}");
+        assert!(f.requests()?.is_empty());
+        assert_eq!(f.listener()?["status"], "FENCED_INACTIVE");
+        assert_eq!(f.rows()?[0]["held_reason"], "fenced_before_dispatch");
+        assert!(
+            db.query("SELECT claimed_by_channel FROM hub_signals", &[])?[0]["claimed_by_channel"]
+                .is_null()
+        );
+    }
     Ok(())
 }
 

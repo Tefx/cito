@@ -1,5 +1,14 @@
 //! Activity persistence transitions; HTTP/UI callers only select operations and project results.
 use super::*;
+
+fn optional_string<'a>(action: &'a Value, key: &str) -> Result<&'a str, String> {
+    action.get(key).map_or(Ok(""), |value| {
+        value
+            .as_str()
+            .ok_or_else(|| format!("INVALID_INPUT: {key} must be a string"))
+    })
+}
+
 impl LocalState {
     pub(in crate::core) fn acknowledge_activity(
         &self,
@@ -12,29 +21,30 @@ impl LocalState {
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let hub = string(action, "hub");
+        let hub = optional_string(action, "hub")?;
+        let query = optional_string(action, "query")?;
         let (filter, query) = if bulk {
             (
                 action["filter"].as_str().unwrap_or(default_filter),
-                string(action, "query").trim(),
+                query.trim().to_lowercase(),
             )
         } else {
-            ("all", "")
+            ("all", String::new())
         };
         // Only a text search needs the payload. Stream those rows through the same Unicode
         // and address matcher as the activity view rather than collecting search results.
         let search = if query.is_empty() {
             ""
         } else {
-            ",s.message,s.from_user,s.from_title,s.from_host_name,s.from_listener_id,s.from_harness,l.owner_user AS target_user,l.title AS target_title"
+            ACTIVITY_SEARCH
         };
         self.db.transaction(|c| {
             let mut groups = std::collections::HashMap::<_,Vec<Value>>::new();
-            c.query_each(&format!("SELECT s.hub,s.listener_id,s.signal_id,s.batch_id,s.hub_url,s.principal_id,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness{search} FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?1='' OR s.hub=?1) AND (?2!='me' OR l.harness='human')"), &[json!(hub),json!(filter)], |row| {
+            c.query_each(&format!("SELECT s.hub,s.listener_id,s.signal_id,s.batch_id,l.harness AS target_harness,{ACTIVITY_ORIGIN}{search} FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?1='' OR s.hub=?1) AND (?2!='me' OR l.harness='human')"), &[json!(hub),json!(filter)], |row| {
                 let hub = string(&row,"hub");
                 let id = string(&row,"signal_id");
                 let selected = bulk || ids.iter().filter_map(Value::as_str).any(|key| key == id || Some(key) == row["batch_id"].as_str() || key.strip_prefix(hub).and_then(|s|s.strip_prefix(':')) == Some(id));
-                if selected && joined_signal_is_current(&row) && (query.is_empty() || matches_activity(&row,query)) {
+                if selected && joined_signal_is_current(&row) && (query.is_empty() || matches_activity(&row,&query)) {
                     let node = string(&row,"listener_id");
                     groups.entry((hub.to_owned(),node.to_owned(),format!("{host_id}:{}",string(&row,"target_harness")))).or_default().push(row["signal_id"].clone());
                 }
@@ -69,13 +79,19 @@ impl LocalState {
         default_filter: &str,
         host_id: &str,
     ) -> Result<(), String> {
+        let selected = optional_string(action, "hub")?;
+        let query = optional_string(action, "query")?.trim().to_lowercase();
+        let search = if query.is_empty() {
+            ""
+        } else {
+            ACTIVITY_SEARCH
+        };
         self.db.transaction(|c| {
-            let selected = action["hub"].as_str().unwrap_or("");
             let signal_id = action["signal_id"].as_str().unwrap_or("");
             let filter=action["filter"].as_str().unwrap_or(default_filter);
             let mut groups = HashMap::<_,Vec<_>>::new();
-            c.query_each("SELECT s.*,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
-                if joined_signal_is_current(&row) && matches_activity(&row,string(action,"query")) {
+            c.query_each(&format!("SELECT s.hub,s.listener_id,s.signal_id,s.acknowledged_at_ms,l.harness AS target_harness,{ACTIVITY_ORIGIN}{search} FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)"), &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
+                if joined_signal_is_current(&row) && (query.is_empty() || matches_activity(&row,&query)) {
                     groups.entry((string(&row,"hub").to_owned(), string(&row,"listener_id").to_owned())).or_default().push((row["signal_id"].clone(), row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null()));
                 }
             })?;

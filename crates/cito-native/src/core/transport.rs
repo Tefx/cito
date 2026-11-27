@@ -380,6 +380,7 @@ impl HttpIo for rustls::StreamOwned<rustls::ClientConnection, SocketIo<'_>> {
 
 pub(super) struct HttpResponse<R> {
     pub status: u16,
+    event_stream: bool,
     body: ResponseBody<R>,
 }
 
@@ -523,6 +524,7 @@ pub(super) fn read_response<R: Read>(stream: R) -> io::Result<HttpResponse<R>> {
         .ok_or_else(|| invalid("Invalid HTTP status"))?;
     let mut length = None;
     let mut chunked = false;
+    let mut event_stream = None;
     loop {
         line.clear();
         headers.read_line(&mut line)?;
@@ -548,6 +550,13 @@ pub(super) fn read_response<R: Read>(stream: R) -> io::Result<HttpResponse<R>> {
                 return Err(invalid("Invalid Transfer-Encoding"));
             }
             chunked = true;
+        } else if name.eq_ignore_ascii_case("content-type") {
+            event_stream = Some(
+                event_stream.is_none()
+                    && value.split(';').next().is_some_and(|media| {
+                        media.trim().eq_ignore_ascii_case("text/event-stream")
+                    }),
+            );
         }
     }
     let framing = match (chunked, length, status) {
@@ -559,6 +568,7 @@ pub(super) fn read_response<R: Read>(stream: R) -> io::Result<HttpResponse<R>> {
     };
     Ok(HttpResponse {
         status,
+        event_stream: event_stream.unwrap_or(false),
         body: ResponseBody { reader, framing },
     })
 }
@@ -798,10 +808,12 @@ impl HubClient {
         if response["ok"] != true {
             return Err("HUB_UNAVAILABLE: Invalid Hub RPC envelope".into());
         }
-        response
+        let result = response
             .get("result")
             .cloned()
-            .ok_or_else(|| "HUB_UNAVAILABLE: Missing Hub RPC result".into())
+            .ok_or("HUB_UNAVAILABLE: Missing Hub RPC result")?;
+        self.accept_static_token(bearer);
+        Ok(result)
     }
     fn reject_token(&self, bearer: &Option<String>) {
         // An old in-flight request must not reject a newly verified credential.
@@ -810,6 +822,21 @@ impl HubClient {
             if let Ok(mut rejected) = self.rejected_bearer.lock() {
                 *rejected = Some(super::identity::hash(bearer.as_deref().unwrap_or("")));
             }
+        }
+    }
+    fn accept_static_token(&self, bearer: &Option<String>) {
+        if self.config["authMode"] == "oidc" {
+            return;
+        }
+        let cleared = self.event_credentials.lock().is_ok_and(|token| {
+            *token == *bearer
+                && self
+                    .rejected_bearer
+                    .lock()
+                    .is_ok_and(|mut rejected| rejected.take().is_some())
+        });
+        if cleared {
+            self.mutation();
         }
     }
     /// Preserve the authority-owned observations and running stream on renewal.
@@ -997,6 +1024,12 @@ impl HubClient {
             tls,
             Some(&self.event_wait.0),
         )?;
+        if response.status == 200 && !response.event_stream {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid event stream media type",
+            ));
+        }
         response.body.reader.get_mut().start_streaming();
         Ok((response.status, response.body))
     }
@@ -1032,12 +1065,16 @@ impl HubClient {
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
                         }
                     };
-                    if changed || disconnected {
+                    if changed {
                         client.mutation();
                     }
                     if disconnected && !client.closed.load(Ordering::SeqCst) {
-                        let Some(local) = &client.local else { break };
+                        let Some(local) = &client.local else {
+                            client.mutation();
+                            break;
+                        };
                         let Ok(next) = local.subscribe(Some(client.identity.clone())) else {
+                            client.mutation();
                             break;
                         };
                         subscription = next;
@@ -1047,6 +1084,7 @@ impl HubClient {
                                 subscription.wake.notify();
                             }
                         }
+                        client.mutation();
                     }
                 }
                 client.stream_live.store(false, Ordering::SeqCst);
@@ -1063,6 +1101,7 @@ impl HubClient {
         let client = self.clone();
         Some(thread::spawn(move || {
             let mut backoff = crate::support::RetryBackoff::default();
+            let mut reconnect = false;
             let cancelled = || client.request_cancelled();
             while !client.request_cancelled() {
                 let bearer = client
@@ -1077,6 +1116,10 @@ impl HubClient {
                     .and_then(|(status, body)| (status == 200).then_some(body))
                 {
                     client.stream_live.store(true, Ordering::SeqCst);
+                    client.accept_static_token(&bearer);
+                    if reconnect {
+                        client.mutation();
+                    }
                     let mut reader = BufReader::new(body);
                     let connected = Instant::now();
                     let mut last_input = connected;
@@ -1118,10 +1161,11 @@ impl HubClient {
                     }
                 }
                 client.stream_live.store(false, Ordering::SeqCst);
+                reconnect = true;
                 if bearer.is_some() && status == Some(401) {
                     client.reject_token(&bearer);
                 }
-                if matches!(status, Some(401 | 403 | 409)) {
+                if matches!(status, Some(401 | 409)) {
                     let guard = client
                         .event_wait
                         .0
@@ -1136,6 +1180,12 @@ impl HubClient {
                                     .event_credentials
                                     .lock()
                                     .is_ok_and(|token| *token == bearer)
+                                && (status != Some(401)
+                                    || bearer.is_none()
+                                    || client
+                                        .rejected_bearer
+                                        .lock()
+                                        .is_ok_and(|rejected| rejected.is_some()))
                         })
                         .unwrap_or_else(|e| e.into_inner());
                     continue;
@@ -1187,7 +1237,9 @@ impl HubClient {
         }
         if result["record"].is_object() {
             let mut record = result["record"].clone();
-            record["server_now_ms"] = result["server_now_ms"].clone();
+            if let Some(fields) = record.as_object_mut() {
+                fields.remove("server_now_ms");
+            }
             if let Ok(mut cache) = self.directory_cache.lock() {
                 cache.retain(|row| row["listener_id"] != record["listener_id"]);
                 cache.push(record);
@@ -1232,7 +1284,7 @@ impl HubClient {
             .map_err(|_| "STATE_ERROR: Directory update lock poisoned")?;
         let mut cursor: Option<String> = None;
         let mut rows = Vec::new();
-        loop {
+        let server_now = loop {
             let raw = self.rpc("kv_snapshot", &json!({"after_key":cursor}))?;
             if !raw["next_cursor"].is_null() && !raw["next_cursor"].is_string() {
                 return Err("HUB_UNAVAILABLE: Invalid snapshot cursor".into());
@@ -1271,13 +1323,13 @@ impl HubClient {
             }
             cursor = next;
             if cursor.is_none() {
-                if let Some(now) = raw["server_now_ms"].as_u64() {
-                    for row in &mut rows {
-                        row["server_now_ms"] = json!(now);
-                    }
-                }
                 self.observe_server_clock(&raw);
-                break;
+                break raw["server_now_ms"].as_u64();
+            }
+        };
+        if server_now.is_some() {
+            for fields in rows.iter_mut().filter_map(Value::as_object_mut) {
+                fields.remove("server_now_ms");
             }
         }
         if let Ok(mut cache) = self.directory_cache.lock() {
@@ -1292,6 +1344,11 @@ impl HubClient {
         }
         if let Ok(mut observed) = self.human_observed_at.lock() {
             *observed = Some(now);
+        }
+        if let Some(now) = server_now {
+            for row in &mut rows {
+                row["server_now_ms"] = json!(now);
+            }
         }
         Ok(rows)
     }

@@ -283,6 +283,53 @@ fn reservations_are_globally_bounded_and_local_backpressure_does_not_spend_attem
 }
 
 #[test]
+fn http_shutdown_joins_live_event_streams_without_closing_the_shared_engine() -> Result<(), String>
+{
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+
+    let f = Fixture::new();
+    let server = f
+        .hub
+        .start_server("127.0.0.1", 0, HubAuth::new("none", None, None, None)?)?;
+    let mut stream = TcpStream::connect(server.address).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
+    write!(
+        stream,
+        "GET /v1/events HTTP/1.1\r\nHost: {}\r\n\r\n",
+        server.address
+    )
+    .map_err(|e| e.to_string())?;
+    let mut events = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(events.read_line(&mut line).map_err(|e| e.to_string())?, 0);
+        if line == ":ok\n" {
+            break;
+        }
+    }
+    let response: Value = ureq::post(&format!("http://{}/v1/rpc", server.address))
+        .timeout(Duration::from_secs(2))
+        .send_json(json!({"op":"stream_info","params":{"stream":SIGNALS}}))
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    assert_eq!(response["ok"], true);
+    let start = std::time::Instant::now();
+    server.shutdown();
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(!server.is_running());
+    assert!(f
+        .hub
+        .rpc("stream_info", &json!({"stream":SIGNALS}), None)
+        .is_ok());
+    Ok(())
+}
+
+#[test]
 fn scope_revocation_sends_a_payload_free_hint_to_nonowners() {
     let f = Fixture::new();
     let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice","oidc":true});

@@ -141,7 +141,11 @@ pub(crate) fn profile_target(path: &Path, mut preserve: impl FnMut(&Path)) -> Re
                     next = Some(link.join(components.as_path()));
                     break;
                 }
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+                    ) => {}
                 Err(e) => return Err(e.to_string()),
             }
         }
@@ -289,7 +293,10 @@ impl FileLock {
         Self::acquire_inner(path, Some(wait))
     }
 
-    fn acquire_inner(path: &Path, mut wait: Option<&mut dyn FnMut() -> Result<()>>) -> Result<Self> {
+    fn acquire_inner(
+        path: &Path,
+        mut wait: Option<&mut dyn FnMut() -> Result<()>>,
+    ) -> Result<Self> {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
@@ -313,7 +320,10 @@ impl FileLock {
                 let error = std::io::Error::last_os_error();
                 match (error.kind(), wait.as_deref_mut()) {
                     (std::io::ErrorKind::Interrupted, None) => continue,
-                    (std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock, Some(wait)) => {
+                    (
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock,
+                        Some(wait),
+                    ) => {
                         wait()?;
                         continue;
                     }
@@ -561,7 +571,9 @@ pub fn remove_legacy_file(req: &Value, id: &str, path: &Path) -> Result<Value> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "unchanged",
         Err(error) => return Err(error.to_string()),
     };
-    Ok(json!({"target":id,"path":path,"status":status,"backupPath":null,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}))
+    Ok(
+        json!({"target":id,"path":path,"status":status,"backupPath":null,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
+    )
 }
 
 pub fn json_mutate(
@@ -632,6 +644,15 @@ pub fn live_bridge(req: &Value, harness: &str, pid: u32) -> bool {
         && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true)
 }
 pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
+    socket_call_observe_connect(path, req, |_| {})
+}
+
+/// Report connect failures separately from protocol failures or timeouts after connecting.
+pub fn socket_call_observe_connect(
+    path: &Path,
+    req: &Value,
+    mut connect_failed: impl FnMut(std::io::ErrorKind),
+) -> Result<Value> {
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::time::Instant;
@@ -684,10 +705,12 @@ pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
     if unsafe { libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) } < 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            connect_failed(error.kind());
             return Err(socket_io_error(error));
         }
         ready(libc::POLLOUT)?;
         if let Some(error) = s.take_error().map_err(socket_io_error)? {
+            connect_failed(error.kind());
             return Err(socket_io_error(error));
         }
     }
@@ -740,11 +763,11 @@ pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
 // Inspect sibling bridges with at most eight workers sharing a dynamic queue.
 // Return completed results in PID order within the provider's discovery budget;
 // unfinished socket calls may finish independently, but cannot hold up siblings.
-pub fn inspect_socket_endpoints(
+pub fn inspect_socket_endpoints<T: Send + 'static>(
     req: &Value,
     prefix: &str,
-    inspect: impl Fn(u32, &Path) -> Option<Value> + Send + Sync + 'static,
-) -> Result<Vec<(u32, Value)>> {
+    inspect: impl Fn(u32, &Path) -> Option<T> + Send + Sync + 'static,
+) -> Result<Vec<(u32, T)>> {
     use std::sync::{atomic::AtomicUsize, atomic::Ordering, mpsc, Arc};
     let deadline = std::time::Instant::now() + Duration::from_millis(1100);
     let entries = match fs::read_dir(state(req).join("sockets")) {

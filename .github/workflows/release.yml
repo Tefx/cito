@@ -39,7 +39,7 @@ jobs:
           PY
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -63,6 +63,7 @@ jobs:
         id: assets
         env:
           GH_TOKEN: ${{ github.token }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: python3 packaging/release.py assets "$RELEASE_TAG" dist
       - name: Locate passing main CI for this exact commit
         if: steps.assets.outputs.reused != 'true'
@@ -92,7 +93,7 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked -- --test-threads=4
-          cargo build --release --locked
+          RUSTFLAGS='-D warnings' cargo build --release --locked
           python3 packaging/release.py bundle build/candidate.zip
       - name: Sign, notarize, staple, and create the final ZIP
         if: steps.assets.outputs.reused != 'true'
@@ -114,6 +115,7 @@ jobs:
       - name: Publish the verified immutable assets
         env:
           GH_TOKEN: ${{ github.token }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: python3 packaging/release.py publish "$RELEASE_TAG" dist
       - name: Verify the public Cask install and push the tap update
         env:

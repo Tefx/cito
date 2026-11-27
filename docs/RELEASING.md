@@ -11,17 +11,19 @@ when an annotated stable version tag is selected.
 | `.github/workflows/ci.yml` | Push to `main`, pull request, manual run | Checks, tests, arm64 build, and an ad-hoc-signed candidate artifact |
 | `.github/workflows/release.yml` | Push of `v*`, manual run for an existing tag | Developer ID signing, notarization, GitHub Release, install verification, and Homebrew tap update |
 
-The website workflow remains independent. A normal `main` push never publishes
-an application release, runs notarization, or updates the tap. Local development
-on multiple Macs needs no Developer ID private key when formal signing happens
-in Actions.
+The website workflow remains independent. It runs the site clipboard, link,
+anchor, and environment-table checks (`node crates/cito-native/tests/support/site-clipboard.mjs`)
+and `python3 packaging/release.py check` before uploading Pages. A normal `main`
+push never publishes an application release, runs notarization, or updates the
+Homebrew tap. Local development on multiple Macs needs no Developer ID private
+key when formal signing happens in Actions.
 
 ## Checks and candidates
 
 CI uses a macOS arm64 runner, the Rust toolchain in `rust-toolchain.toml`,
-Python 3.13, and Node.js 24. Python is release tooling; Node is used only for the
-existing dependency-free Pi extension tests. Neither becomes an installed Cito
-runtime dependency.
+Python 3.13, and Node.js 24. Python runs release tooling; Node runs the
+Pi extension tests and the Pages checks. Neither is an installed Cito runtime
+dependency.
 
 CI runs:
 
@@ -31,24 +33,29 @@ python3 -m unittest discover -s packaging -p 'test_*.py' -v
 /usr/bin/ruby -c packaging/homebrew/cito.rb
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked -- --test-threads=4
-cargo build --release --locked
+cargo test --workspace --locked -- --test-threads=2
+RUSTFLAGS='-D warnings' cargo build --release --locked
 python3 packaging/release.py bundle build/candidate.zip
 ```
 
-Tests remain headless and sandboxed. CI verifies bundle versions, signatures,
-resources, and the packaged CLI without starting the desktop UI or a real login
-item. Cargo downloads are cached. The build directory remains incremental within
-a job; it is not restored independently of the post-link staged binaries.
+Tests remain headless and sandboxed. The macOS build treats Swift warnings as
+errors (`-warnings-as-errors`). The candidate is relocatable, and the packaged
+CLI is checked without starting the desktop UI or a real login item. Cargo
+downloads are cached. The build directory remains incremental within a job;
+it is not restored independently of the post-link staged binaries.
 
 A passing run uploads `cito-candidate-<commit-sha>` for 14 days. This artifact is
-ad-hoc signed and has not been notarized. Formal release reuse accepts only a
-passing **push-to-main** CI run for the exact selected source commit. It does not
-select the latest artifact by branch name or use a pull-request artifact.
+ad-hoc signed and has not been notarized. Reuse requires a successful
+**push-to-main** CI run on the exact selected commit, with exactly one completed,
+successful job named `Check and build arm64 candidate`. Pull-request artifacts
+and artifacts from other commits are ineligible.
 
-If matching CI is still running, release waits up to 20 minutes. Failed CI blocks
-release. Missing, expired, or cancelled candidates cause the same source commit
-to be checked and rebuilt; release never substitutes a newer `main` commit.
+A matching completed run that failed blocks release, even if a later run was
+successful. If the selected run is still active, release waits up to 20 minutes;
+a timeout blocks release rather than permitting a rebuild. If no matching run
+exists, the selected run was cancelled, or a passing candidate is unavailable,
+the workflow checks and rebuilds the same commit. It never substitutes a newer
+`main` commit.
 
 ## Version preparation on main
 
@@ -58,7 +65,8 @@ commit on `main` updating:
 - The native crate version and the native package entry in `Cargo.lock`.
 - `.agents/plugins/marketplace.json`, including its nested plugin version.
 - Distribution manifests in `plugins/`, including the Pi package manifest and the
-  Codex/Claude marketplace manifests. `packaging/release.py check` lists drift.
+  Codex and Claude host plugin manifests. `packaging/release.py check` rejects
+  missing or mismatched versions and an empty marketplace plugin list.
 - The `application-version` metadata in the five website HTML pages, plus user
   documentation and release notes where they describe the current version.
 
@@ -86,7 +94,8 @@ git push origin v0.22.0
 The release workflow requires:
 
 - A stable `vMAJOR.MINOR.PATCH` tag without leading zeroes.
-- An annotated tag pointing to the checked-out commit.
+- An annotated tag pointing to the checked-out commit. The workflow checks out
+  the selected tag ref, not `main`.
 - That commit to be reachable from `origin/main`.
 - The tag version to match the native crate and distribution metadata.
 
@@ -97,7 +106,7 @@ versions.
 
 ## Signing and notarization credentials
 
-Configure these **Actions repository secrets** in `Tefx/cito`:
+Configure these **Actions repository secrets** in the source repository:
 
 | Secret | Purpose |
 | --- | --- |
@@ -109,9 +118,9 @@ Configure these **Actions repository secrets** in `Tefx/cito`:
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for the notarization client |
 | `HOMEBREW_TAP_SSH_KEY` | Dedicated, non-passphrase-protected SSH deploy key with write access only to the declared tap |
 
-The declared tap is `Tefx/homebrew-tap`. Its public deploy key must have **Allow
-write access** enabled. The default repository `GITHUB_TOKEN` cannot push to that
-other repository. Do not copy a personal `gh` login token into Actions as a
+The tap is the repository named by `HOMEBREW_TAP_REPOSITORY` in the release
+workflow. Its public deploy key must have **Allow write access** enabled. The
+default repository `GITHUB_TOKEN` cannot push to that other repository. Do not copy a personal `gh` login token into Actions as a
 shortcut. Keep an independent encrypted P12 backup for device replacement.
 
 CI jobs receive none of these credentials. Release scopes Apple credentials to
@@ -125,12 +134,32 @@ receives an explicit keychain. Import grants access to the signing tools, and
 cleanup restores the original search list and removes the temporary keychain
 and exported key files. The runner is ephemeral.
 
+## Bundle and archive verification
+
+The outer `Cito.app` contains the launcher at `Contents/MacOS/Cito`, the native
+CLI and daemon executable at `Contents/Helpers/cito-native`, the nested AppKit
+companion at `Contents/Helpers/Cito.app`, and bundled plugins under
+`Contents/Resources/plugins`. The nested app declares its executable in its own
+`Info.plist`. The verifier accepts the earlier flat `Contents/Helpers/cito-ui`
+layout only when the Cask quit targets match the app identifiers for that layout.
+
+Candidate verification checks the app and plugin versions (including the Pi
+package), the icon, required host integration files (Codex and Claude plugin
+manifests and MCP configuration, plus Claude hooks and the hook executable),
+executable permissions, arm64 architecture, and the strict bundle signature.
+The app bundle identifiers, including the nested companion's when present, must
+match the Cask's quit targets.
+
+For a final ZIP, including downloaded assets on retry, verify the archive
+checksum, bundle layout, versions and signature, the exact `APPLE_TEAM_ID`, and
+the stapled notarization ticket **before** executing the packaged `Cito --version`.
+A failed or missing check blocks reuse and publication.
+
 ## Release sequence
 
 1. Validate the tag and metadata; require the scoped tap credential before any
    publication.
-2. On retry, inspect existing GitHub Release assets. Reuse a ZIP only after
-   checking its checksum, packaged version, signature, and stapled ticket.
+2. On retry, reuse existing assets only after the final ZIP verification above.
 3. Otherwise obtain the exact-commit CI candidate, or check and rebuild that
    source commit when no reusable candidate exists.
 4. Import the signing identity, validate Apple notarization credentials, and sign
@@ -140,10 +169,11 @@ and exported key files. The runner is ephemeral.
    on `Accepted`; staple and validate the ticket.
 6. Create `Cito-macos-arm64.zip` and its `.sha256` sidecar. Compute the checksum
    after signing and stapling. Do not modify or repackage the App afterward.
-7. Upload to a draft GitHub Release and publish after the expected assets exist.
-   An older release does not replace a newer version as GitHub's latest release.
-8. Generate the Cask from that final checksum. Test the actual public download
-   through Homebrew before pushing the tap.
+7. Generate the Cask from the final checksum and check its Ruby syntax. Verify
+   the ZIP before uploading to a draft GitHub Release; publish only after the
+   expected assets exist. An older release does not replace a newer version as
+   GitHub's latest release.
+8. Test the actual public download through Homebrew before pushing the tap.
 9. Push the verified Cask and read back the tap's `main` commit. Never force-push
    or downgrade a newer tap version.
 
@@ -164,17 +194,18 @@ release URL, not a locally substituted ZIP.
 ## Retrying and recovery
 
 For a tag created after this workflow was introduced, retry with its own workflow
-revision and explicit tag:
+revision and explicit tag from a checkout of the release repository:
 
 ```sh
-gh workflow run release.yml --repo Tefx/cito --ref v0.22.0 -f tag=v0.22.0
+gh workflow run release.yml --ref v0.22.0 -f tag=v0.22.0
 ```
 
 Tags predating this workflow are not supported by this command. A workflow run
 on a branch cannot stand in for an explicitly selected tag.
 
 - **CI or candidate failure:** fix source through a new commit and version as
-  appropriate. An actual failing CI result is not bypassed by rebuilding.
+  appropriate. A failing CI result is not bypassed by rebuilding. If waiting for
+  CI timed out, check the status of the exact tagged commit before retrying.
 - **Notarization rejection:** inspect the Apple submission log. Correct the
   cause before another submission.
 - **Notarization timeout or interrupted submission:** inspect authenticated

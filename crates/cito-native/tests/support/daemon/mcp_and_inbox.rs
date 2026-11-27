@@ -1044,6 +1044,7 @@ fn pending_business_ack_requires_original_url_and_principal() {
     state.transaction(|c| {
         for i in 0..256 { c.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES('local',?,?,'device:human',0)",&[human["listener_id"].clone(),json!(format!("unbound-{i}"))])?; }
         c.execute("UPDATE pending_hub_acks SET hub_url='local://',principal_id=? WHERE signal_id=?",&[human["principal_id"].clone(),id.clone()])?;
+        c.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES('local','c_0000000000000000','deleted','device:human',0,'local://',?)", &[human["principal_id"].clone()])?;
         Ok(())
     }).unwrap();
     f.tool("cito_inbox", json!({"ack_all":false}), meta);
@@ -1682,6 +1683,26 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         json!([])
     );
     let expected_listeners = f.tool("cito_find", json!({}), json!({}))["listeners"].clone();
+    let omitted = f.mcp("tools/call", json!({"name":"cito_find"}));
+    assert_eq!(omitted["isError"], false, "{omitted}");
+    let payload: Value =
+        serde_json::from_str(omitted["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["listeners"], expected_listeners);
+    assert_eq!(
+        f.mcp("tools/call", json!({"name":"cito_find","arguments":null}))["isError"],
+        true
+    );
+    let result = ureq::post(&format!("http://127.0.0.1:{}/mcp", f.port))
+        .set("Content-Type", "application/json")
+        .send_string("{");
+    let Err(ureq::Error::Status(400, response)) = result else {
+        panic!("Expected a parse error, got {result:?}");
+    };
+    let body: Value = response.into_json().unwrap();
+    assert_eq!(
+        body,
+        json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}})
+    );
     for v in [
         json!([]),
         json!(42),
@@ -1716,6 +1737,74 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         (200, json!({"jsonrpc":"2.0","id":null,"result":{}}))
     );
 }
+#[test]
+fn http_early_rejections_deliver_json_with_unread_request_bytes() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.daemon(&[]);
+    let address = ("127.0.0.1", f.port);
+    let prefix = "x".repeat(64 * 1024);
+    for (method, length, status, error) in [
+        ("POST", "invalid", 400, "Invalid Content-Length"),
+        ("GET", "65536", 404, "Not found"),
+        ("POST", "1048577", 413, "Request body exceeds 1 MiB"),
+    ] {
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = format!(
+            "{method} /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\n\r\n{prefix}",
+            f.port
+        );
+        socket.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(
+            headers.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{response}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            json!({"error":error})
+        );
+    }
+}
+
+#[test]
+fn health_bypasses_saturated_mcp_worker_slots() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.daemon(&[]);
+    let _blocked: Vec<_> = (0..64).map(|_| {
+        let mut socket = TcpStream::connect(("127.0.0.1", f.port)).unwrap();
+        write!(socket, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n", f.port).unwrap();
+        socket
+    }).collect();
+    let ping = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
+    wait(|| {
+        let (status, body) = http(f.port, "/mcp", Some(&ping));
+        if status == 503 {
+            assert_eq!(body, json!({"error":"Too many daemon requests"}));
+        }
+        status == 503
+    });
+    let (status, health) = http(f.port, "/health", None);
+    assert_eq!(status, 200, "{health}");
+    assert_eq!(health["ok"], true, "{health}");
+}
+
 #[test]
 fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() {
     let _lock = serial();
@@ -2055,6 +2144,10 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .command(NATIVE, &["status"], "")
         .1
         .contains("AVAILABLE SESSIONS"));
+    for (harness, count) in [("fixture", 1), ("fix", 0)] {
+        let found = f.tool("cito_find", json!({"harness":harness}), json!({}));
+        assert_eq!(found["matched_count"], count, "{found}");
+    }
     let find = f.tool("cito_find", json!({"query":"Native receiver"}), json!({}));
     assert!(find["listeners"]
         .as_array()

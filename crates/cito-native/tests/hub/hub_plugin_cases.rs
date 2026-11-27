@@ -459,11 +459,21 @@ fn packaged_roots_worker() {
         "telegram",
         user.clone(),
     );
-    fs::write(user.join("plugin.json"), json!({"id":"telegram","kind":"agent","displayName":"Agent override","command":["./driver"]}).to_string()).unwrap();
-    assert!(!discover(&roots, Some(&data.join("plugins")))
-        .unwrap()
-        .iter()
-        .any(|p| p.id == "telegram"));
+    let fallback = dir.join("data/runtime/plugins/telegram");
+    fs::write(fallback.join("plugin.json"), json!({"id":"telegram","kind":"human-channel","scope":"hub","displayName":"Bundled channel","command":["./driver"]}).to_string()).unwrap();
+    for (kind, scope) in [
+        (json!("agent"), json!("hub")),
+        (json!("human"), json!("user")),
+        (json!("human"), json!(true)),
+        (json!(true), json!("hub")),
+    ] {
+        fs::write(user.join("plugin.json"), json!({"id":"telegram","kind":kind,"scope":scope,"displayName":"Unsupported override","command":["./driver"]}).to_string()).unwrap();
+        assert_plugin(
+            &discover(&roots, Some(&data.join("plugins"))).unwrap(),
+            "telegram",
+            fallback.clone(),
+        );
+    }
     fs::remove_dir_all(user).unwrap();
     assert!(
         discover(&roots, Some(&data.join("plugins"))).is_ok(),

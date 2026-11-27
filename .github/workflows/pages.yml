@@ -30,6 +30,17 @@ jobs:
         with:
           enablement: true
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Verify the site before upload
+        run: |
+          node crates/cito-native/tests/support/site-clipboard.mjs
+          python3 packaging/release.py check
+
       - name: Upload static site artifact
         uses: actions/upload-pages-artifact@v3
         with:

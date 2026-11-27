@@ -180,6 +180,57 @@ fn signal_reads_and_acknowledgments_isolate_origin_and_accept_principal_aliases(
 }
 
 #[test]
+fn replay_ack_only_updates_the_persisted_listener_and_origin() -> Result<(), String> {
+    let f = Fixture::new()?;
+    for (seq, id) in ["current", "other-origin", "other-listener"]
+        .into_iter()
+        .enumerate()
+    {
+        f.seed(id, seq)?;
+    }
+    f.state.db.execute("UPDATE local_signals SET hub_url='https://other.example.com' WHERE signal_id='other-origin'; UPDATE local_signals SET listener_id='c_2' WHERE signal_id='other-listener'", &[])?;
+    for id in ["current", "other-origin", "other-listener"] {
+        assert!(!f.state.admit(
+            "local",
+            &f.listener()?,
+            &signal(id, "none#alice", 1),
+            1,
+            "2026-01-01T00:00:00Z",
+            now_ms() + 60_000,
+            &json!(123)
+        )?);
+    }
+    let rows = f.rows()?;
+    assert_eq!(rows[0]["acknowledged_at_ms"], 123);
+    assert!(rows[1..]
+        .iter()
+        .all(|row| row["acknowledged_at_ms"].is_null()));
+    Ok(())
+}
+
+#[test]
+fn malformed_activity_selectors_cannot_clear_or_ack_the_unfiltered_history() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.seed("signal", 1)?;
+    for action in [json!({"query": false}), json!({"hub": null})] {
+        assert!(f
+            .state
+            .clear_activity_history(&action, "all", "host")
+            .is_err());
+        assert!(f
+            .state
+            .acknowledge_activity(&action, "all", "host", true)
+            .is_err());
+    }
+    let (rows, total, unread) = f.state.query_activity("all", "")?;
+    assert_eq!((rows.len(), total, unread), (1, 1, 1));
+    assert_eq!(rows[0]["message"], "message");
+    f.state.clear_activity_history(&json!({}), "all", "host")?;
+    assert_eq!(f.state.query_activity("all", "")?.1, 0);
+    Ok(())
+}
+
+#[test]
 fn hub_clock_remaining_lifetime_survives_client_skew_at_admission() -> Result<(), String> {
     for skew in [-1_860_000i64, 1_860_000] {
         let f = Fixture::new()?;
@@ -413,7 +464,7 @@ fn signal_origin_upgrade_leaves_legacy_rows_unbound_and_new_admissions_immutable
 ) -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("legacy", 1)?;
-    f.state.db.execute("ALTER TABLE local_signals DROP COLUMN hub_url; ALTER TABLE local_signals DROP COLUMN principal_id; PRAGMA user_version=5", &[])?;
+    f.state.db.execute("DROP INDEX signals_activity_page; ALTER TABLE local_signals DROP COLUMN hub_url; ALTER TABLE local_signals DROP COLUMN principal_id; PRAGMA user_version=5", &[])?;
     let state = LocalState::open(&f.dir)?;
     assert!(state.db.query("SELECT * FROM local_signals", &[])?[0]["hub_url"].is_null());
     state
@@ -474,7 +525,7 @@ fn oversized_single_card_stays_readable_without_retrying_or_blocking_its_peer() 
 {
     let f = Fixture::new()?;
     let mut large = signal("large", "none#alice", 1);
-    large["message"] = json!("<".repeat(131_072));
+    large["message"] = json!("x".repeat(MAX_WAKE_CARD_BYTES));
     assert!(admit(&f, &large, 1)?);
     assert!(admit(&f, &signal("healthy", "none#alice", 1), 2)?);
     let batch = f.claim_wake_batch()?;
@@ -1249,12 +1300,12 @@ fn unlisten_racing_final_completion_cannot_business_ack_or_resurrect_dispatch() 
 }
 
 #[test]
-fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
+fn native_card_preserves_plain_text_sender_and_multi_signal_layout() {
     let target = json!({"title":" <Target> "});
     let one = json!({"signal_id":"s:123","from_user":"alice","from_host_name":"host.LOCAL","from_title":"Alice Smith","from_listener_id":"alice-smith-abcdefghijkl","message":"<x> & hello"});
     assert_eq!(
         format_wake_card(&target, std::slice::from_ref(&one), "cloud", true),
-        "Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl] [signal_id: cloud:s:123] · auto-acknowledged on delivery\n\n&lt;x&gt; & hello"
+        "Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl] [signal_id: cloud:s:123]\n\n<x> & hello"
     );
     for suffix in ["abcdefghijkl", "0123456789abcdef"] {
         let mut sender = one.clone();
@@ -1265,7 +1316,7 @@ fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
     distinct["from_title"] = json!("Different title");
     assert!(format_sender(&distinct, "local", false).contains("Different title"));
     let two = json!({"from_user":"bob","from_host_name":"other.local","from_title":" Sender <B> ","from_listener_id":null,"message":"second"});
-    assert_eq!(format_wake_card(&target, &[one, two], "local", false), "Cito · 2 notifications → &lt;Target&gt; · auto-acknowledged on delivery\n\n[1] alice@host [↩ alice-smith-abcdefghijkl] [signal_id: local:s:123]\n&lt;x&gt; & hello\n\n[2] bob@other · Sender &lt;B&gt;\nsecond");
+    assert_eq!(format_wake_card(&target, &[one, two], "local", false), "Cito · 2 notifications → <Target>\n\n[1] alice@host [↩ alice-smith-abcdefghijkl] [signal_id: local:s:123]\n<x> & hello\n\n[2] bob@other · Sender <B>\nsecond");
 }
 
 #[test]

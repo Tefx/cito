@@ -8,7 +8,7 @@ import test from 'node:test';
 import {syncBuiltinESMExports} from 'node:module';
 import {createConnection} from 'node:net';
 import {createServer} from 'node:http';
-import {mkdirSync, writeFileSync, readFileSync, existsSync, statSync, unlinkSync} from 'node:fs';
+import {appendFileSync, mkdirSync, writeFileSync, existsSync, statSync, unlinkSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
 import bridge from '../../../../plugins/pi/cito-bridge.ts';
@@ -16,6 +16,7 @@ test('real Pi host, socket repair, and shutdown', async t => {
 const root=fs.mkdtempSync(join(process.env.TMPDIR || '/tmp','ct-pi-'));
 t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
 const state=join(root,'state'), path=join(state,'sockets',`pi-pid-${process.pid}.sock`);
+const sentinel=join(state,'pi','endpoints',`pi-pid-${process.pid}.watch`);
 process.env.HOME=root;
 process.env.CITO_STATE_DIR=state;
 process.env.CITO_PI_HOME=join(root,'.pi','agent');
@@ -27,9 +28,19 @@ const held=[];
 const branch=[{type:'message',message:{role:'assistant',content:'Not the user prompt'}},
  {type:'message',message:{role:'user',content:[{type:'image'},{type:'text',text:'  Review\u0007\n routing '},{type:'text',text:'🦀'.repeat(140)}]}}];
 const about='Review routing '+'🦀'.repeat(105);
-const context={cwd:'/repo',sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work',getBranch:()=>branch},ui:{setStatus:(_k,v)=>badges.push(v),notify:(s,t)=>notices.push({s,t})}};
-const api={on:(n,f)=>handlers.set(n,f),registerMcpServer:(name,config)=>{if(++attempts===1)throw Error('Registry not ready');registrations.push({name,config});},registerMessageRenderer:(_n,r)=>{renderer=r},registerToolRenderer:r=>{toolRenderer=r},registerCommand:(_n,c)=>{command=c},sendMessage:(m,o)=>{if(failSend)throw Error('Retry');messages.push({m,o});}};
-function request(value,fragment=false){return new Promise((resolve,reject)=>{const s=createConnection(path);let data='';s.setTimeout(2000,()=>s.destroy(Error('Timeout')));s.on('error',reject);s.on('connect',()=>{const raw=JSON.stringify(value)+'\n';if(fragment){s.write(raw.slice(0,5));s.end(raw.slice(5));}else s.write(raw);});s.on('data',c=>{data+=c;if(data.includes('\n')){s.destroy();resolve(JSON.parse(data));}});});}
+const entries=new Map(), steering=[];
+let streaming=false, nextEntry=0;
+const transcript=()=>join(root,`${session}.jsonl`);
+const context={cwd:'/repo',isIdle:()=>!streaming,sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work',getSessionFile:transcript,getBranch:()=>branch,getEntries:()=>[...branch,...entries.get(session)??[]]},ui:{setStatus:(_k,v)=>badges.push(v),notify:(s,t)=>notices.push({s,t})}};
+function append(message, write=true) {
+ const entry={type:'custom_message',id:`entry-${++nextEntry}`,...message};
+ if(!entries.has(session))entries.set(session,[]);
+ entries.get(session).push(entry);
+ if(write) appendFileSync(transcript(),JSON.stringify(entry)+'\n');
+ return entry;
+}
+const api={on:(n,f)=>handlers.set(n,f),registerMcpServer:(name,config)=>{if(++attempts===1)throw Error('Registry not ready');registrations.push({name,config});},registerMessageRenderer:(_n,r)=>{renderer=r},registerToolRenderer:r=>{toolRenderer=r},registerCommand:(_n,c)=>{command=c},sendMessage:(m,o)=>{if(failSend)throw Error('Retry');messages.push({m,o});if(streaming)steering.push(m);else append(m);}};
+function request(value,fragment=false){return new Promise((resolve,reject)=>{const s=createConnection(path);let data='';s.setTimeout(2000,()=>s.destroy(Error('Timeout')));s.on('error',reject);s.on('close',()=>reject(Error('Socket closed before receipt')));s.on('connect',()=>{const raw=JSON.stringify(value)+'\n';if(fragment){s.write(raw.slice(0,5));s.end(raw.slice(5));}else s.write(raw);});s.on('data',c=>{data+=c;if(data.includes('\n')){s.destroy();resolve(JSON.parse(data));}});});}
 async function waitForSocket() {
  const deadline=Date.now()+2000;
  for(;;) {
@@ -41,14 +52,21 @@ async function waitForSocket() {
  }
 }
 const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;calls.push(JSON.parse(body));if(holdHttp){held.push(res);heldArrival?.();return;}if(stallHttp)return;res.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'  alice-very-long-project-abcdefgh1234  ',scope:'self'})}]}}));});
+const originalWatch=fs.watch;
+let muteDirectory=false;
+const watchPaths=new Set();
+fs.watch=(file,options,callback)=>{
+ watchPaths.add(file);
+ assert.equal(options.persistent,false);
+ return originalWatch(file,options,(...args)=>{
+  if(file!==join(state,'sockets')||!muteDirectory)callback(...args);
+ });
+};
+syncBuiltinESMExports();
+t.after(()=>{fs.watch=originalWatch;syncBuiltinESMExports();});
 try {
  mkdirSync(join(state,'sockets'),{recursive:true});execFileSync('python3',['-c','import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()',path]);
- const interval=globalThis.setInterval;
- globalThis.setInterval=(callback,delay,...args)=>{
-  assert.notEqual(delay,2000,'A healthy owned socket must not install periodic stat polling');
-  return interval(callback,delay,...args);
- };
- try { bridge(api); } finally { globalThis.setInterval=interval; }
+ bridge(api);
  // Startup must recover an F58 stale socket, even before session_start.
  await waitForSocket();
  const sessionDir=join(process.env.HOME,'.pi','agent','sessions',`--${process.cwd().replace(/^\//,'').replaceAll('/','-')}--`);mkdirSync(sessionDir,{recursive:true});
@@ -72,7 +90,7 @@ try {
  assert.equal((await request({...early,session_id:'wrong'})).error,'SESSION_MISMATCH');
  assert.equal((await request({op:'status',session_id:'wrong',badge:'wrong'})).error,'SESSION_MISMATCH');
  assert.equal((await request(early)).deduplicated,false);assert.equal((await request(early)).deduplicated,true);
- assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true},o:{triggerTurn:true,deliverAs:'steer'}}]);
+ assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true,details:{citoBatchId:early.batch_id}},o:{triggerTurn:true,deliverAs:'steer'}}]);
  session=recovered.session_id;
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
  assert.equal(badges.at(-1),'listening before start','Repeated session_start must retain the session badge');
@@ -81,31 +99,57 @@ try {
  messages.length=0;
  assert.equal(attempts,2);assert.deepEqual(registrations,[{name:'cito',config:{command:join(state,'bin/cito-mcp'),args:[]}}]);assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(join(state,'sockets')).mode&0o777,0o700);
  assert.deepEqual(await request({op:'ping'}),{ok:true});assert.equal((await request({op:'identify'})).session_id,'session-a');
- const delivery={op:'deliver',id:17,session_id:session,batch_id:'one',content:'<card> café',wake:false};assert.equal((await request(delivery,true)).deduplicated,false);assert.equal((await request(delivery)).deduplicated,true);assert.equal(messages.length,1);assert.deepEqual(messages[0],{m:{customType:'cito-notification',content:'<card> café',display:true},o:{triggerTurn:false,deliverAs:'followUp'}});
+ const delivery={op:'deliver',id:17,session_id:session,batch_id:'one',content:'<card> café',wake:false};assert.equal((await request(delivery,true)).deduplicated,false);assert.equal((await request(delivery)).deduplicated,true);assert.equal(messages.length,1);assert.deepEqual(messages[0],{m:{customType:'cito-notification',content:'<card> café',display:true,details:{citoBatchId:'one'}},o:{triggerTurn:false,deliverAs:'followUp'}});
  assert.equal((await request({...delivery,session_id:'wrong'})).error,'SESSION_MISMATCH');assert.equal((await request({...delivery,batch_id:'invalid',wake:'yes'})).error,'INVALID_REQUEST');
  failSend=true;assert.equal((await request({...delivery,batch_id:'retry'})).error,'BRIDGE_ERROR');failSend=false;assert.equal((await request({...delivery,batch_id:'retry',wake:true})).deduplicated,false);assert.equal(messages.at(-1).o.triggerTurn,true);
  await request({op:'status',session_id:session,badge:'active'});session='session-b';assert.equal((await request({op:'identify'})).session_id,'session-b');assert.equal(badges.at(-1),undefined);
  assert.equal((await request({...delivery,session_id:session})).deduplicated,false);session='session-a';await handlers.get('session_tree')({},context);assert.equal((await request(delivery)).deduplicated,true);
- for(let i=0;i<201;i++)await request({...delivery,batch_id:`evict-${i}`});assert.equal((await request(delivery)).deduplicated,false);
- for(let i=0;i<128;i++){session=`inactive-${i}`;await handlers.get('session_tree')({},context);}
- session='session-a';await handlers.get('session_tree')({},context);
- assert.equal((await request(delivery)).deduplicated,false,'The oldest inactive session must be evicted');
- assert.equal((await request(delivery)).deduplicated,true,'The active session must retain deduplication');
+ // A queued wake is not a receipt. Clearing the queue and settling must let
+ // the daemon submit the same batch again, even if a new tool is already running.
+ const wake={...delivery,batch_id:'during-tool',wake:true};
+ const unconfirmed={id:17,ok:true,delivered:false,delivered_unconfirmed:true};
+ streaming=true;
+ assert.deepEqual(await request(wake),unconfirmed);
+ assert.equal(messages.at(-1).o.deliverAs,'steer');
+ assert.deepEqual(await request(wake),unconfirmed);
+ assert.equal(steering.length,1,'Retries must not queue duplicate steering messages');
+ steering.length=0;
+ await handlers.get('agent_settled')({},context);
+ assert.deepEqual(await request(wake),unconfirmed);
+ assert.equal(steering.length,1,'A dropped steer must be eligible for reinjection');
+ const memoryOnly=append(steering.shift(),false);
+ assert.deepEqual(await request(wake),unconfirmed,'A session-manager entry alone is not a durable receipt');
+ appendFileSync(transcript(),JSON.stringify(memoryOnly)+'\n');
+ assert.deepEqual(await request(wake),{id:17,ok:true,delivered:true,persisted_batch_id:wake.batch_id,deduplicated:true});
+ assert.equal(steering.length,0);
+ streaming=false;
+ await handlers.get('agent_settled')({},context);
  const plain={fg:(_n,t)=>t,bg:(_n,t)=>t,bold:t=>t};
  const painted={...plain,bg:(color,text)=>`<${color}>${text}</${color}>`};
  const padding='<customMessageBg>'+' '.repeat(40)+'</customMessageBg>';
  const send=toolRenderer('mcp__cito__cito_send',()=>undefined);
  const args={to:'bob/agent#123'};
- for(const card of [renderer({content:'Cito · hello'},{expanded:false},painted),send.renderCall(args,painted,{outputPad:1})]) {
+ const renderContext={isError:false,outputPad:1,state:{}};
+ const title=send.renderCall(args,painted,renderContext);
+ for(const card of [renderer({content:'Cito · hello'},{expanded:false},painted),title]) {
   const lines=card.render(40);assert.equal(lines[0],padding);assert.equal(lines.at(-1),padding);assert.match(lines[1],/Cito ·/);
  }
  const receipt={content:[{type:'text',text:'{"signal_id":"sig_1","expires_at":"later"}'}]};
  for(const expanded of [true,false]) {
-  const rendered=send.renderResult(receipt,{expanded},plain,{isError:false,outputPad:1}).render(60).join('\n');
+  const rendered=send.renderResult(receipt,{expanded},plain,renderContext).render(60).join('\n');
   assert.match(rendered,/sig_1/);assert.equal(rendered.includes('expires_at'),expanded);
  }
- const degraded={content:[{type:'text',text:JSON.stringify({ok:true,signal_id:'sig_1',maintenance_warning:'Sent history unavailable'})}]};
- assert.match(send.renderResult(degraded,{expanded:false},plain,{isError:false,outputPad:1}).render(120).join('\n'),/Sent history unavailable/);
+ assert.deepEqual(title.render(60),[],'The call frame must disappear once the combined result card is available');
+ function renderTool(action, receipt) {
+  const tool=toolRenderer(`mcp__cito__cito_${action}`,()=>undefined);
+  return tool.renderResult({content:JSON.stringify(receipt)},{expanded:false},plain,{...renderContext,state:{}}).render(120).join('\n');
+ }
+ assert.match(renderTool('send',{ok:true,signal_id:'sig_1',maintenance_warning:'Sent history unavailable'}),/sig_1[\s\S]*Warning: Sent history unavailable/);
+ const found=renderTool('find',{matched_count:2,online_count:1,listeners:[{display_address:'alice/agent#review',listener_id:'opaque'},{display_address:'bob/agent#test'}]});
+ assert.match(found,/2 listeners · 1 online[\s\S]*alice\/agent#review[\s\S]*bob\/agent#test/);
+ assert.doesNotMatch(found,/opaque|display_address/);
+ const status=renderTool('status',{registered:true,unread_count:2,display_address:'alice/agent#review',hubs:[{name:'work',status:'auth_required'},{name:'cloud',status:'disconnected'}]});
+ assert.match(status,/Listening · 2 unread[\s\S]*Warning: work: Sign in required[\s\S]*Warning: cloud: Disconnected/);
  assert.equal(toolRenderer('mcp__other__cito_send',()=> 'fallback'),'fallback');
  const narrow=renderer({content:'\u4e2d👩‍💻é'.repeat(8)},{expanded:false,outputPad:4},plain);
  for(let width=1;width<=12;width++)for(const line of narrow.render(width)){const cells=Array.from(line.replaceAll('\u4e2d','XX').replaceAll('👩‍💻','XX').replaceAll('é','e')).length;assert(cells<=width,`width ${width}: ${line}`);}
@@ -177,31 +221,52 @@ try {
  await handlers.get('session_start')({},context);
  const beforeReload={...early,session_id:session,batch_id:'reload'};
  assert.equal((await request(beforeReload)).deduplicated,false);
+ await request({op:'status',session_id:session,badge:'Retained badge'});
+ holdHttp=true;
+ const acrossReload=await begin('on Pending reload');
+ const reloadCallCount=calls.length;
  await handlers.get('session_shutdown')({reason:'reload'},context);
  const reloaded=await import('../../../../plugins/pi/cito-bridge.ts?reload');
  reloaded.default(api);
  await waitForSocket();
  const current=await request({op:'identify'});
- assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about],[session,'/repo','Work',about]);
- assert.equal((await request(beforeReload)).deduplicated,true);
+ assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about,current.badge],[session,'/repo','Work',about,'Retained badge']);
  await handlers.get('session_start')({reason:'reload'},context);
+ assert.equal((await request(beforeReload)).deduplicated,true);
+ assert.equal(badges.at(-1),'Retained badge');
+ const offAfterReload=begin('');
+ await request({op:'ping'});
+ assert.equal(calls.length,reloadCallCount,'The new command must wait for the old instance’s in-flight request');
+ const reloadReply=JSON.stringify({result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'active',scope:'self'})}]}});
+ acrossReload.response.end(reloadReply);await acrossReload.done;
+ const off=await offAfterReload;
+ assert.equal(calls.at(-1).params.name,'cito_unlisten');
+ off.response.end(reloadReply);await off.done;
+ assert.equal(badges.at(-1),undefined);
+ holdHttp=false;
  // U2: recover an unlinked socket only while the package remains configured.
  const home=join(process.env.HOME,'.pi','agent');mkdirSync(home,{recursive:true});
  const custom=join(process.env.HOME,'custom-pi');mkdirSync(custom,{recursive:true});
- writeFileSync(join(custom,'cito-bridge.ts'),readFileSync(new URL('../../../../plugins/pi/cito-bridge.ts',import.meta.url)));
- // Exercise the idle directory watcher without a host callback. Directory events
- // may coalesce; the observable result is a new socket serving the same session.
+ writeFileSync(join(custom,'cito-bridge.ts'),'');
  writeFileSync(join(home,'settings.json'),JSON.stringify({packages:['~/custom-pi']}));
- unlinkSync(path);
- // On Darwin, a socket-only unlink need not generate its own FSEvents frame.
- // Make distinct sibling directory entries until a real watcher wake is delivered;
- // no callback is injected and only the bridge can recreate the missing socket.
- for(let i=0;i<100 && !existsSync(path);i++) {
-  writeFileSync(join(state,'sockets',`sibling-${i}`),'');
-  await new Promise(r=>setTimeout(r,100));
- }
- assert(existsSync(path),'The reloaded bridge must repair its socket on a directory change');
- assert.equal((await request({op:'identify'})).session_id,session);
+ assert(watchPaths.has(join(state,'sockets')));
+ assert(watchPaths.has(sentinel));
+ assert(statSync(sentinel).isFile());
+ assert.equal(statSync(sentinel).mode&0o777,0o600);
+ // Suppress directory notifications. Only the real regular-file fs.watch can
+ // repair the socket now; neither an extension lifecycle event nor a timer can.
+ muteDirectory=true;
+ const interval=globalThis.setInterval, watchFile=fs.watchFile;
+ globalThis.setInterval=fs.watchFile=()=>{assert.fail('Socket repair must not poll');};
+ syncBuiltinESMExports();
+ try {
+  for(let i=0;i<2;i++) {
+   unlinkSync(path);
+   writeFileSync(sentinel,'1',{flag:'r+'});
+   await waitForSocket();
+   assert.equal((await request({op:'identify'})).session_id,session);
+  }
+ } finally {globalThis.setInterval=interval;fs.watchFile=watchFile;syncBuiltinESMExports();muteDirectory=false;}
  // Remaining cases exercise repair policy. A real session_start is a repair
  // opportunity even if FSEvents batched two successive unlinks into one event.
  async function unlinkAndResume() {
@@ -225,26 +290,6 @@ try {
   assert(interrupted>=2,'A second unlink during repair must start another bind');
   assert.equal((await request({op:'identify'})).session_id,session);
  } finally {fs.chmodSync=chmod;syncBuiltinESMExports();}
- // Run real socket repairs, shortening only the scheduled retry intervals.
- const schedule=globalThis.setTimeout, delays=[];
- let failures=0;
- fs.chmodSync=(file,mode)=>{
-  if(file===join(state,'sockets') && failures>0){failures--;throw Error('Directory unavailable');}
-  chmod(file,mode);
- };
- syncBuiltinESMExports();
- globalThis.setTimeout=(callback,ms,...args)=>{
-  delays.push(ms);return schedule(callback,1,...args);
- };
- try {
-  for(const expected of [[50,100,200,400,800,1600,3200,5000,5000],[50]]) {
-   failures=expected.length;delays.length=0;
-   await unlinkAndResume();
-   for(let i=0;i<100&&!existsSync(path);i++)await new Promise(r=>schedule(r,5));
-   assert.equal((await request({op:'identify'})).session_id,session);
-   assert.deepEqual(delays,expected,'Retry delays must grow, cap, and reset after a healthy bind');
-  }
- } finally {globalThis.setTimeout=schedule;fs.chmodSync=chmod;syncBuiltinESMExports();}
  for(const packages of [[],[join(process.env.HOME,'unrelated-package')]]) {
   writeFileSync(join(home,'settings.json'),JSON.stringify({packages}));
   if(existsSync(path))await unlinkAndResume();
@@ -252,7 +297,11 @@ try {
  }
 } finally {await handlers.get('session_shutdown')?.({},context);server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}
 assert.equal(existsSync(path),false);
-const headless=new Map(), originalWatch=fs.watch, savedArgs=[...process.argv], savedHeadless=process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY;
+assert.equal(existsSync(sentinel),false);
+process.env.CITO_STATE_DIR='';
+assert.throws(()=>bridge({...api,registerMcpServer:()=>assert.fail('Empty state directory reached MCP setup')}),/CITO_STATE_DIR must not be empty/);
+process.env.CITO_STATE_DIR=state;
+const headless=new Map(), savedArgs=[...process.argv], savedHeadless=process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY;
 try {
  process.argv.push('--mode=json');process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='0';
  fs.watch=()=>{throw Error('Headless mode must not register a repair watcher');};syncBuiltinESMExports();

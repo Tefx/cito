@@ -1642,7 +1642,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     // A real plugin discovery response travels through SessionActivity, snapshot,
     // and the UI, including mixed 36/46-point rows in the scroll document.
     let options = f.state.join("plugins/fixture/options.json");
-    let sessions:Vec<Value>=(0..5).map(|i|json!({"harness":"fixture","session_id":format!("reload-{i}"),"title":"Work session","cwd":"/tmp","needs_reload":i%2==0,"reload_hint":"Run /reload in Fixture to enable 1-click listen"})).collect();
+    let sessions:Vec<Value>=(0..5).map(|i|json!({"harness":"fixture","session_id":format!("reload-{i}"),"title":"Work session","cwd":"/tmp","endpoint_pid":std::process::id(),"needs_reload":i%2==0,"reload_hint":"Run /reload in Fixture to enable 1-click listen"})).collect();
     fs::write(&options,json!({"session_id":"session-1","status":"alive","outcome":"delivered_unconfirmed","sessions":sessions}).to_string()).unwrap();
     f.action_ok(json!({"op":"setup_apply","harness":"fixture"}));
     f.send(l.ui, json!({"op":"test_menu_open"}));
@@ -1650,6 +1650,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     l.snapshot("menu", "r4_needs_reload_candidates.png");
     l.control("reload:fixture:reload-0");
     l.until(|s| s["clipboard"] == "/reload");
+    l.until(|s| s.menu("listen:fixture:reload-1")["enabled"] == true);
     l.control("listen:fixture:reload-1");
     l.until(|s| !s.menu("menu_error_row").is_null());
     l.snapshot("menu", "r3_menu_error.png");
@@ -2871,7 +2872,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         p,
         json!({"op":"test_composer_input","value":"Ready to review"}),
     );
-    assert_eq!(inspect(&f, p)["composer_target"], "bob/pi#8a4f");
+    assert_eq!(inspect(&f, p)["composer_target"], "local:review");
     capture("directory", "directory_composer");
     control(&f, p, "composer_cancel");
     control(&f, p, "dir_mode:activity");
@@ -2899,7 +2900,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     let reply = inspect(&f, p);
     assert_eq!(reply["composer_open"], true);
-    assert_eq!(reply["composer_target"], "bob/pi#8a4f");
+    assert_eq!(reply["composer_target"], "local:review");
     assert_eq!(
         reply.directory("composer_target")["text"],
         "To: bob/pi#8a4f"

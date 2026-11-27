@@ -1,9 +1,11 @@
 **
 !Cargo.toml
 !Cargo.lock
+!rust-toolchain.toml
 !crates/
 !crates/cito-native/
 !crates/cito-native/**
 **/target/
 !plugins/
 !plugins/**
+plugins/**/bin/

@@ -439,7 +439,8 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
             );
             children.lines().any(|child| {
                 let (_, path, _) = f.command("/bin/ps", &["-p", child, "-o", "comm="], "");
-                std::fs::canonicalize(path.trim()).is_ok_and(|path| path == helpers.join("cito-ui"))
+                std::fs::canonicalize(path.trim())
+                    .is_ok_and(|path| path == helpers.join("Cito.app/Contents/MacOS/cito-ui"))
             })
         });
         pid
@@ -464,7 +465,13 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
         "",
     );
     assert!(ok, "In-place app rebuild failed: {out} {err}");
-    check_generation(&f, app, original_pid);
+    let moved_pid = check_generation(&f, app, original_pid);
+    let launcher = app.join("Contents/MacOS/Cito");
+    for args in [&[][..], &["-psn_0_123"][..]] {
+        let (ok, out, err) = f.command(launcher.to_str().unwrap(), args, "");
+        assert!(ok, "App reopen failed: {out} {err}");
+        assert_eq!(http(f.port, "/health", None).1["pid"], moved_pid);
+    }
     assert!(!obsolete.exists());
     assert!(!obsolete_plugin.exists());
     assert_eq!(fs::read(&bundled).unwrap(), b"relocated source");
@@ -480,11 +487,34 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
             .to_string_lossy()
             .starts_with(".Cito-")));
     // Keep stdin open until the relocated helper processes its main-run-loop frames.
-    let helper = f.spawn(
-        app.join("Contents/Helpers/cito-ui").to_str().unwrap(),
-        &[],
-        &[],
+    let ui = app.join("Contents/Helpers/Cito.app/Contents");
+    let (ok, plist, err) = f.command(
+        "/usr/bin/plutil",
+        &[
+            "-convert",
+            "json",
+            "-o",
+            "-",
+            ui.join("Info.plist").to_str().unwrap(),
+        ],
+        "",
     );
+    assert!(ok, "{err}");
+    let plist: Value = serde_json::from_str(&plist).unwrap();
+    assert_eq!(plist["CFBundleName"], "Cito");
+    assert_eq!(plist["CFBundleDisplayName"], "Cito");
+    assert_eq!(plist["CFBundleExecutable"], "cito-ui");
+    assert_eq!(plist["CFBundlePackageType"], "APPL");
+    assert_eq!(
+        plist["CFBundleShortVersionString"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(plist["CFBundleIconFile"], "AppIcon");
+    assert_eq!(
+        fs::read(ui.join("Resources/AppIcon.icns")).unwrap(),
+        fs::read(app.join("Contents/Resources/AppIcon.icns")).unwrap()
+    );
+    let helper = f.spawn(ui.join("MacOS/cito-ui").to_str().unwrap(), &[], &[]);
     f.send(helper,json!({"op":"state","hubs":[{"name":"local","status":"connected","auth_mode":"none","user":"alice"}],"listeners":[],"unread_count":0}));
     f.send(helper, json!({"op":"test_inspect_menu"}));
     wait(|| f.output(helper, true).contains("cito-ui: menu "));
@@ -561,7 +591,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     assert!(
         f.command(
             "/usr/bin/codesign",
-            &["--verify", "--deep", app.to_str().unwrap()],
+            &["--verify", "--deep", "--strict", app.to_str().unwrap()],
             ""
         )
         .0

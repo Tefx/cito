@@ -353,7 +353,7 @@ fn human_replies_resolve_stored_ids_before_hub_qualifiers() {
     let human = listener_id("none#alice", "human", "default");
     put(&e, "target", "none#bob", "workspace");
     for id in ["1", "event:1", "thread:source"] {
-        send(&e, &human, id);
+        send_from(&e, &human, id, "none#bob", "target");
     }
     for (field, supplied, expected) in [
         ("in_reply_to", "work:thread:source", "thread:source"),
@@ -463,7 +463,7 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
     e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,enabled) VALUES('none#alice','fixture',1)", &[]).unwrap();
     put(&e, "target", "none#bob", "workspace");
     send(&e, &human, "ack-source");
-    send(&e, &human, "reply-source");
+    send_from(&e, &human, "reply-source", "none#bob", "target");
     let root = fixture(&dir);
     let mut plugin = hub_plugins::discover(&[(root, false)], None)
         .unwrap()
@@ -507,7 +507,7 @@ fn committed_ack_and_human_reply_survive_notification_failure() {
             )],
         )
         .unwrap();
-    send(&e, &human, "thread:source");
+    send_from(&e, &human, "thread:source", "none#bob", "target");
     e.inner.db.execute("INSERT INTO hub_channel_delivery_msgs VALUES('fixture','none#alice','chunk','thread:source','target')",&[]).unwrap();
     let mut frame = json!({"op":"inbound_reply","external_chat_id":"room","external_user_id":"user","reply_to_external_msg_id":"chunk","update_id":"opaque","text":"Reply"});
     assert_eq!(e.plugin_frame("fixture", &frame).unwrap()["ok"], false);
@@ -1114,7 +1114,10 @@ fn put(e: &HubEngine, id: &str, pid: &str, scope: &str) {
     e.rpc("kv_put",&json!({"key":id,"data_b64":encoded(&json!({"listener_id":id,"principal_id":pid,"owner_user":"alice","scope":scope,"harness":"fixture","session_id":"s1","binding_generation":1,"state":"ACTIVE","updated_at_ms":now_ms()}))}),None).unwrap();
 }
 fn send(e: &HubEngine, id: &str, sig: &str) {
-    e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data_b64":encoded(&json!({"signal_id":sig,"from":{"principal_id":"oidc:https://id.example.com|sender","listener_id":"sender","user":"bob"},"message":"hello"})),"opts":{"msgID":sig}}),None).unwrap();
+    send_from(e, id, sig, "oidc:https://id.example.com|sender", "sender");
+}
+fn send_from(e: &HubEngine, id: &str, sig: &str, pid: &str, from: &str) {
+    e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data_b64":encoded(&json!({"signal_id":sig,"from":{"principal_id":pid,"listener_id":from,"user":"bob"},"message":"hello"})),"opts":{"msgID":sig}}),None).unwrap();
 }
 #[test]
 fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_unknown_effects() {
@@ -1697,7 +1700,16 @@ fn oidc_admin_can_edit_redacted_service_fields() {
     let root = fixture(&dir);
     let e = test_engine(&dir);
     e.set_plugin_roots(&[root]).unwrap();
-    let admin = json!({"principal_id":"oidc:https://id.example.com|admin","owner_user":"lifecycle-admin","sub":"admin","oidc":true});
+    let admin = json!({"principal_id":"oidc:https://id.example.com|lifecycle-admin","owner_user":"alice","sub":"lifecycle-admin","oidc":true});
+    let collision = json!({"principal_id":"oidc:https://id.example.com|guest","owner_user":"lifecycle-admin","sub":"guest","oidc":true});
+    assert!(e
+        .rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","hub_config":{"credential":"secret"}}),
+            Some(&collision)
+        )
+        .unwrap_err()
+        .starts_with("FORBIDDEN"));
     e.rpc(
         "human_channels_configure",
         &json!({"plugin_id":"fixture","hub_config":{"credential":"secret"}}),
@@ -1929,6 +1941,126 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     configure(json!({"hub_config":{"credential":"restored"}}));
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
 }
+#[test]
+fn bot_switch_marks_delivery_unverified_until_current_destination_settles() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let path = root.join("fixture/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["serviceIdentity"] = json!({"field":"credential","separator":":"});
+    manifest["pairing"]["deliveryVerificationHelpText"] =
+        json!("Send /start to the bot or re-pair your account to verify delivery.");
+    std::fs::write(path, manifest.to_string()).unwrap();
+    let e = test_engine(&dir);
+    e.pause_worker();
+    e.set_plugin_roots(&[root]).unwrap();
+    let owner = principal("alice");
+    let save = |token: &str| {
+        e.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":token},"user_config":{"address":"room"}}), Some(&owner)).unwrap()
+    };
+    let inventory = || {
+        e.rpc("human_channels_list", &json!({}), Some(&owner))
+            .unwrap()["channels"][0]
+            .clone()
+    };
+    save("1:first");
+    assert_eq!(inventory()["delivery_unverified"], false);
+    save("2:other");
+    e.plugin_frame(
+        "fixture",
+        &json!({"op":"health","service_label":"@new_bot"}),
+    );
+    let channel = inventory();
+    assert_eq!(channel["delivery_unverified"], true);
+    let detail = s(&channel, "detail");
+    assert!(detail.contains("@new_bot") && detail.contains("/start") && detail.contains("re-pair"));
+    save("2:other");
+    assert_eq!(inventory()["delivery_unverified"], true);
+    let node = listener_id("none#alice", "human", "default");
+    send(&e, &node, "verify-current-bot");
+    e.rpc("human_channel_poll", &json!({"plugin_id":"fixture"}), None)
+        .unwrap();
+    wait_for(|| inventory()["delivery_unverified"] == false);
+}
+
+#[test]
+fn send_test_wait_allows_hub_channel_poll_and_rejects_missing_status() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let plugin_dir = root.join("fixture");
+    let manifest_path = plugin_dir.join("plugin.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let script = plugin_dir.join("test_pipe.py");
+    std::fs::write(
+        &script,
+        r#"import json, pathlib, sys
+for line in sys.stdin:
+    frame = json.loads(line)
+    if frame['op'] == 'test':
+        test = frame['req_id']
+        pathlib.Path('test-received').touch()
+    if frame['op'] == 'deliver':
+        print(json.dumps({'op':'rpc_result','req_id':test}), flush=True)
+        print(json.dumps({'op':'delivered','delivery_id':frame['delivery_id']}), flush=True)
+"#,
+    )
+    .unwrap();
+    manifest["command"] = json!(["python3", script]);
+    std::fs::write(manifest_path, manifest.to_string()).unwrap();
+    let e = test_engine(&dir);
+    e.pause_worker();
+    e.set_plugin_roots(&[root]).unwrap();
+    let owner = principal("alice");
+    e.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}), Some(&owner)).unwrap();
+    let tester = e.0.clone();
+    let test = thread::spawn(move || {
+        tester.rpc("human_channels_test", &json!({"plugin_id":"fixture"}), None)
+    });
+    wait_for(|| plugin_dir.join("test-received").exists());
+    let node = listener_id("none#alice", "human", "default");
+    send(&e, &node, "after-test-started");
+    e.rpc("human_channel_poll", &json!({"plugin_id":"fixture"}), None)
+        .unwrap();
+    let test = test.join().unwrap().unwrap();
+    assert_eq!(test["effect_unknown"], true);
+    assert_eq!(test["ok"], false);
+    wait_for(|| {
+        e.inner
+            .db
+            .query("SELECT status FROM hub_channel_deliveries", &[])
+            .unwrap()
+            == [json!({"status":"effect_unknown"})]
+    });
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT signal_id FROM hub_signals WHERE acked_at_ms IS NOT NULL",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+
+    // Simulate the listener joining an HTTP worker that is waiting on the child.
+    std::fs::remove_file(plugin_dir.join("test-received")).unwrap();
+    let tester = e.0.clone();
+    let (done, result) = mpsc::channel();
+    let test = thread::spawn(move || {
+        let value = tester.rpc("human_channels_test", &json!({"plugin_id":"fixture"}), None);
+        let _ = done.send(value);
+    });
+    wait_for(|| plugin_dir.join("test-received").exists());
+    e.shutdown_before(|| {
+        assert!(result
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap_err()
+            .starts_with("UNAVAILABLE:"));
+    });
+    test.join().unwrap();
+}
+
 #[test]
 fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_service() {
     let dir = temp();
@@ -2739,8 +2871,17 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     );
     assert_eq!(list["channels"][0]["fields"][0]["value"], "");
     assert!(pair["instruction"].as_str().unwrap().contains(code));
-    let redeemed=e.redeem("fixture",&json!({"code":code,"is_private_chat":true,"external_chat_id":"paired-chat","external_user_id":"paired-user","user_config_patch":{"address":"paired-room"}})).unwrap();
+    let frame = json!({"code":code,"is_private_chat":true,"external_chat_id":"paired-chat","external_user_id":"paired-user","user_config_patch":{"address":"paired-room"}});
+    let redeemed = e.redeem("fixture", &frame).unwrap();
     assert_eq!(redeemed["ok"], true);
+    e.shutdown();
+    let e = TestEngine(HubEngine::open_with_auth_mode(&dir, "token").unwrap());
+    e.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let mut replay = frame;
+    replay["user_config_patch"] = json!({"address":"must-not-be-applied-twice"});
+    assert_eq!(e.redeem("fixture", &replay).unwrap()["duplicate"], true);
+    replay["external_user_id"] = json!("different-account");
+    assert!(e.redeem("fixture", &replay).is_err());
     assert_eq!(
         e.inner
             .db
@@ -3043,7 +3184,7 @@ fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
                     Ok(())
                 })
                 .unwrap();
-            send(&e, &node, signal);
+            send_from(&e, &node, signal, binding_pid, "sender");
             wait_for(|| {
                 !e.inner.db.query(
                 "SELECT 1 AS n FROM hub_channel_deliveries WHERE principal_id=? AND signal_id=? AND status='delivered'",
@@ -3119,7 +3260,7 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
     .unwrap();
     let human = listener_id("none#alice", "human", "default");
     put(&e, "target", "none#bob", "workspace");
-    send(&e, &human, "source");
+    send_from(&e, &human, "source", "none#bob", "target");
     wait_for(|| {
         !e.inner.db.query("SELECT 1 AS n FROM hub_channel_deliveries WHERE signal_id='source' AND status='delivered'", &[]).unwrap().is_empty()
     });
@@ -3174,9 +3315,18 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     let sender = principal("alice");
     let human = listener_id("none#alice", "human", "default");
     put(&e, "target", "none#bob", "workspace");
-    send(&e, &human, "original");
+    send_from(&e, &human, "original", "none#bob", "target");
     let events = e.subscribe(None).unwrap();
     let request = json!({"to":"work:target","message":" \u{0081}Approv\u{0081}ed\t ","in_reply_to":"work:original","msg_id":"desktop-reply","host_id":"desktop","host_name":"Desktop"});
+    put(&e, "wrong-sender", "none#bob", "workspace");
+    let mut wrong = request.clone();
+    wrong["to"] = json!("wrong-sender");
+    assert!(e
+        .rpc("send_reply_from_human", &wrong, Some(&sender))
+        .unwrap_err()
+        .contains("source signal sender"));
+    // Drain the registration event before checking that a failed reply emits nothing.
+    assert_eq!(events.try_recv().unwrap()["type"], "kv");
     e.inner.db.execute("CREATE TRIGGER fail_reply_ack BEFORE UPDATE OF acked_at_ms ON hub_signals WHEN OLD.signal_id='original' BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
     assert!(e
         .rpc("send_reply_from_human", &request, Some(&sender))
@@ -3574,6 +3724,25 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
             };
             assert_eq!(actual, status, "bind={bind} host={host} media={media}");
         }
+        // A bounded prefix of a rejected upload must not reset the response.
+        let mut upload = TcpStream::connect(&address).unwrap();
+        upload
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        upload
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = format!(
+            "POST /v1/rpc HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            MAX_RPC_BYTES + 1,
+            "x".repeat(64 * 1024),
+        );
+        upload.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        upload.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+        drop(upload);
+
         let mut clients = Vec::new();
         for _ in 0..3 {
             let mut client = TcpStream::connect(&address).unwrap();
@@ -4621,6 +4790,120 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     );
     assert!(e.inner.processes.lock().unwrap().is_empty());
     e.inner.plugins.lock().unwrap().clear();
+}
+
+#[test]
+fn stream_ingress_rejects_coercion_and_audit_excludes_private_payloads() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.rpc("kv_put", &json!({"key":"target","data":{"principal_id":"none#alice","scope":"workspace","state":"ACTIVE","owner_token":"private-owner-token","channels":{"a":{"owner_token":"private-nested-token"}}}}), None).unwrap();
+    let signal = hub.rpc("js_publish", &json!({"subject":"cito.signal.target","data":{"signal_id":"published","message":"private-message-body"}}), None).unwrap();
+    hub.rpc(
+        "consumer_add",
+        &json!({"config":{"name":"receiver","filter_subject":"cito.signal.target"}}),
+        None,
+    )
+    .unwrap();
+    for (key, value) in [
+        ("max_age", json!(true)),
+        ("duplicate_window", json!(1.5)),
+        ("max_age", json!("1")),
+    ] {
+        for (op, params) in [
+            ("stream_add", json!({"config":{"name":"test",key:value}})),
+            (
+                "stream_update",
+                json!({"stream":SIGNALS,"patch":{key:value}}),
+            ),
+        ] {
+            assert!(hub.rpc(op, &params, None).unwrap_err().contains(key));
+        }
+    }
+    for seq in [json!(true), json!(0), json!(-1), json!(1.0), json!("1")] {
+        for (op, params) in [
+            ("stream_get_message", json!({"stream":SIGNALS,"seq":seq})),
+            ("stream_get_message", json!({"stream":SIGNALS,"seqs":[seq]})),
+            ("consumer_ack", json!({"name":"receiver","seq":seq})),
+        ] {
+            assert!(hub
+                .rpc(op, &params, None)
+                .unwrap_err()
+                .starts_with("INVALID_INPUT:"));
+        }
+    }
+    assert_eq!(
+        hub.rpc(
+            "consumer_ack",
+            &json!({"name":"receiver","seq":signal["seq"]}),
+            None
+        )
+        .unwrap()["acked"],
+        true
+    );
+    let detail = hub
+        .inner
+        .db
+        .query("SELECT detail_json FROM hub_audit_log", &[])
+        .unwrap();
+    let serialized = json!(detail).to_string();
+    for secret in [
+        "private-owner-token",
+        "private-nested-token",
+        "private-message-body",
+    ] {
+        assert!(!serialized.contains(secret));
+    }
+}
+
+#[test]
+fn fresh_publish_and_wake_claims_check_registration_incarnation() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    let owner = principal("alice");
+    let stranger = principal("bob");
+    let register = |generation, token: &str, scope: &str| {
+        hub.rpc("kv_put", &json!({"key":"agent","data":{"harness":"agent","principal_id":"none#alice","scope":scope,"state":"ACTIVE","binding_generation":generation,"channels":{"host:agent":{"state":"ACTIVE","host_id":"host","owner_token":token}}}}), Some(&owner)).unwrap()
+    };
+    let publish = |generation, caller: &Value, id: &str| {
+        hub.rpc("js_publish", &json!({"subject":"cito.signal.agent","data":{"signal_id":id,"target_generation":generation,"from":{"principal_id":caller["principal_id"],"listener_id":"sender"},"message":"Hello"}}), Some(caller))
+    };
+    register(1, "first", "self");
+    assert!(publish(0, &stranger, "private")
+        .unwrap_err()
+        .starts_with("FORBIDDEN_TARGET_SCOPE:"));
+    assert!(publish(2, &owner, "stale")
+        .unwrap_err()
+        .starts_with("STALE_GENERATION:"));
+    publish(1, &owner, "admitted").unwrap();
+    let claim = |token: &str| {
+        hub.rpc("signal_claim_dispatch", &json!({"node_id":"agent","channel_id":"host:agent","signal_ids":["admitted"],"owner_token":token}), Some(&owner))
+    };
+    assert_eq!(claim("first").unwrap()["claimed"], true);
+    register(2, "second", "self");
+    assert!(claim("first").unwrap_err().starts_with("STALE_GENERATION:"));
+    assert_eq!(claim("second").unwrap()["reason"], "already_claimed");
+    hub.inner
+        .db
+        .execute("UPDATE hub_signals SET claim_until_ms=0", &[])
+        .unwrap();
+    assert_eq!(claim("second").unwrap()["claimed"], true);
+    // Freeze the cached clock at an old valid lease. Only the Hub clock is authoritative.
+    hub.inner
+        .db
+        .transaction(|c| {
+            let mut reg = parse(&kv_row(c, "agent")?.unwrap(), "value");
+            reg["channels"]["host:agent"]["updated_at_ms"] = json!(1);
+            reg["server_now_ms"] = json!(2);
+            c.execute(
+                "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key='agent'",
+                &[json!(reg.to_string())],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(publish(2, &owner, "expired")
+        .unwrap_err()
+        .starts_with("LISTENER_NOT_FOUND:"));
 }
 
 #[test]

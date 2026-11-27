@@ -103,6 +103,10 @@ pub fn is_staged_plugin_intact(state_dir: &Path, plugin: &PluginDescriptor) -> b
 }
 
 pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> bool {
+    check_plugin_dir(dir, plugin, false)
+}
+
+fn check_plugin_dir(dir: &Path, plugin: &PluginDescriptor, compare_contents: bool) -> bool {
     if !dir.join("plugin.json").is_file() {
         return false;
     }
@@ -118,26 +122,23 @@ pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> boo
             .ok()
             .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
             .is_some_and(|manifest| manifest["version"].as_str() == Some(CITO_VERSION))
-            && contains_plugin_files(&resolve_bundled_plugin_dir(&plugin.id), dir))
+            && contains_plugin_files(
+                &resolve_bundled_plugin_dir(&plugin.id),
+                dir,
+                compare_contents,
+            ))
 }
 
 fn valid_plugin_command(dir: &Path, cmd: &str) -> bool {
     !(cmd.starts_with("./") || cmd.starts_with("../"))
         || fs::metadata(dir.join(cmd))
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o100 != 0)
 }
 
-fn contains_plugin_files(source: &Path, target: &Path) -> bool {
+fn contains_plugin_files(source: &Path, target: &Path, compare_contents: bool) -> bool {
     fn equal_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
         use std::io::Read;
         let (mut a, mut b) = (fs::File::open(a)?, fs::File::open(b)?);
-        let (source, staged) = (a.metadata()?, b.metadata()?);
-        if source.len() != staged.len()
-            || (source.permissions().mode() & 0o111 != 0
-                && staged.permissions().mode() & 0o111 == 0)
-        {
-            return Ok(false);
-        }
         let (mut left, mut right) = ([0; 16 * 1024], [0; 16 * 1024]);
         loop {
             let n = a.read(&mut left)?;
@@ -169,12 +170,18 @@ fn contains_plugin_files(source: &Path, target: &Path) -> bool {
             return false;
         }
         let equal = if kind.is_dir() {
-            contains_plugin_files(&path, &staged)
+            contains_plugin_files(&path, &staged, compare_contents)
         } else if kind.is_symlink() {
             fs::read_link(path)
                 .is_ok_and(|link| fs::read_link(staged).is_ok_and(|other| link == other))
         } else {
-            kind.is_file() && equal_bytes(&path, &staged).unwrap_or(false)
+            kind.is_file()
+                && entry.metadata().is_ok_and(|source| {
+                    source.len() == meta.len()
+                        && (source.permissions().mode() & 0o100 == 0
+                            || meta.permissions().mode() & 0o100 != 0)
+                })
+                && (!compare_contents || equal_bytes(&path, &staged).unwrap_or(false))
         };
         if !equal {
             return false;
@@ -251,7 +258,8 @@ fn ensure_plugins_staged<'a>(
     let mut publications = Vec::new();
     for plugin in plugins {
         let target = plugins_dir.join(&plugin.id);
-        if is_plugin_dir_intact(&target, plugin) {
+        // Explicit setup and repair compare contents; recurring checks use metadata.
+        if check_plugin_dir(&target, plugin, true) {
             continue;
         }
         let bundled = resolve_bundled_plugin_dir(&plugin.id);
@@ -416,6 +424,13 @@ pub fn set_launch_at_login(
     ensure_cli_shims_native(state_dir, plugins)?;
     let bin_dir = state_dir.join("bin");
     let cito_bin = bin_dir.join("cito");
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let native = resolve_stable_package_root(&exe.to_string_lossy());
+    // Resolve the registered outer application when the installation backing the shim has moved.
+    let launch = r#"if [ -x "$1" ] && [ -x "$2" ]; then exec "$1" daemon; fi
+app=$(/usr/bin/osascript -l JavaScript -e 'ObjC.import("AppKit"); const url = $.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier("one.tefx.cito"); ObjC.unwrap(url.path);') || exit 1
+[ -n "$app" ] && [ -x "$app/Contents/MacOS/Cito" ] || exit 1
+exec "$app/Contents/MacOS/Cito" daemon"#;
     let path_val = format!(
         "{}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         bin_dir.display()
@@ -439,10 +454,16 @@ pub fn set_launch_at_login(
          <dict>\n\
            <key>Label</key>\n\
            <string>com.tefx.cito.daemon</string>\n\
+           <key>AssociatedBundleIdentifiers</key>\n\
+           <array><string>one.tefx.cito</string></array>\n\
            <key>ProgramArguments</key>\n\
            <array>\n\
+             <string>/bin/sh</string>\n\
+             <string>-c</string>\n\
              <string>{}</string>\n\
-             <string>daemon</string>\n\
+             <string>cito-login</string>\n\
+             <string>{}</string>\n\
+             <string>{}</string>\n\
            </array>\n\
            <key>RunAtLoad</key>\n\
            <true/>\n\
@@ -460,7 +481,9 @@ pub fn set_launch_at_login(
            </dict>\n\
          </dict>\n\
          </plist>\n",
+        escape_xml(launch),
         escape_xml(&cito_bin.to_string_lossy()),
+        escape_xml(&native),
         escape_xml(&home_dir.to_string_lossy()),
         escape_xml(&path_val),
         escape_xml(&state_dir.to_string_lossy()),
@@ -1155,6 +1178,14 @@ fn disconnect_plugin(plugin: &PluginDescriptor, dry_run: bool) -> Result<Vec<Set
 }
 pub fn run_setup_cli(args: &[String]) {
     let run = || -> Result<bool, String> {
+        if args == ["--open-app"] {
+            let (config, _) = crate::plugins::load_native_config()?;
+            crate::plugins::ensure_daemon(&config)?;
+            if env::var("CITO_DISABLE_UI").as_deref() != Ok("1") {
+                super::cli::control_request(&config, &json!({"op":"reopen_ui"}))?;
+            }
+            return Ok(false);
+        }
         let (state_dir, config_path, home_dir) = resolve_state_and_config_paths()?;
 
         let mut status_only = false;
@@ -1226,14 +1257,16 @@ pub fn run_setup_cli(args: &[String]) {
                 purge_data = true;
             } else if arg == "--default" {
                 set_default = true;
-            } else if arg == "--login-item" {
-                launch_at_login = Some(true);
-            } else if arg == "--no-login-item" {
-                launch_at_login = Some(false);
-            } else if arg == "--share-hub" {
-                share_hub = Some(true);
-            } else if arg == "--no-share-hub" {
-                share_hub = Some(false);
+            } else if matches!(arg.as_str(), "--login-item" | "--no-login-item") {
+                let enabled = arg == "--login-item";
+                if launch_at_login.replace(enabled) == Some(!enabled) {
+                    return Err("--login-item and --no-login-item are mutually exclusive".into());
+                }
+            } else if matches!(arg.as_str(), "--share-hub" | "--no-share-hub") {
+                let enabled = arg == "--share-hub";
+                if share_hub.replace(enabled) == Some(!enabled) {
+                    return Err("--share-hub and --no-share-hub are mutually exclusive".into());
+                }
             } else if arg == "--share-port" || arg.starts_with("--share-port=") {
                 let (v, next_i) = read_val(arg, i, "--share-port")?;
                 share_port = Some(v.parse::<i64>().unwrap_or(-1));
@@ -1339,28 +1372,43 @@ pub fn run_setup_cli(args: &[String]) {
             return Err("--hub requires --url".to_string());
         }
 
+        // Status can accompany build-app as a read-only query; it must never publish a bundle.
+        let primary = [
+            status_only,
+            uninstall,
+            build_app && !status_only,
+            invite.is_some(),
+            print_invite,
+            disconnect_all,
+        ];
+        let editing = hub_url.is_some()
+            || share_hub.is_some()
+            || share_port.is_some()
+            || !enable_hubs.is_empty()
+            || !disable_hubs.is_empty()
+            || !remove_hubs.is_empty()
+            || !enable_harnesses.is_empty()
+            || !disable_harnesses.is_empty()
+            || launch_at_login.is_some();
+        if primary.into_iter().filter(|active| *active).count() > 1
+            || (primary.contains(&true) && editing)
+        {
+            return Err(
+                "Primary setup operations must be used separately from other setup operations"
+                    .into(),
+            );
+        }
+        if enable_hubs
+            .iter()
+            .any(|hub| disable_hubs.contains(hub) || remove_hubs.contains(hub))
+            || disable_hubs.iter().any(|hub| remove_hubs.contains(hub))
+            || enable_harnesses
+                .iter()
+                .any(|harness| disable_harnesses.contains(harness))
+        {
+            return Err("Conflicting setup operations for the same target".into());
+        }
         if invite.is_some() || print_invite || disconnect_all {
-            if usize::from(invite.is_some())
-                + usize::from(print_invite)
-                + usize::from(disconnect_all)
-                != 1
-                || uninstall
-                || build_app
-                || status_only
-                || hub_url.is_some()
-                || share_hub.is_some()
-                || share_port.is_some()
-                || !enable_hubs.is_empty()
-                || !disable_hubs.is_empty()
-                || !remove_hubs.is_empty()
-                || !enable_harnesses.is_empty()
-                || !disable_harnesses.is_empty()
-                || launch_at_login.is_some()
-                || set_default
-                || (purge_data && !disconnect_all)
-            {
-                return Err("Invite and disconnect operations must be used separately from other setup operations".into());
-            }
             let action = if let Some(invite) = invite {
                 json!({"op":"paste_hub_invite","invite":invite})
             } else if print_invite {
@@ -1526,7 +1574,7 @@ pub fn run_setup_cli(args: &[String]) {
             return Ok(false);
         }
 
-        if uninstall && !build_app {
+        if uninstall {
             let (default_hub, actions) =
                 uninstall_setup_native(&state_dir, &config_path, &home_dir, &plugins, purge_data)
                     .inspect_err(|e| {
@@ -1553,7 +1601,7 @@ pub fn run_setup_cli(args: &[String]) {
                     crate::plugins::stop_daemon(&config, &existing)?;
                     // status runs ensure_daemon from the published helper, even if setup
                     // itself was invoked from a checkout or a different installation.
-                    let status = Command::new(app.join("Contents/Helpers/cito-native"))
+                    let status = Command::new(app.join("Contents/MacOS/Cito"))
                         .arg("status")
                         .stdout(Stdio::null())
                         .status()
@@ -1734,6 +1782,7 @@ pub fn run_setup_cli(args: &[String]) {
         let mut resolved_default_hub = "local".to_string();
         let config_action = mutate_file("cito", &config_path, dry_run, Some(0o600), |existing| {
             let (mut def_hub, mut hubs, mut rest) = try_normalize_existing_config(existing)?;
+            let had_enabled_hub = hubs.values().any(super::config::hub_enabled);
             let had_remote_before = hubs.iter().any(|(k, v)| {
                 k != "local"
                     && v.get("url")
@@ -1770,6 +1819,10 @@ pub fn run_setup_cli(args: &[String]) {
                 if hubs.remove(n).is_none() {
                     return Err(format!("Unknown hub: {n}"));
                 }
+            }
+            // Preserve an enabled Hub without blocking edits to legacy all-disabled profiles.
+            if had_enabled_hub && !hubs.values().any(super::config::hub_enabled) {
+                return Err("INVALID_INPUT: At least one Hub must remain enabled".into());
             }
             if let Some(order) = rest.get_mut("hub_order").and_then(Value::as_array_mut) {
                 order.retain(|name| name.as_str().is_some_and(|name| hubs.contains_key(name)));
@@ -2186,8 +2239,10 @@ mod tests {
             plugin.command[0] = command.into();
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o100)).unwrap();
             assert!(is_plugin_dir_intact(&dir, plugin));
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(!is_plugin_dir_intact(&dir, plugin));
+            for mode in [0o644, 0o655] {
+                fs::set_permissions(&binary, fs::Permissions::from_mode(mode)).unwrap();
+                assert!(!is_plugin_dir_intact(&dir, plugin), "mode {mode:o}");
+            }
         }
         plugin.command[0] = "sh".into();
         assert!(is_plugin_dir_intact(&dir, plugin));
@@ -2298,7 +2353,12 @@ mod tests {
             ("Contents/Info.plist", 0o644),
             ("Contents/MacOS/Cito", 0o755),
             ("Contents/Helpers/cito-native", 0o755),
-            ("Contents/Helpers/cito-ui", 0o755),
+            ("Contents/Helpers/Cito.app/Contents/MacOS/cito-ui", 0o755),
+            ("Contents/Helpers/Cito.app/Contents/Info.plist", 0o644),
+            (
+                "Contents/Helpers/Cito.app/Contents/Resources/AppIcon.icns",
+                0o644,
+            ),
             ("Contents/Resources/AppIcon.icns", 0o644),
             ("Contents/Resources/plugins/sample", 0o755),
             ("Contents/Resources/plugins/sample/package.json", 0o644),
@@ -2321,7 +2381,12 @@ mod tests {
     #[test]
     fn app_bundle_rejects_invalid_signing_identity() {
         let (root, _) = fixture();
+        let shim = root.join("bin/cito");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        fs::write(&shim, "previous shim").unwrap();
         let result = cli_child(&root, &root, &["test-codesign-failure"]);
+        assert_eq!(fs::read_to_string(shim).unwrap(), "previous shim");
+        assert!(!root.join("Applications/Cito.app").exists());
         fs::remove_dir_all(root).unwrap();
         assert!(
             result.status.success(),
@@ -2336,13 +2401,14 @@ mod tests {
         fs::create_dir_all(root.join("bin")).unwrap();
         let ui = root.join("bin/cito-ui-darwin-arm64");
         fs::write(&ui, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&ui, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = build_mac_app_bundle_from_root(None, &root, &plugins, &root);
-        assert!(!root.join("Applications/Cito.app").exists());
-        assert_eq!(fs::read_dir(root.join("Applications")).unwrap().count(), 0);
+        for (mode, expected) in [(0o000, "os error 13"), (0o655, "executable by its owner")] {
+            fs::set_permissions(&ui, fs::Permissions::from_mode(mode)).unwrap();
+            let error = build_mac_app_bundle_from_root(None, &root, &plugins, &root).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(!root.join("Applications/Cito.app").exists());
+            assert_eq!(fs::read_dir(root.join("Applications")).unwrap().count(), 0);
+        }
         fs::remove_dir_all(root).unwrap();
-        let error = result.unwrap_err();
-        assert!(error.contains("os error 13"), "{error}");
     }
 
     #[test]
@@ -2400,6 +2466,32 @@ mod tests {
                 String::from_utf8_lossy(&result.stderr)
             );
             assert_eq!(snapshot(&root), before);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_rejects_conflicting_setup_operations_before_writes() {
+        let (root, _) = fixture();
+        let state = root.join("state");
+        for args in [
+            ["--build-app", "--uninstall"].as_slice(),
+            &["--dry-run", "--status", "--uninstall"],
+            &["--login-item", "--no-login-item"],
+            &["--no-share-hub", "--share-hub"],
+            &["--enable=sample", "--disable=sample"],
+            &["--remove-hub=work", "--enable-hub=work"],
+        ] {
+            let output = cli_child(&root, &state, args);
+            assert!(!output.status.success(), "{args:?}");
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("exclusive")
+                    || error.contains("separately")
+                    || error.contains("Conflicting"),
+                "{args:?}: {error}"
+            );
+            assert!(!state.exists(), "{args:?}");
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -2591,6 +2683,36 @@ mod tests {
             assert_eq!(saved["hubs"]["local"]["enabled"], expected);
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_rejects_disabling_or_removing_the_last_enabled_hub() {
+        let (root, _) = fixture();
+        let _cleanup = Candidate(root.clone());
+        let path = root.join("config.json");
+        let config =
+            r#"{"hubs":{"local":{"url":"local://","disabled":true},"work":{"url":"local://"}}}"#;
+        fs::write(&path, config).unwrap();
+        for args in [["--disable-hub", "work"], ["--remove-hub", "work"]] {
+            let output = cli_child(&root, &root, &args);
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("At least one Hub must remain enabled"),
+                "{output:?}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), config);
+        }
+        let output = cli_child(
+            &root,
+            &root,
+            &["--disable-hub", "work", "--enable-hub", "local"],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["default_hub"], "local");
+        assert_eq!(saved["hubs"]["work"]["enabled"], false);
+        assert_eq!(saved["hubs"]["local"]["enabled"], true);
     }
 
     #[test]
@@ -2790,7 +2912,7 @@ mod tests {
         let binary = staged.join(&builtin.command[0]);
         assert!(binary.is_file());
         assert_eq!(
-            fs::metadata(binary).unwrap().permissions().mode() & 0o111,
+            fs::metadata(&binary).unwrap().permissions().mode() & 0o111,
             0o111
         );
         assert!(!installed.join("plugins").exists());
@@ -2822,6 +2944,13 @@ mod tests {
         plugins.plugins[1] = crate::plugins::parse_manifest_dir(&staged, true).unwrap();
         ensure_cli_shims_native(&installed, &plugins).unwrap();
         assert!(is_staged_plugin_intact(&installed, &builtin));
+        let original = fs::read(&binary).unwrap();
+        let mut changed = original.clone();
+        changed[0] ^= 1;
+        fs::write(&binary, changed).unwrap();
+        assert!(is_staged_plugin_intact(&installed, &builtin));
+        ensure_single_plugin_staged(&installed, &builtin).unwrap();
+        assert_eq!(fs::read(binary).unwrap(), original);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3060,7 +3189,21 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let xml = fs::read_to_string(launch_agent_plist_path(&root)).unwrap();
+        let plist = launch_agent_plist_path(&root);
+        let xml = fs::read_to_string(&plist).unwrap();
+        let output = Command::new("/usr/bin/plutil")
+            .args(["-convert", "json", "-o", "-"])
+            .arg(plist)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let layout: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            layout["AssociatedBundleIdentifiers"],
+            json!(["one.tefx.cito"])
+        );
+        assert_eq!(layout["ProgramArguments"][0], "/bin/sh");
+        assert_eq!(layout["ProgramArguments"][4], json!(state.join("bin/cito")));
         let expected = expected.to_string_lossy();
         assert!(xml.contains(&format!(
             "<key>CITO_CONFIG_PATH</key><string>{}</string>",

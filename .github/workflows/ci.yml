@@ -45,11 +45,14 @@ jobs:
           python3 -m unittest discover -s packaging -p 'test_*.py' -v
           /usr/bin/ruby -c packaging/homebrew/cito.rb
           cargo fmt --all -- --check
-      - name: Lint, test, and build
+      - name: Lint and test
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked -- --test-threads=2
-          cargo build --release --locked
+      - name: Build native release artifacts
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build --release --locked
       - name: Build and verify relocatable candidate
         run: python3 packaging/release.py bundle build/candidate.zip
       - name: Retain the exact source commit candidate

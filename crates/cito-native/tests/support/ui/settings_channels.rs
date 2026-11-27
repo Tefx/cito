@@ -248,7 +248,12 @@ fn multi_frame_channel_receipts_preserve_pairing_and_latest_test_feedback() {
         control(&f, p, "copy_pair_command:channel");
         assert_eq!(inspect(&f, p)["clipboard"], "/start example-code");
     }
+    assert_eq!(
+        inspect(&f, p).settings("test_channel:channel")["enabled"],
+        false
+    );
     cfg["channel_inventory_error"] = Value::Null;
+    f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "test_channel:channel");
     let test = latest(&f, p, "channel_test");
     f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","request_id":test["request_id"],"ok":false,"detail":"Current test failed"}));
@@ -829,7 +834,9 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     cfg["channels"][0]["error_origin"] = json!("user");
     cfg["channels"][0]["status"] = json!("ready");
     cfg["channels"][0]["configured"] = json!(true);
-    cfg["channels"][0]["detail"]=json!("Connection unavailable.\nThe remote gateway rejected the request.\nCheck credentials and try again.");
+    cfg["channels"][0]["detail"] = json!(
+        "Connection unavailable.\nThe remote gateway rejected the request.\nCheck credentials and try again."
+    );
     f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
@@ -1360,4 +1367,65 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":request["request_id"],"instruction":"Send the link command below","pairing_command":"/link 123456"}));
     control(&f, p, "copy_pair_command:channel");
     assert_eq!(inspect(&f, p)["clipboard"], "/link 123456");
+}
+
+#[test]
+fn channel_test_excludes_collapsed_shared_drafts_and_personal_save_sends_boolean_and_cas() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    let ch = &mut cfg["channels"][0];
+    ch["service_identity"] = json!("service-cas-1");
+    ch["hub_ready"] = json!(false);
+    ch["fields"][0]["value"] = json!("hub-saved");
+    ch["fields"][1]["value"] = json!("user-saved");
+    let mut bool_field = ch["fields"][1].clone();
+    bool_field["key"] = json!("notify_replies");
+    bool_field["label"] = json!("Notify Replies");
+    bool_field["type"] = json!("boolean");
+    bool_field["required"] = json!(false);
+    bool_field["value"] = json!("false");
+    bool_field["configured"] = json!(true);
+    ch["fields"].as_array_mut().unwrap().push(bool_field);
+    open_settings(&f, p, &cfg, "channels");
+
+    // The unconfigured gateway exposes the shared field without explicitly opening its editor.
+    assert!(inspect(&f, p)
+        .settings("channel_field:channel:secret")
+        .is_object());
+    input(&f, p, "channel_field:channel:secret", "hidden-hub-draft");
+    cfg["channels"][0]["hub_ready"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert!(inspect(&f, p)
+        .settings("channel_field:channel:secret")
+        .is_null());
+    // Toggle the now-visible personal boolean.
+    control(&f, p, "channel_field:channel:notify_replies");
+    let toggled = inspect(&f, p);
+    assert_eq!(
+        toggled.settings("channel_field:channel:notify_replies")["native_button"],
+        true
+    );
+    assert_eq!(
+        toggled.settings("channel_field:channel:notify_replies")["accessibility_value"],
+        1
+    );
+    // Manual personal Save includes CAS expected_service_identity and JSON boolean true.
+    control(&f, p, "save_channel:channel");
+    let save = latest(&f, p, "channel_save");
+    assert_eq!(save["expected_service_identity"], "service-cas-1");
+    assert_eq!(save["values"]["notify_replies"], json!(true));
+    assert_eq!(save["values"]["account"], json!("user-saved"));
+
+    // A passive refresh collapsed the gateway editor without discarding its draft.
+    control(&f, p, "test_channel:channel");
+    let test = latest(&f, p, "channel_test");
+    assert_eq!(test["values"]["account"], json!("user-saved"));
+    assert_eq!(test["values"]["notify_replies"], json!(true));
+    assert!(test["values"].get("secret").is_none());
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    let gateway = latest(&f, p, "save_hub_service");
+    assert_eq!(gateway["values"]["secret"], "hidden-hub-draft");
 }

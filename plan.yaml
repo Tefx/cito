@@ -28286,7 +28286,7 @@ phases:
 - id: v71
   name: 'V71 Wave 2: Five Disjoint Parallel Contract-Closure Tracks (2A..2E) [REQUIRES_SKILL:
     contract-and-simplicity]'
-  status: pending
+  status: done
   gate: Wave 2 full regression gate passes across all 5 merged disjoint tracks (2A
     macOS/Bundle/UI, 2B Pi/Claude/Codex/CLI, 2C Auth/OIDC/Hub/Telegram, 2D Hotpath/State/Daemon/SSE,
     2E Release/CI/Deploy/Docs/Site) with zero warnings and zero cross-track regressions.
@@ -28296,7 +28296,7 @@ phases:
   - id: v71.track2a_bundle_identity_and_menu
     name: 'Track 2A.1: Nested Cito.app helper identity, LaunchAgent self-healing,
       and MenuSurface closure'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28375,10 +28375,24 @@ phases:
     - crates/cito-native/tests/support/ui/menu.rs
     - crates/cito-native/tests/support/ui/oidc_settlement.rs
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T00:18:27.735509Z'
+    done_at: '2026-11-27T00:43:54.668326+00:00'
+    evidence: 'Integrated e94bf5a11e3c99c12a3247757994e88f914a9f8f (rebased 89a38694)
+      onto main (9 files, +383/-111; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Packaged cito-ui
+      as nested Contents/Helpers/Cito.app with complete Info.plist & AppIcon.icns;
+      routed Finder reopen to /control reopen_ui while keeping CLI ensure_daemon background-silent;
+      added AssociatedBundleIdentifiers and moved-path LaunchAgent self-healing; updated
+      cito.rb uninstall/zap; added About Cito, Dock icon/badge sync, MenuControl drag-out
+      cancel, Sign In drawer persistence, + Listen gating, and CITO_PLUGIN_DIR artwork.
+      Verified: cargo fmt, clippy -D warnings, swiftc -warnings-as-errors, distribution
+      (9), setup (63), ui::menu (17), ui::oidc_settlement (12), ui::settlement (17),
+      ruby -c cito.rb all passed.'
   - id: v71.track2a_companion_directory_settings_closure
     name: 'Track 2A.2: Companion RunLoop IPC, Directory/Composer targeting, Settings
       tabs, and read-only Oracle'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28467,10 +28481,24 @@ phases:
     depends_on:
     - v71.track2a_bundle_identity_and_menu
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T00:44:02.544572Z'
+    done_at: '2026-11-27T01:34:11.352606+00:00'
+    evidence: 'Integrated 9122122e70aee296592c7e00e90f36e2f6c6fe8f (rebased 29f42fa2)
+      onto main (12 files, +973/-213; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Closed Companion
+      RunLoop.Mode.common IPC delivery during NSMenu tracking, unlatched cold-start
+      Setup inspection pending, correlated error routing + retry banner clear, Directory/Composer
+      scoped_id targeting, shared blank-draft validation, Delete confirm/isARepeat/facet/DISCONNECTED_RETAINED
+      guards, SettingsChannelsTab draft keying + boolean toggle + hidden draft exclusion,
+      SettingsHubsTab CAS personal Save + remote resubscription + stale capability
+      guard, and read-only HeadlessOracle with (hub, signal_id) Activity selectors.
+      Verified: cargo fmt, clippy -D warnings, swiftc -warnings-as-errors, 166/166
+      UI tests all passed.'
   - id: v71.track2b_pi_loop_delivery_and_bridge
     name: 'Track 2B.1: Pi streaming/tool-loop wake steer + post-JSONL ACK, Pi native
       safety, and CLI parity'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28550,10 +28578,24 @@ phases:
     - crates/cito-native/tests/support/pi-bridge.mjs
     - crates/cito-native/tests/support/plugins.rs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T00:18:27.736056Z'
+    done_at: '2026-11-27T00:43:38.325623+00:00'
+    evidence: 'Integrated 69605af5ec41a542f2a6aaf93e7ae0acc6f14979 (rebased 1c5640de)
+      onto main (6 files, +751/-254; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Closed Pi streaming/tool-loop
+      wake steer + post-JSONL persistence ACK (retrying unconfirmed wakes without
+      silent loss), zero-polling 0600 regular sentinel + kernel kqueue socket self-healing
+      (closing V70-06), compact single-card MCP summaries, /reload badge/serialization
+      preservation, symlink-safe legacy unlink, foreign mcpServers preservation, reused-PID
+      ECONNREFUSED admission, human-readable CLI default output + --json, and conflicting
+      --hub/--scope/--team rejection. Verified: cargo fmt, clippy -D warnings, node
+      --test pi-bridge.mjs (1 passed), cli:: (8), plugins:: (103), human inbox compat
+      (2) all passed.'
   - id: v71.track2b_claude_codex_and_mcp_relay
     name: 'Track 2B.2: Claude hook/sidecar isolation, MCP relay resilience, and Codex
       discovery/wake closure'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28618,10 +28660,24 @@ phases:
     depends_on:
     - v71.track2b_pi_loop_delivery_and_bridge
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T00:44:02.544787Z'
+    done_at: '2026-11-27T01:10:21.648131+00:00'
+    evidence: 'Integrated 033dab1f55a30e72af92029b7acbc430d63c2d1c (rebased 325291b3)
+      onto main (4 files, +1021/-175; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Claude: ~/.claude.json
+      registration preserving foreign entries, Stop hook ignores passive wake:false
+      & revalidates inbox ACKs with torn UTF-8 tolerance, notifications/initialized
+      gating, sidecar fault isolation, and transient binding preservation. Codex:
+      command-position subcommand classification, Unicode whitespace pre-LIMIT 8 check,
+      streaming large wake cards without argv E2BIG (396 KB UTF-8 live Codex 0.170.0
+      smoke verified), SQLite rev + rollout activity pairing, and CITO_CODEX_HOME
+      precedence. Verified: cargo fmt, clippy -D warnings, plugins:: (80), claude_
+      (17), codex_ (13), binary unit tests all passed.'
   - id: v71.track2c_auth_oidc_and_config_security
     name: 'Track 2C.1: OIDC/JWKS strict validation, login/lease hygiene, and config
       lock/token security'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28697,10 +28753,25 @@ phases:
     - crates/cito-native/tests/hub/login_cases.rs
     - crates/cito-native/tests/support/daemon/config_and_hubs.rs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T00:18:27.736908Z'
+    done_at: '2026-11-27T00:37:34.380649+00:00'
+    evidence: 'Integrated b4d3de3f5a74344fefdd55c3d4fcc7d64c1935ed (rebased 6d1fd22e)
+      onto main (7 files, +522/-200; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Hardened JWKS/ID-token
+      validation (mixed JWKS, at+jwt/crit/iat, same-kid alg rotation, AUTH_UNAVAILABLE
+      on cooldown), sub/nonce continuity, expired id_token rejection, discovery outside
+      locks, prompt= dedup, static token clear on URL change, non-string token rejection,
+      expired non-Human channel pruning, and <104B Darwin cancel.sock. Verified: cargo
+      fmt, clippy -D warnings, core::auth (18), core::login (22), core::config (15),
+      core::lease (3), daemon::config_and_hubs (22), core::registration (5) all passed.
+      Cross-file items (hub.rs admin_users -> 2C.2; http_actions.rs invite rejoin
+      -> 2D.2; setup.rs last-enabled-Hub CLI + receiver_tests.rs expired sibling expectation
+      -> post-merge) tracked for owning tracks/consolidation.'
   - id: v71.track2c_hub_delivery_and_telegram_settlement
     name: 'Track 2C.2: Hub admission/audit/delivery settlement and Telegram 5xx/429/rollover
       closure'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28778,10 +28849,27 @@ phases:
     depends_on:
     - v71.track2c_auth_oidc_and_config_security
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T00:37:40.039491Z'
+    done_at: '2026-11-27T01:15:29.494201+00:00'
+    evidence: 'Integrated 060cddcce96ae184053c09a2ba27b7d7ae2ce22f (rebased 42b21470)
+      onto main (6 files, +1439/-265; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Enforced strict
+      plugin kind/scope whitelist, hub_audit redaction, integer max_age/duplicate_window/seq
+      validation, admin_users subject binding, lock-free Send Test + ok==true requirement
+      + effect_unknown quarantine, Pause Inbox/scope handoff recheck, Hub-clock lease
+      evaluation, reply-target match, incarnation-bound wake claims, zero payload
+      read on Trusted-Hub ACK sweeps, byte-bounded Arc<str> SSE frames, IPv6 CLI URL,
+      shutdown channel RPC cancel, and Telegram 5xx effect_unknown / shared 429 cooldown
+      / update_id rollover / bot-switch guidance. Verified: cargo fmt, clippy -D warnings,
+      core::hub (101), core::hub_plugins (8), cito-plugin-telegram (8), daemon::human_and_channels
+      (14), core::registration (5) all passed; 2 cross-track test expectations (plugins.rs:5214,
+      receiver_tests.rs) & embedded-listener/receiver wiring queued for cross-track
+      seam closure.'
   - id: v71.track2d_hotpath_state_and_transport
     name: 'Track 2D.1: Hotpath session_activity, state/activity queries, receiver
       fencing, and Hub HTTP/SSE pools'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28861,10 +28949,26 @@ phases:
     - crates/cito-native/src/core/receiver_tests.rs
     - crates/cito-native/src/core/hub/regression_tests.rs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T00:18:27.737500Z'
+    done_at: '2026-11-27T00:35:21.774466+00:00'
+    evidence: 'Integrated 06465720a95a261bdd39a2ab1cfb979f9326bb49 (rebased f0483662)
+      onto main (8 files, +551/-184; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Completed all
+      in-scope Track 2D.1 deliverables: SessionActivity::reload generation cancellation,
+      plain-text wake cards, metadata-only unsearched activity queries, replay ACK
+      listener+origin guard, DB-bound durable receiver consumers, Pause/scope recheck
+      at admission, kv_get->None local fencing, retry on delivered:false, separated
+      Hub RPC/SSE worker pools. Verified: cargo fmt, clippy -D warnings, core::session_activity
+      (20), core::state (41), core::receiver (37), core::hub::regression_tests (7),
+      core::transport (21), core::daemon (79) all passed. Cross-track items living
+      in sibling-owned files (pending_hub_acks 403 in mcp.rs -> 2D.2; hub.rs/hub_plugins.rs
+      items -> 2C.2; plugins.rs/setup.rs binary comparison -> post-merge) explicitly
+      routed to their owning tracks.'
   - id: v71.track2d_daemon_concurrency_and_sse_recovery
     name: 'Track 2D.2: Daemon lock-free MCP/directory concurrency, SSE 403/401 recovery,
       and /health exemption'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -28946,10 +29050,25 @@ phases:
     depends_on:
     - v71.track2d_hotpath_state_and_transport
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T00:35:30.256711Z'
+    done_at: '2026-11-27T01:08:39.987472+00:00'
+    evidence: 'Integrated 6b66fcaf5f94672916680d1a5bdc5f125c1b0be0 (rebased b935ebae)
+      onto main (9 files, +1086/-124; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Fixed directory_revision
+      churn, SSE 403/401 recovery, event_revision immediate bump, closed-Settings
+      ui_revision polling, async supersedable directory_open, setup_remove_hub/control
+      scope/unlisten_all/set_auto_listen locks, lock-free MCP caller resolution/cito_find/256-row
+      ACK + pending_hub_acks 403 isolation, /health 64-worker exemption, JSON-RPC
+      -32700 parse errors, and explicit-PID lsof skip. Verified: cargo fmt, clippy
+      -D warnings, core::transport (24), core::daemon (85), daemon::mcp_and_inbox
+      (34), daemon::discovery_and_setup (20) all passed. Remaining daemon/projection.rs
+      active_settings_hub disabled-Hub fallback & state-push inventory enum noted
+      for post-merge consolidation.'
   - id: v71.track2e_release_gates_ci_and_deploy
     name: 'Track 2E.1: Release security gates, CI/Pages workflows, strict build warnings,
       and Docker context'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -29020,10 +29139,23 @@ phases:
     - crates/cito-native/build.rs
     - deploy/hub/Dockerfile.dockerignore
     agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T00:18:27.737658Z'
+    done_at: '2026-11-27T00:31:51.910950+00:00'
+    evidence: 'Integrated 97aa5c16b780f28f70c0da2a1e18e023d98b8328 onto main (7 files,
+      +385/-81; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Enforced host
+      integration files, executable cito-claude-hook, pi package version, Cask quit
+      target for both app layouts, non-empty marketplace plugins, pre-execution staple/Team
+      ID validation, exact CI job/SHA reuse checks, tag ref checkout, Pages pre-upload
+      checks, strict Rust/Swift warnings, and Docker buildignore exclusions. Verified:
+      packaging unittest (35 passed), release.py check, site-clipboard.mjs, Ruby YAML
+      checks, cargo fmt, clippy -D warnings, cargo test --no-run, local ZIP & BuildKit
+      smoke checks all passed.'
   - id: v71.track2e_docs_sync
     name: 'Track 2E.2: Repository, architecture, release, and Hub deployment documentation
       sync'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -29087,10 +29219,21 @@ phases:
     depends_on:
     - v71.track2e_release_gates_ci_and_deploy
     agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T00:32:03.650277Z'
+    done_at: '2026-11-27T00:41:40.687509+00:00'
+    evidence: 'Integrated 66665201bbbb6d2ce763bd36fcc0f5f9e70b2316 (rebased d9c92c6e)
+      onto main (5 files, +148/-100; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml/site/
+      changes; 0 PI_PERSONA/larva leaks; version 0.22.3 unchanged). Synchronized deploy/hub/README.md,
+      AGENTS.md, README.md, docs/DESIGN.md, and docs/RELEASING.md with Wave 1-2 runtime
+      contracts, Linux >= 5.3 & Nginx 8m prerequisites, nested Helpers/Cito.app layout,
+      and 41-row env table parity with site/docs/hosting.html. Verified: site-clipboard.mjs,
+      release.py check, git diff --check, bash -n on snippets, English-only & vendor-neutral
+      checks all passed.'
   - id: v71.track2e_site_sync
     name: 'Track 2E.3: Product website docs parity, keyboard <pre> focus, CSS token
       cleanup, and anchor checks'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -29157,9 +29300,19 @@ phases:
     depends_on:
     - v71.track2e_docs_sync
     agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T00:41:44.196500Z'
+    done_at: '2026-11-27T00:52:35.321431+00:00'
+    evidence: Integrated 0f1bb4bb39aa06fd3de3173d64f6522140e40003 (rebased 817be279)
+      onto main (7 files, +138/-124; worktree removed; 0 Cargo.toml/Cargo.lock/bin/*/plugins/*/bin/*/plan.yaml
+      changes; 0 PI_PERSONA/larva leaks; site version metadata 0.22.3 unchanged).
+      Synced site/docs/*.html with Wave 1-2 contracts and env-var parity against both
+      READMEs; added tabindex="0" focusable code blocks (21 blocks), removed dead
+      CSS tokens, and verified 31 fragment links, site-clipboard.mjs, release.py check,
+      git diff --check, and Headless Chrome 390px/1280px keyboard scroll checks.
   - id: v71.gate_wave2
     name: Wave 2 full regression gate across all 5 merged parallel tracks
-    status: pending
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Wave 2 FULL workspace regression gate across all 5 merged parallel tracks\
       \ (`2A`, `2B`, `2C`, `2D`, `2E`) verifying:\n  1. Complete Rust workspace test\
@@ -29190,10 +29343,22 @@ phases:
     - v71.track2d_daemon_concurrency_and_sse_recovery
     - v71.track2e_site_sync
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-27T01:43:34.868506Z'
+    done_at: '2026-11-27T03:28:24.576046+00:00'
+    evidence: 'v71.gate_wave2 PASSED (gate.report.v2 valid=true, binding_checked=true,
+      evidence_disposition=POSITIVE_GATE_EVIDENCE, 33/33 requirements PROVEN at git:1b9d264b2520f2964d59d3096318bd28119da515).
+      Report: /tmp/cito-v71-gate-report.json. Checks: cargo fmt --all -- --check,
+      cargo clippy --workspace --all-targets --locked -- -D warnings, cargo test --workspace
+      --locked (816/816 bounded + 457/457 lib + 167/167 ui:: + 80/80 plugins:: + 101/101
+      core::hub:: + 65/65 core::daemon::tests:: + 35/35 daemon::mcp_and_inbox + 20/20
+      saturation + 20/20 peer_pid + 20/20 hub boundary), swiftc -warnings-as-errors,
+      pi-bridge.mjs, site-clipboard.mjs, 35/35 packaging tests, release.py check,
+      INV-NO-BINARIES-RESTAGED & INV-ZERO-LARVA verified clean.'
 - id: v72
   name: 'V72 Wave 3: Release Binary Staging, v0.23.0 Bump, Dual-Host + GCP Live Verification
     & Tag'
-  status: locked
+  status: pending
   gate: 'Wave 3 FULL acceptance gate passes: v0.23.0 release manifests and signed
     macOS arm64 binaries are staged cleanly, full test suites and CI pass with zero
     warnings, live smoke verification passes across both Macs and GCP agentic-hub

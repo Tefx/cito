@@ -1352,3 +1352,70 @@ fn changing_default_in_open_settings_refreshes_implicit_channel_hub_without_loop
         "refreshing implicit channel hub must not loop"
     );
 }
+
+#[test]
+fn same_name_hub_url_save_restores_human_channels_subscription() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    open_settings(&f, p, &cfg, "channels");
+    control(&f, p, "channel_hub_selector:work");
+    inspect(&f, p);
+    let before = f
+        .frames_for(p, "open_settings")
+        .filter(|frame| frame["hub"] == "work")
+        .count();
+    assert_eq!(before, 1);
+
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "edit_hub:work");
+    input(&f, p, "settings_hub_url", "https://new-work.example.com");
+    control(&f, p, "submit_add_hub");
+    let save = latest(&f, p, "setup_save_hub");
+    cfg["hubs"][1]["url"] = json!("https://new-work.example.com");
+    f.send(
+        p,
+        json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":save["request_id"],"settings":cfg}),
+    );
+
+    control(&f, p, "settings_tab:channels");
+    inspect(&f, p);
+    let after = f
+        .frames_for(p, "open_settings")
+        .filter(|frame| frame["hub"] == "work")
+        .count();
+    assert_eq!(
+        after,
+        before + 1,
+        "switching to Human Channels after a same-name Hub URL save must re-subscribe"
+    );
+}
+
+#[test]
+fn return_on_join_from_clipboard_is_scoped_to_focused_control() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "hubs");
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"https://hub.example.com"}),
+    );
+
+    // Return when Join from Clipboard is not focused must not trigger paste_hub_invite.
+    f.send(p, json!({"op":"test_settings_key","key":"return"}));
+    inspect(&f, p);
+    assert_eq!(f.frames_for(p, "paste_hub_invite").count(), 0);
+
+    // Even with the Add Hub form open, Return while focused on Join from Clipboard
+    // activates Join from Clipboard rather than submitting the form.
+    control(&f, p, "open_add_hub");
+    f.send(
+        p,
+        json!({"op":"test_control","id":"paste_hub_invite","drag":[false]}),
+    );
+    assert_eq!(inspect(&f, p).settings("paste_hub_invite")["focused"], true);
+    f.send(p, json!({"op":"test_settings_key","key":"return"}));
+    inspect(&f, p);
+    assert_eq!(f.frames_for(p, "paste_hub_invite").count(), 1);
+    assert_eq!(f.frames_for(p, "setup_save_hub").count(), 0);
+}

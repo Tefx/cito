@@ -875,3 +875,131 @@ fn closed_ui_emits_light_status_without_activity_history_or_inventory() -> Resul
     assert!(full.get("settings").is_some());
     Ok(())
 }
+
+#[test]
+fn closed_settings_poll_gate_preserves_state_changes() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    let mailbox = Arc::new(UiMailbox::default());
+    f.service.ui = Some(mailbox.clone());
+    f.service.push_ui();
+    assert!(mailbox.next().is_some());
+    assert!(!f.service.should_poll_push_ui());
+    f.service.state.db.execute(
+        "INSERT OR REPLACE INTO daemon_owner VALUES(1,?,?)",
+        &[json!(std::process::id()), json!(23456)],
+    )?;
+    assert!(f.service.should_poll_push_ui());
+    f.service.push_ui();
+    assert!(mailbox.next().is_some());
+    assert!(!f.service.should_poll_push_ui());
+    f.service.active_settings_hub = Some("local".into());
+    f.service.push_ui();
+    assert!(f.service.should_poll_push_ui());
+    Ok(())
+}
+
+#[test]
+fn disabled_hub_preserves_active_settings_hub() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.active_settings_hub = Some("work".into());
+    f.service
+        .action(&json!({"op":"setup_toggle_hub","hub":"work","enabled":false}))?;
+    assert_eq!(f.service.active_settings_hub.as_deref(), Some("work"));
+    f.service.reload_slots()?;
+    assert_eq!(f.service.active_settings_hub.as_deref(), Some("work"));
+    let settings = f.service.snapshot()?["settings"].clone();
+    assert_eq!(settings["settings_hub"], "work");
+    assert_eq!(settings["channels"], json!([]));
+    f.service
+        .action(&json!({"op":"hub_action","hub":"work","action":"disconnect"}))?;
+    assert_eq!(f.service.active_settings_hub.as_deref(), Some("work"));
+    f.service
+        .action(&json!({"op":"setup_remove_hub","hub":"work"}))?;
+    assert!(f.service.active_settings_hub.is_none());
+    Ok(())
+}
+
+#[test]
+fn ui_directory_open_is_async_and_superseded_without_blocking_close_directory() -> Result<(), String>
+{
+    use std::io::{BufReader, Read};
+    let mut f = Fixture::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let mut cfg = f.service.slot("work")?.config.clone();
+    cfg["url"] = json!(url);
+    f.service.shutdown();
+    let service = Arc::new(Mutex::new(DaemonService::open(
+        &f.service.config,
+        &f.service.plugins,
+    )?));
+    let (ui_gen, mailbox) = {
+        let mut s = service.lock().unwrap();
+        let client = HubClient::new("work".into(), cfg, "alice", None);
+        let old = s.slots.insert("work".into(), client).unwrap();
+        old.close();
+        let mailbox = Arc::new(UiMailbox::default());
+        s.set_ui(mailbox.clone());
+        while !mailbox.pending.lock().unwrap().is_empty() {
+            let _ = mailbox.next();
+        }
+        (s.ui_generation, mailbox)
+    };
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || -> Result<(), String> {
+        let mut stream = crate::core::http_boundary::accept_test_client(&listener)?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let head = crate::core::http_boundary::read_head(&mut reader, 16384).map_err(|(_, e)| e)?;
+        let mut bytes = vec![0; head.length];
+        reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        assert_eq!(request["op"], "kv_snapshot");
+        entered_tx.send(()).map_err(|e| e.to_string())?;
+        let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        respond(
+            &mut stream,
+            200,
+            &json!({"ok":true,"result":{"entries":[]}}),
+        );
+        Ok(())
+    });
+    let start = Instant::now();
+    http_actions::dispatch_action(
+        &service,
+        &json!({"op":"open_directory","hub":"work","request_id":"open-1"}),
+        Some(ui_gen),
+    )?;
+    assert!(
+        start.elapsed() < Duration::from_millis(300),
+        "open_directory blocked UI pipe reader: {:?}",
+        start.elapsed()
+    );
+    entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|e| e.to_string())?;
+    let close_start = Instant::now();
+    http_actions::dispatch_action(&service, &json!({"op":"close_directory"}), Some(ui_gen))?;
+    assert!(
+        close_start.elapsed() < Duration::from_millis(300),
+        "close_directory blocked behind open_directory: {:?}",
+        close_start.elapsed()
+    );
+    assert!(!service.lock().unwrap().directory_open);
+    release_tx.send(()).map_err(|e| e.to_string())?;
+    server.join().unwrap()?;
+    let worker = service.lock().unwrap().directory_worker.take();
+    if let Some(worker) = worker {
+        worker.join().unwrap();
+    }
+    while !mailbox.pending.lock().unwrap().is_empty() {
+        let frame: Value = serde_json::from_slice(&mailbox.next().unwrap()).unwrap();
+        assert_ne!(frame["request_id"], "open-1", "{frame}");
+        assert_ne!(frame["op"], "directory", "{frame}");
+    }
+    service.lock().unwrap().shutdown();
+    Ok(())
+}

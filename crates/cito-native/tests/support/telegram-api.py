@@ -41,7 +41,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if chat == 'stall':
                 threading.Event().wait(3)
             attempts[chat] = attempts.get(chat, 0) + 1
-            status = int(chat.split(':')[1]) if chat.startswith('status:') else (429 if chat == 'partial' and attempts[chat] == 2 else None)
+            # Exercise immediate chunk resume without the separate 429 cooldown.
+            status = int(chat.split(':')[1]) if chat.startswith('status:') else (408 if chat == 'partial' and attempts[chat] == 2 else None)
             if status:
                 data = json.dumps(dict(ok=False, description='Rejected by fixture', error_code=status, parameters={'retry_after': 7} if status == 429 else {})).encode()
                 self.send_response(status)

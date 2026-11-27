@@ -19,6 +19,8 @@ mod activity;
 
 pub(super) const INBOX_SIGNAL_BYTES: usize = 7 * 1024 * 1024 - 1024;
 const MAX_WAKE_CARD_BYTES: usize = 512 * 1024;
+const ACTIVITY_ORIGIN: &str = "s.hub_url,s.principal_id,l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status";
+const ACTIVITY_SEARCH: &str = ",s.message,s.from_user,s.from_title,s.from_host_name,s.from_listener_id,s.from_harness,l.owner_user AS target_user,l.title AS target_title";
 
 /// The inbox embeds serialized JSON inside an MCP text string. Budget for both
 /// escapes, fully qualified IDs and the longest subsequent wake disposition.
@@ -67,6 +69,7 @@ pub(super) fn activity_revision(row: &Value, key: &str) -> Option<u64> {
 #[derive(Clone)]
 pub struct LocalState {
     pub db: Database,
+    pub(super) instance_id: Arc<str>,
     discovery_revisions: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
     registration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
@@ -89,7 +92,13 @@ impl LocalState {
                 .any(|r| r["name"] == "process_identity")
                 && c.query("PRAGMA table_info(local_sent_idempotency)", &[])?
                     .iter()
-                    .any(|r| r["name"] == "fallback_key"))
+                    .any(|r| r["name"] == "fallback_key")
+                && !c
+                    .query(
+                        "SELECT 1 FROM sqlite_master WHERE name='local_instance'",
+                        &[],
+                    )?
+                    .is_empty())
         };
         if current != 7 || !db.read(schema_complete)? {
             db.transaction(|c| {
@@ -187,13 +196,23 @@ impl LocalState {
             if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "delivered_at_ms") {
                 c.execute("ALTER TABLE local_signals ADD COLUMN delivered_at_ms INTEGER", &[])?;
             }
+            c.execute("CREATE TABLE IF NOT EXISTS local_instance(singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS signals_activity_page ON local_signals(activity_hidden,created_at DESC,signal_id,hub,listener_id,hub_url,principal_id,acknowledged_at_ms)", &[])?;
+            c.execute("INSERT OR IGNORE INTO local_instance VALUES(1,?)", &[json!(crate::plugins::random_uuid_v4())])?;
             // Opening another handle must never steal a live dispatch lease. Frozen
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
         })?;
         }
+        let instance_id = db
+            .query("SELECT id FROM local_instance WHERE singleton=1", &[])?
+            .first()
+            .and_then(|row| row["id"].as_str())
+            .map(Arc::from)
+            .ok_or("STATE_ERROR: Local database instance ID is missing")?;
         Ok(Self {
             db,
+            instance_id,
             discovery_revisions: Arc::new(Mutex::new(HashMap::new())),
             registration_locks: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -325,7 +344,10 @@ impl LocalState {
         self.db.transaction(|c| {
             let current = current_listener(c, hub, string(listener, "listener_id"))?;
             check_listener(&current, listener)?;
-            let previous = c.query("SELECT 1 FROM local_signals WHERE hub=? AND signal_id=?", &[json!(hub), signal["signal_id"].clone()])?;
+            let previous = c.query("SELECT listener_id,hub_url,principal_id FROM local_signals WHERE hub=? AND signal_id=?", &[json!(hub), signal["signal_id"].clone()])?;
+            if previous.first().is_some_and(|row| row["listener_id"] != current["listener_id"] || !signal_matches_listener(row, &current)) {
+                return Ok(false);
+            }
             if previous.is_empty() && ((current["scope"] != "workspace"
                 && !principal_ids_equal(string(&signal["from"], "principal_id"), string(&current, "principal_id")))
                 || !fits_inbox(hub, signal, seq, created)?) {
@@ -641,16 +663,16 @@ impl LocalState {
             let (mut total, mut unread) = (0, 0);
             // Apply address normalization before pagination and counts, streaming
             // history so a broad search retains at most the visible page in memory.
-            c.query_each(&format!("SELECT s.*, l.hub_url AS target_hub_url,l.principal_id AS target_principal_id,l.status AS target_status,l.owner_user AS target_user, l.harness AS target_harness, l.title AS target_title{predicate} ORDER BY s.created_at DESC,s.signal_id ASC"), &params, |mut row| {
-                if !joined_signal_is_current(&row) || !matches_activity(&row, &query) { return; }
+            let search = if query.is_empty() { "" } else { ACTIVITY_SEARCH };
+            c.query_while(&format!("SELECT s.hub,s.signal_id,s.listener_id,s.acknowledged_at_ms,l.harness AS target_harness,{ACTIVITY_ORIGIN}{search}{predicate} ORDER BY s.created_at DESC,s.signal_id ASC"), &params, |row| {
+                if !joined_signal_is_current(&row) || (!query.is_empty() && !matches_activity(&row, &query)) { return Ok(true); }
                 total += 1;
                 unread += u64::from(row["acknowledged_at_ms"].is_null());
                 if rows.len() < 80 {
-                    if let Some(fields) = row.as_object_mut() {
-                        for key in ["target_user", "target_harness", "target_title", "target_hub_url", "target_principal_id", "target_status"] { fields.remove(key); }
-                    }
-                    rows.push(row);
+                    // The outer statement pins the read snapshot while we fetch this page row.
+                    rows.extend(c.query("SELECT * FROM local_signals WHERE hub=? AND signal_id=?", &[row["hub"].clone(), row["signal_id"].clone()])?);
                 }
+                Ok(true)
             })?;
             Ok((rows, total, unread))
         })
@@ -754,7 +776,7 @@ pub(super) fn joined_signal_is_current(row: &Value) -> bool {
     )
 }
 
-pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
+fn matches_activity(row: &Value, normalized_query: &str) -> bool {
     let address = |user: &str, harness: &str, raw_id: &str| {
         let id = super::identity::canonical_node_id(raw_id).unwrap_or_default();
         let suffix = id.strip_prefix("c_").unwrap_or("");
@@ -801,9 +823,7 @@ pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
     if row["target_harness"] == "human" {
         searchable.push_str(" you");
     }
-    searchable
-        .to_lowercase()
-        .contains(&query.trim().to_lowercase())
+    searchable.to_lowercase().contains(normalized_query)
 }
 
 fn acknowledge_current(
@@ -844,9 +864,6 @@ fn earliest_expiry(rows: &[Value]) -> u64 {
         .min()
         .unwrap_or(0)
 }
-fn escape_card(raw: &str) -> String {
-    raw.replace('<', "&lt;").replace('>', "&gt;")
-}
 pub(super) fn scoped_reply_id(hub: &str, id: &str, qualify: bool) -> String {
     if !id.is_empty() && (qualify || id.contains(':')) {
         format!("{hub}:{id}")
@@ -869,40 +886,39 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
     let redundant =
         canonical_node_id(id).is_ok_and(|canonical| public_listener_id(title, &canonical) == id);
     let title_part = if !title.is_empty() && !redundant {
-        format!(" · {}", escape_card(title))
+        format!(" · {title}")
     } else {
         String::new()
     };
     let reply = if scoped.is_empty() {
         String::new()
     } else {
-        format!(" [↩ {}]", escape_card(&scoped))
+        format!(" [↩ {scoped}]")
     };
     let signal_id = scoped_reply_id(hub, string(signal, "signal_id"), qualify_ids);
     let correlation = if signal_id.is_empty() {
         String::new()
     } else {
-        format!(" [signal_id: {}]", escape_card(&signal_id))
+        format!(" [signal_id: {signal_id}]")
     };
     format!(
-        "{}@{}{title_part}{reply}{correlation}",
-        escape_card(string(signal, "from_user")),
-        escape_card(host)
+        "{}@{host}{title_part}{reply}{correlation}",
+        string(signal, "from_user")
     )
 }
 pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_ids: bool) -> String {
     if signals.len() == 1 {
         return format!(
-            "Cito · {} · auto-acknowledged on delivery\n\n{}",
+            "Cito · {}\n\n{}",
             format_sender(&signals[0], hub, qualify_ids),
-            escape_card(string(&signals[0], "message"))
+            string(&signals[0], "message")
         );
     }
     let title = string(target, "title").trim();
     let target_part = if title.is_empty() {
         String::new()
     } else {
-        format!(" → {}", escape_card(title))
+        format!(" → {title}")
     };
     let body = signals
         .iter()
@@ -912,13 +928,13 @@ pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_id
                 "[{}] {}\n{}",
                 i + 1,
                 format_sender(s, hub, qualify_ids),
-                escape_card(string(s, "message"))
+                string(s, "message")
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
-        "Cito · {} notifications{target_part} · auto-acknowledged on delivery\n\n{body}",
+        "Cito · {} notifications{target_part}\n\n{body}",
         signals.len()
     )
 }

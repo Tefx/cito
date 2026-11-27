@@ -211,7 +211,7 @@ fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
         let client = HubClient::new("work".into(), config.clone(), "alice", None);
         let worker = client.start_events().unwrap();
         let first = calls.recv_timeout(Duration::from_secs(2)).unwrap();
-        if status == 503 {
+        if matches!(status, 503 | 403) {
             let second = calls.recv_timeout(Duration::from_secs(2)).unwrap();
             let third = calls.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(second.duration_since(first) >= Duration::from_millis(200));
@@ -339,7 +339,7 @@ fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
             crate::core::http_boundary::read_head(&mut BufReader::new(&stream), 16_384).unwrap();
         assert!(!head.headers.contains_key("authorization"));
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\ndata: ready\n\n")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: ready\n\n")
             .unwrap();
         assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
     });
@@ -1039,7 +1039,11 @@ fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
     let page = |id: &str, clock: u64, next: Value| json!({"server_now_ms":clock,"entries":[{"value_b64":STANDARD.encode(json!({"listener_id":id}).to_string())}],"next_cursor":next});
     let committed = fetch(vec![(Value::Null, page("committed", 1000, Value::Null))]).unwrap();
     let before = observe();
-    assert_eq!(before.0, committed);
+    assert_eq!(
+        committed,
+        vec![json!({"listener_id":"committed","server_now_ms":1000})]
+    );
+    assert_eq!(before.0, vec![json!({"listener_id":"committed"})]);
     assert!(before.1 > 0 && before.2.is_some() && before.3.is_some() && before.4.is_some());
     for later in [false, true] {
         let encoding_error = STANDARD.decode("%%%").unwrap_err().to_string();
@@ -1098,7 +1102,13 @@ fn malformed_snapshot_pages_preserve_the_last_complete_observation() {
     let after = observe();
     assert_eq!(recovered[0]["listener_id"], "first");
     assert_eq!(recovered[1]["listener_id"], "recovered");
-    assert_eq!(after.0, recovered);
+    assert_eq!(
+        after.0,
+        vec![
+            json!({"listener_id":"first"}),
+            json!({"listener_id":"recovered"})
+        ]
+    );
     assert_eq!(after.1, before.1 + 1);
     assert_eq!(after.2.unwrap().0, 100_000);
     assert!(after.3 > before.3 && after.4 > before.4);
@@ -1181,4 +1191,197 @@ fn large_backlog_pages_round_trip_over_http_and_https() {
                 .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn directory_ignores_server_now_ms_churn_while_advancing_clock() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap())}),
+        "alice",
+        None,
+    );
+    let page = |id: &str, clock: u64| {
+        json!({
+            "server_now_ms": clock,
+            "entries": [{"value_b64": STANDARD.encode(json!({"listener_id": id}).to_string())}],
+            "next_cursor": Value::Null
+        })
+    };
+    let fetch = |clock: u64, id: &str| {
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                serve_rpc(
+                    &listener,
+                    "kv_snapshot",
+                    &json!({"after_key": null}),
+                    200,
+                    &json!({"ok": true, "result": page(id, clock)}),
+                );
+            });
+            let rows = client.directory().unwrap();
+            server.join().unwrap();
+            rows
+        })
+    };
+    let first = fetch(1_000, "node-a");
+    let rev1 = client.directory_revision();
+    assert_eq!(rev1, 1);
+    assert_eq!(first[0]["server_now_ms"], 1_000);
+
+    let second = fetch(5_000, "node-a");
+    assert_eq!(client.directory_revision(), rev1);
+    assert_eq!(second[0]["server_now_ms"], 5_000);
+    assert!(client.server_now() >= 5_000);
+    assert!(
+        client.cached_directory()[0]["server_now_ms"]
+            .as_u64()
+            .unwrap()
+            >= 5_000
+    );
+
+    fetch(6_000, "node-b");
+    assert_eq!(client.directory_revision(), rev1 + 1);
+}
+
+#[test]
+fn static_token_401_latch_clears_on_validated_200_and_resumes_sse() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap()),"token":"static-secret"}),
+        "alice",
+        None,
+    );
+    let serve = |status: u16, body: &str| {
+        let mut socket = crate::core::http_boundary::accept_test_client(&listener).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut socket);
+        let head = crate::core::http_boundary::read_head(&mut reader, 16_384).unwrap();
+        assert_eq!(head.headers["authorization"], "Bearer static-secret");
+        let mut req = vec![0; head.length];
+        reader.read_exact(&mut req).unwrap();
+        write!(
+            socket,
+            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    };
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            serve(401, "{}");
+            serve(
+                200,
+                r#"{"ok":true,"error":null,"result":{"accepted":true}}"#,
+            );
+        });
+        assert!(client.rpc("fixture", &json!({})).is_err());
+        assert_eq!(client.connection_status(), "auth_required");
+        assert!(client.rejected_bearer.lock().unwrap().is_some());
+
+        let ok = client.rpc("fixture", &json!({})).unwrap();
+        assert_eq!(ok["accepted"], true);
+        assert_eq!(client.connection_status(), "connected");
+        assert!(client.rejected_bearer.lock().unwrap().is_none());
+    });
+
+    // OIDC clients must not clear their 401 latch without authority renewal.
+    let oidc = HubClient::new(
+        "work".into(),
+        json!({"url":"http://127.0.0.1:1","authMode":"oidc","token":"oidc-secret"}),
+        "alice",
+        None,
+    );
+    oidc.reject_token(&oidc.bearer);
+    assert!(!oidc.auth_valid());
+    let _ = oidc.parse_rpc_response(
+        200,
+        br#"{"ok":true,"error":null,"result":{}}"#,
+        &oidc.bearer,
+    );
+    assert!(!oidc.auth_valid());
+}
+
+#[test]
+fn replacement_sse_and_local_subscriptions_bump_event_revision_when_live() {
+    // SSE replacement: initial 200 does not bump, replacement 200 bumps immediately without data.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":format!("http://{}",listener.local_addr().unwrap())}),
+        "alice",
+        None,
+    );
+    let (second_live_tx, second_live_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut first = crate::core::http_boundary::accept_test_client(&listener).unwrap();
+        crate::core::http_boundary::read_head(&mut BufReader::new(&first), 16_384).unwrap();
+        first
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        drop(first);
+
+        let mut second = crate::core::http_boundary::accept_test_client(&listener).unwrap();
+        crate::core::http_boundary::read_head(&mut BufReader::new(&second), 16_384).unwrap();
+        second
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        second.flush().unwrap();
+        second_live_tx.send(()).unwrap();
+        let _ = second.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = second.read(&mut [0; 1]);
+    });
+    let initial = client.event_revision();
+    let worker = client.start_events().unwrap();
+    second_live_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    client.wait_for_event(initial, Instant::now() + Duration::from_secs(2));
+    assert!(client.event_revision() > initial);
+    client.close();
+    worker.join().unwrap();
+    server.join().unwrap();
+
+    // Local subscription replacement: dropping a slow subscriber triggers resubscribe + bump.
+    let dir = std::env::temp_dir().join(format!(
+        "cito-local-resub-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    let engine = Arc::new(HubEngine::open(&dir).unwrap());
+    engine.set_plugin_roots(&[]).unwrap();
+    let local_client = HubClient::new(
+        "local".into(),
+        json!({"url":"local://","authMode":"none"}),
+        "alice",
+        Some(engine.clone()),
+    );
+    let local_worker = local_client.start_events().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !local_client.stream_live.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let before = local_client.event_revision();
+    for i in 0..300 {
+        let value = STANDARD.encode(json!({"listener_id":format!("n-{i}"),"harness":"agent","scope":"workspace","principal_id":"none#alice"}).to_string());
+        engine
+            .rpc(
+                "kv_put",
+                &json!({"key":format!("n-{i}"),"data_b64":value}),
+                Some(&local_client.identity),
+            )
+            .unwrap();
+    }
+    local_client.wait_for_event(before, Instant::now() + Duration::from_secs(2));
+    assert!(local_client.event_revision() > before);
+    local_client.close();
+    local_worker.join().unwrap();
+    engine.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
 }

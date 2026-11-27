@@ -6,44 +6,53 @@ For daily use, see the [User Guide](https://tefx.github.io/cito/docs/guide.html)
 
 ## Standalone server
 
-Install a native `cito` executable on the server. For a Linux source build, run `cargo build --release --bin cito-native` at the repository root and install `target/release/cito-native` as `/usr/local/bin/cito`. Bundled channel executables must also be built and available through plugin discovery; Docker provides a packaged alternative.
+On Linux, use kernel 5.3 or newer with `pidfd_open` available for managed subprocesses. This also applies to the kernel and syscall policy used by Docker. On Debian or Ubuntu, install `libsqlite3-dev` and `pkg-config` for source builds and `libsqlite3-0` on the runtime host. The Dockerfile installs those packages in their respective build and runtime stages.
+
+Install a native `cito` executable on the server. For a Linux source build, run `cargo build --locked --release --bin cito-native` at the repository root and install `target/release/cito-native` as `/usr/local/bin/cito`. Bundled channel executables must also be built and available through plugin discovery; Docker provides a packaged alternative.
 
 ```sh
 # Local trusted access only; default bind is loopback for auth=none.
 cito hub --port 4291 --auth none --data-dir /var/lib/cito-hub
 
-# Shared token; terminate HTTPS at a proxy for public access.
-cito hub --bind 127.0.0.1 --auth token --token '<strong-secret-token>' --data-dir /var/lib/cito-hub
-
 # Multi-user OIDC with an explicit Hub administrator.
 CITO_OIDC_ADMIN_USERS=alice cito hub --bind 127.0.0.1 --auth oidc --issuer https://id.example.com --client-id cito --data-dir /var/lib/cito-hub
+```
+
+For a shared-token Hub, terminate HTTPS at a reverse proxy for public access. Run this example in Bash with shell tracing off. The hidden prompt keeps the token out of shell history, and `CITO_HUB_TOKEN` avoids putting it in the server command's arguments:
+
+```bash
+(
+  IFS= read -r -s -p 'Hub token: ' token || exit 1
+  printf '\n'
+  CITO_HUB_TOKEN="$token" cito hub --bind 127.0.0.1 --auth token --data-dir /var/lib/cito-hub
+)
 ```
 
 Create the data directory with ownership for the service account. Flags accept both `--key value` and `--key=value` and take precedence over the corresponding environment variable. Blank standalone Hub environment values count as unset; empty CLI values are rejected. `SIGTERM` and `SIGINT` close the listener, SSE streams, and managed channels gracefully. Use `cito --version` to inspect the installed release.
 
 Set `cito hub --name work` or `CITO_HUB_NAME=work` to advertise a stable name, especially in containers. Otherwise the Hub derives its name from the OIDC issuer domain in OIDC mode or from the hostname. The name `local` is reserved. Clients joining with `cito setup --url <url>` use the advertised name, or derive one from the Hub URL if none is advertised. An explicit client `--hub` overrides this choice.
 
-On a client Mac, join a token Hub with:
-
-```sh
-cito setup --hub work --url https://cito.example.com --auth token --token '<strong-secret-token>' --default
-```
+On a client Mac, use **Settings → Hubs & Network → Add Hub…** to join `https://hub.example.com` with token access. Enter the token in Settings rather than passing it on the command line.
 
 Use a distinct token for each independently operated Hub. Token access and Trusted (`none`) access do not provide OIDC's verified per-user identity. Keep unauthenticated Hubs on a trusted private network; never expose them publicly.
 
 ## Docker Compose
 
-The repository's `deploy/hub/docker-compose.yml` builds a Linux native Hub with bundled channel plugins. It publishes only `127.0.0.1:4291` on the host, stores data in the `cito-hub-data` named volume at `/data`, and restarts unless explicitly stopped. Run from the repository root:
+The repository's `deploy/hub/docker-compose.yml` builds a Linux native Hub with bundled channel plugins. It publishes only `127.0.0.1:4291` on the host and restarts unless explicitly stopped. The volume key is `cito-hub-data`, mounted at `/data`; Docker names the volume `hub_cito-hub-data` for the default project `hub`. If you override the project name, use that project's volume name for backups.
 
-```sh
-export CITO_AUTH_MODE=token
-export CITO_HUB_TOKEN='<strong-secret-token>'
-docker compose -f deploy/hub/docker-compose.yml up -d --build
+Run from the repository root in Bash with shell tracing off:
+
+```bash
+(
+  IFS= read -r -s -p 'Hub token: ' token || exit 1
+  printf '\n'
+  CITO_AUTH_MODE=token CITO_HUB_TOKEN="$token" docker compose -f deploy/hub/docker-compose.yml up -d --build
+)
 docker compose -f deploy/hub/docker-compose.yml logs --tail=50 cito-hub
 curl http://127.0.0.1:4291/health
 ```
 
-The Compose file defaults to `none`; set authentication before exposing the service through a proxy. For OIDC, set `CITO_AUTH_MODE=oidc`, `CITO_OIDC_ISSUER`, `CITO_OIDC_CLIENT_ID`, and `CITO_OIDC_ADMIN_USERS` instead. It also forwards `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. Add other plugin-specific variables explicitly to the service's `environment` mapping; a host environment variable alone does not enter a container. Recreate the container after changing its environment. User plugin overrides belong at `/data/plugins/<id>/`; bundled defaults live at `/app/plugins` via `CITO_BUILTIN_PLUGINS_DIR`.
+The Compose file defaults to `none`; set authentication before exposing the service through a proxy. For OIDC, set `CITO_AUTH_MODE=oidc`, `CITO_OIDC_ISSUER`, `CITO_OIDC_CLIENT_ID`, and `CITO_OIDC_ADMIN_USERS` instead. It also forwards `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. Add other plugin-specific variables explicitly to the service's `environment` mapping; a host environment variable alone does not enter a container. Recreate the container after changing its environment. The prompt protects shell history, but users with Docker access can inspect container environment variables. User plugin overrides belong at `/data/plugins/<id>/`; bundled defaults live at `/app/plugins` via `CITO_BUILTIN_PLUGINS_DIR`.
 
 ## Linux systemd
 
@@ -114,10 +123,11 @@ cito.example.com {
 }
 ```
 
-Optional Nginx location inside an HTTPS `server` block with your TLS certificate configured:
+Optional Nginx location inside an HTTPS `server` block with your TLS certificate configured. Set the request body limit to match the Hub's 8 MiB RPC limit:
 
 ```nginx
 location / {
+    client_max_body_size 8m;
     proxy_pass http://127.0.0.1:4291;
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;

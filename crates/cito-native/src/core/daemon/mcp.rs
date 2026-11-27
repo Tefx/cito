@@ -11,11 +11,41 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 pub(super) const STALE_HUB: &str = "STALE_GENERATION: Request authority changed";
+
+type DirectoryFlight = Arc<OnceLock<Result<Vec<Value>, String>>>;
+#[derive(Default)]
+pub(super) struct DirectoryFlights(Mutex<BTreeMap<(String, usize), DirectoryFlight>>);
+
+impl DirectoryFlights {
+    pub(super) fn refresh(
+        &self,
+        slot: &crate::core::transport::HubClient,
+    ) -> Result<Vec<Value>, String> {
+        let key = (slot.name.clone(), Arc::as_ptr(&slot.closed) as usize);
+        let flight = self
+            .0
+            .lock()
+            .map_err(|_| "Directory flights lock poisoned")?
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let result = flight.get_or_init(|| slot.directory());
+        if let Ok(mut flights) = self.0.lock() {
+            if flights
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &flight))
+            {
+                flights.remove(&key);
+            }
+        }
+        result.clone()
+    }
+}
 
 #[derive(Clone, Default)]
 pub(super) struct Stops {
@@ -81,6 +111,7 @@ pub(super) enum ToolCall {
         action: Value,
         hubs: Vec<String>,
         ui_generation: Option<u64>,
+        expected_profile: Option<Value>,
     },
     Drain {
         batch: Detaches,
@@ -278,13 +309,47 @@ pub(super) fn dispatch_tool<S: std::borrow::BorrowMut<DaemonService>>(
     args: &Value,
     meta: &Value,
 ) -> Result<Value, String> {
+    if (name != "cito_find" && args["harness"] == "human")
+        || string(meta, "expected_harness").trim() == "human"
+    {
+        return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
+    }
+    validate_tool_input(name, args)?;
+    if meta
+        .get("expected_session_id")
+        .is_some_and(|v| v.as_str().is_none_or(|s| s.trim().is_empty()))
+    {
+        return Err("INVALID_INPUT: expected_session_id must be nonempty".into());
+    }
+    if meta.get("http_transport").is_some() || meta.get("http_client_pid").is_some() {
+        return Err("INVALID_INPUT: Reserved caller metadata".into());
+    }
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let caller = if name == "cito_find" {
+        crate::support::caller_pid_hint(meta, true)?;
+        None
+    } else {
+        let access = {
+            let mut guard = service.lock().map_err(|_| "Daemon lock poisoned")?;
+            let s = (*guard).borrow_mut();
+            if s.closing || s.purging || shutdown_requested() {
+                return Err("Shutting down".into());
+            }
+            if name == "cito_status" {
+                s.reload_slots()?;
+                s.refresh_available_until(deadline)?;
+            }
+            s.access.clone()
+        };
+        access.caller_until(meta, name == "cito_listen", deadline)?
+    };
     let (access, work) = {
         let mut guard = service.lock().map_err(|_| "Daemon lock poisoned")?;
         let s = (*guard).borrow_mut();
-        if s.closing || shutdown_requested() {
+        if s.closing || s.purging || shutdown_requested() {
             return Err("Shutting down".into());
         }
-        let work = s.prepare_tool(name, args, meta)?;
+        let work = s.prepare_tool(name, args, meta, caller)?;
         if let ToolCall::Ready(value) = work {
             return Ok(value);
         }
@@ -302,6 +367,7 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
         action,
         hubs,
         ui_generation,
+        expected_profile,
     } = work
     {
         if action["op"] == "setup_remove_app" {
@@ -358,7 +424,7 @@ pub(super) fn run_captured<S: std::borrow::BorrowMut<DaemonService>>(
                 .as_str()
                 .unwrap_or(&s.config.default_hub)
                 .to_owned();
-            break s.apply_registration_edit(action, hub)?;
+            break s.apply_registration_edit(action, hub, expected_profile.as_ref())?;
         };
         let result = drain.execute(&access);
         let mut guard = match service.lock() {
@@ -632,7 +698,7 @@ pub(super) fn tools_list() -> Value {
     tools
 }
 
-impl DaemonService {
+impl HubAccess {
     pub(super) fn caller(&self, meta: &Value, required: bool) -> Result<Option<Value>, String> {
         self.caller_until(meta, required, Instant::now() + Duration::from_millis(1500))
     }
@@ -951,6 +1017,9 @@ impl HubAccess {
         let id = super::super::registration::local_node_id(&self.state, slot, harness, session)?;
         self.state.db.transaction(|db| {
         if slot.closed.load(Ordering::Acquire) { return Err(STALE_HUB.into()); }
+        // The replacement URL may have the same deterministic node ID. Old
+        // signals remain tied to their recorded authority, not the new Stop row.
+        db.execute("DELETE FROM local_listeners WHERE hub=? AND listener_id=? AND status='FENCED_INACTIVE'", &[json!(hub),json!(id)])?;
         db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,user_stopped,retirement_reason,hub_url) VALUES(?,?,?,?,?,?,?,?,?,'','','','self','UNLISTENED',1,'user',?)", &[json!(hub),json!(id),json!(crate::core::identity::public_listener_id(string(&slot.identity,"owner_user"),&id)),slot.identity["principal_id"].clone(),slot.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name()),json!(harness),json!(session),slot.config["url"].clone()])?;
         Ok(()) })?;
         Ok(id)
@@ -1009,6 +1078,12 @@ impl HubAccess {
     ) -> Result<bool, String> {
         let client = self.slots.get(hub);
         let row = self.state.listener(hub, id)?;
+        if row
+            .as_ref()
+            .is_some_and(|r| r["status"] == "FENCED_INACTIVE")
+        {
+            return Err(STALE_HUB.into());
+        }
         let hub_url = if let Some(url) = row
             .as_ref()
             .and_then(|r| r["hub_url"].as_str())
@@ -1096,7 +1171,7 @@ impl HubAccess {
                 .iter()
                 .filter(|(name, _)| !args["hub"].is_string() || *name == &hub)
                 .map(|(name, slot)| {
-                    let worker = scope.spawn(move || slot.directory());
+                    let worker = scope.spawn(move || self.directory_flights.refresh(slot));
                     (name.clone(), slot.clone(), worker)
                 })
                 .collect();
@@ -1161,11 +1236,10 @@ impl HubAccess {
                             if *key == "host" {
                                 return !filter.is_empty() && !host_matches(filter);
                             }
-                            let field = match *key {
-                                "user" => "owner_user",
-                                "host" => "host_name",
-                                other => other,
-                            };
+                            if *key == "harness" {
+                                return !filter.is_empty() && string(row, "harness") != filter;
+                            }
+                            let field = if *key == "user" { "owner_user" } else { key };
                             !filter.is_empty()
                                 && !string(row, field)
                                     .to_ascii_lowercase()
@@ -1320,22 +1394,13 @@ impl DaemonService {
         dispatch_tool(&Mutex::new(self), name, args, meta)
     }
 
-    fn prepare_tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<ToolCall, String> {
-        if (name != "cito_find" && args["harness"] == "human")
-            || string(meta, "expected_harness").trim() == "human"
-        {
-            return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
-        }
-        validate_tool_input(name, args)?;
-        if meta
-            .get("expected_session_id")
-            .is_some_and(|v| v.as_str().is_none_or(|s| s.trim().is_empty()))
-        {
-            return Err("INVALID_INPUT: expected_session_id must be nonempty".into());
-        }
-        if meta.get("http_transport").is_some() || meta.get("http_client_pid").is_some() {
-            return Err("INVALID_INPUT: Reserved caller metadata".into());
-        }
+    fn prepare_tool(
+        &mut self,
+        name: &str,
+        args: &Value,
+        meta: &Value,
+        caller: Option<Value>,
+    ) -> Result<ToolCall, String> {
         self.reload_slots()?;
         let hub = args["hub"]
             .as_str()
@@ -1346,9 +1411,7 @@ impl DaemonService {
         }
         match name {
             "cito_listen" => {
-                let caller = self
-                    .caller(meta, true)?
-                    .ok_or("BINDING_REQUIRED: Caller required")?;
+                let caller = caller.ok_or("BINDING_REQUIRED: Caller required")?;
                 if caller["harness"] == "human" {
                     return Err("FORBIDDEN: Agent tools cannot attach Human devices".into());
                 }
@@ -1373,11 +1436,7 @@ impl DaemonService {
                 Ok(ToolCall::Listen { hub, args, caller })
             }
             "cito_status" => {
-                let deadline = Instant::now() + Duration::from_millis(1500);
-                self.refresh_available_until(deadline)?;
-                let caller = self
-                    .caller_until(meta, false, deadline)?
-                    .ok_or("BINDING_REQUIRED: Caller required")?;
+                let caller = caller.ok_or("BINDING_REQUIRED: Caller required")?;
                 let row = self.state.active()?.into_iter().find(|r| {
                     r["hub"] == hub
                         && r["harness"] == caller["harness"]
@@ -1397,9 +1456,7 @@ impl DaemonService {
                 ))
             }
             "cito_unlisten" => {
-                let caller = self
-                    .caller(meta, false)?
-                    .ok_or("BINDING_REQUIRED: Caller required")?;
+                let caller = caller.ok_or("BINDING_REQUIRED: Caller required")?;
                 if caller["harness"] == "human" {
                     return Err("FORBIDDEN: Agent tools cannot detach Human devices".into());
                 }
@@ -1420,16 +1477,19 @@ impl DaemonService {
                     stops,
                 })
             }
-            "cito_find" => {
-                let _ = crate::support::caller_pid_hint(meta, true)?;
-                Ok(ToolCall::McpFind(args.clone()))
-            }
+            "cito_find" => Ok(ToolCall::McpFind(args.clone())),
             "cito_send" => Ok(ToolCall::Send {
                 hub,
                 args: args.clone(),
-                caller: self.caller(meta, false)?,
+                caller,
             }),
-            "cito_inbox" => self.inbox(&hub, args, meta).map(ToolCall::Ready),
+            "cito_inbox" => self
+                .inbox(
+                    &hub,
+                    args,
+                    &caller.ok_or("BINDING_REQUIRED: Caller required")?,
+                )
+                .map(ToolCall::Ready),
             _ => Err(format!("INVALID_INPUT: Unknown tool: {name}")),
         }
     }
@@ -2032,10 +2092,7 @@ impl HubAccess {
     }
 }
 impl DaemonService {
-    fn inbox(&self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {
-        let caller = self
-            .caller(meta, false)?
-            .ok_or("BINDING_REQUIRED: Caller required")?;
+    fn inbox(&self, hub: &str, args: &Value, caller: &Value) -> Result<Value, String> {
         let limit = args["limit"].as_u64().unwrap_or(50);
         if !(1..=1000).contains(&limit) {
             return Err("INVALID_INPUT: limit must be 1..1000".into());
@@ -2055,8 +2112,8 @@ impl DaemonService {
             let id = crate::core::registration::local_node_id(
                 &self.state,
                 slot,
-                string(&caller, "harness"),
-                string(&caller, "session_id"),
+                string(caller, "harness"),
+                string(caller, "session_id"),
             )?;
             bindings.insert(name.clone(), json!(id));
             addresses.insert(
@@ -2065,7 +2122,7 @@ impl DaemonService {
             );
         }
         let bindings = Value::String(Value::Object(bindings).to_string());
-        let channel = format!("{}:{}", self.host_id, string(&caller, "harness"));
+        let channel = format!("{}:{}", self.host_id, string(caller, "harness"));
         self.state.db.transaction(|db| {
             self.read_and_ack_inbox(db, args, &bindings, &channel, limit as usize, &addresses)
         })
@@ -2201,12 +2258,6 @@ impl DaemonService {
             }) {
                 continue;
             }
-            // Identity filtering precedes the page limit: retained rows for an
-            // unavailable/replaced profile must not starve this profile's ACKs.
-            let Ok(rows) = self.state.db.query("SELECT * FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?) ORDER BY acked_at_ms LIMIT 256",&[json!(hub),slot.config["url"].clone(),slot.identity["principal_id"].clone(),slot.identity["legacy_principal_id"].clone()]) else { continue; };
-            if rows.is_empty() {
-                continue;
-            }
             let worker_key = format!("acks:{hub}");
             if self
                 .receivers
@@ -2215,16 +2266,44 @@ impl DaemonService {
             {
                 continue;
             }
-            let local = slot.local.is_some();
+            const PENDING: &str =
+                "FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?)";
+            let authority = [
+                json!(hub),
+                slot.config["url"].clone(),
+                slot.identity["principal_id"].clone(),
+                slot.identity["legacy_principal_id"].clone(),
+            ];
+            if !self
+                .state
+                .db
+                .query(&format!("SELECT 1 {PENDING} LIMIT 1"), &authority)
+                .is_ok_and(|rows| !rows.is_empty())
+            {
+                continue;
+            }
             let slot = slot.clone();
             let db = self.state.db.clone();
             let backoff = self.ack_backoff.clone();
             let flush = move || {
+                // Filter by authority before paging; retired profiles must not
+                // starve the current one, even when their rows sort first.
+                let Ok(rows) = db.query(
+                    &format!("SELECT * {PENDING} ORDER BY acked_at_ms LIMIT 256"),
+                    &authority,
+                ) else {
+                    return;
+                };
                 let mut failed = false;
                 for row in rows {
-                    if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok() {
-                    let _=db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=? AND hub_url=? AND principal_id=? AND acked_at_ms=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone(),row["hub_url"].clone(),row["principal_id"].clone(),row["acked_at_ms"].clone()]);
-                } else { failed = true; break; }
+                    match slot.rpc("signal_ack", &json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})) {
+                        Ok(_) => {},
+                        // This targeted 403 means the deleted registration cannot
+                        // accept its ACK. Unrelated auth failures remain retryable.
+                        Err(e) if e == "FORBIDDEN: target registration not found" => {},
+                        Err(_) => { failed = true; break; }
+                    }
+                    let _ = db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=? AND hub_url=? AND principal_id=? AND acked_at_ms=? AND channel_id=?", &[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone(),row["hub_url"].clone(),row["principal_id"].clone(),row["acked_at_ms"].clone(),row["channel_id"].clone()]);
                 }
                 if let Ok(mut retries) = backoff.lock() {
                     if slot.closed.load(Ordering::Acquire) {
@@ -2240,11 +2319,7 @@ impl DaemonService {
                     }
                 }
             };
-            if local {
-                flush();
-            } else {
-                self.receivers.insert(worker_key, thread::spawn(flush));
-            }
+            self.receivers.insert(worker_key, thread::spawn(flush));
         }
     }
 }

@@ -32,6 +32,7 @@ struct Discovery {
     refreshed_at: u64,
     revision: Option<Arc<AtomicU64>>,
     requested_generation: u64,
+    cancelled: Arc<AtomicBool>,
     error: Option<String>,
     seen_revision: u64,
     refreshed_revision: u64,
@@ -78,6 +79,7 @@ struct Intent {
 }
 struct Badge {
     plugin: PluginDescriptor,
+    cancelled: Arc<AtomicBool>,
     desired: Intent,
     sent: Option<Intent>,
     retry_at: Instant,
@@ -146,6 +148,7 @@ impl SessionActivity {
                     refreshed_at: 0,
                     revision: None,
                     requested_generation: 0,
+                    cancelled: Arc::new(AtomicBool::new(false)),
                     error: None,
                     seen_revision: 0,
                     refreshed_revision: 0,
@@ -185,10 +188,13 @@ impl SessionActivity {
                 if changed.contains(id) {
                     self.remove_candidates(id);
                     let provider = &mut self.discovery[index];
+                    provider.cancelled.store(true, Ordering::Release);
+                    provider.cancelled = fresh.cancelled.clone();
                     provider.requested_generation = provider.requested_generation.wrapping_add(1);
                     for (target, badge) in &mut self.badges {
                         if &target.harness == id {
                             badge.plugin = fresh.plugin.clone();
+                            badge.cancelled = fresh.cancelled.clone();
                             badge.sent = None;
                             badge.attempted = None;
                             badge.failures = 0;
@@ -213,6 +219,7 @@ impl SessionActivity {
         self.discovery = kept;
         retired.discovery = removed;
         for p in &retired.discovery {
+            p.cancelled.store(true, Ordering::Release);
             if let Some(revision) = &p.revision {
                 revision.fetch_add(1, Ordering::SeqCst);
             }
@@ -489,6 +496,7 @@ impl SessionActivity {
                         target,
                         Badge {
                             plugin: provider.plugin.clone(),
+                            cancelled: provider.cancelled.clone(),
                             desired: intent,
                             sent: None,
                             retry_at: Instant::now(),
@@ -545,6 +553,7 @@ impl SessionActivity {
                 "retained_session_ids":retained,
                 "recent_window_ms":plugin.auto_listen.recent_window_ms.unwrap_or(900_000),"plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
+            let cancelled = provider.cancelled.clone();
             provider.flight.complete.store(false, Ordering::Release);
             let finished = CompletionNotice {
                 done: provider.flight.complete.clone(),
@@ -559,7 +568,7 @@ impl SessionActivity {
                             &plugin,
                             &request,
                             DISCOVERY_TIMEOUT,
-                            |_| check_running(&stopping),
+                            |_| check_running(&stopping).and_then(|()| check_running(&cancelled)),
                         )?;
                         if response["ok"] != true {
                             return Err(crate::support::response_diagnostic(
@@ -719,11 +728,14 @@ impl SessionActivity {
             badge.attempted = Some(intent.clone());
             let request = badge_request(&self.state_dir, &self.env, &intent);
             let stopping = self.stopping.clone();
+            let cancelled = badge.cancelled.clone();
             badge.worker = Some(
                 thread::Builder::new()
                     .name("cito-badge".into())
                     .spawn(move || {
-                        send_badge(&plugin, &request, &stopping)?;
+                        send_badge(&plugin, &request, |_| {
+                            check_running(&stopping).and_then(|()| check_running(&cancelled))
+                        })?;
                         Ok(intent)
                     })
                     .map_err(|e| format!("Cannot start badge worker: {e}"))?,
@@ -777,9 +789,8 @@ impl SessionActivity {
                 for (plugin, request) in chunk {
                     match thread::Builder::new()
                         .name("cito-badge-clear".into())
-                        .spawn_scoped(scope, move || {
-                            send_badge(plugin, request, &AtomicBool::new(false))
-                        }) {
+                        .spawn_scoped(scope, move || send_badge(plugin, request, |_| Ok(())))
+                    {
                         Ok(worker) => workers.push(worker),
                         Err(error) => {
                             errors.push(format!("Cannot start badge clear worker: {error}"))
@@ -824,10 +835,9 @@ fn badge_request(state_dir: &std::path::Path, env: &Value, intent: &Intent) -> V
 fn send_badge(
     plugin: &PluginDescriptor,
     request: &Value,
-    stopping: &AtomicBool,
+    progress: impl FnMut(Duration) -> Result<(), String>,
 ) -> Result<(), String> {
-    let response =
-        plugin_request_with_progress(plugin, request, BADGE_TIMEOUT, |_| check_running(stopping))?;
+    let response = plugin_request_with_progress(plugin, request, BADGE_TIMEOUT, progress)?;
     if response["ok"] == true {
         Ok(())
     } else {
@@ -1373,6 +1383,35 @@ print(json.dumps(response), flush=True)
     }
 
     #[test]
+    fn reload_cancels_changed_discovery_without_interrupting_an_unrelated_provider(
+    ) -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider("changed", json!({"discovery_delay":1.2}))?;
+        f.provider("unchanged", json!({"discovery_delay":0.4}))?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &[], |_| {
+            ["changed", "unchanged"]
+                .into_iter()
+                .all(|id| !f.calls(id, "discover_sessions").is_empty())
+        })?;
+        let original = f.calls("changed", "discover_sessions")[0]["pid"].clone();
+        fs::write(f.dir.join("changed/options.json"), json!({"sessions":[{"harness":"changed","session_id":"replacement","cwd":"/workspace"}]}).to_string()).map_err(|e| e.to_string())?;
+        drop(activity.reload(&f.config, &f.plugins, &HashSet::from(["changed".into()])));
+        pump(&mut activity, &f, &[], |a| {
+            !a.discovery_pending() && a.candidates().any(|row| row["session_id"] == "replacement")
+        })?;
+        assert!(!f
+            .records("changed")
+            .iter()
+            .any(|r| r["pid"] == original && r["stage"] == "end"));
+        assert_eq!(f.calls("unchanged", "discover_sessions").len(), 1);
+        assert!(f.records("unchanged").iter().any(|r| r["stage"] == "end"));
+        activity.shutdown()?;
+        assert_reaped(&f);
+        Ok(())
+    }
+
+    #[test]
     fn refresh_during_inflight_discovery_runs_the_new_generation_without_reap_delay(
     ) -> Result<(), String> {
         let mut f = Fixture::new()?;
@@ -1422,7 +1461,7 @@ print(json.dumps(response), flush=True)
             },
         );
         assert_eq!(
-            send_badge(&f.plugins.plugins[0], &request, &AtomicBool::new(false)).unwrap_err(),
+            send_badge(&f.plugins.plugins[0], &request, |_| Ok(())).unwrap_err(),
             "PROVIDER_OFFLINE: The provider is unavailable"
         );
         activity.remove_candidates("agent");
@@ -1442,7 +1481,7 @@ print(json.dumps(response), flush=True)
             "A missing ok is not success"
         );
         assert_eq!(
-            send_badge(&f.plugins.plugins[0], &request, &AtomicBool::new(false)).unwrap_err(),
+            send_badge(&f.plugins.plugins[0], &request, |_| Ok(())).unwrap_err(),
             "Session badge update failed"
         );
         activity.shutdown()?;

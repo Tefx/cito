@@ -1,5 +1,6 @@
 //! HTTP authentication. Only cryptographically verified OIDC principals enter the engine.
 use super::transport::{http_request, HttpDeadline, HTTP_TLS};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -115,6 +116,7 @@ pub struct OidcVerifier {
     key_lifetime: Duration,
     refresh_cooldown: Duration,
     tls: Arc<rustls::ClientConfig>,
+    jwks_uri: Option<String>,
 }
 
 impl OidcVerifier {
@@ -145,7 +147,13 @@ impl OidcVerifier {
             key_lifetime,
             refresh_cooldown,
             tls: HTTP_TLS.clone(),
+            jwks_uri: None,
         })
+    }
+
+    pub(super) fn with_jwks_uri(mut self, uri: String) -> Self {
+        self.jwks_uri = Some(uri);
+        self
     }
 
     fn check_deadline(deadline: Option<HttpDeadline<'_>>) -> Result<(), String> {
@@ -194,23 +202,37 @@ impl OidcVerifier {
     }
 
     fn refresh(&self, deadline: Option<HttpDeadline<'_>>) -> Result<JwkSet, String> {
-        let discovery = self.get_json(
-            &format!(
-                "{}/.well-known/openid-configuration",
-                self.issuer.trim_end_matches('/')
-            ),
-            "CITO_OIDC_ISSUER discovery URL",
-            "OIDC discovery",
-            deadline,
-        )?;
-        if discovery["issuer"] != self.issuer {
-            return Err("AUTH_UNAVAILABLE: discovery issuer mismatch".into());
-        }
-        let uri = discovery["jwks_uri"]
-            .as_str()
-            .ok_or("AUTH_UNAVAILABLE: missing OIDC jwks_uri")?;
-        serde_json::from_value(self.get_json(uri, "OIDC jwks_uri", "JWKS", deadline)?)
-            .map_err(|_| "AUTH_UNAVAILABLE: Invalid JWKS JSON".into())
+        let discovery;
+        let uri = if let Some(uri) = &self.jwks_uri {
+            uri
+        } else {
+            discovery = self.get_json(
+                &format!(
+                    "{}/.well-known/openid-configuration",
+                    self.issuer.trim_end_matches('/')
+                ),
+                "CITO_OIDC_ISSUER discovery URL",
+                "OIDC discovery",
+                deadline,
+            )?;
+            if discovery["issuer"] != self.issuer {
+                return Err("AUTH_UNAVAILABLE: discovery issuer mismatch".into());
+            }
+            discovery["jwks_uri"]
+                .as_str()
+                .ok_or("AUTH_UNAVAILABLE: missing OIDC jwks_uri")?
+        };
+        let mut document = self.get_json(uri, "OIDC jwks_uri", "JWKS", deadline)?;
+        let keys = document
+            .get_mut("keys")
+            .and_then(Value::as_array_mut)
+            .ok_or("AUTH_UNAVAILABLE: Invalid JWKS JSON")?;
+        Ok(JwkSet {
+            keys: std::mem::take(keys)
+                .into_iter()
+                .filter_map(|key| serde_json::from_value(key).ok())
+                .collect(),
+        })
     }
 
     fn verification_key(
@@ -220,19 +242,19 @@ impl OidcVerifier {
         mut refresh_after: Option<Instant>,
     ) -> Result<(jsonwebtoken::jwk::Jwk, Instant), String> {
         let mut attempted = false;
-        let mut cache = self
-            .cache
-            .lock()
-            .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?;
         loop {
             Self::check_deadline(deadline)?;
+            let mut cache = self
+                .cache
+                .lock()
+                .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?;
+            let mut rejected = "AUTHORIZATION_VIOLATION: unknown JWT kid";
             if let Some(at) = cache
                 .loaded_at
                 .filter(|at| Some(*at) > refresh_after && at.elapsed() < self.key_lifetime)
             {
                 if let Some(keys) = &cache.keys {
                     let mut selected = None;
-                    let mut rejected = None;
                     for key in keys
                         .keys
                         .iter()
@@ -249,20 +271,17 @@ impl OidcVerifier {
                                 break;
                             }
                             Ok(()) => selected = Some(key),
-                            Err(reason) if header.kid.is_some() => rejected = Some(reason),
+                            Err(reason) if header.kid.is_some() => rejected = reason,
                             Err(_) => {}
                         }
                     }
                     if let Some(key) = selected {
                         return Ok((key.clone(), at));
                     }
-                    if let Some(reason) = rejected {
-                        return Err(reason.into());
-                    }
                 }
             }
             if cache.refreshing {
-                cache = if let Some(deadline) = deadline {
+                let _cache = if let Some(deadline) = deadline {
                     let remaining = deadline.at.saturating_duration_since(Instant::now());
                     self.refreshed
                         .wait_timeout(cache, remaining.min(Duration::from_millis(50)))
@@ -280,10 +299,14 @@ impl OidcVerifier {
                     .refresh_at
                     .is_some_and(|at| at.elapsed() < self.refresh_cooldown)
             {
-                return Err(if cache.unavailable {
+                return Err(if cache.unavailable
+                    || cache
+                        .loaded_at
+                        .is_none_or(|at| at.elapsed() >= self.key_lifetime)
+                {
                     "AUTH_UNAVAILABLE: OIDC keys unavailable; refresh cooldown active"
                 } else {
-                    "AUTHORIZATION_VIOLATION: unknown JWT kid"
+                    rejected
                 }
                 .into());
             }
@@ -322,14 +345,14 @@ impl OidcVerifier {
     }
 
     pub fn verify(&self, token: &str) -> Result<Value, String> {
-        self.verify_inner(token, None)
+        self.verify_inner(token, None).map(|(identity, _)| identity)
     }
 
     pub(super) fn verify_with_deadline(
         &self,
         token: &str,
         deadline: HttpDeadline<'_>,
-    ) -> Result<Value, String> {
+    ) -> Result<(Value, Value), String> {
         Self::check_deadline(Some(deadline))?;
         let result = self.verify_inner(token, Some(deadline));
         Self::check_deadline(Some(deadline))?;
@@ -340,12 +363,24 @@ impl OidcVerifier {
         &self,
         token: &str,
         deadline: Option<HttpDeadline<'_>>,
-    ) -> Result<Value, String> {
+    ) -> Result<(Value, Value), String> {
         if !super::config::valid_hub_token(token) {
             return Err("AUTHORIZATION_VIOLATION: invalid bearer token".into());
         }
-        let header =
-            decode_header(token).map_err(|_| "AUTHORIZATION_VIOLATION: invalid JWT header")?;
+        let invalid = "AUTHORIZATION_VIOLATION: invalid JWT header";
+        let header = decode_header(token).map_err(|_| invalid)?;
+        // The library header does not expose JOSE critical extensions.
+        let (raw_header, _) = token.split_once('.').ok_or(invalid)?;
+        let extensions: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(raw_header).map_err(|_| invalid)?)
+                .map_err(|_| invalid)?;
+        if extensions.get("crit").is_some()
+            || header.typ.as_deref().is_some_and(|typ| {
+                typ.eq_ignore_ascii_case("at+jwt") || typ.eq_ignore_ascii_case("application/at+jwt")
+            })
+        {
+            return Err("AUTHORIZATION_VIOLATION: unsupported JWT header".into());
+        }
         if !matches!(
             header.alg,
             Algorithm::RS256
@@ -398,6 +433,9 @@ impl OidcVerifier {
             .map_err(|_| "AUTH_UNAVAILABLE: invalid system clock")?
             .as_secs();
         validate_token_times(&claims, now)?;
+        if claims["iat"].as_f64().is_none() {
+            return Err("AUTHORIZATION_VIOLATION: missing or invalid JWT iat".into());
+        }
         if claims["iss"].as_str() != Some(self.issuer.as_str()) {
             return Err("AUTHORIZATION_VIOLATION: invalid issuer".into());
         }
@@ -406,9 +444,8 @@ impl OidcVerifier {
             .filter(|s| !s.trim().is_empty())
             .ok_or("AUTHORIZATION_VIOLATION: missing subject")?;
         let owner = owner_user(&claims, sub);
-        Ok(
-            json!({"principal_id": format!("oidc:{}|{}", self.issuer, sub), "owner_user": owner, "sub": sub, "oidc": true, "token_expires_at":claims["exp"], "legacy_principal_id":format!("{}#{}",self.issuer,sub)}),
-        )
+        let identity = json!({"principal_id": format!("oidc:{}|{}", self.issuer, sub), "owner_user": owner, "sub": sub, "oidc": true, "token_expires_at":claims["exp"], "legacy_principal_id":format!("{}#{}",self.issuer,sub)});
+        Ok((identity, claims))
     }
 }
 

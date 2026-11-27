@@ -205,7 +205,12 @@ fn check_key_selection(with_kid: bool) {
     encryption["use"] = json!("enc");
     let mut other_alg = signing.clone();
     other_alg["alg"] = json!("RS512");
-    let mut keys = vec![encryption, other_alg, signing.clone()];
+    let mut keys = vec![
+        json!({"kty":"OKP","crv":"X25519","kid":"encryption","x":"example"}),
+        encryption,
+        other_alg,
+        signing.clone(),
+    ];
     let mut header = Header::new(Algorithm::RS256);
     if with_kid {
         header.kid = Some("test-key".into());
@@ -214,7 +219,7 @@ fn check_key_selection(with_kid: bool) {
         keys.push(other);
     }
     let server = key_server(json!({"keys":keys}));
-    let claims = json!({"iss":server.issuer,"aud":"client","sub":"alice","exp":crate::plugins::now_ms()/1000+60});
+    let claims = json!({"iss":server.issuer,"aud":"client","sub":"alice","iat":crate::plugins::now_ms()/1000,"exp":crate::plugins::now_ms()/1000+60});
     let jwt = encode(&header, &claims, &key).unwrap();
     let check = || {
         OidcVerifier::new(&server.issuer, "client")
@@ -243,7 +248,7 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let claims = json!({"iss":server.issuer,"sub":"subject","aud":["other","client"],"azp":"client","exp":now+300,"nbf":now-1,"preferred_username":"alice.smith"});
+        let claims = json!({"iss":server.issuer,"sub":"subject","aud":["other","client"],"azp":"client","iat":now,"exp":now+300,"nbf":now-1,"preferred_username":"alice.smith"});
         let mut header = Header::new(alg);
         header.kid = Some("test-key".into());
         let signed = |claims: &Value| encode(&header, claims, &key).unwrap();
@@ -264,6 +269,7 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
             ("azp", json!("other")),
             ("azp", Value::Null),
             ("exp", json!(now - 30)),
+            ("iat", json!("invalid")),
             ("nbf", json!(now + 60)),
             ("nbf", json!("invalid")),
             ("sub", json!("")),
@@ -275,6 +281,9 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
                 "{alg:?}: accepted invalid {k}"
             );
         }
+        let mut missing_iat = claims.clone();
+        missing_iat.as_object_mut().unwrap().remove("iat");
+        assert!(v.verify(&signed(&missing_iat)).unwrap_err().contains("iat"));
         let mut parts: Vec<String> = token.split('.').map(String::from).collect();
         let mut sig = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();
         sig[0] ^= 1;
@@ -401,7 +410,7 @@ fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let claims = json!({"iss":issuer,"aud":"client","sub":"subject","exp":now+300});
+    let claims = json!({"iss":issuer,"aud":"client","sub":"subject","iat":now,"exp":now+300});
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();
@@ -559,7 +568,8 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let claims = json!({"iss":issuer,"aud":"client","sub":"subject","exp":now+300,"nbf":now-1});
+    let claims =
+        json!({"iss":issuer,"aud":"client","sub":"subject","iat":now,"exp":now+300,"nbf":now-1});
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();
@@ -585,7 +595,7 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
             .collect();
         for caller in callers {
             assert_eq!(
-                caller.join().unwrap().unwrap()["principal_id"],
+                caller.join().unwrap().unwrap().0["principal_id"],
                 format!("oidc:{issuer}|subject")
             );
         }
@@ -636,9 +646,80 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
 }
 
 #[test]
+fn token_headers_reject_access_tokens_and_unsupported_critical_extensions() {
+    let (server, verifier, key) = verifier(Algorithm::RS256);
+    let now = crate::plugins::now_ms() / 1000;
+    let claims = json!({"iss":server.issuer,"aud":"client","sub":"alice","iat":now,"exp":now+60});
+    let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+    for header in [
+        json!({"alg":"RS256","typ":"at+jwt"}),
+        json!({"alg":"RS256","typ":"JWT","crit":["extension"],"extension":true}),
+    ] {
+        let message = format!("{}.{payload}", URL_SAFE_NO_PAD.encode(header.to_string()));
+        let signature =
+            jsonwebtoken::crypto::sign(message.as_bytes(), &key, Algorithm::RS256).unwrap();
+        let error = verifier
+            .verify(&format!("{message}.{signature}"))
+            .unwrap_err();
+        assert!(error.contains("unsupported JWT header"), "{error}");
+    }
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn same_kid_algorithm_rotation_refreshes_cached_keys() {
+    let (rsa, rsa_key) = key_material(Algorithm::RS256);
+    let (ec, ec_key) = key_material(Algorithm::ES256);
+    let server = key_server(json!({"keys":[rsa]}));
+    let verifier = OidcVerifier::with_cache_policy(
+        &server.issuer,
+        "client",
+        Duration::from_secs(60),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let now = crate::plugins::now_ms() / 1000;
+    let claims = json!({"iss":server.issuer,"aud":"client","sub":"alice","iat":now,"exp":now+60});
+    let signed = |alg, key| {
+        let mut header = Header::new(alg);
+        header.kid = Some("test-key".into());
+        encode(&header, &claims, key).unwrap()
+    };
+    verifier
+        .verify(&signed(Algorithm::RS256, &rsa_key))
+        .unwrap();
+    *server.keys.lock().unwrap() = json!({"keys":[ec]});
+    verifier.verify(&signed(Algorithm::ES256, &ec_key)).unwrap();
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn cooldown_with_expired_cache_reports_unavailability() {
+    let (server, _, key) = verifier(Algorithm::RS256);
+    let lifetime = Duration::from_millis(100);
+    let verifier = OidcVerifier::with_cache_policy(
+        &server.issuer,
+        "client",
+        lifetime,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let now = crate::plugins::now_ms() / 1000;
+    let claims = json!({"iss":server.issuer,"aud":"client","sub":"alice","iat":now,"exp":now+60});
+    let token = encode(&Header::new(Algorithm::RS256), &claims, &key).unwrap();
+    verifier.verify(&token).unwrap();
+    std::thread::sleep(lifetime);
+    assert!(verifier
+        .verify(&token)
+        .unwrap_err()
+        .starts_with("AUTH_UNAVAILABLE:"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn discovery_requires_the_configured_issuer_before_fetching_keys() {
     let (server, _, key) = verifier(Algorithm::RS256);
-    let jwt = encode(&Header::new(Algorithm::RS256), &json!({"iss":server.issuer,"sub":"alice","aud":"client","exp":crate::plugins::now_ms()/1000+60}), &key).unwrap();
+    let jwt = encode(&Header::new(Algorithm::RS256), &json!({"iss":server.issuer,"sub":"alice","aud":"client","iat":crate::plugins::now_ms()/1000,"exp":crate::plugins::now_ms()/1000+60}), &key).unwrap();
     for issuer in [None, Some(json!("https://other.example.com"))] {
         let mut doc = server.discovery.lock().unwrap();
         doc.as_object_mut().unwrap().remove("issuer");
@@ -666,7 +747,7 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
     header.kid = Some("test-key".into());
     let token = encode(
         &header,
-        &json!({"iss":issuer.issuer,"aud":"client","sub":"subject","exp":now as f64-0.5}),
+        &json!({"iss":issuer.issuer,"aud":"client","sub":"subject","iat":now-1,"exp":now as f64-0.5}),
         &key,
     )
     .unwrap();
@@ -721,7 +802,7 @@ fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
     header.kid = Some("test-key".into());
     let token = encode(
         &header,
-        &json!({"iss":issuer.issuer,"aud":"client","sub":"subject","exp":expires}),
+        &json!({"iss":issuer.issuer,"aud":"client","sub":"subject","iat":crate::plugins::now_ms()/1000,"exp":expires}),
         &key,
     )
     .unwrap();
@@ -803,7 +884,8 @@ fn caller_deadline_bounds_cache_wait_and_cached_verification() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let claims = json!({"iss":server.issuer,"aud":"client","sub":"subject","exp":now+300});
+    let claims =
+        json!({"iss":server.issuer,"aud":"client","sub":"subject","iat":now,"exp":now+300});
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();

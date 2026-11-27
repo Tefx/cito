@@ -187,6 +187,13 @@ pub fn parse_cli(
     {
         return Err("INVALID_INPUT: Human device commands do not accept session selectors, policy flags or descriptions; use cito inbox".into());
     }
+    // Human inbox policy is scoped to a selected Hub, independently of its visibility.
+    if matches!(cmd, "listen" | "unlisten")
+        && input.contains_key("hub")
+        && input.contains_key("scope")
+    {
+        return Err("INVALID_INPUT: --hub cannot be combined with --scope or --team".into());
+    }
     if cmd == "unlisten" && input.contains_key("scope") {
         return Err("INVALID_INPUT: Use cito inbox for scope policy".into());
     }
@@ -546,6 +553,7 @@ pub fn format_status(payload: &Value) -> String {
             Some("connected") => "Connected",
             Some("connecting") => "Connecting",
             Some("auth_required") => "Sign in required",
+            Some("disconnected") => "Disconnected",
             _ => "Unavailable",
         };
         let error = hub["error"]
@@ -584,6 +592,126 @@ fn inbox_policy(input: &Value) -> bool {
     ["paused", "scope", "about"]
         .iter()
         .any(|key| input.get(*key).is_some())
+}
+
+fn format_receipt(cmd: &str, payload: &Value) -> String {
+    use std::fmt::Write;
+    let string = |key: &str| payload[key].as_str().unwrap_or("");
+    let count = |key: &str| payload[key].as_u64().unwrap_or(0);
+    let address = || {
+        payload["display_address"]
+            .as_str()
+            .unwrap_or_else(|| string("listener_id"))
+    };
+    match cmd {
+        "status" => format_status(payload),
+        "listen" => {
+            let mut output = format!("Listening as {} ({})", address(), string("scope"));
+            let about = string("about");
+            if !about.is_empty() {
+                let _ = write!(output, ": {about}");
+            }
+            output.push('\n');
+            output
+        }
+        "unlisten" => format!("Unlistened ({} removed)\n", count("removed")),
+        "rename" => format!("Renamed session to {}\n", string("title")),
+        "send" => format!("Sent to {} ({})\n", string("to"), string("signal_id")),
+        "find" => {
+            let mut output = format!(
+                "{} listeners ({} online)\n",
+                count("matched_count"),
+                count("online_count")
+            );
+            for row in payload["listeners"].as_array().into_iter().flatten() {
+                if let Some(address) = row["display_address"].as_str() {
+                    let _ = writeln!(output, "  {address}");
+                }
+            }
+            output
+        }
+        "inbox" => {
+            if let Some(signals) = payload["signals"].as_array() {
+                let mut output = format!(
+                    "{} signals ({} acknowledged)\n",
+                    signals.len(),
+                    count("acknowledged_count")
+                );
+                for signal in signals {
+                    let from = &signal["from"];
+                    let sender = from["title"]
+                        .as_str()
+                        .or_else(|| from["user"].as_str())
+                        .unwrap_or("Unknown sender");
+                    let _ = writeln!(
+                        output,
+                        "  {sender} ({})",
+                        signal["signal_id"].as_str().unwrap_or("")
+                    );
+                    if let Some(message) = signal["message"].as_str() {
+                        for line in message.lines() {
+                            let _ = writeln!(output, "    {line}");
+                        }
+                    }
+                }
+                if payload["replay_gap_detected"] == true {
+                    output.push_str("Warning: Some earlier signals may be missing\n");
+                }
+                output
+            } else if let Some(record) = payload["record"].as_object() {
+                let status = if record.get("human_paused") == Some(&Value::Bool(true)) {
+                    "paused"
+                } else {
+                    "active"
+                };
+                let scope = record
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown scope");
+                format!("Human inbox {status} ({scope})\n")
+            } else {
+                "Human inbox updated\n".into()
+            }
+        }
+        _ => format!("{payload}\n"),
+    }
+}
+
+fn receipt_warnings(payload: &Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for row in payload["warnings"].as_array().into_iter().flatten() {
+        if let Some(message) = row.as_str().or_else(|| row["message"].as_str()) {
+            let message = presentation_error(message);
+            let warning = match row["hub"].as_str() {
+                Some(hub) => format!("{hub}: {message}"),
+                None => message,
+            };
+            if !warning.is_empty() && !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+    // A top-level warning is the aggregate when a detailed list is present.
+    let aggregate = warnings
+        .is_empty()
+        .then(|| payload["warning"].as_str())
+        .flatten();
+    for message in [aggregate, payload["maintenance_warning"].as_str()]
+        .into_iter()
+        .flatten()
+        .map(presentation_error)
+    {
+        if !message.is_empty() && !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
+    warnings
+}
+
+fn terminal_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
 }
 
 pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugins: &LoadedPlugins) {
@@ -634,22 +762,13 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
             }
             serde_json::from_str(text).map_err(|e| e.to_string())?
         };
-        if args.iter().any(|a| a == "--json") || !matches!(cmd, "listen" | "unlisten" | "status") {
+        if args.iter().any(|a| a == "--json") {
             println!("{payload}");
-        } else if cmd == "status" {
-            print!("{}", format_status(&payload));
-        } else if cmd == "listen" {
-            println!(
-                "Listening as {} ({}): {}",
-                payload["listener_id"].as_str().unwrap_or(""),
-                payload["scope"].as_str().unwrap_or(""),
-                payload["about"].as_str().unwrap_or("")
-            );
         } else {
-            println!(
-                "Unlistened ({} removed)",
-                payload["removed"].as_u64().unwrap_or(0)
-            );
+            print!("{}", terminal_text(&format_receipt(cmd, &payload)));
+            for warning in receipt_warnings(&payload) {
+                eprintln!("Warning: {}", terminal_text(&warning));
+            }
         }
         Ok(())
     })();
@@ -814,6 +933,70 @@ mod tests {
         )
         .unwrap();
         assert_eq!(input["message"], "-value");
+    }
+
+    #[test]
+    fn hub_and_scope_selectors_conflict_in_both_orders() {
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        for cmd in ["listen", "unlisten"] {
+            for flags in [
+                ["--hub=work", "--scope=self"],
+                ["--scope=self", "--hub=work"],
+                ["--hub=work", "--team"],
+                ["--team", "--hub=work"],
+            ] {
+                assert!(parse_cli(cmd, &flags.map(str::to_owned), &plugins)
+                    .unwrap_err()
+                    .contains("--hub cannot be combined"));
+            }
+        }
+        let flags = ["resume", "--hub", "work", "--team"].map(str::to_owned);
+        let (input, _) = parse_cli("inbox", &flags, &plugins).unwrap();
+        assert_eq!(input["scope"], "workspace");
+        assert_eq!(input["hub"], "work");
+    }
+
+    #[test]
+    fn human_receipts_use_addresses_and_preserve_committed_warnings() {
+        let find = json!({"matched_count":3,"online_count":2,"listeners":[
+            {"display_address":"alice/agent#review","listener_id":"internal-id"}
+        ]});
+        assert_eq!(
+            format_receipt("find", &find),
+            "3 listeners (2 online)\n  alice/agent#review\n"
+        );
+        assert_eq!(
+            format_receipt("send", &json!({"to":"alice","signal_id":"signal-a"})),
+            "Sent to alice (signal-a)\n"
+        );
+        assert_eq!(
+            format_receipt("rename", &json!({"title":"Review"})),
+            "Renamed session to Review\n"
+        );
+        let inbox = json!({"signals":[{"signal_id":"signal-a","from":{"user":"alice"},"message":"Review\nReady"}],"acknowledged_count":1});
+        assert_eq!(
+            format_receipt("inbox", &inbox),
+            "1 signals (1 acknowledged)\n  alice (signal-a)\n    Review\n    Ready\n"
+        );
+        let receipt = json!({"ok":true,"committed":true,"removed":1,"warning":"Aggregate",
+            "warnings":[{"hub":"work","message":"UNAVAILABLE: Reconciliation pending"}],"maintenance_warning":"Cleanup pending"});
+        assert_eq!(
+            format_receipt("unlisten", &receipt),
+            "Unlistened (1 removed)\n"
+        );
+        assert_eq!(
+            receipt_warnings(&receipt),
+            ["work: Reconciliation pending", "Cleanup pending"]
+        );
+        assert_eq!(
+            receipt_warnings(
+                &json!({"warning":"Cleanup pending","maintenance_warning":"Cleanup pending"})
+            ),
+            ["Cleanup pending"]
+        );
     }
 
     #[test]

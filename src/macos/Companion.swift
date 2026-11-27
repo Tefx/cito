@@ -137,7 +137,13 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         layoutComposer()
         composerSendButton?.layoutContents()
     } }
-    var settings: SettingsPayload?
+    var settings: SettingsPayload? { didSet {
+        let subscribed = settingsChannels.subscribedHub
+        if let old = oldValue?.hubs.first(where: { $0.name == subscribed }),
+           !old.sharesChannelAuthority(with: settings?.hubs.first { $0.name == subscribed }) {
+            settingsChannels.subscribedHub = ""
+        }
+    } }
     var settingsVisible = false
     var settingsActiveTab = "apps" { didSet {
         if oldValue != settingsActiveTab { settingsBannerError = nil; hostPort.error = nil }
@@ -342,8 +348,41 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     var settingsApps = SettingsAppsState()
     var activeUninstallAlert: NSAlert?
     var settingsChannels = SettingsChannelsState()
-    var settingsBannerError: String?
-    var menuBannerError: String?
+    var settingsBannerError: String? { didSet { settingsBannerOwner = nil } }
+    var menuBannerError: String? { didSet { menuBannerOwner = nil } }
+    enum ActionSurface { case menu, settings }
+    struct BannerOwner: Equatable {
+        let surface: ActionSurface
+        let op: String
+        let hub: String
+        let target: String
+    }
+    private var settingsBannerOwner: BannerOwner?
+    private var menuBannerOwner: BannerOwner?
+
+    private func actionSurface(for operation: String) -> ActionSurface {
+        // Hub authentication is available on both surfaces. Capture tracking at
+        // dispatch time, not window visibility when the reply arrives.
+        if operation == "hub_action" && menuOpen { return .menu }
+        if SettingsTab.affected(by: operation) != nil ||
+            ["setup_save_hub", "paste_hub_invite", "set_launch_at_login"].contains(operation) { return .settings }
+        return .menu
+    }
+
+    private func updateActionBanner(_ message: String?, owner: BannerOwner, advisory: Bool = false) {
+        if message == nil && menuBannerOwner == owner { menuBannerError = nil }
+        // A committed operation can also report a refresh warning. Keep that
+        // advisory readable if its Settings window has already closed.
+        let surface: ActionSurface = advisory && !settingsVisible ? .menu : owner.surface
+        switch surface {
+        case .settings:
+            if let message { settingsBannerError = message; settingsBannerOwner = owner }
+            else if settingsBannerOwner == owner { settingsBannerError = nil }
+        case .menu:
+            if let message { menuBannerError = message; menuBannerOwner = owner }
+            else if menuBannerOwner == owner { menuBannerError = nil }
+        }
+    }
     var settingsFieldControls: [String: NSTextField] = [:]
     static let channelResetOps = ["channel_cancel_pair", "channel_unpair", "disconnect_human_channel"]
     static let channelSaveOps = ["channel_save", "save_hub_service"]
@@ -357,6 +396,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
 
         let op: String, hub: String, target: String
         let appCheck: Bool
+        let bannerOwner: BannerOwner
+        let channelEditor: String?
         // A superseded save still owns its control receipt, but cannot reconcile drafts.
         var channelSave: ChannelSave?
         var channelReset: (hub: Bool, user: Bool, submitted: ChannelUiState)?
@@ -492,6 +533,19 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         return false
     }
 
+    func handleSettingsPanelKey(_ key: String) {
+        if key == "return", let focused = settingsPanel?.firstResponder as? MenuControl {
+            if !focused.isHiddenOrHasHiddenAncestor { focused.performClick(nil) }
+            return
+        }
+        if key == "escape", settingsActiveTab == "channels", let mounted = mountedChannelsSettings {
+            guard allowPanelKey(key, in: settingsPanel) else { return }
+            cancelChannelEditing(in: mounted)
+            return
+        }
+        handleSettingsKey(key)
+    }
+
     func allowPanelKey(_ key: String, in window: NSWindow?) -> Bool {
         guard let window, (window.firstResponder as? NSTextInputClient)?.hasMarkedText() == true else { return true }
         switch key {
@@ -573,7 +627,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             if window?.sheetParent === self.settingsPanel && window?.sheetParent != nil { return event }
             let onPanelKey: ((String) -> Void)?
             if self.directoryVisible && window === self.directoryPanel { onPanelKey = self.handleDirectoryKey }
-            else if self.settingsVisible && window === self.settingsPanel { onPanelKey = self.handleSettingsKey }
+            else if self.settingsVisible && window === self.settingsPanel { onPanelKey = self.handleSettingsPanelKey }
             else { onPanelKey = nil }
             if let key = panelShortcutKey(event, includingNative: self.headless || onPanelKey == nil) {
                 if let onPanelKey { onPanelKey(key); return nil }
@@ -589,6 +643,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             // Text Services owns navigation and commit keys while the field editor is active.
             guard let onPanelKey, !(window?.firstResponder is NSTextView),
                   let key = [53:"escape",126:"up",125:"down",36:"return",76:"return",51:"delete",117:"delete"][event.keyCode] else { return event }
+            if key == "delete" && event.isARepeat { return nil }
+            if key == "return" && window === self.settingsPanel && event.isARepeat { return nil }
             onPanelKey(key == "return" && event.modifierFlags.contains(.shift) ? "shift-return" : key)
             return nil
         }
@@ -606,22 +662,39 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         DispatchQueue.global().async { [weak self] in
             var buffer = Data()
             var bytes = [UInt8](repeating: 0, count: 8192)
+            let delivered = DispatchSemaphore(value: 0)
+            var lines: [Data] = []
+            // Keep one bounded batch in flight. The pipe provides backpressure,
+            // and tracking-mode delivery preserves IPC order without flooding AppKit.
+            func deliver() {
+                guard !lines.isEmpty else { return }
+                let batch = lines
+                lines.removeAll(keepingCapacity: true)
+                RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self] in
+                    defer { delivered.signal() }
+                    for line in batch { self?.receive(line) }
+                }
+                CFRunLoopWakeUp(CFRunLoopGetMain())
+                delivered.wait()
+            }
             while true {
                 let n = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
                 if n < 0 && errno == EINTR { continue }
                 if n <= 0 {
                     RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self] in self?.finishAfterDaemonEOF() }
+                    CFRunLoopWakeUp(CFRunLoopGetMain())
                     return
                 }
                 var start = 0
                 for end in 0..<n where bytes[end] == 10 {
                     buffer.append(contentsOf: bytes[start..<end])
-                    let line = buffer
+                    lines.append(buffer)
                     buffer = Data()
                     start = end + 1
-                    RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self] in self?.receive(line) }
+                    if lines.count == 16 { deliver() }
                 }
                 buffer.append(contentsOf: bytes[start..<n])
+                deliver()
             }
         }
     }
@@ -673,6 +746,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         guard frame.op == "settings" || (frame.op == "state" && frame.hubs != nil && frame.listeners != nil),
               frame.ok != false, let value = frame.settings,
               settingsHub(value, hub: settingsFrameHub(frame, pending: pending)) == pending.hub,
+              channelEditorKey(hub: pending.hub, principal: channelPrincipal(for: pending.hub, in: value), channel: pending.target) == pending.channelEditor,
               value.channels?.contains(where: { $0.id == pending.target }) == true else { return nil }
         return pending
     }
@@ -750,9 +824,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             settingsApps.checkedUntil[pending.target] = Date().addingTimeInterval(1.5)
             rebuildFeedbackAfter(1.5, tab: .apps)
         }
-        guard isChannel else { return true }
+        guard isChannel, let key = pending.channelEditor else { return true }
         let hub = pending.hub
-        let key = "\(hub)|\(pending.target)"
         if pending.op == "channel_pair", settingsChannels.editors[key]?.pairing == .requested(request) {
             settingsChannels.editors[key]?.pairing = nil
         }
@@ -773,7 +846,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 ui.clearPairingInstructions()
             }
             for field in fields where (reset.hub && field.scope == "hub") || (reset.user && field.scope == "user") {
-                if ui.drafts[field.key] == sent.drafts[field.key] { ui.drafts.removeValue(forKey: field.key) }
+                let draftKey = channelDraftKey(scope: field.scope, key: field.key)
+                if ui.drafts[draftKey] == sent.drafts[draftKey] { ui.drafts.removeValue(forKey: draftKey) }
             }
             if unchanged {
                 if reset.hub { ui.resetGateway() }
@@ -784,9 +858,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         if let save = pending.channelSave, channelSaveProjection(frame, for: pending) == nil {
             // Settings never echo submitted secrets. Keep non-secret drafts
             // until a fresh projection reconciles their values.
-            for field in fields where field.type == "secret" {
-                if let sent = save.values[field.key], settingsChannels.editors[key]?.drafts[field.key] == sent {
-                    settingsChannels.editors[key]?.drafts.removeValue(forKey: field.key)
+            for field in fields where field.type == "secret" && field.scope == save.scope {
+                let draftKey = channelDraftKey(scope: field.scope, key: field.key)
+                if let sent = save.values[field.key], settingsChannels.editors[key]?.drafts[draftKey] == sent {
+                    settingsChannels.editors[key]?.drafts.removeValue(forKey: draftKey)
                 }
             }
         }
@@ -810,10 +885,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     func settleReceiptOnly(_ frame: Frame) -> Bool {
         guard let request = frame.request_id else { return false }
         if settleDirectoryActionSuccess(frame) { return true }
-        let pendingOperation = pendingControls[request]?.op
+        let pending = pendingControls[request]
         var settled = settleControlReceipt(frame, receiptOnly: true)
+        let settledControl = settled
         var routedToForm = false
-        let operation = frame.source_op ?? frame.action ?? (settled ? pendingOperation : nil) ?? ""
+        let operation = frame.source_op ?? frame.action ?? (settled ? pending?.op : nil) ?? ""
         let failed = frame.ok == false || frame.op == "error"
         let message = frame.warning ?? frame.error
         if let pending = hubForm.pendingSave, request == pending.requestId,
@@ -834,8 +910,13 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 routedToForm = true
             }
         }
-        if settled && !routedToForm && operation != "channel_test", let message = message, !message.isEmpty {
-            if settingsVisible { settingsBannerError = message } else { menuBannerError = message }
+        if settled && !routedToForm && operation != "channel_test" {
+            if settledControl, let pending {
+                if let message, !message.isEmpty { updateActionBanner(message, owner: pending.bannerOwner, advisory: !failed) }
+                else if !failed && (frame.ok == true || frame.committed == true) { updateActionBanner(nil, owner: pending.bannerOwner) }
+            } else if let message, !message.isEmpty {
+                settingsBannerError = message
+            }
         }
         return settled
     }
@@ -894,6 +975,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         var revealHubError = false
         var revealPairingChannel: String?
         defer {
+            refreshChannelSettingsIfNeeded()
             if let previousSettings {
                 let current = settingsPresentation()
                 let tabs = current.changedTabs(from: previousSettings)
@@ -950,8 +1032,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         let settledControl = settleControlReceipt(frame)
         let previousMenuBanner = menuBannerError
         let previousSettingsBanner = settingsBannerError
-        if frame.op == "state", (frame.request_id == nil || settledControl), let message = frame.error ?? frame.warning, !message.isEmpty {
-            if settingsVisible { settingsBannerError = message } else { menuBannerError = message }
+        let receiptOwner = settledControl ? pendingReceipt?.bannerOwner : nil
+        if let receiptOwner, receiptOwner.op != "channel_test", frame.ok != false, frame.op != "error",
+           frame.ok == true || frame.committed == true {
+            let warning = frame.warning.flatMap { $0.isEmpty ? nil : $0 }
+            if receiptOwner.op != "set_host_hub" || warning == nil || warning != frame.settings?.host_hub.error {
+                updateActionBanner(warning, owner: receiptOwner, advisory: warning != nil)
+            }
+        } else if frame.op == "state", frame.request_id == nil, frame.ok != false, let message = frame.error ?? frame.warning, !message.isEmpty {
+            if settingsVisible && settingsPanel?.isMiniaturized != true { settingsBannerError = message }
+            else { menuBannerError = message }
         }
         let menuBannerChanged = menuBannerError != previousMenuBanner
         let settingsBannerChanged = settingsBannerError != previousSettingsBanner
@@ -1043,11 +1133,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             else if ["query_directory", "open_directory", "directory"].contains(sourceOp) || (frame.op == "directory" && sourceOp.isEmpty) {
                 if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
             }
-            else if directoryVisible && directoryActionOps.contains(sourceOp) {
+            else if directoryActionOps.contains(sourceOp) {
                 directoryActionError = error; directoryActionErrorSourceOp = sourceOp; updateDirectoryWarnings()
             }
             else if sourceOp == "channel_test" || (sourceOp == "set_host_hub" && settings?.host_hub.error == error) { }
-            else if settingsVisible || hubForm.pendingSave != nil || clipboardJoin || sourceOp == "paste_hub_invite" { settingsBannerError = error }
+            else if let receiptOwner { updateActionBanner(error, owner: receiptOwner) }
+            else if (settingsVisible && settingsPanel?.isMiniaturized != true) || hubForm.pendingSave != nil || clipboardJoin || sourceOp == "paste_hub_invite" { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild(preservingEditor: true)
@@ -1069,22 +1160,18 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             if hubInvite.requestId != nil && frame.request_id == hubInvite.requestId && hubSaveSucceeded {
                 hubInvite.requestId = nil; hubInvite.joinedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2, tab: .hubs)
             }
-            let previousChannelHub = effectiveChannelHub
             acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, confirmHubSave: hubSaveSucceeded, savedHub: frame.hub, truncated: preserveSettingsChannels)
-            let nextChannelHub = effectiveChannelHub
-            if settingsChannels.selectedHub.isEmpty && nextChannelHub != previousChannelHub {
-                refreshChannelSettingsIfNeeded()
-            }
-            if let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
+            if receiptOwner == nil, let warning = frame.warning, !warning.isEmpty, frame.source_op != "channel_test",
                !(frame.source_op == "set_host_hub" && value.host_hub.error == warning) { settingsBannerError = warning }
+            if menuBannerChanged { rebuild(preservingEditor: true) }
             return
         }
         if frame.op == "pair_code", frame.authority_changed != true, let id = frame.channel_id {
             let hub = receiptHub ?? effectiveChannelHub
-            let key="\(hub)|\(id)"
+            let key = channelEditorKey(hub: hub, channel: id)
             guard let request = frame.request_id, let pending = pendingReceipt,
                   pending.op == "channel_pair", pending.hub == hub, pending.target == id,
-                  var ui = settingsChannels.editors[key], ui.pairing == .requested(request) else { return }
+                  pending.channelEditor == key, var ui = settingsChannels.editors[key], ui.pairing == .requested(request) else { return }
             ui.pairing = .displayed(request)
             ui.pairingInstruction = frame.instruction ?? frame.code ?? ""
             ui.pairingCommand = frame.pairing_command ?? frame.instruction
@@ -1096,7 +1183,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         }
         if frame.op == "channel_test_result", frame.authority_changed != true, let id = frame.channel_id {
             guard frame.request_id == nil || settledControl else { return }
-            let key = "\(receiptHub ?? effectiveChannelHub)|\(id)"
+            let key = channelEditorKey(hub: receiptHub ?? effectiveChannelHub, channel: id)
+            guard frame.request_id == nil || pendingReceipt?.channelEditor == key else { return }
             settingsChannels.editors[key, default: ChannelUiState()].testResult = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
             settingsChannels.editors[key, default: ChannelUiState()].testResultIsLatest = true
             return
@@ -1129,21 +1217,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             let directoryMembershipChanged = h != hubs || l != listeners
             let nextHarnesses = hasRenderedState && frame.preservesCollection("harnesses") ? harnesses : frame.harnesses ?? harnesses
             let harnessesChanged = nextHarnesses != harnesses
-            if harnessesChanged { harnesses = nextHarnesses }
+            if harnessesChanged { harnesses = nextHarnesses; directoryDirty = true }
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings.map { settingsProjectionChanged($0, hub: settingsHubHint) } ?? false
             let settingsReceipt = (hostPort.pending && frame.request_id == hostPort.submission?.requestId) || (settledControl && projectedSave != nil)
             if hasRenderedState && !settledControl && !discoveryChanged && !harnessesChanged && !settingsChanged && !settingsReceipt && !menuBannerChanged && !settingsBannerChanged && !activityChanged && !directoryMembershipChanged && a == available && !directoryRemoteChanged {
                 updateStatusItem()
             } else {
-                let previousChannelHub = effectiveChannelHub
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
                 if (settingsChanged || settingsReceipt), let value = nextSettings ?? settings {
                     acceptSettings(value, hub: settingsHubHint, channelSave: settledControl ? projectedSave : nil, savedRequest: frame.request_id, sourceOp: frame.source_op, truncated: preserveSettingsChannels)
-                }
-                let nextChannelHub = effectiveChannelHub
-                if settingsChannels.selectedHub.isEmpty && nextChannelHub != previousChannelHub {
-                    refreshChannelSettingsIfNeeded()
                 }
                 seedDirectoryPeersIfEmpty()
                 hasRenderedState = true
@@ -1151,7 +1234,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 refreshDirectoryViews()
                 if directoryVisible && (directoryMembershipChanged || directoryRemoteChanged) { queryDirectory() }
             }
-            if !hasCheckedFirstLaunchOnboarding, let s = settings, !s.apps.isEmpty {
+            if !hasCheckedFirstLaunchOnboarding, let s = settings, !s.apps.isEmpty,
+               !s.apps.contains(where: { $0.status == "error" && $0.detail == "Setup inspection pending" }) {
                 hasCheckedFirstLaunchOnboarding = true
                 if !headless && !s.apps.contains(where: { $0.isConfigured || $0.status == "error" }) {
                     let rawStateDir = ProcessInfo.processInfo.environment["CITO_STATE_DIR"] ?? (NSHomeDirectory() + "/.cito")
@@ -1201,8 +1285,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
         guard quitState == .running else { return }
         let operation = action["op"] as? String ?? ""
         if operation == "quit" { NSApp.terminate(nil); return }
-        let passive = ["query_directory", "refresh_available"].contains(operation)
-        if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild(preservingEditor: true) }
+        let surface = actionSurface(for: operation)
+        if userInitiated && surface == .menu && menuBannerOwner == nil && menuBannerError != nil &&
+            !["query_directory", "refresh_available", "close_settings", "close_directory"].contains(operation) {
+            menuBannerError = nil; rebuild(preservingEditor: true)
+        }
         var outgoing = action
         let tracked = Self.channelControlOps + Self.hubOrderOps + ["set_host_hub", "human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app", "setup_remove_hub", "set_scope", "set_auto_listen", "unlisten_session", "set_listen_mode", "rename_session", "hub_action", "setup_toggle_hub", "set_launch_at_login", "setup_disconnect_all", "listen_session"]
         if tracked.contains(operation) || directoryActionOps.contains(operation) {
@@ -1214,7 +1301,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             else if operation == "set_host_hub" { hostPort.submission = nil; hostPort.error = message }
             else if operation == "paste_hub_invite" { hubInvite.requestId = nil; hubForm.parseRequest = ""; settingsBannerError = message }
             else if operation == "send_signal" { pendingComposer = nil; setComposerStatus(message) }
-            else { settingsBannerError = message; menuBannerError = message }
+            else if surface == .settings { settingsBannerError = message }
+            else { menuBannerError = message }
             rebuild(preservingEditor: true); if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
@@ -1226,17 +1314,22 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             let inboxTarget = action["paused"] != nil ? "paused" : "scope"
             let controlTarget = operation == "set_host_hub" ? hostTarget : (operation == "human_inbox_update" ? inboxTarget : "")
             let target = channel ?? session ?? outgoing["harness"] as? String ?? controlTarget
-            var pending = PendingControl(op: operation, hub: hub, target: target, appCheck: appCheck)
-            if let channel {
-                let key = "\(hub)|\(channel)"
+            let bannerTarget = outgoing["listener_id"] as? String ?? outgoing["action"] as? String ?? target
+            let owner = BannerOwner(surface: surface, op: operation, hub: hub, target: bannerTarget)
+            let editor = channel.map { channelEditorKey(hub: hub, channel: $0) }
+            var pending = PendingControl(op: operation, hub: hub, target: target, appCheck: appCheck, bannerOwner: owner, channelEditor: editor)
+            if let key = editor {
                 if operation == "channel_pair" { settingsChannels.editors[key, default: ChannelUiState()].pairing = .requested(request) }
                 if operation == "channel_test" { settingsChannels.editors[key, default: ChannelUiState()].testResultIsLatest = false }
-                if Self.channelSaveOps.contains(operation), let values = outgoing["values"] as? [String: String] {
+                if Self.channelSaveOps.contains(operation), let values = outgoing["values"] as? [String: Any] {
                     let scope = outgoing["scope"] as? String ?? (operation == "save_hub_service" ? "hub" : "user")
-                    for old in Array(pendingControls.keys) where pendingControls[old].map({ $0.hub == hub && $0.target == target && $0.channelSave?.scope == scope }) == true {
+                    for old in Array(pendingControls.keys) where pendingControls[old].map({ $0.channelEditor == key && $0.channelSave?.scope == scope }) == true {
                         pendingControls[old]?.channelSave = nil
                     }
-                    pending.channelSave = .init(scope: scope, values: values)
+                    let submitted = values.compactMapValues { value in
+                        (value as? String) ?? (value as? Bool).map(String.init)
+                    }
+                    pending.channelSave = .init(scope: scope, values: submitted)
                 }
                 if Self.channelResetOps.contains(operation) {
                     let resetHub = outgoing["reset_hub"] as? Bool == true
@@ -1254,7 +1347,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             clearDirectoryActionError()
         }
         if Self.channelControlOps.contains(operation), let id = outgoing["channel_id"] as? String {
-            let key = "\(outgoing["hub"] as? String ?? effectiveChannelHub)|\(id)"
+            let key = channelEditorKey(hub: outgoing["hub"] as? String ?? effectiveChannelHub, channel: id)
             var removedTestResult = false
             if operation != "channel_test" {
                 removedTestResult = settingsChannels.editors[key]?.testResult != nil
@@ -1336,9 +1429,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             return false
         }
         if control.window === settingsPanel {
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleSettingsKey("return"); return true }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleSettingsPanelKey("return"); return true }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                handleSettingsKey("escape")
+                handleSettingsPanelKey("escape")
                 return true
             }
             return false
@@ -1348,7 +1441,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
             handleDirectoryKey(commandSelector == #selector(NSResponder.moveDown(_:)) ? "down" : "up")
             return true
         }
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleDirectoryKey(NSApp.currentEvent?.modifierFlags.contains(.shift) == true ? "shift-return" : "return"); return true }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if control === directorySearchField { return true }
+            handleDirectoryKey(NSApp.currentEvent?.modifierFlags.contains(.shift) == true ? "shift-return" : "return")
+            return true
+        }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { handleDirectoryKey("escape"); return true }
         return false
     }

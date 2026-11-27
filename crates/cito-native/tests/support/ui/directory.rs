@@ -40,7 +40,7 @@ fn v41_directory_copy_drafts_and_activity_confirmation_survive_only_valid_transi
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     f.send(p, json!({"op":"test_directory_key","key":"shift-return"}));
     let draft = inspect(&f, p);
-    assert_eq!(draft["composer_target"], peer("one")["display_address"]);
+    assert_eq!(draft["composer_target"], peer("one")["scoped_id"]);
     assert_eq!(draft.directory("composer_input")["text"], "Keep this draft");
     control(&f, p, "composer_cancel");
     control(&f, p, "dir_mode:activity");
@@ -579,7 +579,7 @@ fn appkit_activity_delete_cancels_a_press_when_a_correlated_refresh_reuses_the_r
     assert!(refreshed.directory("delete_activity:d").is_object());
     assert!(
         f.output(p, true)
-            .contains("tracked-row-press true true activity_row:b"),
+            .contains("tracked-row-press true false activity_row:b"),
         "{}",
         f.output(p, true)
             .lines()
@@ -736,7 +736,13 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     );
     assert_eq!(inspect(&f, p)["directory_selected_index"], 1);
     f.send(p, json!({"op":"test_focus_field","id":"directory_table"}));
-    f.send(p, json!({"op":"test_directory_key","key":"delete"}));
+    f.send(p, json!({"op":"test_key_event","surface":"directory","character":"\u{7f}","key_code":51,"repeat":true}));
+    inspect(&f, p);
+    assert_eq!(f.frames_for(p, "clear_activity_history").count(), deletions);
+    f.send(
+        p,
+        json!({"op":"test_key_event","surface":"directory","character":"\u{7f}","key_code":51}),
+    );
     wait(|| {
         f.frames(p).iter().any(|v| {
             v["op"] == "clear_activity_history"
@@ -773,7 +779,7 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     wait(|| {
         f.frames(p).iter().any(|v| {
             v["op"] == "send_signal"
-                && v["in_reply_to"] == "personal:sig_unread"
+                && v["in_reply_to"] == "personal:personal:sig_unread"
                 && v["message"] == "Approved"
         })
     });
@@ -1413,7 +1419,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["to"], "personal:one");
     assert_eq!(replies[0]["hub"], "personal");
-    assert_eq!(replies[0]["in_reply_to"], "personal:reply_a");
+    assert_eq!(replies[0]["in_reply_to"], "personal:personal:reply_a");
     control(&f, p, "reply_activity:personal:reply_b");
     let s = inspect(&f, p);
     assert_eq!(s["composer_reply_signal_id"], "personal:reply_b");
@@ -1444,7 +1450,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(replies.len(), 2);
     assert_eq!(replies[1]["to"], "personal:one");
     assert_eq!(replies[1]["hub"], "personal");
-    assert_eq!(replies[1]["in_reply_to"], "personal:reply_b");
+    assert_eq!(replies[1]["in_reply_to"], "personal:personal:reply_b");
     // Cancel only hides the draft; its in-flight send must still own its snapshot.
     control(&f, p, "composer_cancel");
     control(&f, p, "dir_mode:directory");
@@ -1635,7 +1641,17 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     assert_eq!(copied["clipboard"], message.trim());
     assert_eq!(copied.directory(&control_id)["text"], "✓ Copied");
     l.control(&control_id);
-    l.pump();
+    wait(|| f.frames_for(l.ui, "copy_activity_message").count() == 2);
+    let second = f
+        .frames_for(l.ui, "copy_activity_message")
+        .next_back()
+        .unwrap();
+    wait(|| {
+        l.pump();
+        l.frames.iter().any(|frame| {
+            frame["op"] == "activity_message" && frame["request_id"] == second["request_id"]
+        })
+    });
     f.send(
         l.ui,
         json!({"op":"test_expire_copy_feedback","id":control_id}),
@@ -1671,7 +1687,9 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         "A newer clipboard action supersedes an in-flight copy receipt"
     );
     assert_eq!(inspect(&f, l.ui)["composer_open"], false);
+    let copy_count = f.frames_for(l.ui, "copy_activity_message").count();
     l.control(&control_id);
+    wait(|| f.frames_for(l.ui, "copy_activity_message").count() == copy_count + 1);
     let request = f
         .frames_for(l.ui, "copy_activity_message")
         .next_back()
@@ -1807,4 +1825,180 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     assert!(!f
         .rows("SELECT signal_id FROM local_signals WHERE activity_hidden=1")
         .is_empty());
+}
+
+#[test]
+fn activity_selector_disambiguates_the_same_opaque_id_on_two_hubs() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state());
+    control(&f, p, "open_activity");
+    control(&f, p, "act_filter:all");
+    let activity = ["personal", "work"].map(|hub| json!({"hub":hub,"signal_id":"thread:one","listener_id":"recipient","from_user":"bob","from_host_name":"desktop","from_title":"Build","target_harness":"human","target_title":"You","message":"Build complete","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}));
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":activity,"activity_filter":"all"}),
+    );
+    assert_eq!(
+        inspect(&f, p)["directory_selected_activity"],
+        json!({"hub":"personal","signal_id":"thread:one"})
+    );
+    control(&f, p, "delete_activity:thread:one");
+    inspect(&f, p);
+    assert_eq!(f.frames_for(p, "clear_activity_history").count(), 0);
+    f.send(p, json!({"op":"test_control","id":"activity_row:thread:one","hub":"work","signal_id":"thread:one"}));
+    assert_eq!(
+        inspect(&f, p)["directory_selected_activity"],
+        json!({"hub":"work","signal_id":"thread:one"})
+    );
+    f.send(p, json!({"op":"test_control","id":"delete_activity:thread:one","hub":"work","signal_id":"thread:one"}));
+    let action = latest(&f, p, "clear_activity_history");
+    assert_eq!(action["hub"], "work");
+    assert_eq!(action["signal_id"], "thread:one");
+}
+
+#[test]
+fn directory_2a_composer_binding_validation_delete_guards_facets_and_attachments() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    let mut extra_harness = frame["harnesses"][0].clone();
+    extra_harness["id"] = json!("external-app");
+    extra_harness["display_name"] = json!("External App");
+    frame["harnesses"] = json!([frame["harnesses"][0].clone(), extra_harness]);
+    f.send(p, frame.clone());
+    control(&f, p, "open_directory");
+
+    // 1. Address chip copy-action AX label and DISCONNECTED_RETAINED attachment filtering.
+    let mut human_one = peer("alice-one");
+    human_one["harness"] = json!("human");
+    human_one["user"] = json!("alice");
+    human_one["display_address"] = json!("@alice");
+    human_one["attachments"] = json!([
+        {"channel_id":"dev:active","location":"device","host_id":"h1","display_name":"laptop","availability":"ACTIVE","is_local":false},
+        {"channel_id":"dev:stale","location":"device","host_id":"h2","display_name":"desktop","availability":"DISCONNECTED_RETAINED","is_local":true}
+    ]);
+    let mut human_two = peer("alice-two");
+    human_two["scoped_id"] = json!("personal:alice-two");
+    human_two["harness"] = json!("human");
+    human_two["user"] = json!("alice");
+    human_two["display_address"] = json!("@alice");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[human_one, human_two],"matched_count":2,"online_count":2}),
+    );
+    let initial = inspect(&f, p);
+    assert_eq!(
+        initial.directory("copy_dir:personal:alice-one")["accessibility_label"],
+        "Copy address @alice"
+    );
+    assert_eq!(
+        initial.directory("dir_meta:personal:alice-one")["text"],
+        "Inbox · laptop · Schema work"
+    );
+
+    // 2. Removed external App facet resets to "all".
+    control(&f, p, "dir_harness:external-app");
+    assert_eq!(inspect(&f, p)["directory_harness"], "external-app");
+    frame["harnesses"] = json!([frame["harnesses"][0].clone()]);
+    f.send(p, frame.clone());
+    let reset_facet = inspect(&f, p);
+    assert_eq!(reset_facet["directory_harness"], "all");
+    assert_eq!(reset_facet.directory("dir_harness:all")["border_width"], 1);
+
+    // 3. Composer binds @alice target to stable scoped_id, shares blank validation,
+    // and ignores Search Return while Search is focused.
+    control(&f, p, "msg_dir:personal:alice-two");
+    let opened = inspect(&f, p);
+    assert_eq!(opened["composer_target"], "personal:alice-two");
+    assert_eq!(opened.directory("composer_target")["text"], "To: @alice");
+
+    f.send(p, json!({"op":"test_composer_input","value":"   "}));
+    control(&f, p, "composer_send");
+    let blank_send = inspect(&f, p);
+    assert_eq!(
+        blank_send.directory("composer_error")["text"],
+        "Enter a message to send."
+    );
+    assert_eq!(f.frames_for(p, "send_signal").count(), 0);
+
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Ready to send"}),
+    );
+    f.send(p, json!({"op":"test_focus_field","id":"directory_search"}));
+    f.send(
+        p,
+        json!({"op":"test_directory_key","key":"return","via":"field"}),
+    );
+    inspect(&f, p);
+    assert_eq!(f.frames_for(p, "send_signal").count(), 0);
+
+    f.send(p, json!({"op":"test_focus_field","id":"composer_input"}));
+    f.send(
+        p,
+        json!({"op":"test_directory_key","key":"return","via":"field"}),
+    );
+    let sent = latest(&f, p, "send_signal");
+    assert_eq!(sent["to"], "personal:alice-two");
+    assert_eq!(sent["hub"], "personal");
+    assert_eq!(sent["message"], "Ready to send");
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":sent["request_id"]}),
+    );
+
+    // 4. Reply binds to from_scoped_id and scopes colon-bearing signal_id for in_reply_to.
+    control(&f, p, "dir_mode:activity");
+    control(&f, p, "act_filter:all");
+    let item = |id: &str, msg: &str| json!({"hub":"work","signal_id":id,"listener_id":"c_human","from_user":"alice","from_host_name":"laptop","from_harness":"human","from_title":"Alice","from_scoped_id":"work:c_alice","from_display_address":"@alice","target_harness":"human","target_title":"You","target_scoped_id":"work:me","message":msg,"created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true,"can_reply":true});
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[item("thread:source", "Hello"), item("sibling", "Other")],"activity_filter":"all","activity_total":2}),
+    );
+    control(&f, p, "reply_activity:thread:source");
+    f.send(p, json!({"op":"test_composer_input","value":"Reply body"}));
+    control(&f, p, "composer_send");
+    let reply = latest(&f, p, "send_signal");
+    assert_eq!(reply["to"], "work:c_alice");
+    assert_eq!(reply["hub"], "work");
+    assert_eq!(reply["in_reply_to"], "work:thread:source");
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":reply["request_id"]}),
+    );
+
+    // 5. Block row × Delete during Clear N… confirm, and preserve unchanged row press
+    // across passive sibling updates.
+    control(&f, p, "activity_clear");
+    assert_eq!(
+        inspect(&f, p).directory("delete_activity:thread:source")["enabled"],
+        false
+    );
+    control(&f, p, "delete_activity:thread:source");
+    inspect(&f, p);
+    assert_eq!(f.frames_for(p, "clear_activity_history").count(), 0);
+    control(&f, p, "activity_clear_confirm_cancel");
+    assert_eq!(
+        inspect(&f, p).directory("delete_activity:thread:source")["enabled"],
+        true
+    );
+
+    let request = latest(&f, p, "query_directory");
+    let mut sibling_update = json!({"op":"directory","peers":[],"activity":[item("thread:source", "Hello"), item("sibling", "Updated sibling")],"activity_filter":"all","activity_total":2});
+    for key in ["request_id", "query", "scope", "harness"] {
+        sibling_update[key] = request[key].clone();
+    }
+    f.send(
+        p,
+        json!({"op":"test_tracked_row_press","id":"delete_activity:thread:source","refresh":sibling_update}),
+    );
+    wait(|| f.frames_for(p, "clear_activity_history").count() == 1);
+    assert_eq!(
+        latest(&f, p, "clear_activity_history")["signal_id"],
+        "thread:source"
+    );
 }

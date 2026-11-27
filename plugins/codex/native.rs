@@ -1,10 +1,14 @@
 use crate::support::*;
 use serde_json::{json, Value};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::{
+    fs::{MetadataExt, PermissionsExt},
+    net::UnixStream,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use toml_edit::{value, DocumentMut, Item, Table};
 fn matches_process(command: &str) -> bool {
     agent_harness(command) == Some("codex")
@@ -19,19 +23,54 @@ fn interactive_process(p: u32, command: &str) -> bool {
     {
         return true;
     }
-    process_has_tty(p)
-        && !process_arguments(command).any(|arg| {
-            matches!(
-                arg,
-                "exec"
-                    | "exec-server"
-                    | "app-server"
-                    | "mcp-server"
-                    | "cloud"
-                    | "--help"
-                    | "--version"
-            )
-        })
+    process_has_tty(p) && interactive_command(command)
+}
+fn interactive_command(command: &str) -> bool {
+    let mut args = process_arguments(command);
+    args.next();
+    if let Some((_, Some(script))) = process_entrypoint(command) {
+        for arg in args.by_ref() {
+            if arg.trim_matches(['\'', '"']) == script {
+                break;
+            }
+        }
+    }
+    while let Some(arg) = args.next() {
+        match arg {
+            "--" => return true, // Everything after the separator is prompt text.
+            "--help" | "-h" | "--version" | "-V" => return false,
+            "-c"
+            | "--config"
+            | "--enable"
+            | "--disable"
+            | "--remote"
+            | "--remote-auth-token-env"
+            | "-i"
+            | "--image"
+            | "-m"
+            | "--model"
+            | "--local-provider"
+            | "-p"
+            | "--profile"
+            | "-s"
+            | "--sandbox"
+            | "-C"
+            | "--cd"
+            | "--add-dir"
+            | "-a"
+            | "--ask-for-approval" => {
+                args.next();
+            }
+            flag if flag.starts_with('-') => {}
+            word => {
+                return !matches!(
+                    word,
+                    "exec" | "e" | "exec-server" | "app-server" | "mcp-server" | "cloud" | "review"
+                )
+            }
+        }
+    }
+    true
 }
 fn desktop_running(req: &Value) -> Result<bool> {
     if let Some(p) = pid(req) {
@@ -247,7 +286,7 @@ fn idle_wake_guard(path: &Path) -> Result<Option<std::fs::File>> {
 }
 fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     use sha2::{Digest, Sha256};
-    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom};
     let path = effect_path(req, raw_str_at(row, "id").unwrap_or(""));
     std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
         .map_err(|_| "Cannot save session activity")?;
@@ -281,6 +320,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
         settle_effects(&mut ledger, source_revision, recency);
     }
     let mut scanned_activity = None;
+    let mut user_activity = cached["user_activity"].clone();
     if let Some(rollout) = raw_str_at(row, "rollout_path") {
         match std::fs::File::open(rollout) {
             Ok(mut file) => {
@@ -413,16 +453,25 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                         latest = Some(latest.unwrap_or(0).max(at));
                     }
                 }
-                // The cursor bounds repeat work, not the activity revision. Revision
-                // remains the durable DB source integer across scans and restarts.
-                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision,"carrier":carrier,"consumed":consumed});
+                // Publish the two source observations together. A newer DB row
+                // alone cannot make a previously published rollout turn fresh.
                 if let Some(at) = latest {
-                    scanned_activity =
-                        Some(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
-                } else if saw_effect {
-                    scanned_activity =
-                        Some(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+                    let effect_revision = ledger["fallback"]["revision"].as_u64().unwrap_or(0);
+                    if user_activity.is_null()
+                        || (at > user_activity["at_ms"].as_u64().unwrap_or(0)
+                            && source_revision
+                                > effect_revision
+                                    .max(user_activity["revision"].as_u64().unwrap_or(0)))
+                    {
+                        user_activity = json!({"revision":revision,"at_ms":at,"kind":"user_turn"});
+                    }
                 }
+                cached = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"user_activity":user_activity,"saw_effect":saw_effect,"revision":revision,"carrier":carrier,"consumed":consumed});
+                scanned_activity = Some(if saw_effect {
+                    json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"})
+                } else {
+                    Value::Null
+                });
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("Cannot read session activity".into()),
@@ -432,6 +481,9 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     ledger["cursor"] = cached;
     if ledger != previous_ledger {
         atomic_write(&path, ledger.to_string().as_bytes())?;
+    }
+    if !user_activity.is_null() {
+        return Ok(user_activity);
     }
     if let Some(activity) = scanned_activity {
         return Ok(activity);
@@ -518,12 +570,11 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
     .filter(|column| has(column))
     .collect::<Vec<_>>()
     .join(", ");
-    let mut predicates = vec![
-        "id IS NOT NULL",
-        "trim(id,char(9)||char(10)||char(13)||' ') != ''",
-        "cwd IS NOT NULL",
-        "trim(cwd,char(9)||char(10)||char(13)||' ') != ''",
-    ];
+    // Rust's str::trim uses Unicode White_Space. Use those same code points
+    // before the inner LIMIT, without normalizing the returned opaque IDs.
+    const SPACE: &str = "char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)";
+    let non_blank = format!("trim(id,{SPACE}) != '' AND trim(cwd,{SPACE}) != ''");
+    let mut predicates = vec![non_blank.as_str()];
     if has("archived") && req["cli_cmd"] != "unlisten" {
         predicates.push("archived = 0");
     }
@@ -566,19 +617,14 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
     } else {
         String::new()
     };
-    Ok(connection
-        .rows_params(
-            &format!("SELECT {projection} FROM threads WHERE {predicate}{window} ORDER BY {order}"),
-            if req["op"] == "discover_sessions" {
-                &retained
-            } else {
-                &[]
-            },
-        )?
-        .into_iter()
-        // Preserve caller validation for whitespace-only IDs and working directories.
-        .filter(|row| raw_str_at(row, "id").is_some() && raw_str_at(row, "cwd").is_some())
-        .collect())
+    connection.rows_params(
+        &format!("SELECT {projection} FROM threads WHERE {predicate}{window} ORDER BY {order}"),
+        if req["op"] == "discover_sessions" {
+            &retained
+        } else {
+            &[]
+        },
+    )
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];
@@ -653,6 +699,305 @@ fn row_caller(req: &Value, r: &Value) -> Value {
     }
     caller(req, "codex", sid, cwd, pid(req), title)
 }
+fn wake_command(req: &Value, program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    if let Some(env) = req["env"].as_object() {
+        command.envs(
+            env.iter()
+                .filter_map(|(key, value)| Some((key, value.as_str()?))),
+        );
+    }
+    command
+        .env(
+            "CODEX_HOME",
+            config_home(req, "CITO_CODEX_HOME", "~/.codex"),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+// The proxy relays the private app-server control socket byte-for-byte. Keep
+// the same absolute deadline across handshake, frames and RPCs.
+struct ProxyIo {
+    stream: UnixStream,
+    deadline: Instant,
+}
+impl ProxyIo {
+    fn remaining(&self) -> io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "Codex queue protocol timed out")
+            })
+    }
+}
+impl Read for ProxyIo {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(buf)
+    }
+}
+impl Write for ProxyIo {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn websocket_accept(key: &[u8; 24]) -> [u8; 20] {
+    // RFC 6455 requires SHA-1 solely to confirm the upgrade (not authentication).
+    // The fixed 60-byte key + GUID input always occupies exactly two blocks.
+    let mut input = [0u8; 128];
+    input[..24].copy_from_slice(key);
+    input[24..60].copy_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    input[60] = 0x80;
+    input[126..].copy_from_slice(&480u16.to_be_bytes());
+    let mut state = [
+        0x67452301u32,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476,
+        0xc3d2e1f0,
+    ];
+    for block in input.chunks_exact(64) {
+        let mut words = [0u32; 80];
+        for (word, bytes) in words.iter_mut().zip(block.chunks_exact(4)) {
+            *word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        for i in 16..80 {
+            words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = state;
+        for (i, word) in words.into_iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5a827999),
+                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                _ => (b ^ c ^ d, 0xca62c1d6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            [a, b, c, d, e] = [next, a, b.rotate_left(30), c, d];
+        }
+        for (value, delta) in state.iter_mut().zip([a, b, c, d, e]) {
+            *value = value.wrapping_add(delta);
+        }
+    }
+    let mut digest = [0; 20];
+    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+fn websocket_upgrade(stream: &mut BufReader<ProxyIo>) -> Result<()> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut nonce = [0; 16];
+    getrandom::getrandom(&mut nonce).map_err(|e| e.to_string())?;
+    let key = STANDARD.encode(nonce);
+    let expected = STANDARD.encode(websocket_accept(
+        key.as_bytes()
+            .try_into()
+            .map_err(|_| "Invalid WebSocket key")?,
+    ));
+    write!(stream.get_mut(), "GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n").map_err(|e| e.to_string())?;
+    let mut headers = stream.take(8192).lines();
+    let status = headers.next().transpose().map_err(|e| e.to_string())?;
+    if status
+        .as_deref()
+        .and_then(|line| line.split_whitespace().nth(1))
+        != Some("101")
+    {
+        return Err("Codex queue proxy did not upgrade to WebSocket".into());
+    }
+    let (mut accept, mut upgrade, mut connection) = (false, false, false);
+    for line in headers {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.is_empty() {
+            if accept && upgrade && connection {
+                return Ok(());
+            }
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("Sec-WebSocket-Accept") {
+                accept = value.trim() == expected;
+            } else if name.eq_ignore_ascii_case("Upgrade") {
+                upgrade = value.trim().eq_ignore_ascii_case("websocket");
+            } else if name.eq_ignore_ascii_case("Connection") {
+                connection = value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("upgrade"));
+            }
+        }
+    }
+    Err("Invalid Codex queue proxy upgrade response".into())
+}
+
+fn write_websocket(stream: &mut ProxyIo, opcode: u8, mut payload: Vec<u8>) -> Result<()> {
+    let mut frame = vec![0x80 | opcode];
+    match payload.len() {
+        len @ 0..=125 => frame.push(0x80 | len as u8),
+        len @ 126..=65_535 => {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(len as u16).to_be_bytes());
+        }
+        len => {
+            frame.push(0x80 | 127);
+            frame.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+    }
+    let mut mask = [0; 4];
+    getrandom::getrandom(&mut mask).map_err(|e| e.to_string())?;
+    frame.extend_from_slice(&mask);
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte ^= mask[i % mask.len()];
+    }
+    stream
+        .write_all(&frame)
+        .and_then(|_| stream.write_all(&payload))
+        .map_err(|e| e.to_string())
+}
+
+fn read_websocket(stream: &mut BufReader<ProxyIo>) -> Result<Value> {
+    const MAX_MESSAGE: u64 = 2 * 1024 * 1024;
+    let mut message = Vec::new();
+    let mut fragmented = false;
+    loop {
+        let mut read = |bytes: &mut [u8]| stream.read_exact(bytes).map_err(|e| e.to_string());
+        let mut header = [0; 2];
+        read(&mut header)?;
+        let (fin, opcode) = (header[0] & 0x80 != 0, header[0] & 0x0f);
+        if header[0] & 0x70 != 0 || header[1] & 0x80 != 0 {
+            return Err("Invalid Codex queue WebSocket frame".into());
+        }
+        let size = match header[1] {
+            126 => {
+                let mut raw = [0; 2];
+                read(&mut raw)?;
+                u64::from(u16::from_be_bytes(raw))
+            }
+            127 => {
+                let mut raw = [0; 8];
+                read(&mut raw)?;
+                u64::from_be_bytes(raw)
+            }
+            n => u64::from(n),
+        };
+        match opcode {
+            0 | 1 if (opcode == 0) == fragmented && size <= MAX_MESSAGE - message.len() as u64 => {
+                let start = message.len();
+                message.resize(start + size as usize, 0);
+                read(&mut message[start..])?;
+                if fin {
+                    return serde_json::from_slice(&message).map_err(|e| e.to_string());
+                }
+                fragmented = true;
+            }
+            9 | 10 if fin && size <= 125 => {
+                let mut payload = vec![0; size as usize];
+                read(&mut payload)?;
+                if opcode == 9 {
+                    write_websocket(stream.get_mut(), 10, payload)?;
+                }
+            }
+            8 => return Err("Codex queue proxy closed the WebSocket".into()),
+            _ => return Err("Invalid Codex queue WebSocket message".into()),
+        }
+    }
+}
+
+// The queue CLI only accepts --message in argv. Stream large cards to the
+// running app server without starting a second queue authority.
+fn queue_over_stdio(req: &Value, bin: &Path, sid: &str, text: &str) -> Result<Option<bool>> {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::process::CommandExt;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (stream, remote) = UnixStream::pair().map_err(|error| error.to_string())?;
+    let input = remote.try_clone().map_err(|error| error.to_string())?;
+    let mut child = wake_command(req, bin)
+        .args(["app-server", "proxy"])
+        .stdin(Stdio::from(OwnedFd::from(input)))
+        .stdout(Stdio::from(OwnedFd::from(remote)))
+        .process_group(0)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let result = (|| -> Result<Option<bool>> {
+        let mut stream = BufReader::new(ProxyIo { stream, deadline });
+        websocket_upgrade(&mut stream)?;
+        let mut exchange = |id: u64, method: &str, params: Value| -> Result<Value> {
+            let mut request = json!({"method":method,"params":params});
+            if id != 0 {
+                request["id"] = json!(id);
+            }
+            write_websocket(stream.get_mut(), 1, request.to_string().into_bytes())?;
+            if id == 0 {
+                return Ok(Value::Null);
+            }
+            loop {
+                let response = read_websocket(&mut stream)?;
+                if response.get("method").is_none() && response["id"] == id {
+                    return Ok(response);
+                }
+            }
+        };
+        let initialized = exchange(
+            1,
+            "initialize",
+            json!({"clientInfo":{"name":"cito","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),
+        )?;
+        if !initialized["result"].is_object() {
+            return Err("Codex queue proxy rejected initialization".into());
+        }
+        exchange(0, "initialized", json!({}))?;
+        let response = exchange(
+            2,
+            "thread/queue/add",
+            json!({"threadId":sid,"clientUserMessageId":random_uuid_v4(),"input":[{"type":"text","text":text,"text_elements":[]}]}),
+        );
+        let Ok(response) = response else {
+            return Ok(None); // The submitted operation may already have committed.
+        };
+        if let Some(code) = response["error"]["code"].as_i64() {
+            // Admission failures prove no insertion. Internal failures can
+            // occur while assembling a receipt for an already committed item.
+            return Ok(match code {
+                -32602..=-32600 => Some(false),
+                _ => None,
+            });
+        }
+        if !response["result"]["queuedSubmission"]["id"].is_string() {
+            return Ok(None);
+        }
+        if exchange(
+            3,
+            "thread/read",
+            json!({"threadId":sid,"includeTurns":false}),
+        )
+        .is_ok_and(|r| r["result"]["thread"]["status"]["type"] == "notLoaded")
+        {
+            let _ = exchange(
+                4,
+                "thread/resume",
+                json!({"threadId":sid,"excludeTurns":true}),
+            );
+        }
+        Ok(Some(true))
+    })();
+    let _ = teardown_child_group(&mut child);
+    result
+}
+
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
     if matches!(op, "setup_inspect" | "setup_apply" | "setup_remove") {
@@ -836,18 +1181,7 @@ pub fn handle(req: &Value) -> Result<Value> {
         "wake" => {
             let sid = raw_str_at(req, "session_id").ok_or("Session ID is required")?;
             let text = req["text"].as_str().ok_or("Wake text is required")?;
-            let run = |mut command: Command, timeout: Duration| {
-                command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                if let Some(env) = req["env"].as_object() {
-                    for (key, value) in env {
-                        if let Some(value) = value.as_str() {
-                            command.env(key, value);
-                        }
-                    }
-                }
+            let run = |command: Command, timeout: Duration| {
                 run_command_with_timeout(command, timeout)
                     .map(|output| output.map(|o| o.status.success()))
             };
@@ -878,24 +1212,34 @@ pub fn handle(req: &Value) -> Result<Value> {
                         json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":error}),
                     );
                 }
+                let mut stream = text.len() >= 64 * 1024 || text.contains('\0');
                 let mut attempt = 0;
                 loop {
-                    let mut command = Command::new(&bin);
-                    command
-                        .args(["queue", "--resume", "--thread", sid, "--message", text])
-                        .env(
-                            "CODEX_HOME",
-                            config_home(req, "CITO_CODEX_HOME", "~/.codex"),
-                        );
-                    let failure = match run(command, Duration::from_secs(10)) {
+                    let receipt = if stream {
+                        queue_over_stdio(req, &bin, sid, text)
+                    } else {
+                        let mut command = wake_command(req, &bin);
+                        command.args(["queue", "--resume", "--thread", sid, "--message", text]);
+                        run(command, Duration::from_secs(10))
+                    };
+                    let failure = match receipt {
                         Ok(Some(true)) => break true,
                         // A timed-out insertion may have committed. Never submit it again.
                         Ok(None) => break false,
                         Ok(Some(false)) => "Codex queue command failed".to_string(),
+                        Err(error)
+                            if !stream
+                                && error
+                                    == std::io::Error::from_raw_os_error(libc::E2BIG)
+                                        .to_string() =>
+                        {
+                            stream = true;
+                            continue; // Spawn failed; no queue submission took place.
+                        }
                         Err(error) => error,
                     };
                     attempt += 1;
-                    if attempt >= 3 {
+                    if stream || attempt >= 3 {
                         let cleanup = abandon_effect(req, sid, text);
                         let reason = match cleanup {
                             Ok(()) => failure,
@@ -929,7 +1273,8 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
             let mut opened = false;
             for attempt in 0..2 {
-                let mut command = Command::new(
+                let mut command = wake_command(
+                    req,
                     env_value(req, "CITO_OPEN_BIN").unwrap_or_else(|| "/usr/bin/open".into()),
                 );
                 command.args([

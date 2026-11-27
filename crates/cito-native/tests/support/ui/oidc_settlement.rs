@@ -2,6 +2,49 @@ use super::settlement::{input, latest, open_settings as open};
 use super::*;
 
 #[test]
+fn selecting_a_hub_that_needs_oidc_keeps_its_drawer_open_and_disables_listen() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    frame["hubs"][1]["status"] = json!("auth_required");
+    frame["hubs"][1]["auth_mode"] = json!("oidc");
+    frame["hubs"][1]["can_login"] = json!(true);
+    frame["available"] = json!([
+        {"harness":"fixture","session_id":"open","title":"Open session","cwd":"/tmp","endpoint_pid":4242}
+    ]);
+    f.send(p, frame.clone());
+    let initial = inspect(&f, p);
+    assert_eq!(initial.menu("drawer:work")["hidden"], false);
+    assert_eq!(initial.menu("listen:fixture:open")["enabled"], true);
+    assert!(nodes(&initial.menu("drawer:work")["children"])
+        .iter()
+        .any(|node| node["text"] == "work · Authentication required"));
+
+    control(&f, p, "hub:work");
+    let selected = inspect(&f, p);
+    assert_eq!(selected.menu("drawer:work")["hidden"], false);
+    assert_eq!(selected.menu("login:work")["text"], "Sign In…");
+    assert_eq!(selected.menu("listen:fixture:open")["enabled"], false);
+    control(&f, p, "listen:fixture:open");
+    control(&f, p, "login:work");
+    inspect(&f, p);
+    assert!(f.frames_for(p, "listen_session").next().is_none());
+    let login = f.frames_for(p, "hub_action").next().unwrap();
+    assert_eq!(login["hub"], "work");
+    assert_eq!(login["action"], "login");
+
+    frame["hubs"][1]["status"] = json!("connected");
+    f.send(p, frame);
+    assert_eq!(inspect(&f, p).menu("listen:fixture:open")["enabled"], true);
+    control(&f, p, "listen:fixture:open");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames_for(p, "listen_session").next().unwrap()["hub"],
+        "work"
+    );
+}
+
+#[test]
 fn payload_free_save_errors_have_only_the_form_as_their_owner() {
     let _lock = serial();
     let (f, p) = ui_fixture();

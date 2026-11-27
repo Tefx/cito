@@ -207,7 +207,7 @@ impl DaemonService {
     fn selected_settings_hub(&self) -> &str {
         self.active_settings_hub
             .as_deref()
-            .filter(|h| self.slots.contains_key(*h))
+            .filter(|h| self.hub_controls.contains_key(*h))
             .unwrap_or(&self.config.default_hub)
     }
 
@@ -269,7 +269,7 @@ impl DaemonService {
             .collect()
     }
     pub(super) fn settings_for_hub(&self, channel_hub: &str) -> Value {
-        self.settings_snapshot(channel_hub, &self.hub_samples())
+        self.settings_snapshot(channel_hub, &self.hub_samples(), true)
     }
     fn app_settings_snapshot(&self) -> Vec<Value> {
         self.plugins.agent_plugins().into_iter().map(|p| {
@@ -413,7 +413,12 @@ impl DaemonService {
         (channels, None)
     }
 
-    fn settings_snapshot(&self, hub: &str, samples: &HashMap<&str, HubSample>) -> Value {
+    fn settings_snapshot(
+        &self,
+        hub: &str,
+        samples: &HashMap<&str, HubSample>,
+        include_channels: bool,
+    ) -> Value {
         let apps = self.app_settings_snapshot();
         let (order, configured, host) = self.hub_projection_config();
         let hubs: Vec<_> = order
@@ -435,8 +440,11 @@ impl DaemonService {
                     .and_then(|row| row["human_paused"].as_bool())
             })
             .flatten();
-        let (channels, channel_inventory_error) =
-            self.channel_settings_snapshot(hub, paused, &order);
+        let (channels, channel_inventory_error) = if include_channels {
+            self.channel_settings_snapshot(hub, paused, &order)
+        } else {
+            (Vec::new(), None)
+        };
         let host = &host;
         let running = self.host_server.as_ref().is_some_and(HubServer::is_running);
         let host = if running {
@@ -613,14 +621,16 @@ impl DaemonService {
     }
 
     pub fn snapshot(&self) -> Result<Value, String> {
-        self.snapshot_from(&self.hub_samples())
+        self.snapshot_from(&self.hub_samples(), true)
     }
 
     pub(super) fn snapshot_from(
         &self,
         samples: &HashMap<&str, HubSample>,
+        include_channels: bool,
     ) -> Result<Value, String> {
-        let settings = self.settings_snapshot(self.selected_settings_hub(), samples);
+        let settings =
+            self.settings_snapshot(self.selected_settings_hub(), samples, include_channels);
         let (activity, activity_total, activity_unread) = self
             .state
             .query_activity(&self.activity_filter, &self.activity_query)?;
@@ -915,27 +925,20 @@ impl DaemonService {
             .collect::<Result<_, _>>()?;
         inventories.sort_by_key(Value::to_string);
         let (order, _, _) = self.hub_projection_config();
-        let mut local_inventories: Vec<_> = order
-            .iter()
-            .filter(|name| {
-                self.slots
-                    .get(*name)
-                    .is_some_and(|slot| slot.local.is_some())
-            })
-            .map(|name| {
-                (
-                    name.as_str(),
-                    hash(&self.settings_channel_inventory(name, false).to_string()),
-                )
-            })
-            .collect();
-        if self.active_settings_hub.as_deref() == Some("local")
-            && self
-                .slots
-                .get("local")
-                .is_none_or(|slot| slot.local.is_none())
-        {
-            local_inventories.push(("local", hash(&self.builtin_channel_inventory().to_string())));
+        let mut local_inventories = Vec::new();
+        if let Some(selected) = self.active_settings_hub.as_deref() {
+            local_inventories.extend(order.iter().filter_map(|name| {
+                let local = self
+                    .slots
+                    .get(name)
+                    .is_some_and(|slot| slot.local.is_some());
+                (local || (name == selected && selected == "local")).then(|| {
+                    (
+                        name.as_str(),
+                        hash(&self.settings_channel_inventory(name, false).to_string()),
+                    )
+                })
+            }));
         }
         let inspections: BTreeMap<_, _> = self
             .setup_inspections
@@ -1039,7 +1042,7 @@ impl DaemonService {
             || self.active_settings_hub.is_some()
             || cached.is_none();
         let result = if full {
-            self.snapshot()
+            self.snapshot_from(&self.hub_samples(), self.active_settings_hub.is_some())
         } else {
             self.status_frame(cached.unwrap_or_default(), inspections_changed)
         };

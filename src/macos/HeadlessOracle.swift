@@ -47,24 +47,70 @@ extension Companion {
         if directoryDirty, directoryPanel != nil { refreshDirectoryViews() }
     }
 
+    private func activityRow(signalID: String, hub: String?) -> Int? {
+        guard directoryMode == "activity" else { return nil }
+        let matches = activityFilteredItems.indices.filter { index in
+            let item = activityFilteredItems[index]
+            return item.signal_id == signalID && (hub == nil || item.hub == hub)
+        }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    private func activityControlSelection(_ id: String, command: [String: Any]) -> (Int, Bool)? {
+        guard let prefix = ["activity_row:", "reply_activity:", "delete_activity:", "copy_activity_msg:"].first(where: { id.hasPrefix($0) }) else { return nil }
+        let signalID = String(id.dropFirst(prefix.count))
+        guard command["signal_id"] == nil || command["signal_id"] as? String == signalID,
+              command["hub"] == nil || command["hub"] is String else { return (-1, false) }
+        return (activityRow(signalID: signalID, hub: command["hub"] as? String) ?? -1, prefix == "activity_row:")
+    }
+
+    private func appearanceTargets() -> [any NSAppearanceCustomization] {
+        var targets: [any NSAppearanceCustomization] = cardMenu.items.compactMap { $0.view }
+        for window in [directoryPanel, settingsPanel, activeUninstallAlert?.window].compactMap({ $0 }) {
+            targets.append(window)
+            if let root = window.contentView { targets.append(root) }
+        }
+        return targets
+    }
+
+    private func observe(in appearance: NSAppearance?, _ observation: () -> Void) {
+        guard let appearance else { observation(); return }
+        // Preserve explicit overrides and inherited (nil) appearances alike.
+        let targets = appearanceTargets()
+        let previous = targets.map { $0.appearance }
+        defer {
+            for (target, original) in zip(targets, previous) { target.appearance = original }
+        }
+        for target in targets { target.appearance = appearance }
+        observation()
+    }
+
     func handleHeadlessTestCommand(_ data: Data) -> Bool {
         // Headless hooks exercise the same four-surface control handlers.
         if headless, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let op = object["op"] as? String {
-            if ["test_appearance", "test_inspect", "test_inspect_menu", "test_render_png"].contains(op),
-               let name = object["appearance"] as? String, ["light", "dark"].contains(name) {
-                testAppearance = NSAppearance(named: name == "light" ? .aqua : .darkAqua)
-                for item in cardMenu.items { item.view?.appearance = testAppearance }
-                for window in [directoryPanel, settingsPanel, activeUninstallAlert?.window].compactMap({ $0 }) {
-                    window.appearance = testAppearance
-                    window.contentView?.appearance = testAppearance
+            func requestedAppearance() -> NSAppearance? {
+                switch object["appearance"] as? String {
+                case "light": return NSAppearance(named: .aqua)
+                case "dark": return NSAppearance(named: .darkAqua)
+                default: return nil
                 }
+            }
+            if op == "test_appearance" {
+                if let appearance = requestedAppearance() {
+                    testAppearance = appearance
+                    for target in appearanceTargets() { target.appearance = appearance }
+                }
+                flushDirtyViews()
+                return true
             }
             if op == "test_key_event", let character = object["character"] as? String {
                 let modifiers = object["modifiers"] as? [String] ?? []
                 var flags: NSEvent.ModifierFlags = []
                 for (name, flag) in [("command", NSEvent.ModifierFlags.command), ("shift", .shift), ("option", .option), ("control", .control), ("capsLock", .capsLock)] where modifiers.contains(name) { flags.insert(flag) }
-                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: (object["key_code"] as? UInt16) ?? UInt16.max) {
+                let window = object["surface"] as? String == "directory" ? directoryPanel : nil
+                if let window { makeEventProbeKey(window) }
+                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: object["repeat"] as? Bool == true, keyCode: (object["key_code"] as? UInt16) ?? UInt16.max) {
                     NSApp.sendEvent(event)
                 }
                 return true
@@ -92,6 +138,21 @@ extension Companion {
                 else { openDirectoryPanel(mode: object["mode"] as? String ?? "directory") }
                 return true
             }
+            if op == "test_menu_tracking_probe" {
+                // Enter the event loop after the current IPC delivery has returned.
+                // A new frame must arrive through stdin, not through direct injection.
+                RunLoop.main.perform { [weak self] in
+                    guard let self, self.menuOpen else { return }
+                    let initial = self.unreadCount
+                    let deadline = Date().addingTimeInterval(4)
+                    diagnostic("menu-tracking-start")
+                    while self.unreadCount == initial && Date() < deadline {
+                        if !RunLoop.current.run(mode: .eventTracking, before: deadline) { break }
+                    }
+                    diagnostic("menu-tracking-unread \(self.unreadCount)")
+                }
+                return true
+            }
             if op == "test_render_state" {
                 func containsRename(_ view: NSView) -> Bool {
                     view.identifier?.rawValue.hasPrefix("rename_field:") == true || view.subviews.contains(where: containsRename)
@@ -114,6 +175,7 @@ extension Companion {
                         "settings.channels": settings?.channels?.count ?? 0
                     ],
                     "settings_launch_at_login": settings?.launch_at_login ?? false,
+                    "onboarding_checked": hasCheckedFirstLaunchOnboarding,
                     "hover_watch_active": MenuControl.hoverWatchActive,
                     "hovered": MenuControl.activeHovered?.identifier?.rawValue ?? "",
                     "panel_effect_states": effects.map { $0.state.rawValue },
@@ -159,9 +221,16 @@ extension Companion {
                 return true
             }
             if op.hasPrefix("test_"), !["test_menu_open", "test_menu_close"].contains(op) { flushDirtyViews() }
-            if op == "test_inspect" || op == "test_inspect_menu" { inspectMenu(); return true }
+            if op == "test_inspect" || op == "test_inspect_menu" {
+                observe(in: requestedAppearance()) { inspectMenu() }
+                return true
+            }
             if op == "test_render_png", let surface = object["surface"] as? String, let path = object["path"] as? String {
-                renderPNG(surface: surface, path: path); return true
+                let appearance = requestedAppearance()
+                observe(in: appearance) {
+                    renderPNG(surface: surface, path: path, appearance: appearance ?? testAppearance)
+                }
+                return true
             }
             if op == "test_scroll", let id = object["id"] as? String, let offset = object["offset"] as? Double {
                 func scroll(_ view: NSView) {
@@ -269,7 +338,9 @@ extension Companion {
                 return true
             }
             if op == "test_tracked_row_press", let id = object["id"] as? String, let window = directoryPanel,
-               let table = directoryTableView, let control: MenuControl = findView(in: table, id: id),
+               let table = directoryTableView, case let (row, false)? = activityControlSelection(id, command: object), row >= 0,
+               let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true),
+               let control: MenuControl = findView(in: cell, id: id),
                let down = mouseEvent(.leftMouseDown, in: control), let up = mouseEvent(.leftMouseUp, in: control),
                let root = window.contentView {
                 let parentPoint = root.convert(down.locationInWindow, from: nil)
@@ -293,7 +364,6 @@ extension Companion {
             }
             if op == "test_menu_open" { menuWillOpen(cardMenu); return true }
             if op == "test_menu_close" { menuDidClose(cardMenu); return true }
-            if op == "test_appearance" { return true }
             if op == "test_hover", let id = object["id"] as? String, let hovered = object["hovered"] as? Bool {
                 let roots = cardMenu.items.compactMap { $0.view } + [directoryPanel?.contentView, settingsPanel?.contentView].compactMap { $0 }
                 roots.lazy.compactMap { self.findView(in: $0, id: id, as: MenuControl.self) }.first?.setHovered(hovered)
@@ -322,19 +392,6 @@ extension Companion {
             }
             if op == "test_end_editing" {
                 for window in [settingsPanel, headlessMenuPanel].compactMap({ $0 }) { window.makeFirstResponder(nil) }
-                return true
-            }
-            if op == "test_reconfigure_rows", let table = directoryTableView {
-                for row in 0..<table.numberOfRows {
-                    guard let cell = table.view(atColumn:0,row:row,makeIfNecessary:false) as? DirectoryPeerCellView else { continue }
-                    if directoryMode == "activity", activityFilteredItems.indices.contains(row) {
-                        let item = activityFilteredItems[row]
-                        cell.configureActivity(with:item,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
-                    } else if directoryFilteredPeers.indices.contains(row) {
-                        let peer = directoryFilteredPeers[row]
-                        cell.configure(with:peer,harnesses:harnessMap,onCopy:{ [weak self] _,c in self?.copyPeer(peer,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
-                    }
-                }
                 return true
             }
             if activeUninstallAlert != nil, ["test_settings_scroll", "test_settings_input"].contains(op) { return true }
@@ -439,7 +496,7 @@ extension Companion {
                     }
                     return true
                 }
-                if op == "test_settings_key" { handleSettingsKey(key) } else { handleDirectoryKey(key) }
+                if op == "test_settings_key" { handleSettingsPanelKey(key) } else { handleDirectoryKey(key) }
                 return true
             }
             if op == "test_expire_copy_feedback", let id = object["id"] as? String {
@@ -462,7 +519,17 @@ extension Companion {
                     return true
                 }
                 let id = requestedId.hasPrefix("target_hub:") ? "hub:" + requestedId.dropFirst("target_hub:".count) : requestedId
-                let roots = cardMenu.items.compactMap { $0.view } + [directoryPanel?.contentView, settingsInteractionWindow?.contentView].compactMap { $0 }
+                let roots: [NSView]
+                if let (row, selectsRow) = activityControlSelection(id, command: object) {
+                    guard row >= 0, let table = directoryTableView else { return true }
+                    if selectsRow {
+                        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                        return true
+                    }
+                    roots = table.view(atColumn: 0, row: row, makeIfNecessary: true).map { [$0] } ?? []
+                } else {
+                    roots = cardMenu.items.compactMap { $0.view } + [directoryPanel?.contentView, settingsInteractionWindow?.contentView].compactMap { $0 }
+                }
                 if let control = roots.lazy.compactMap({ self.findView(in: $0, id: id, as: NSControl.self) }).first {
                     if let control = control as? MenuControl {
                         if let drag = object["drag"] as? [Bool], let window = control.window, control.enclosingMenuItem == nil {
@@ -486,11 +553,6 @@ extension Companion {
                 if id.hasPrefix("dir_peer:"), let table = directoryTableView {
                     let scopedId = String(id.dropFirst("dir_peer:".count))
                     if let row = directoryFilteredPeers.firstIndex(where: { $0.scoped_id == scopedId }) {
-                        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    }
-                } else if id.hasPrefix("activity_row:"), let table = directoryTableView {
-                    let sigId = String(id.dropFirst("activity_row:".count))
-                    if let row = activityFilteredItems.firstIndex(where: { $0.signal_id == sigId }) {
                         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                     }
                 }
@@ -520,8 +582,7 @@ extension Companion {
     }
 
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
-    func renderPNG(surface: String, path: String) {
-        flushDirtyViews()
+    private func renderPNG(surface: String, path: String, appearance: NSAppearance?) {
         var restored: [(NSMenuItem, NSView, NSView?, NSRect)] = []
         let view: NSView
         var compositeWindow: NSPanel?
@@ -532,7 +593,7 @@ extension Companion {
             let height=rows.reduce(CGFloat(8)) { $0 + ($1.view?.frame.height ?? 9) }
             let composite=FlippedView(frame:NSRect(x:0,y:0,width:380,height:height))
             composite.wantsLayer=true
-            composite.appearance = testAppearance
+            composite.appearance = appearance
             composite.effectiveAppearance.performAsCurrentDrawingAppearance {
                 composite.layer?.backgroundColor = CitoPalette.surfaceBackground.cgColor
             }
@@ -546,6 +607,7 @@ extension Companion {
                 } else { y+=9 }
             }
             let window=NSPanel(contentRect:composite.bounds,styleMask:.borderless,backing:.buffered,defer:false)
+            window.appearance = appearance
             window.contentView=composite
             compositeWindow=window
             view=composite
@@ -562,8 +624,6 @@ extension Companion {
             }
             table.layoutSubtreeIfNeeded()
         }
-        view.window?.appearance = testAppearance
-        view.appearance = testAppearance
         // Behind-window effects cannot sample a desktop in an offscreen panel.
         // Substitute the declared appearance backdrop only for capture, restoring
         // the live material and its root fill before returning to event handling.
@@ -608,9 +668,7 @@ extension Companion {
         catch { diagnostic("render failed: " + error.localizedDescription) }
     }
 
-    @discardableResult
-    func inspectMenu() -> [String: Any] {
-        flushDirtyViews()
+    private func inspectMenu() {
         var truncatedLabels: [String] = []
         var overlappingSiblings: [String] = []
         var clippedViews: [String] = []
@@ -668,9 +726,6 @@ extension Companion {
             let enabled = enabled && ((view as? NSControl)?.isEnabled ?? true)
             let base = background ?? resolved(CitoPalette.surfaceBackground, in: view.effectiveAppearance)
             var surface = base
-            // Resolve dynamic layer-backed fills in the same appearance as the text.
-            if let control = view as? MenuControl { control.applyVisualState() }
-            if let fill = view as? SurfaceView { fill.applyLayerColors() }
             let fill: NSColor?
             if let scroll = view as? NSScrollView {
                 fill = scroll.drawsBackground ? resolved(scroll.backgroundColor, in: view.effectiveAppearance) : nil
@@ -793,7 +848,7 @@ extension Companion {
                     let hub = mounted?.hub ?? effectiveChannelHub
                     let channels = mounted?.channels ?? []
                     defaultLayout = settingsChannels.errors[hub] == nil && channels.count == 1 && channels.allSatisfy { channel in
-                        let ui = settingsChannels.editors["\(hub)|\(channel.id)"] ?? ChannelUiState()
+                        let ui = settingsChannels.editors[channelEditorKey(hub: hub, channel: channel.id)] ?? ChannelUiState()
                         return !ui.editingGateway && !ui.editingPersonal && !ui.manualEntry && ui.pairingInstruction.isEmpty &&
                             channel.status != "error" && channel.warning != true && ui.testResult == nil && channel.fields.count <= 2
                     }
@@ -998,6 +1053,7 @@ extension Companion {
             }
             if let cell = view as? DirectoryPeerCellView {
                 result["reuse_identifier"] = cell.identifier?.rawValue ?? ""
+                if let item = cell.activityItem { result["activity"] = ["hub": item.hub, "signal_id": item.signal_id] }
                 if let row = cell.superview as? NSTableRowView {
                     result["selected"] = row.isSelected
                     result["row_height"] = row.frame.height
@@ -1093,9 +1149,10 @@ extension Companion {
             settingsItems.append(sheet)
         }
         let selectedId: String
+        let selectedActivity = directoryMode == "activity" && activityFilteredItems.indices.contains(directorySelectedIndex)
+            ? activityFilteredItems[directorySelectedIndex] : nil
         if directoryMode == "activity" {
-            selectedId = activityFilteredItems.indices.contains(directorySelectedIndex)
-                ? activityFilteredItems[directorySelectedIndex].signal_id : ""
+            selectedId = selectedActivity?.signal_id ?? ""
         } else {
             selectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex)
                 ? directoryFilteredPeers[directorySelectedIndex].scoped_id : ""
@@ -1126,7 +1183,6 @@ extension Companion {
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = readPasteboardString()
         let now = Date()
-        pruneCopyFeedback(at: now)
         let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "rename_field_identity": renameField.map { String(describing:ObjectIdentifier($0)) } ?? "",
@@ -1167,8 +1223,8 @@ extension Companion {
                     "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
             },
-            "directory_copy_remaining": directoryCopiedUntil.mapValues { $0.timeIntervalSince(now) },
-            "activity_copy_remaining": activityCopiedUntil.mapValues { $0.timeIntervalSince(now) },
+            "directory_copy_remaining": directoryCopiedUntil.filter { $0.value > now }.mapValues { $0.timeIntervalSince(now) },
+            "activity_copy_remaining": activityCopiedUntil.filter { $0.value > now }.mapValues { $0.timeIntervalSince(now) },
             "hub_attachment_counts": Dictionary(uniqueKeysWithValues: hubs.map { ($0.name, $0.attachments?.count ?? 0) }),
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
@@ -1177,7 +1233,9 @@ extension Companion {
             "directory_online_count": directoryOnlineCount,
             "directory_matched_count": directoryMatchedCount, "directory_query": directoryQuery,
             "directory_scope": directoryScopeFilter, "directory_harness": directoryHarnessFilter,
-            "directory_selected_id": selectedId, "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
+            "directory_selected_id": selectedId,
+            "directory_selected_activity": selectedActivity.map { ["hub": $0.hub, "signal_id": $0.signal_id] } as Any? ?? NSNull(),
+            "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
             "directory_selection_visible": directoryTableView.map { table in directorySelectedIndex >= 0 && directorySelectedIndex < table.numberOfRows && table.visibleRect.contains(table.rect(ofRow:directorySelectedIndex)) } ?? false,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
             "pending_hub_save": hubForm.pendingSave?.requestId ?? "",
@@ -1199,6 +1257,5 @@ extension Companion {
             },
             "button_digit_widths": font.map { font in ["11111111", "88888888"].map { ($0 as NSString).size(withAttributes: [.font: font]).width } } ?? []]
         diagnostic("menu " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
-        return snapshot
     }
 }

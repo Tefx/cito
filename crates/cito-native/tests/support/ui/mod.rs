@@ -170,12 +170,15 @@ fn inspect(f: &Fixture, p: usize) -> Value {
     inspect_as(f, p, None)
 }
 fn inspect_unchecked(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
+    inspect_command(f, p, "test_inspect_menu", appearance)
+}
+fn inspect_command(f: &Fixture, p: usize, op: &str, appearance: Option<&str>) -> Value {
     let count = f
         .output(p, true)
         .lines()
         .filter(|l| l.starts_with("cito-ui: menu "))
         .count();
-    f.send(p, json!({"op":"test_inspect_menu","appearance":appearance}));
+    f.send(p, json!({"op":op,"appearance":appearance}));
     wait(|| {
         f.output(p, true)
             .lines()

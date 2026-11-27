@@ -15,6 +15,7 @@ fn v48_non_admin_channel_authority_and_gateway_health() {
     let mut cfg = settings();
     cfg["channels"][0]["can_configure_hub"] = json!(false);
     cfg["channels"][0]["can_clear_hub"] = json!(false);
+    cfg["channels"][0]["can_unpair"] = json!(false);
     cfg["channels"][0]["hub_ready"] = json!(false);
     cfg["channels"][0]["status"] = json!("not_configured");
     cfg["channels"][0]["fields"][0]["hidden"] = json!(true);
@@ -24,12 +25,31 @@ fn v48_non_admin_channel_authority_and_gateway_health() {
         hidden.settings("channels_managed_notice")["text"],
         "External channels are managed by your 'personal' Hub administrator. None are enabled yet."
     );
+    // Non-admin retains Unpair after Clear Token clears the shared gateway.
+    cfg["channels"][0]["enabled"] = json!(false);
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("saved-room");
+    let after_clear = channels(&f, ui, &cfg);
+    assert!(!after_clear.settings("settings_channel:channel").is_null());
+    assert_eq!(
+        after_clear.settings("unpair_channel:channel")["hidden"],
+        false
+    );
+    assert_eq!(
+        after_clear.settings("unpair_channel:channel")["enabled"],
+        true
+    );
+    assert!(after_clear.settings("save_channel:channel").is_null());
+    assert_eq!(after_clear.settings("test_channel:channel")["hidden"], true);
+    cfg["channels"][0]["fields"][1]["configured"] = json!(false);
+    cfg["channels"][0]["fields"][1]["value"] = json!("");
     cfg["channel_inventory_error"] = json!("Service unavailable");
     assert!(channels(&f, ui, &cfg)
         .settings("channels_managed_notice")
         .is_null());
     cfg["channel_inventory_error"] = Value::Null;
     cfg["channels"][0]["hub_ready"] = json!(true);
+    cfg["channels"][0]["enabled"] = json!(true);
     for status in ["hub_ready", "ready", "paused"] {
         cfg["channels"][0]["status"] = json!(status);
         cfg["channels"][0]["configured"] = json!(status != "hub_ready");
@@ -61,7 +81,21 @@ fn v48_non_admin_channel_authority_and_gateway_health() {
     assert!(readonly.settings("clear_channel_service:channel").is_null());
     cfg["channels"][0]["can_configure_hub"] = json!(true);
     cfg["channels"][0]["can_clear_hub"] = json!(true);
+    cfg["channels"][0]["can_unpair"] = json!(true);
     cfg["channels"][0]["fields"][0]["hidden"] = json!(false);
+    cfg["channel_inventory_error"] = json!("Inventory refresh failed");
+    let stale = channels(&f, ui, &cfg);
+    for id in [
+        "clear_channel_service:channel",
+        "edit_hub_service:channel",
+        "toggle_channel:channel",
+        "unpair_channel:channel",
+        "test_channel:channel",
+        "edit_user_channel:channel",
+    ] {
+        assert_eq!(stale.settings(id)["enabled"], false, "{id}");
+    }
+    cfg["channel_inventory_error"] = Value::Null;
     assert_eq!(
         channels(&f, ui, &cfg).settings("edit_hub_service:channel")["enabled"],
         true
@@ -397,7 +431,7 @@ fn v48_reply_authority_separates_activity_ownership_from_send_permission() {
     let _lock = serial();
     let (f, ui) = ui_fixture();
     let mut frame = state();
-    let mut item = json!({"hub":"personal","signal_id":"reply","listener_id":"inbox","from_user":"bob","from_host_name":"laptop","from_title":"Review","from_display_address":"@bob","target_harness":"human","target_title":"Human","target_scoped_id":"personal:inbox","message":"Review ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":false});
+    let mut item = json!({"hub":"personal","signal_id":"reply","listener_id":"inbox","from_user":"bob","from_host_name":"laptop","from_title":"Review","from_scoped_id":"personal:bob","from_display_address":"@bob","target_harness":"human","target_title":"Human","target_scoped_id":"personal:inbox","message":"Review ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":false});
     for allowed in [false, true] {
         item["can_reply"] = json!(allowed);
         frame["activity"] = json!([item]);

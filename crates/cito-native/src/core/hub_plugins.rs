@@ -32,8 +32,37 @@ pub fn discover(
         .filter(|(_, builtin)| *builtin)
         .map(|(path, _)| path.clone())
         .collect();
-    let mut plugins = load_plugins_from_roots(&external, &builtin, user_root, true).plugins;
-    plugins.retain(|plugin| plugin.kind == "human-channel" && plugin.channel.hub_scoped);
+    // Filter before deduplicating across roots: a descriptor that cannot run on
+    // the Hub must not suppress a lower-priority Hub plugin of the same ID.
+    let mut seen = std::collections::HashSet::new();
+    let mut plugins = Vec::new();
+    for (root, builtin) in external
+        .iter()
+        .map(|r| (r, false))
+        .chain(builtin.iter().map(|r| (r, true)))
+    {
+        let roots = std::slice::from_ref(root);
+        let (external, bundled) = if builtin {
+            (&[][..], roots)
+        } else {
+            (roots, &[][..])
+        };
+        for plugin in load_plugins_from_roots(external, bundled, user_root, true).plugins {
+            if plugin.kind == "human-channel"
+                && plugin.channel.hub_scoped
+                && std::fs::read(plugin.plugin_dir.join("plugin.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .is_some_and(|manifest| {
+                        matches!(manifest["kind"].as_str(), Some("human" | "human-channel"))
+                            && manifest.get("scope").is_none_or(|scope| scope == "hub")
+                    })
+                && seen.insert(plugin.id.clone())
+            {
+                plugins.push(plugin);
+            }
+        }
+    }
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(plugins)
 }
@@ -64,11 +93,12 @@ pub(super) fn test_descriptor(
     descriptor
 }
 
-type Pending = Arc<Mutex<HashMap<String, mpsc::SyncSender<Value>>>>;
+type Pending = Arc<Mutex<HashMap<String, mpsc::SyncSender<Result<Value, String>>>>>;
 // Monotonic: either pipe can fail; only an intentional shutdown suppresses the exit wake.
 const RUNNING: u8 = 0;
 const EXITED: u8 = 1;
-const STOPPING: u8 = 2;
+const CANCELLING: u8 = 2;
+const STOPPING: u8 = 3;
 pub(super) const CHANNEL_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -190,7 +220,7 @@ impl ChannelProcess {
                     if let Some(id) = frame["req_id"].as_str() {
                         if let Ok(mut map) = p.lock() {
                             if let Some(tx) = map.remove(id) {
-                                let _ = tx.send(frame);
+                                let _ = tx.send(Ok(frame));
                             }
                         }
                     }
@@ -202,13 +232,13 @@ impl ChannelProcess {
                     }
                 }
             }
-            let unexpected_exit = reader_state.fetch_max(EXITED, Ordering::SeqCst) != STOPPING;
+            let unexpected_exit = reader_state.fetch_max(EXITED, Ordering::SeqCst) < CANCELLING;
             if let Ok(mut si) = si.lock() {
                 si.take();
             }
             if let Ok(mut p) = p.lock() {
                 for (_, tx) in p.drain() {
-                    let _ = tx.send(json!({"ok":false,"error":"Plugin subprocess exited"}));
+                    let _ = tx.send(Err("PLUGIN_EXEC_FAILED: Plugin subprocess exited".into()));
                 }
             }
             if unexpected_exit {
@@ -254,27 +284,52 @@ impl ChannelProcess {
         }
         result
     }
-    pub fn request(&self, mut value: Value) -> Result<Value, String> {
+    pub fn request(&self, value: Value) -> Result<Value, String> {
+        self.request_after_send(value, || {})
+    }
+    pub(super) fn request_after_send(
+        &self,
+        mut value: Value,
+        after_send: impl FnOnce(),
+    ) -> Result<Value, String> {
         let id = crate::support::try_random_hex(16)?;
         value["req_id"] = json!(id);
         let (tx, rx) = mpsc::sync_channel(1);
-        self.pending
-            .lock()
-            .map_err(|_| "Plugin pending lock poisoned")?
-            .insert(id.clone(), tx);
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "Plugin pending lock poisoned")?;
+            if self.state.load(Ordering::SeqCst) != RUNNING {
+                return Err("PLUGIN_EXEC_FAILED: Plugin subprocess exited".into());
+            }
+            pending.insert(id.clone(), tx);
+        }
         if let Err(e) = self.send(&value) {
             if let Ok(mut p) = self.pending.lock() {
                 p.remove(&id);
             }
             return Err(e);
         }
+        after_send();
         let result = rx
             .recv_timeout(Duration::from_secs(10))
             .map_err(|_| "PLUGIN_EXEC_FAILED: plugin request timed out".to_owned());
         if let Ok(mut p) = self.pending.lock() {
             p.remove(&id);
         }
-        result
+        result?
+    }
+    pub(super) fn has_pending_requests(&self) -> bool {
+        self.pending.lock().is_ok_and(|p| !p.is_empty())
+    }
+    pub(super) fn cancel_requests(&self) {
+        self.state.fetch_max(CANCELLING, Ordering::SeqCst);
+        if let Ok(mut pending) = self.pending.lock() {
+            for (_, tx) in pending.drain() {
+                let _ = tx.send(Err("UNAVAILABLE: Channel process is stopping".into()));
+            }
+        }
     }
     pub fn shutdown(&self) {
         let Ok(mut reader) = self.reader.lock() else {
@@ -283,7 +338,9 @@ impl ChannelProcess {
         if reader.is_none() {
             return;
         }
-        if self.state.swap(STOPPING, Ordering::SeqCst) == RUNNING {
+        let previous = self.state.swap(STOPPING, Ordering::SeqCst);
+        self.cancel_requests();
+        if matches!(previous, RUNNING | CANCELLING) {
             let _ = send_line(&self.stdin, &json!({"op":"shutdown"}));
         }
         // Closing stdin also triggers the protocol's plugin-side EOF lifecycle.
@@ -291,11 +348,6 @@ impl ChannelProcess {
             stdin.take();
         }
         self.shutdown_wake.notify();
-        if let Ok(mut pending) = self.pending.lock() {
-            for (_, tx) in pending.drain() {
-                let _ = tx.send(json!({"ok":false,"error":"Plugin subprocess exited"}));
-            }
-        }
         if let Ok(mut child) = self.child.lock() {
             // waitid also recognizes an exited child after its kqueue exit event
             // has passed. ECHILD prevents signaling after an external reap.

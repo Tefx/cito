@@ -1,6 +1,9 @@
 use crate::support::*;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
+use std::io::{ErrorKind, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 fn matches_process(command: &str) -> bool {
     agent_harness(command) == Some("pi")
@@ -21,6 +24,12 @@ fn setup(req: &Value) -> Result<Value> {
     let legacy_package = state(req).join("plugins/pi");
     let runtime_package = state(req).join("runtime/plugins/pi");
     let op = str_at(req, "op").unwrap_or("");
+    let shim = state(req).join("bin/cito-mcp");
+    let owns_mcp = |entry: &Value| {
+        entry["command"]
+            .as_str()
+            .is_some_and(|command| command == "cito-mcp" || expand(req, command) == shim)
+    };
     if op == "setup_inspect" {
         let v = read_json(&settings)?;
         // Host registration survives missing staged assets; setup owns integrity checks.
@@ -36,7 +45,7 @@ fn setup(req: &Value) -> Result<Value> {
             .unwrap_or(false)
             && matches!(fs::symlink_metadata(&legacy), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         for path in &mcp_paths {
-            configured &= read_json(path)?["mcpServers"].get("cito").is_none();
+            configured &= !owns_mcp(&read_json(path)?["mcpServers"]["cito"]);
         }
         let mut paths = vec![settings];
         paths.extend(mcp_paths);
@@ -72,7 +81,9 @@ fn setup(req: &Value) -> Result<Value> {
     for path in &mcp_paths {
         actions.push(json_mutate(req, "pi", path, |v| {
             if let Some(o) = v.get_mut("mcpServers").and_then(Value::as_object_mut) {
-                o.remove("cito");
+                if o.get("cito").is_some_and(owns_mcp) {
+                    o.remove("cito");
+                }
                 if o.is_empty() {
                     v.as_object_mut().map(|o| o.remove("mcpServers"));
                 }
@@ -84,11 +95,40 @@ fn setup(req: &Value) -> Result<Value> {
     remove_setup_runtime(req, "pi", Some("pi-pid-"))?;
     Ok(json!({"ok":true,"actions":actions}))
 }
-fn identify(req: &Value, p: u32) -> Result<Value> {
-    let response = socket_call(
-        &state(req).join(format!("sockets/pi-pid-{p}.sock")),
-        &json!({"op":"identify"}),
-    )?;
+fn socket_path(req: &Value, p: u32) -> PathBuf {
+    state(req).join(format!("sockets/pi-pid-{p}.sock"))
+}
+fn request_socket(
+    req: &Value,
+    p: u32,
+    request: &Value,
+    failure: &mut Option<ErrorKind>,
+) -> Result<Value> {
+    let path = socket_path(req, p);
+    let reply = socket_call_observe_connect(&path, request, |kind| *failure = Some(kind));
+    if reply.is_err() && !path.exists() {
+        nudge_missing_socket(req, p);
+    }
+    reply
+}
+fn nudge_missing_socket(req: &Value, p: u32) {
+    let watch = state(req).join(format!("pi/endpoints/pi-pid-{p}.watch"));
+    if !watch.is_file() || !process_command(p).is_ok_and(|command| matches_process(&command)) {
+        return;
+    }
+    // Do not create a sentinel or follow a symlink. Write to the watched inode.
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(watch)
+    {
+        if file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            let _ = file.write_all(b"1");
+        }
+    }
+}
+fn identify(req: &Value, p: u32, failure: &mut Option<ErrorKind>) -> Result<Value> {
+    let response = request_socket(req, p, &json!({"op":"identify"}), failure)?;
     if response["ok"] != true {
         let _ = fs::remove_file(state(req).join(format!("pi/endpoints/{p}.json")));
     }
@@ -158,7 +198,11 @@ fn prompt_about(row: &Value) -> Option<String> {
     (!summary.is_empty()).then_some(summary)
 }
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
-fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
+fn process_candidates(
+    req: &Value,
+    out: &mut Vec<(u32, Value)>,
+    refused: &HashSet<u32>,
+) -> Result<()> {
     if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0") {
         return Ok(());
     }
@@ -174,16 +218,16 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         .copied()
         .filter(|p| {
             !out.iter().any(|(pid, _)| pid == p)
-                && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+                && (refused.contains(p) || !socket_path(req, *p).exists())
                 && process_command(*p).is_ok_and(|command| matches_process(&command))
         })
         .collect();
     // Stable ordering makes the shared-cwd session assignment consistent across requests.
     processes.sort_unstable();
     for p in processes {
-        // Socket endpoints own their discovery result; never replace a slow bridge
-        // with a process-only candidate that incorrectly asks the user to reload.
-        if state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+        // A connect refusal is not a slow bridge. Leave the old inode alone and
+        // admit process-only discovery for the independently verified Pi PID.
+        if (!refused.contains(&p) && socket_path(req, p).exists())
             || !interactive_candidate(req, p).unwrap_or(false)
         {
             continue;
@@ -302,11 +346,35 @@ fn publish_endpoint(req: &Value, p: u32, identity: &Value, session: &Value) -> R
     }
     Ok(())
 }
-fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
+enum SocketCandidate {
+    Session(Value),
+    Refused,
+}
+
+fn socket_candidates(req: &Value) -> Result<Vec<(u32, SocketCandidate)>> {
+    // Directory discovery includes sentinels even when process-only discovery is disabled.
+    if let Ok(entries) = fs::read_dir(state(req).join("pi/endpoints")) {
+        for entry in entries.flatten() {
+            if let Some(p) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("pi-pid-"))
+                .and_then(|name| name.strip_suffix(".watch"))
+                .and_then(|id| id.parse::<u32>().ok())
+                .filter(|p| !socket_path(req, *p).exists())
+            {
+                nudge_missing_socket(req, p);
+            }
+        }
+    }
     let request = req.clone();
     inspect_socket_endpoints(req, "pi-pid-", move |p, _| {
         let req = &request;
-        let reply = identify(req, p);
+        let mut failure = None;
+        let reply = identify(req, p, &mut failure);
+        if failure == Some(ErrorKind::ConnectionRefused) {
+            return Some(SocketCandidate::Refused);
+        }
         let live = reply.is_ok();
         let v = socket_response_or_cached(reply, p, || cached_session(req, p)).ok()?;
         if live && v["ok"] == true {
@@ -318,12 +386,13 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
             && interactive_candidate(req, p).unwrap_or(false)
             && raw_str_at(&v, "session_id").is_some()
             && raw_str_at(&v, "cwd").is_some())
-        .then_some(v)
+        .then_some(SocketCandidate::Session(v))
     })
 }
 type Candidates = (Vec<(u32, Value)>, bool, Option<String>);
 fn candidates(req: &Value) -> Result<Candidates> {
     let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
+    let mut refused = HashSet::new();
     if resolve || req["op"] == "probe" || pid(req).is_some() {
         let roots = if resolve {
             caller_pid_roots(req).unwrap_or_default()
@@ -334,9 +403,13 @@ fn candidates(req: &Value) -> Result<Candidates> {
         let mut searched = Vec::new();
         for p in endpoint_pid_walk(roots, if resolve { 5 } else { 0 }, matches_process) {
             searched.push(p);
-            let reply = identify(req, p);
+            let mut failure = None;
+            let reply = identify(req, p, &mut failure);
             let live = reply.is_ok();
-            let bridge = live || state(req).join(format!("sockets/pi-pid-{p}.sock")).exists();
+            if failure == Some(ErrorKind::ConnectionRefused) {
+                refused.insert(p);
+            }
+            let bridge = live || (!refused.contains(&p) && socket_path(req, p).exists());
             let response = if bridge {
                 socket_response_or_cached(reply, p, || cached_session(req, p))
             } else if req["op"] == "probe" && allow_process_only(req) {
@@ -372,7 +445,7 @@ fn candidates(req: &Value) -> Result<Candidates> {
         // A responding bridge with no open session must not be bypassed.
         let mut live = vec![];
         if req["op"] != "probe" && !responded && !searched.is_empty() {
-            process_candidates(req, &mut live)?;
+            process_candidates(req, &mut live, &refused)?;
             // Prefer the nearest caller ancestor, just as socket resolution does.
             // An explicit endpoint must not become ambiguous with its host ancestors.
             live = searched
@@ -383,8 +456,16 @@ fn candidates(req: &Value) -> Result<Candidates> {
         }
         return Ok((live, responded, None));
     }
-    let mut out = socket_candidates(req)?;
-    process_candidates(req, &mut out)?;
+    let mut out = Vec::new();
+    for (p, candidate) in socket_candidates(req)? {
+        match candidate {
+            SocketCandidate::Session(session) => out.push((p, session)),
+            SocketCandidate::Refused => {
+                refused.insert(p);
+            }
+        }
+    }
+    process_candidates(req, &mut out, &refused)?;
     Ok((out, false, None))
 }
 fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
@@ -417,10 +498,8 @@ fn probe_fence(req: &Value) -> Result<Option<Value>> {
             json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
         ));
     }
-    if cached["identity"] == current
-        && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
-        && !allow_process_only(req)
-    {
+    if cached["identity"] == current && !socket_path(req, p).exists() && !allow_process_only(req) {
+        nudge_missing_socket(req, p);
         return Ok(Some(
             json!({"ok":true,"status":"transient_error","reason":"Pi bridge is temporarily unavailable"}),
         ));
@@ -473,7 +552,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     Ok(Some(c)) => {
                         if !allow_process_only(req)
                             && !pid(&c).is_some_and(|p| {
-                                identify(req, p).is_ok_and(|v| {
+                                identify(req, p, &mut None).is_ok_and(|v| {
                                     v["ok"] == true
                                         && raw_str_at(&v, "session_id")
                                             == raw_str_at(&c, "session_id")
@@ -536,9 +615,8 @@ pub fn handle(req: &Value) -> Result<Value> {
                     json!({"ok":true,"status":"closed_definitive","reason":"No open session"}),
                 );
             }
-            if pid(req).is_some_and(|p| {
-                alive(p) && state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
-            }) && cs.first().is_none_or(|(_, v)| v["needs_reload"] == true)
+            if pid(req).is_some_and(|p| alive(p) && socket_path(req, p).exists())
+                && cs.first().is_none_or(|(_, v)| v["needs_reload"] == true)
             {
                 return Ok(
                     json!({"ok":true,"status":"transient_error","reason":"Pi bridge is temporarily unavailable"}),
@@ -565,39 +643,42 @@ pub fn handle(req: &Value) -> Result<Value> {
             let Some(p) = pid(req) else {
                 return Ok(error("BINDING_REQUIRED", "Endpoint PID is required"));
             };
-            let path = state(req).join(format!("sockets/pi-pid-{p}.sock"));
             if op == "update_badge" {
                 return update_badge(
                     req,
-                    &path,
+                    &socket_path(req, p),
                     p,
                     raw_str_at(req, "session_id").unwrap_or(""),
                     matches_process,
                 );
             }
             let request = json!({"op":"deliver","session_id":req["session_id"],"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false});
-            for attempt in 0..3 {
-                match socket_call(&path, &request) {
-                    Ok(reply) if reply["ok"] == true => {
-                        return Ok(json!({"ok":true,"outcome":"delivered","reason":null}))
-                    }
-                    Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
-                        return Ok(json!({"ok":true,"outcome":"session_switched","reason":null}))
-                    }
-                    Ok(reply) => {
-                        return Ok(
-                            json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&reply,"Pi bridge rejected delivery")}),
-                        );
-                    }
-                    Err(_) => {}
+            Ok(match request_socket(req, p, &request, &mut None) {
+                Ok(reply)
+                    if reply["ok"] == true
+                        && reply["delivered"] == true
+                        && reply["persisted_batch_id"]
+                            .as_str()
+                            .is_some_and(|batch| Some(batch) == req["batch_id"].as_str()) =>
+                {
+                    json!({"ok":true,"outcome":"delivered","reason":null})
                 }
-                if attempt < 2 {
-                    std::thread::sleep(std::time::Duration::from_secs(attempt + 1));
+                Ok(reply) if reply["ok"] == true => {
+                    // Keep this batch unread and retryable, including replies from
+                    // pre-upgrade bridges that report delivery without proof.
+                    json!({"ok":true,"outcome":"pending","reason":"Pi has not persisted the notification yet"})
                 }
-            }
-            Ok(
-                json!({"ok":true,"outcome":"driver_unavailable","reason":"Pi bridge is unavailable"}),
-            )
+                Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
+                    json!({"ok":true,"outcome":"session_switched","reason":null})
+                }
+                Ok(reply) => {
+                    json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&reply,"Pi bridge rejected delivery")})
+                }
+                // A missing bridge has already been nudged; let the receiver retry.
+                Err(_) => {
+                    json!({"ok":true,"outcome":"driver_unavailable","reason":"Pi bridge is unavailable"})
+                }
+            })
         }
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
     }

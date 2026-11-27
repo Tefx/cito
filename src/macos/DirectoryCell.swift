@@ -1,5 +1,12 @@
 import AppKit
 
+extension ActivityItem {
+    var replyTarget: String? {
+        guard can_reply == true, let from_scoped_id, !from_scoped_id.isEmpty else { return nil }
+        return from_scoped_id
+    }
+}
+
 // AppKit reserves table hits on custom NSControls for row selection. Give the
 // existing row actions an ordinary view target without intercepting row hits.
 final class DirectoryActionHitView: NSView {
@@ -34,6 +41,9 @@ final class DirectoryPeerCellView: NSTableCellView {
     let deleteControl = MenuControl("Delete message", frame: NSRect(x:0,y:0,width:24,height:22), symbol:"xmark")
     var inspectionId = ""
     private(set) var activityItem: ActivityItem?
+    private var copyAction: ((MenuControl) -> Void)?
+    private var messageAction: (() -> Void)?
+    private var deleteAction: (() -> Void)?
     private var heldBadge: SurfaceView?
     let badgeIcon: NSImageView
     let line1TitleLabel: NSTextField
@@ -70,11 +80,6 @@ final class DirectoryPeerCellView: NSTableCellView {
         addSubview(DirectoryActionHitView([deleteControl, msgControl, copyControl], frame: bounds))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        for control in [deleteControl, msgControl, copyControl] { control.invalidatePress() }
-    }
 
     private static func activityMessageWidth(_ rowWidth: CGFloat) -> CGFloat { max(0, rowWidth - 68) }
 
@@ -135,15 +140,21 @@ final class DirectoryPeerCellView: NSTableCellView {
         }
     }
 
-    func configure(with peer: RemotePeer, harnesses: [String: HarnessMeta], onCopy: @escaping (String, MenuControl) -> Void, onMessage: (() -> Void)? = nil) {
+    func configure(with peer: RemotePeer, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onMessage: (() -> Void)? = nil) {
         let samePeer = inspectionId == "dir_peer:\(peer.scoped_id)"
         let keepCopyFeedback = samePeer && copyControl.feedbackTimer?.isValid == true
-        if !samePeer { copyControl.setHovered(false); msgControl.setHovered(false); deleteControl.setHovered(false) }
+        if !samePeer {
+            copyControl.setHovered(false); msgControl.setHovered(false); deleteControl.setHovered(false)
+            for control in [deleteControl, msgControl, copyControl] { control.invalidatePress() }
+        }
         activityItem = nil
+        copyAction = onCopy
+        messageAction = onMessage
+        deleteAction = nil
         heldBadge?.isHidden = true
         badgeView.frame.origin.y = 12
         unreadAccentBar.isHidden = true; deleteControl.isHidden = true; rowDivider.isHidden = true
-        deleteControl.pressed = nil
+        if deleteControl.pressed != nil { deleteControl.pressed = nil }
         line1TitleLabel.font = .systemFont(ofSize:13,weight:.semibold)
         line1TitleLabel.textColor = .labelColor
         line2MetaLabel.font = .systemFont(ofSize:11.5)
@@ -156,21 +167,24 @@ final class DirectoryPeerCellView: NSTableCellView {
         configureBadge(badgeView,icon:badgeIcon,id:peer.harness,symbol:visual.symbol,title:visual.name,tint:visual.tint,inset:6)
 
         let short = peer.display_address
+        let copyAccessibilityLabel = "Copy address \(short)"
         let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
         let shownAddress = compactAddressLabel(short,maxWidth:190,font:copyFont,paddingX:11)
         let copyWidth = min(190,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc")))
-        if !keepCopyFeedback { copyControl.clearFeedback(title: shownAddress, accessibilityLabel: short) }
+        if !keepCopyFeedback { copyControl.clearFeedback(title: shownAddress, accessibilityLabel: copyAccessibilityLabel) }
         copyControl.isHidden = false
         copyControl.frame = NSRect(x: 0, y: 15, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
         copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
         copyControl.applyVisualState()
-        if keepCopyFeedback { copyControl.restingTitle = shownAddress; copyControl.restingAccessibilityLabel = short }
+        if keepCopyFeedback { copyControl.restingTitle = shownAddress; copyControl.restingAccessibilityLabel = copyAccessibilityLabel }
         copyControl.toolTip = short
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
-        copyControl.pressed = { [weak copyControl] in
-            if let control = copyControl { onCopy(peer.display_address, control) }
+        if !samePeer || copyControl.pressed == nil {
+            copyControl.pressed = { [weak self, weak copyControl] in
+                if let control = copyControl { self?.copyAction?(control) }
+            }
         }
 
         let msgWidth: CGFloat = MenuControl.intrinsicWidth("Message", leadingSymbol:"bubble.left")
@@ -182,7 +196,9 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.setAccessibilityLabel("Message")
         msgControl.toolTip = "Message \(peer.display_address)"
         msgControl.identifier = NSUserInterfaceItemIdentifier("msg_dir:\(peer.scoped_id)")
-        msgControl.pressed = onMessage
+        if !samePeer || (onMessage != nil) != (msgControl.pressed != nil) {
+            msgControl.pressed = onMessage == nil ? nil : { [weak self] in self?.messageAction?() }
+        }
 
         let normalizedTitle = peer.use_app_title == true ? visual.name : peer.display_title ?? peer.title
         let displayTitle = peer.harness == "human" && peer.custom_title != true ? "@\(peer.user)" + (peer.is_self_principal == true ? " (You)" : "") : normalizedTitle
@@ -221,7 +237,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         }
         let hostText = hosts.joined(separator: ", ")
         let displayAbout = peer.display_about
-        let attachmentNames = displayAttachments(peer.attachments ?? []).map { cleanHostDisplay($0.display_name) }
+        let attachmentNames = displayAttachments((peer.attachments ?? []).filter { $0.availability == "ACTIVE" }).map { cleanHostDisplay($0.display_name) }
         let segments = (peer.harness == "human" ? ["Inbox"] + attachmentNames + [displayAbout ?? ""] : [hostText,displayAbout ?? ""]).filter { !$0.isEmpty }
         line2MetaLabel.stringValue = (peer.harness != "human" && !segments.isEmpty ? " · " : "") + segments.joined(separator:" · ")
         line2MetaLabel.frame = NSRect(x: 0, y: 7, width: 0, height: 16)
@@ -231,15 +247,21 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.layoutContents(); msgControl.layoutContents()
     }
 
-    func configureActivity(with item: ActivityItem, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onDelete: @escaping () -> Void, onReply: @escaping () -> Void) {
+    func configureActivity(with item: ActivityItem, harnesses: [String: HarnessMeta], canDelete: Bool = true, onCopy: @escaping (MenuControl) -> Void, onDelete: @escaping () -> Void, onReply: @escaping () -> Void) {
         let sameItem = activityItem?.hub == item.hub && activityItem?.signal_id == item.signal_id
         let keepCopyFeedback = sameItem && copyControl.feedbackTimer?.isValid == true
-        if !sameItem { copyControl.setHovered(false); msgControl.setHovered(false); deleteControl.setHovered(false) }
+        if !sameItem {
+            copyControl.setHovered(false); msgControl.setHovered(false); deleteControl.setHovered(false)
+            for control in [deleteControl, msgControl, copyControl] { control.invalidatePress() }
+        }
+        copyAction = onCopy
+        deleteAction = onDelete
+        messageAction = onReply
         activityItem = item
         inspectionId = "activity_row:\(item.signal_id)"
         let visual = resolveHarnessVisual(item.from_harness ?? item.target_harness, harnesses:harnesses)
         configureBadge(badgeView,icon:badgeIcon,id:item.from_harness ?? item.target_harness,symbol:visual.symbol,title:visual.name,tint:visual.tint,inset:6)
-        let canReply = item.can_reply == true
+        let canReply = item.replyTarget != nil
         let copyFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         let copyW = max(66, MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"))
         let replyW = MenuControl.intrinsicWidth("Reply", font:copyFont, leadingSymbol:"arrowshape.turn.up.left")
@@ -247,10 +269,13 @@ final class DirectoryPeerCellView: NSTableCellView {
         unreadAccentBar.frame = NSRect(x:4,y:8,width:3,height:0)
         rowDivider.isHidden = false; rowDivider.frame = NSRect(x:0,y:0,width:bounds.width,height:1)
         deleteControl.isHidden = false
+        deleteControl.isEnabled = canDelete
         deleteControl.frame = NSRect(x:0,y:0,width:24,height:22)
         deleteControl.identifier = NSUserInterfaceItemIdentifier("delete_activity:\(item.signal_id)")
         deleteControl.toolTip = "Delete message"
-        deleteControl.pressed = onDelete
+        if !sameItem || deleteControl.pressed == nil {
+            deleteControl.pressed = { [weak self] in self?.deleteAction?() }
+        }
         msgControl.isHidden = !canReply
         msgControl.style = .neutral
         msgControl.frame = NSRect(x:0,y:0,width:replyW,height:22)
@@ -259,7 +284,9 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.setAccessibilityLabel("Reply")
         msgControl.toolTip = "Reply"
         msgControl.identifier = NSUserInterfaceItemIdentifier("reply_activity:\(item.signal_id)")
-        msgControl.pressed = canReply ? onReply : nil
+        if !sameItem || canReply != (msgControl.pressed != nil) {
+            msgControl.pressed = canReply ? { [weak self] in self?.messageAction?() } : nil
+        }
         copyControl.isHidden = false
         if !keepCopyFeedback { copyControl.clearFeedback(title: "Copy", accessibilityLabel: "Copy message") }
         else { copyControl.restingTitle = "Copy"; copyControl.restingAccessibilityLabel = "Copy message" }
@@ -270,7 +297,11 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.label.font = copyFont
         copyControl.toolTip = "Copy message"
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_activity_msg:\(item.signal_id)")
-        copyControl.pressed = { [weak copyControl] in if let c = copyControl { onCopy(c) } }
+        if !sameItem || copyControl.pressed == nil {
+            copyControl.pressed = { [weak self, weak copyControl] in
+                if let control = copyControl { self?.copyAction?(control) }
+            }
+        }
         copyControl.applyVisualState()
         let held = ["stale_generation":"App reloaded","driver_unavailable":"App unavailable",
             "session_switched":"Conversation changed","unlistened":"Listening paused",

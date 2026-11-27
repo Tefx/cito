@@ -19,6 +19,62 @@ pub(super) fn latest(f: &Fixture, p: usize, op: &str) -> Value {
 }
 
 #[test]
+fn ipc_delivers_live_state_while_the_menu_is_tracking() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    f.send(p, state());
+    f.send(p, json!({"op":"test_menu_open"}));
+    assert_eq!(render_state(&f, p)["menu_open"], true);
+    f.send(p, json!({"op":"test_menu_tracking_probe"}));
+    wait(|| f.output(p, true).contains("menu-tracking-start"));
+    let mut change = state();
+    change["unread_count"] = json!(8);
+    f.send(p, change);
+    wait(|| f.output(p, true).contains("menu-tracking-unread 8"));
+    assert_eq!(render_state(&f, p)["unread_count"], 8);
+}
+
+#[test]
+fn pending_setup_inspection_does_not_settle_first_launch() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["apps"][0]["configured"] = Value::Null;
+    cfg["apps"][0]["status"] = json!("error");
+    cfg["apps"][0]["detail"] = json!("Setup inspection pending");
+    f.send(p, state_with_settings(cfg.clone()));
+    assert_eq!(render_state(&f, p)["onboarding_checked"], false);
+    cfg["apps"][0]["configured"] = json!(false);
+    cfg["apps"][0]["status"] = json!("not_configured");
+    cfg["apps"][0]["detail"] = json!("Click Set Up to connect");
+    f.send(p, state_with_settings(cfg));
+    assert_eq!(render_state(&f, p)["onboarding_checked"], true);
+}
+
+#[test]
+fn menu_card_failure_stays_on_menu_and_only_its_successful_retry_clears_it() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    open_settings(&f, p, &settings(), "apps");
+    control(&f, p, "toggle_auto_listen");
+    let action = latest(&f, p, "set_auto_listen");
+    f.send(p, json!({"op":"error","source_op":"set_auto_listen","request_id":action["request_id"],"error":"Auto-Listen could not be changed."}));
+    let failed = inspect(&f, p);
+    assert!(failed.menu("menu_error_row").is_object());
+    assert!(failed.settings("settings_error_banner").is_null());
+    control(&f, p, "toggle_auto_listen");
+    let retry = latest(&f, p, "set_auto_listen");
+    assert_ne!(retry["request_id"], action["request_id"]);
+    assert!(inspect(&f, p).menu("menu_error_row").is_object());
+    let mut settled = state();
+    settled["ok"] = json!(true);
+    settled["source_op"] = json!("set_auto_listen");
+    settled["request_id"] = retry["request_id"].clone();
+    f.send(p, settled);
+    assert!(inspect(&f, p).menu("menu_error_row").is_null());
+}
+
+#[test]
 fn control_reopen_reaches_the_companion_and_opens_settings() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

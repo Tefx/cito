@@ -968,8 +968,9 @@ print(json.dumps({'port':server.server_address[1]}),flush=True);server.serve_for
     let output = parent_hook(
         &f,
         parent,
-        json!({"hook_event_name":"UserPromptSubmit","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
+        json!({"hook_event_name":"Stop","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
     );
+    assert_eq!(output["decision"], "block", "{output}");
     wait(|| f.frames(proxy).len() >= 2);
     let exchange = f.frames(proxy).remove(1);
     assert_eq!(exchange["path"], "/mcp", "{exchange}");
@@ -997,6 +998,25 @@ print(json.dumps({'port':server.server_address[1]}),flush=True);server.serve_for
         .len(),
         1
     );
+    assert!(!queue.exists());
+    let sent = f.tool(
+        "cito_send",
+        json!({"to":listener["public_id"],"message":"Already read through the inbox"}),
+        json!({}),
+    );
+    wait(|| queue.exists() && fs::read(&queue).is_ok_and(|bytes| bytes.ends_with(b"\n")));
+    let ack = f.tool(
+        "cito_inbox",
+        json!({"ack_ids":[sent["signal_id"]],"ack_all":false}),
+        json!({"claudeSessionId":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
+    );
+    assert_eq!(ack["acknowledged_count"], 1, "{ack}");
+    let output = parent_hook(
+        &f,
+        parent,
+        json!({"hook_event_name":"Stop","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/repo"}),
+    );
+    assert_eq!(output, json!({}), "An ACKed card cannot block Stop");
     assert!(!queue.exists());
     let caller = f.tool(
         "cito_status",
@@ -1366,8 +1386,21 @@ fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
         UnixListener::bind(f.state.join(format!("sockets/claude-pid-{pid}.sock"))).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = bridge_request(&listener);
+        writeln!(
+            stream,
+            "{}",
+            json!({"ok":false,"error":"DELIVERY_FAILED","message":"Cannot persist bridge identity"})
+        )
+        .unwrap();
+        let (mut stream, _) = bridge_request(&listener);
         writeln!(stream, "{}", json!({"ok":false,"message":"Session closed"})).unwrap();
     });
+    let transient = f.plugin(CLAUDE, request.clone());
+    assert_eq!(transient["status"], "transient_error", "{transient}");
+    assert!(
+        binding.exists(),
+        "Transient bridge I/O failure erased the hook binding"
+    );
     let rejected = f.plugin(CLAUDE, request);
     server.join().unwrap();
     assert_eq!(rejected["status"], "transient_error", "{rejected}");
@@ -1570,11 +1603,24 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         assert_eq!(failed["ok"], true, "{id}: {failed}");
         assert!(failed["sessions"].is_array());
         if id == "pi" {
-            assert!(failed["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|s| s["endpoint_pid"] == f.pid(second)));
+            for process in [first, second] {
+                assert!(
+                    failed["sessions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|s| s["endpoint_pid"] == f.pid(process)),
+                    "{failed}"
+                );
+            }
+            let process_only = f.plugin(
+                PI,
+                json!({"op":"resolve_caller","endpoint_pid":f.pid(first),"cwd":cwd}),
+            );
+            assert_eq!(
+                process_only["caller"]["session_id"],
+                format!("pid-{}", f.pid(first))
+            );
         }
         if id == "pi" {
             f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
@@ -1924,9 +1970,11 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
     let before = json!({"theme":"dark","packages":["npm:@tefx/cito","npm:other",f.state.join("plugins/pi")]});
     fs::write(pi.join("settings.json"), before.to_string()).unwrap();
     fs::write(pi.join("extensions/cito-bridge.ts"), "legacy").unwrap();
-    for p in ["mcp.json", "mcp/global.mcp.json"] {
-        fs::write(pi.join(p),json!({"mcpServers":{"cito":{"command":"old"},"other":{"command":"keep"}},"extra":true}).to_string()).unwrap();
-    }
+    let foreign = json!({"mcpServers":{"cito":{"command":"/opt/other/bin/cito-mcp","args":["serve"]},"other":{"command":"keep"}},"extra":true});
+    let owned = json!({"mcpServers":{"cito":{"command":f.state.join("bin/cito-mcp")},"other":{"command":"keep"}},"extra":true});
+    let global = pi.join("mcp/global.mcp.json");
+    fs::write(pi.join("mcp.json"), owned.to_string()).unwrap();
+    fs::write(&global, foreign.to_string()).unwrap();
     assert_eq!(
         f.plugin(PI, json!({"op":"setup_apply","dry_run":true}))["ok"],
         true
@@ -1936,13 +1984,11 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
     let v: Value = read_json(pi.join("settings.json"));
     assert_eq!(v, json!({"theme":"dark","packages":["npm:other",package]}));
     assert!(!pi.join("extensions/cito-bridge.ts").exists());
-    for p in ["mcp.json", "mcp/global.mcp.json"] {
-        let v: Value = read_json(pi.join(p));
-        assert_eq!(
-            v,
-            json!({"mcpServers":{"other":{"command":"keep"}},"extra":true})
-        );
-    }
+    assert_eq!(
+        read_json(pi.join("mcp.json")),
+        json!({"mcpServers":{"other":{"command":"keep"}},"extra":true})
+    );
+    assert_eq!(fs::read_to_string(&global).unwrap(), foreign.to_string());
     assert_eq!(
         f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
         true
@@ -1955,6 +2001,7 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
     assert_eq!(f.plugin(PI, json!({"op":"setup_remove"}))["ok"], true);
     let v: Value = read_json(pi.join("settings.json"));
     assert_eq!(v, json!({"theme":"dark","packages":["npm:other"]}));
+    assert_eq!(fs::read_to_string(global).unwrap(), foreign.to_string());
 }
 #[test]
 fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
@@ -2166,6 +2213,60 @@ fn pi_probe_rejects_reused_pid_behind_stale_socket() {
     assert_eq!(response["status"], "closed_definitive", "{response}");
     f.stop(process);
 }
+#[test]
+fn pi_missing_socket_nudges_its_sentinel_and_pending_wakes_are_retryable() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let script = f.dir.join("pi.mjs");
+    fs::write(&script, "console.log('ready'); process.stdin.resume();").unwrap();
+    let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let pid = f.pid(process);
+    let sentinel = f.state.join(format!("pi/endpoints/pi-pid-{pid}.watch"));
+    let path = f.state.join(format!("sockets/pi-pid-{pid}.sock"));
+    fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for request in [
+        json!({"op":"discover_sessions"}),
+        json!({"op":"resolve_caller","endpoint_pid":pid}),
+    ] {
+        fs::write(&sentinel, "0").unwrap();
+        let _ = f.plugin(PI, request);
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "1");
+    }
+    fs::write(&sentinel, "0").unwrap();
+    let watcher = std::thread::spawn({
+        let path = path.clone();
+        move || {
+            wait(|| fs::read_to_string(&sentinel).is_ok_and(|text| text == "1"));
+            let listener = UnixListener::bind(path).unwrap();
+            for reply in [
+                json!({"ok":true,"delivered":false,"delivered_unconfirmed":true}),
+                json!({"ok":true,"delivered":true}),
+                json!({"ok":true,"delivered":true,"persisted_batch_id":"batch-a"}),
+            ] {
+                let (mut stream, request) = bridge_request(&listener);
+                assert_eq!(request["op"], "deliver");
+                assert_eq!(request["batch_id"], "batch-a");
+                writeln!(stream, "{reply}").unwrap();
+            }
+        }
+    });
+    let wake = || {
+        f.plugin(PI, json!({"op":"wake","endpoint_pid":pid,"session_id":"session-a","batch_id":"batch-a","text":"Review"}))
+    };
+    assert_eq!(wake()["outcome"], "driver_unavailable");
+    wait(|| path.exists());
+    assert_eq!(wake()["outcome"], "pending");
+    assert_eq!(
+        wake()["outcome"],
+        "pending",
+        "A legacy bridge cannot prove persistence"
+    );
+    assert_eq!(wake()["outcome"], "delivered");
+    watcher.join().unwrap();
+}
+
 #[test]
 fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     let _lock = serial();
@@ -2548,6 +2649,18 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
         "Cito effects cannot renew qualifying user activity"
     );
     drop(file);
+    let target = cito_native::database::Database::open(&path).unwrap();
+    target
+        .execute(
+            "UPDATE threads SET recency_at_ms=? WHERE id='thread'",
+            &[json!(now + 1)],
+        )
+        .unwrap();
+    assert_eq!(
+        activity(&discover(&f)),
+        before,
+        "A newer DB row cannot requalify an old rollout turn"
+    );
     let replacement = rollout.with_extension("replacement");
     fs::copy(&rollout, &replacement).unwrap();
     fs::rename(&replacement, &rollout).unwrap();
@@ -2561,16 +2674,24 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     // Tool output after a user turn can exceed a fixed tail slice. It must not
     // hide the qualifying turn or become new activity on subsequent refreshes.
     writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:03:00.000Z","payload":{"type":"tool_output","text":"x".repeat(300_000)}})).unwrap();
-    let target = cito_native::database::Database::open(&path).unwrap();
-    target
-        .execute(
-            "UPDATE threads SET recency_at_ms=? WHERE id='thread'",
-            &[json!(now + 1)],
-        )
-        .unwrap();
     let after = activity(&discover(&f));
     assert!(after["revision"].as_u64() > before["revision"].as_u64());
     assert_eq!(after["at_ms"], 1_767_225_720_000u64);
+    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:04:00.000Z","payload":{"type":"user_message","message":"Another genuine turn"}})).unwrap();
+    assert_eq!(
+        activity(&discover(&f)),
+        after,
+        "Rollout alone cannot advance the durable DB revision"
+    );
+    target
+        .execute(
+            "UPDATE threads SET recency_at_ms=? WHERE id='thread'",
+            &[json!(now + 2)],
+        )
+        .unwrap();
+    let after = activity(&discover(&f));
+    assert_eq!(after["revision"], now + 2);
+    assert_eq!(after["at_ms"], 1_767_225_840_000u64);
     target
         .execute(
             "UPDATE threads SET recency_at_ms=? WHERE id='thread'",
@@ -2998,8 +3119,28 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         "console.log(JSON.stringify({op:'ready'})); setInterval(()=>{},1000);",
     )
     .unwrap();
-    let process = spawn_interactive(&f, "node", &[cli.to_str().unwrap()], &[]);
+    let process = spawn_interactive(
+        &f,
+        "node",
+        &[cli.to_str().unwrap(), "resume", "active", "exec"],
+        &[],
+    );
     wait(|| f.frames_for(process, "ready").next().is_some());
+    let noninteractive = spawn_interactive(
+        &f,
+        "node",
+        &[cli.to_str().unwrap(), "--config", "model=sample", "exec"],
+        &[],
+    );
+    wait(|| f.frames_for(noninteractive, "ready").next().is_some());
+    assert_eq!(
+        f.plugin(
+            CODEX,
+            json!({"op":"discover_sessions","endpoint_pid":f.pid(noninteractive)})
+        )["sessions"],
+        json!([])
+    );
+    f.stop(noninteractive);
     let git = f.dir.join("tools/git");
     script(&git, "#!/bin/sh\necho git >> \"$HOME/git-calls\"\nexit 1\n");
     f.env.insert(
@@ -3073,6 +3214,10 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
                 (json!("user"), json!("{\"subagent\":true}"))
             };
             c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source,source) VALUES(?, '/repo', 0, ?, 'Subagent', ?, ?)", &[json!(format!("subagent-{i}")),json!(1000+i),thread_source,source])?;
+        }
+        for i in 0..8 {
+            let (id, cwd) = if i % 2 == 0 { (json!("\u{a0}\u{2009}\u{2028}"), json!("/repo")) } else { (json!(format!("blank-{i}")), json!("\u{85}\u{3000}\u{2003}")) };
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms) VALUES(?, ?, 0, 2001)", &[id,cwd])?;
         }
         for (id, cwd) in [(Value::Null,json!("/repo")),(json!(""),json!("/repo")),(json!("missing-cwd"),Value::Null),(json!("empty-cwd"),json!("")),(json!(" \t"),json!("/repo")),(json!("blank-cwd"),json!(" \n"))] {
             c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms) VALUES(?, ?, 0, 2000)", &[id,cwd])?;
@@ -3159,12 +3304,20 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
     let queue = f.dir.join("queue");
     script(
         &queue,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/queue-args\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/queue-args\"\nprintf '%s' \"$CODEX_HOME\" > \"$HOME/queue-home\"\n",
     );
     f.env
         .insert("CITO_CODEX_BIN".into(), queue.display().to_string());
+    f.env.insert(
+        "CODEX_HOME".into(),
+        f.dir.join("wrong").display().to_string(),
+    );
     let request = json!({"op":"wake","session_id":"thread/a?# b","text":"a message with spaces"});
     assert_eq!(f.plugin(CODEX, request.clone())["outcome"], "delivered");
+    assert_eq!(
+        fs::read_to_string(f.home.join("queue-home")).unwrap(),
+        f.home.join(".codex").to_str().unwrap()
+    );
     assert_eq!(
         fs::read_to_string(f.home.join("queue-args")).unwrap(),
         "queue\n--resume\n--thread\nthread/a?# b\n--message\na message with spaces\n"
@@ -3206,6 +3359,94 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
             .lines()
             .count(),
         12
+    );
+}
+#[test]
+fn codex_large_queue_uses_stdio_with_resolved_home_and_does_not_replay() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let queue = f.dir.join("queue");
+    let selected = f.dir.join("selected");
+    script(
+        &queue,
+        r#"#!/usr/bin/env python3
+import base64, hashlib, json, os, pathlib, sys
+root = pathlib.Path(os.environ['TMPDIR'])
+assert os.environ['CODEX_HOME'] == os.environ['CITO_CODEX_HOME']
+assert sys.argv[1:] == ['app-server', 'proxy']
+reader, writer = sys.stdin.buffer, sys.stdout.buffer
+assert reader.readline() == b'GET /rpc HTTP/1.1\r\n'
+headers = {}
+while (line := reader.readline()) != b'\r\n':
+    name, value = line.split(b':', 1)
+    headers[name.lower()] = value.strip()
+key = headers[b'sec-websocket-key']
+assert len(base64.b64decode(key)) == 16
+accept = base64.b64encode(hashlib.sha1(key + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest())
+writer.write(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + b'\r\n\r\n')
+writer.flush()
+def receive(opcode=1):
+    flags, marker = reader.read(2)
+    assert flags == 128 | opcode and marker & 128
+    length = marker & 127
+    if length in (126, 127):
+        length = int.from_bytes(reader.read({126: 2, 127: 8}[length]), 'big')
+    mask = reader.read(4)
+    return bytes(byte ^ mask[i % 4] for i, byte in enumerate(reader.read(length)))
+def request():
+    return json.loads(receive())
+def send(flags, payload):
+    assert len(payload) < 126
+    writer.write(bytes([flags, len(payload)]) + payload)
+    writer.flush()
+def reply(request, result):
+    send(0x81, json.dumps({'id': request['id'], 'result': result}).encode())
+init = request()
+assert init['method'] == 'initialize' and init['params']['capabilities']['experimentalApi']
+reply(init, {})
+assert request()['method'] == 'initialized'
+queue = request()
+assert queue['method'] == 'thread/queue/add'
+assert queue['params']['threadId'] == 'session-a'
+with (root / 'queue-calls').open('a') as calls:
+    calls.write('insert\n')
+(root / 'card').write_text(queue['params']['input'][0]['text'])
+if os.environ.get('DROP_QUEUE_RESPONSE') == '1':
+    sys.exit(0)
+answer = json.dumps({'id': queue['id'], 'result': {'queuedSubmission': {'id': 'queued'}}}).encode()
+send(0x01, answer[:17])
+send(0x89, b'ping')
+assert receive(10) == b'ping'
+send(0x80, answer[17:])
+status = request()
+assert status['method'] == 'thread/read'
+reply(status, {'thread': {'status': {'type': 'notLoaded'}}})
+resume = request()
+assert resume['method'] == 'thread/resume'
+(root / 'resumed').touch()
+reply(resume, {})
+"#,
+    );
+    for (key, value) in [
+        ("CITO_CODEX_BIN", queue),
+        ("CITO_CODEX_HOME", selected),
+        ("CODEX_HOME", f.dir.join("wrong")),
+    ] {
+        f.env.insert(key.into(), value.display().to_string());
+    }
+    let text = "literal ' \"\n$value α".repeat(24_000);
+    let request = json!({"op":"wake","session_id":"session-a","text":text,"checkpoint_only":true});
+    let receipt = f.plugin(CODEX, request.clone());
+    assert_eq!(receipt["queue_confirmed"], true, "{receipt}");
+    assert_eq!(fs::read_to_string(f.dir.join("card")).unwrap(), text);
+    assert!(f.dir.join("resumed").exists());
+    f.env.insert("DROP_QUEUE_RESPONSE".into(), "1".into());
+    let uncertain = f.plugin(CODEX, request);
+    assert_eq!(uncertain["queue_written"], true, "{uncertain}");
+    assert_eq!(uncertain["insertion_unknown"], true, "{uncertain}");
+    assert_eq!(
+        fs::read_to_string(f.dir.join("queue-calls")).unwrap(),
+        "insert\ninsert\n"
     );
 }
 #[test]
@@ -3313,7 +3554,7 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
     )
     .unwrap();
     let broken = wakes.join(format!("{sid}.jsonl.draining-0"));
-    fs::write(&broken, [255]).unwrap();
+    fs::create_dir(&broken).unwrap();
     let failed = hook_from_parent(
         &f,
         endpoint,
@@ -3333,7 +3574,7 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
     );
     assert!(alias.exists());
     assert!(broken.exists());
-    fs::remove_file(broken).unwrap();
+    fs::remove_dir(broken).unwrap();
     let result = parent_hook(
         &f,
         endpoint,
@@ -3364,13 +3605,26 @@ fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
     let f = Fixture::new(json!({}));
     let path = f.home.join(".claude/settings.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path,json!({"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/cito-claude-hook"},{"type":"command","command":"keep"}]}]}}).to_string()).unwrap();
+    fs::write(&path,json!({"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/cito-claude-hook"},{"type":"command","command":"keep"}]}]},"mcpServers":{"cito":{"command":"/old/cito-mcp","env":{"CITO_CLAUDE_CHANNEL":"1"}}}}).to_string()).unwrap();
+    let registration = f.home.join(".claude.json");
+    let foreign = json!({"projects":{"/repo":{"mcpServers":{"other":{"command":"project-server"}}}},"mcpServers":{"other":{"command":"user-server"}}});
+    fs::write(&registration, foreign.to_string()).unwrap();
     assert_eq!(f.plugin(CLAUDE, json!({"op":"setup_apply"}))["ok"], true);
     let v: Value = read_json(&path);
+    assert!(
+        v.get("mcpServers").is_none(),
+        "Legacy registration must be removed"
+    );
+    let mut servers = read_json(&registration);
     assert_eq!(
-        v["mcpServers"]["cito"]["command"],
+        servers["mcpServers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cito")
+            .unwrap()["command"],
         json!(f.state.join("bin/cito-mcp"))
     );
+    assert_eq!(servers, foreign);
     assert!(v.to_string().contains(
         f.state
             .join("runtime/plugins/claude/bin/cito-claude-hook")
@@ -3383,6 +3637,16 @@ fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
         v,
         json!({"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"keep"}]}]}})
     );
+    assert_eq!(read_json(&registration), foreign);
+    let mut conflict = foreign;
+    conflict["mcpServers"]["cito"] = json!({"command":"/opt/sample/cito-mcp"});
+    fs::write(&registration, conflict.to_string()).unwrap();
+    assert_eq!(
+        f.plugin(CLAUDE, json!({"op":"setup_apply"}))["actions"][0]["status"],
+        "conflict"
+    );
+    assert_eq!(f.plugin(CLAUDE, json!({"op":"setup_remove"}))["ok"], true);
+    assert_eq!(read_json(registration), conflict);
 }
 #[test]
 fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
@@ -3390,7 +3654,7 @@ fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
     let f = Fixture::new(json!({}));
     let queue = f.state.join("claude/wakes/session-a.jsonl");
     fs::create_dir_all(queue.parent().unwrap()).unwrap();
-    fs::write(&queue, "{\"batch_id\":\"torn\"").unwrap();
+    fs::write(&queue, b"{\"batch_id\":\"torn\",\"content\":\"\xe2\x82").unwrap();
     // Bounded four-way concurrency exercises the file lock without creating a process storm.
     let mut contexts = String::new();
     for chunk in 0..6 {
@@ -3419,7 +3683,15 @@ fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
         HOOK,
         json!({"hook_event_name":"Stop","session_id":"session-a","cwd":"/repo"}),
     );
-    assert!(result.get("decision").is_none());
+    assert_eq!(
+        result,
+        json!({}),
+        "Passive entries must be invisible on Stop"
+    );
+    let result = f.plugin(
+        HOOK,
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"}),
+    );
     contexts.push_str(
         result["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -3432,6 +3704,7 @@ fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
             "{contexts}"
         );
     }
+    f.plugin(CLAUDE,json!({"op":"wake","session_id":"session-a","batch_id":"passive","text":"next prompt","wake":false}));
     f.plugin(CLAUDE,json!({"op":"wake","session_id":"session-a","batch_id":"wake","text":"continue","wake":true}));
     assert_eq!(
         f.plugin(
@@ -3439,6 +3712,13 @@ fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
             json!({"hook_event_name":"Stop","session_id":"session-a"})
         ),
         json!({"decision":"block","reason":"continue"})
+    );
+    assert_eq!(
+        f.plugin(
+            HOOK,
+            json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a"})
+        )["hookSpecificOutput"]["additionalContext"],
+        "next prompt"
     );
     assert_eq!(
         f.plugin(
@@ -3675,10 +3955,14 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
         f.frames(p)[0]["capabilities_patch"]["experimental"]["claude/channel"],
         json!({})
     );
+    let mut partial = UnixStream::connect(&path).unwrap();
+    partial.write_all(b"{\"op\":").unwrap();
     assert_eq!(
-        socket(&path, json!({"op":"identify"}))["session_id"],
-        "session-a"
+        cito_native::support::socket_call(&path, &json!({"op":"identify"})).unwrap()["session_id"],
+        "session-a",
+        "An incomplete peer frame must not delay identify past its deadline"
     );
+    drop(partial);
     socket(
         &path,
         json!({"op":"status","session_id":"session-a","badge":"badge"}),
@@ -3797,6 +4081,85 @@ fn desktop_entrypoints_are_harness_boundaries_only_for_the_executable() {
             "/opt/local/{app}"
         )));
     }
+}
+
+#[test]
+fn claude_channel_requires_initialized_and_framing_failure_leaves_mcp_alive() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let driver = f.dir.join("sidecar");
+    script(
+        &driver,
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+root = pathlib.Path(os.environ['TMPDIR'])
+assert json.loads(input())['op'] == 'stdio_sidecar'
+def emit(frame):
+    print(json.dumps(frame), flush=True)
+def notice(method, label):
+    emit({'jsonrpc': '2.0', 'method': method, 'params': {'label': label}})
+emit({'op': 'ready', 'capabilities_patch': {'experimental': {'claude/channel': {}}}})
+notice('notifications/claude/channel', 'before')
+notice('notifications/message', 'barrier')
+end = time.monotonic() + 10
+while not (root / 'send-after').exists() and time.monotonic() < end:
+    time.sleep(0.01)
+notice('notifications/claude/channel', 'after')
+sys.stdout.buffer.write(b'\xff\n')
+sys.stdout.buffer.flush()
+if sys.stdin.read() == '':
+    (root / 'sidecar-settled').touch()
+"#,
+    );
+    install_provider_command(&f, "claude", json!([driver]));
+    let mcp = f.spawn(NATIVE, &["mcp-stdio"], &[("CITO_CLAUDE_CHANNEL", "1")]);
+    let request = |id, method| {
+        f.send(
+            mcp,
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":{}}),
+        )
+    };
+    request(1, "initialize");
+    wait(|| {
+        f.frames(mcp)
+            .iter()
+            .any(|v| v["params"]["label"] == "barrier")
+    });
+    assert!(f
+        .frames(mcp)
+        .iter()
+        .all(|v| v["params"]["label"] != "before"));
+    wait(|| {
+        f.frames(mcp).iter().any(|v| {
+            v["id"] == 1
+                && v["result"]["capabilities"]["experimental"]["claude/channel"].is_object()
+        })
+    });
+    f.send(
+        mcp,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    request(2, "tools/list");
+    wait(|| {
+        f.frames(mcp)
+            .iter()
+            .any(|v| v["id"] == 2 && v["result"]["tools"].is_array())
+    });
+    fs::write(f.dir.join("send-after"), []).unwrap();
+    wait(|| f.dir.join("sidecar-settled").exists());
+    assert!(f
+        .frames(mcp)
+        .iter()
+        .any(|v| v["params"]["label"] == "after"));
+    assert!(f.output(mcp, true).contains("sidecar framing"));
+    request(3, "tools/list");
+    wait(|| {
+        f.frames(mcp)
+            .iter()
+            .any(|v| v["id"] == 3 && v["result"]["tools"].is_array())
+    });
+    f.eof(mcp);
+    wait(|| f.exited(mcp));
 }
 
 #[test]
@@ -5211,8 +5574,8 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         f.send(p,json!({"op":"deliver","delivery_id":delivery_id,"claim_until_ms":cito_native::plugins::now_ms()+60_000,"config":{"chatId":format!("status:{status}")},"signal":{"message":"Review"}}));
         let frame = outcome(&delivery_id);
         assert_eq!(frame["ok"], false);
-        assert_eq!(frame["retryable"], matches!(status, 408 | 429 | 500..=599));
-        assert_eq!(frame["effect_unknown"], false);
+        assert_eq!(frame["retryable"], matches!(status, 408 | 429));
+        assert_eq!(frame["effect_unknown"], status >= 500);
         assert_eq!(
             frame["retry_after"],
             if status == 429 { json!(7) } else { Value::Null }

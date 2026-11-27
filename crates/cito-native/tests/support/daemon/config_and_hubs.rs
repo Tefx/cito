@@ -10,7 +10,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
   issuer='http://127.0.0.1:'+str(self.server.server_address[1])
-  raw=json.dumps({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','scopes_supported':['openid']}).encode()
+  raw=json.dumps({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','jwks_uri':issuer+'/jwks','scopes_supported':['openid']}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
 s=socketserver.TCPServer(('127.0.0.1',0),Handler)
 print(json.dumps({'port':s.server_address[1]}),flush=True);s.serve_forever()
@@ -143,7 +143,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
    n=bytes.fromhex((keys/'rsa-modulus.txt').read_text().strip().split('=')[1]); self.reply({'keys':[{'kty':'RSA','kid':'fixture','alg':'RS256','n':b64(n).decode(),'e':'AQAB'}]})
   else: self.reply({'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','jwks_uri':issuer+'/jwks'})
  def do_POST(self):
-  p=url.parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode()); claims={'iss':issuer,'sub':'shared','aud':p['client_id'][0],'exp':int(time.time())+600,'nonce':p['code'][0]}
+  p=url.parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode()); now=int(time.time()); claims={'iss':issuer,'sub':'shared','aud':p['client_id'][0],'iat':now,'exp':now+600,'nonce':p['code'][0]}
   payload=part({'alg':'RS256','kid':'fixture'})+b'.'+part(claims); signature=subprocess.check_output(['openssl','dgst','-sha256','-sign',keys/'rsa-private.pem'],input=payload)
   self.reply({'id_token':(payload+b'.'+b64(signature)).decode()})
 s=socketserver.ThreadingTCPServer(('127.0.0.1',0),Provider); issuer='http://127.0.0.1:'+str(s.server_address[1]); print(json.dumps(issuer),flush=True); s.serve_forever()
@@ -389,17 +389,27 @@ fn lifecycle_sign_in_enables_disabled_hub_before_bounded_discovery_failure() {
     );
 }
 #[test]
-fn lifecycle_hub_edit_preserves_secrets_disabled_state_default_and_host_error_rollback() {
+fn lifecycle_hub_edit_keeps_disabled_state_default_and_host_error_rollback() {
     let _lock = serial();
     let f = Fixture::new(
         json!({"hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"token","token":"saved","enabled":false,"clientSecret":"retained"}},"default_hub":"local"}),
     );
     f.daemon(&[]);
-    f.action_ok(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"renamed","url":"http://127.0.0.1:2","auth_mode":"token","token":"","clientSecret":""}));
+    let before = fs::read(&f.config).unwrap();
+    let mut edit = json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"renamed","url":"http://127.0.0.1:2","auth_mode":"token","token":"","clientSecret":""});
+    let (status, result) = f.action(edit.clone());
+    assert_eq!(status, 400, "{result}");
+    assert!(result["error"]
+        .as_str()
+        .unwrap()
+        .contains("token is required"));
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    edit["token"] = json!("replacement");
+    f.action_ok(edit);
     let raw: Value = read_json(&f.config);
     assert_eq!(raw["default_hub"], "local");
     assert!(raw["hubs"].get("work").is_none());
-    assert_eq!(raw["hubs"]["renamed"]["token"], "saved");
+    assert_eq!(raw["hubs"]["renamed"]["token"], "replacement");
     assert_eq!(raw["hubs"]["renamed"]["clientSecret"], "retained");
     assert_eq!(raw["hubs"]["renamed"]["enabled"], false);
     let snapshot = f.snapshot();
@@ -1205,6 +1215,26 @@ fn disabled_hub_alias_saves_preserve_effective_enablement() {
     }
 }
 #[test]
+fn editing_a_hub_url_drops_the_previous_endpoints_token() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{
+        "local":{"url":"local://"},
+        "work":{"url":"https://old.example.com","enabled":false,"authMode":"token","token":"old-token","autoListen":true}
+    }}));
+    let daemon = f.daemon(&[]);
+    f.action_ok(json!({"op":"setup_save_hub","edit":true,"original_name":"work","url":"https://old.example.com"}));
+    let config: Value = read_json(&f.config);
+    assert_eq!(config["hubs"]["work"]["token"], "old-token");
+    assert_eq!(config["hubs"]["work"]["autoListen"], true);
+    f.action_ok(json!({"op":"setup_save_hub","edit":true,"original_name":"work","url":"https://new.example.com"}));
+    let config: Value = read_json(&f.config);
+    assert_eq!(config["hubs"]["work"]["url"], "https://new.example.com");
+    assert_eq!(config["hubs"]["work"]["authMode"], "none");
+    assert!(config["hubs"]["work"].get("token").is_none());
+    f.stop(daemon);
+}
+
+#[test]
 fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"}}}));
@@ -1222,6 +1252,8 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         json!({"authMode":"token"}),
         json!({"authMode":"token","token":"   "}),
         json!({"authMode":"token","token":42}),
+        json!({"authMode":"none","token":null}),
+        json!({"authMode":"none","token":true}),
         json!({"authMode":"oidc","client_id":"client"}),
         json!({"authMode":"oidc","issuer":"http://id.example.com","client_id":"client"}),
         json!({"authMode":"oidc","issuer":"https://id.example.com?query=1","client_id":"client"}),

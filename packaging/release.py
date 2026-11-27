@@ -19,6 +19,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = "Cito-macos-arm64.zip"
+CI_JOB = "Check and build arm64 candidate"
 VERSION_FILES = (
     ".agents/plugins/marketplace.json",
     "plugins/codex/.codex-plugin/plugin.json",
@@ -62,7 +63,10 @@ def check_metadata(root=ROOT):
         data = json.loads((root / name).read_text())
         versions = [data.get("version")]
         if name.endswith("marketplace.json"):
-            versions += [p.get("version") for p in data["plugins"]]
+            plugins = data.get("plugins")
+            if not isinstance(plugins, list) or not plugins:
+                raise ReleaseError(f"Marketplace must list at least one plugin: {name}")
+            versions += [p.get("version") for p in plugins]
         if any(v != expected for v in versions):
             raise ReleaseError(f"Distribution version mismatch: {name}")
     for page in (root / "site").rglob("*.html"):
@@ -122,10 +126,36 @@ def verify_bundle(app, expected):
         info = plistlib.load(stream)
     if info.get("CFBundleShortVersionString") != expected or info.get("CFBundleVersion") != expected:
         raise ReleaseError("App bundle version does not match the release version.")
-    if not (app / "Contents/Resources/plugins").is_dir():
+    bundle_ids = [info.get("CFBundleIdentifier")]
+    helpers = app / "Contents/Helpers"
+    nested = helpers / "Cito.app"
+    ui = helpers / "cito-ui"
+    if nested.exists() or nested.is_symlink():
+        with (nested / "Contents/Info.plist").open("rb") as stream:
+            info = plistlib.load(stream)
+        bundle_ids.append(info.get("CFBundleIdentifier"))
+        executable = info.get("CFBundleExecutable")
+        if not isinstance(executable, str) or not executable or executable in (".", "..") or "/" in executable:
+            raise ReleaseError("Nested Cito.app must name a bundle executable.")
+        ui = nested / "Contents/MacOS" / executable
+    template = (ROOT / "packaging/homebrew/cito.rb").read_text()
+    quit_fields = re.findall(r'^\s*(?:uninstall\s+)?quit:[ \t]*("[^"\r\n]+"|\[[^]]*\])', template, re.M)
+    if len(quit_fields) != 1:
+        raise ReleaseError("Cask must declare one quit field for the app bundle identifiers.")
+    quit_targets = json.loads(quit_fields[0])
+    if isinstance(quit_targets, str):
+        quit_targets = [quit_targets]
+    # The Cask lists the outer app first, followed by the optional nested helper.
+    if (not all(isinstance(value, str) and value for value in bundle_ids + quit_targets)
+            or len(quit_targets) > 2 or len(set(quit_targets)) != len(quit_targets)
+            or bundle_ids != quit_targets[:len(bundle_ids)]):
+        raise ReleaseError("App bundle CFBundleIdentifier values do not match the Cask quit targets.")
+
+    plugins = app / "Contents/Resources/plugins"
+    if not plugins.is_dir():
         raise ReleaseError("App bundle is missing its bundled plugins.")
     for manifest in sorted((ROOT / "plugins").glob("*/plugin.json")):
-        bundled = app / "Contents/Resources/plugins" / manifest.parent.name / "plugin.json"
+        bundled = plugins / manifest.parent.name / "plugin.json"
         try:
             matches = json.loads(bundled.read_text()).get("version") == expected
         except (OSError, ValueError):
@@ -133,18 +163,28 @@ def verify_bundle(app, expected):
         if not matches:
             raise ReleaseError(f"Built-in plugin missing or version mismatched: {manifest.parent.name}")
     launcher = app / "Contents/MacOS/Cito"
-    executables = {app / "Contents/Helpers" / name for name in ("cito-native", "cito-ui")}
-    package = app / "Contents/Resources/plugins/pi/package.json"
-    for path in (launcher, *sorted(executables), app / "Contents/Resources/AppIcon.icns", package, package.with_name("cito-bridge.ts")):
+    executables = {helpers / "cito-native", ui, plugins / "claude/bin/cito-claude-hook"}
+    package = plugins / "pi/package.json"
+    required_files = (
+        launcher, *sorted(executables), app / "Contents/Resources/AppIcon.icns", package,
+        package.with_name("cito-bridge.ts"),
+        plugins / "claude/.claude-plugin/plugin.json", plugins / "claude/.mcp.json",
+        plugins / "claude/hooks/hooks.json",
+        plugins / "codex/.codex-plugin/plugin.json", plugins / "codex/.mcp.json",
+    )
+    for path in required_files:
         if not path.is_file():
             raise ReleaseError(f"App bundle is missing a required release component: {path.relative_to(app)}")
     try:
-        extensions = json.loads(package.read_text())["pi"]["extensions"]
+        manifest_data = json.loads(package.read_text())
+        extensions = manifest_data["pi"]["extensions"]
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ReleaseError(f"Invalid Pi extension manifest: {package}") from error
+    if manifest_data.get("version") != expected:
+        raise ReleaseError("Packaged Pi extension version does not match the release version.")
     if not isinstance(extensions, list) or "./cito-bridge.ts" not in extensions:
         raise ReleaseError(f"{package} must declare the ./cito-bridge.ts extension.")
-    for manifest in sorted((app / "Contents/Resources/plugins").glob("*/plugin.json")):
+    for manifest in sorted(plugins.glob("*/plugin.json")):
         try:
             command = json.loads(manifest.read_text())["command"]
             if not isinstance(command, list) or not command or not isinstance(command[0], str) or not command[0]:
@@ -155,23 +195,28 @@ def verify_bundle(app, expected):
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise ReleaseError(f"Bundled plugin command is missing or not executable: {executable}")
         executables.add(executable)
-    for path in (app / "Contents/Resources/plugins").glob("*/bin/*"):
-        source = ROOT / "plugins" / path.relative_to(app / "Contents/Resources/plugins")
+    for path in plugins.glob("*/bin/*"):
+        source = ROOT / "plugins" / path.relative_to(plugins)
         if path.is_file() and (os.access(path, os.X_OK) or os.access(source, os.X_OK)):
             executables.add(path)
     for path in (app, *app.rglob("*")):
         mode = path.stat().st_mode
-        required_bits = 0o005 if path.is_dir() or path == launcher or path in executables or mode & 0o111 else 0o004
+        required_bits = 0o005 if path.is_dir() or mode & 0o111 else 0o004
+        if path == launcher or path in executables:
+            required_bits = 0o105
         if mode & required_bits != required_bits:
             raise ReleaseError(f"Insufficient public permissions on {path}: {mode & 0o777:o}")
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
-    with tempfile.TemporaryDirectory() as directory:
-        result = run([launcher, "--version"], env=isolated_env(Path(directory)))
-    if result.stdout.strip() != f"cito v{expected}":
-        raise ReleaseError("Bundled CLI version does not match the release version.")
     for executable in sorted(executables):
         if run(["/usr/bin/lipo", "-archs", executable]).stdout.strip() != "arm64":
             raise ReleaseError("The release requires arm64 native executables.")
+
+
+def verify_cli(app, expected):
+    with tempfile.TemporaryDirectory() as directory:
+        result = run([app / "Contents/MacOS/Cito", "--version"], env=isolated_env(Path(directory)))
+    if result.stdout.strip() != f"cito v{expected}":
+        raise ReleaseError("Bundled CLI version does not match the release version.")
 
 
 def bundle(destination):
@@ -184,6 +229,7 @@ def bundle(destination):
         run([ROOT / "bin/cito", "setup", "--build-app", root / "build", "--json"], env=isolated_env(home))
         app = root / "build/Cito.app"
         verify_bundle(app, expected)
+        verify_cli(app, expected)
         run(["/usr/bin/ditto", "-c", "-k", "--keepParent", app, destination])
     print("Candidate bundle and CLI verified.")
 
@@ -315,6 +361,15 @@ def write_checksum(archive):
     return digest
 
 
+def verify_team_id(app):
+    expected = required("APPLE_TEAM_ID")
+    if not re.fullmatch(r"[A-Z0-9]{10}", expected):
+        raise ReleaseError("APPLE_TEAM_ID must be a 10-character Apple Team ID.")
+    details = run(["/usr/bin/codesign", "--display", "--verbose=4", app]).stderr
+    if re.findall(r"^TeamIdentifier=([^\r\n]+)$", details, re.M) != [expected]:
+        raise ReleaseError("Signed bundle Team ID does not match APPLE_TEAM_ID.")
+
+
 def verify_archive(archive):
     expected = archive.with_suffix(archive.suffix + ".sha256").read_text().split()
     with archive.open("rb") as stream:
@@ -324,29 +379,33 @@ def verify_archive(archive):
     with tempfile.TemporaryDirectory() as directory:
         run(["/usr/bin/ditto", "-x", "-k", archive, directory])
         app = Path(directory) / "Cito.app"
-        verify_bundle(app, version())
+        expected_version = version()
+        verify_bundle(app, expected_version)
+        verify_team_id(app)
         run(["/usr/bin/xcrun", "stapler", "validate", app])
+        verify_cli(app, expected_version)
 
 
 def notarize(app, archive):
     if archive.exists():
         raise ReleaseError("Refusing to overwrite an existing release archive.")
-    verify_bundle(app, version())
+    expected = version()
+    verify_bundle(app, expected)
     archive.parent.mkdir(parents=True, exist_ok=True)
     with signing_credentials() as (keychain, identity):
         sign_bundle(app, identity, keychain=keychain)
-        details = run(["/usr/bin/codesign", "--display", "--verbose=4", app]).stderr
-        team = re.search(r"^TeamIdentifier=(.+)$", details, re.M)
-        if not team or team.group(1) != required("APPLE_TEAM_ID"):
-            raise ReleaseError("Signed bundle Team ID does not match APPLE_TEAM_ID.")
+        verify_team_id(app)
         with tempfile.TemporaryDirectory() as directory:
-            submission_zip = Path(directory) / f"Cito-v{version()}-notarize.zip"
+            submission_zip = Path(directory) / f"Cito-v{expected}-notarize.zip"
             run(["/usr/bin/ditto", "-c", "-k", "--keepParent", app, submission_zip])
-            result = run([
-                "/usr/bin/xcrun", "notarytool", "submit", submission_zip,
-                "--keychain-profile", "cito-release", "--keychain", keychain,
-                "--wait", "--timeout", "20m", "--output-format", "json",
-            ], check=False, timeout=1260)
+            try:
+                result = run([
+                    "/usr/bin/xcrun", "notarytool", "submit", submission_zip,
+                    "--keychain-profile", "cito-release", "--keychain", keychain,
+                    "--wait", "--timeout", "20m", "--output-format", "json",
+                ], check=False, timeout=1260)
+            except subprocess.TimeoutExpired as error:
+                raise ReleaseError("Apple notarization timed out; reconcile the submission before retrying.") from error
             try:
                 report = json.loads(result.stdout)
             except json.JSONDecodeError:
@@ -357,7 +416,8 @@ def notarize(app, archive):
                 raise ReleaseError("Notarization did not complete as Accepted. Reconcile Apple's submission history/log before retrying; no release was published.")
         run(["/usr/bin/xcrun", "stapler", "staple", app])
         run(["/usr/bin/xcrun", "stapler", "validate", app])
-        verify_bundle(app, version())
+        verify_bundle(app, expected)
+        verify_cli(app, expected)
         run(["/usr/bin/ditto", "-c", "-k", "--keepParent", app, archive])
     write_checksum(archive)
     print("Developer ID signing, notarization, staple, and final archive verification passed.")
@@ -386,23 +446,37 @@ def release_info(tag):
 def candidate(sha, destination):
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ReleaseError("Candidate lookup requires an exact source commit.")
-    runs = gh(["run", "list", "--repo", repository(), "--workflow", "ci.yml", "--branch", "main", "--event", "push", "--commit", sha,
-               "--limit", "20", "--json", "databaseId,status,conclusion,headSha,headBranch"])
-    runs = [item for item in runs if item["headSha"] == sha and item["headBranch"] == "main"]
+    repo = repository()
+    pages = gh(["api", "--paginate", "--slurp",
+                f"repos/{repo}/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha={sha}&per_page=100"])
+    runs = [item for page in pages for item in page["workflow_runs"]
+            if item["head_sha"] == sha and item["head_branch"] == "main" and item["event"] == "push"]
     if not runs:
         output("reused", "false")
         return
+    if any(item["status"] == "completed" and item["conclusion"] not in ("success", "cancelled") for item in runs):
+        raise ReleaseError("CI for the selected source commit did not pass.")
     current = runs[0]
+    run_id = str(current["id"])
     if current["status"] != "completed":
-        run(["gh", "run", "watch", str(current["databaseId"]), "--repo", repository(), "--interval", "10", "--exit-status"], check=False, timeout=1200)
-        current = gh(["run", "view", str(current["databaseId"]), "--repo", repository(), "--json", "status,conclusion"])
+        try:
+            run(["gh", "run", "watch", run_id, "--repo", repo, "--interval", "10", "--exit-status"],
+                check=False, timeout=1200)
+        except subprocess.TimeoutExpired as error:
+            raise ReleaseError("Timed out after 20 minutes waiting for CI on the selected source commit.") from error
+    current = gh(["run", "view", run_id, "--repo", repo, "--json", "status,conclusion,jobs"])
+    if current["status"] != "completed":
+        raise ReleaseError("CI for the selected source commit has not completed.")
     if current["conclusion"] == "cancelled":
         output("reused", "false")
         return
     if current["conclusion"] != "success":
         raise ReleaseError("CI for the selected source commit did not pass.")
+    jobs = [job for job in current["jobs"] if job["name"] == CI_JOB]
+    if len(jobs) != 1 or jobs[0]["status"] != "completed" or jobs[0]["conclusion"] != "success":
+        raise ReleaseError(f"CI did not pass the required job: {CI_JOB}.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    result = run(["gh", "run", "download", str(runs[0]["databaseId"]), "--repo", repository(), "--name", f"cito-candidate-{sha}", "--dir", destination.parent], check=False)
+    result = run(["gh", "run", "download", run_id, "--repo", repo, "--name", f"cito-candidate-{sha}", "--dir", destination.parent], check=False)
     output("reused", str(result.returncode == 0 and destination.is_file()).lower())
 
 
@@ -654,11 +728,8 @@ def main():
             publish(args.tag, args.directory.resolve())
         elif args.command == "tap":
             update_tap(args.tag, args.cask.resolve())
-    except (ReleaseError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-        if isinstance(error, (ReleaseError, subprocess.TimeoutExpired)):
-            message = str(error) if isinstance(error, ReleaseError) else "Native command timed out; reconcile any notarization submission before retrying."
-        else:
-            message = "Release input or native tool operation failed. No credential values are logged."
+    except (ReleaseError, OSError, ValueError, KeyError) as error:
+        message = str(error) if isinstance(error, ReleaseError) else "Release input or native tool operation failed. No credential values are logged."
         print(f"ERROR: {message}", file=sys.stderr)
         return 1
     return 0

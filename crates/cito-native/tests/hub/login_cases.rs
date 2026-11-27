@@ -12,8 +12,10 @@ use std::thread::JoinHandle;
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
+        // The full cancellation socket pathname must fit Darwin's sun_path.
         let path =
-            std::env::temp_dir().join(format!("cito-login-{}", crate::plugins::random_uuid_v4()));
+            Path::new("/tmp").join(format!("cito-login-{}", crate::plugins::random_uuid_v4()));
+        assert!(path.join("cancel.sock").as_os_str().len() < 104);
         fs::create_dir_all(path.join("home")).unwrap();
         Self(path)
     }
@@ -34,9 +36,12 @@ struct ProviderState {
     omit_refresh: bool,
     bad_signature: bool,
     bad_nonce: bool,
+    omit_nonce: bool,
+    expires_in: i64,
+    authorization_query: String,
     scopes_supported: Option<Vec<String>>,
     requested_scopes: String,
-    requested_prompt: Option<String>,
+    requested_prompts: Vec<String>,
     challenge: String,
     redirect: String,
     nonce: String,
@@ -49,10 +54,20 @@ struct Provider {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
-fn sign(issuer: &str, sub: &str, nonce: &str, bad_signature: bool) -> String {
+fn sign(
+    issuer: &str,
+    sub: &str,
+    nonce: Option<&str>,
+    expires_in: i64,
+    bad_signature: bool,
+) -> String {
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some("login-key".into());
-    let claims = json!({"iss":issuer,"aud":"client","sub":sub,"preferred_username":"Alice","exp":crate::plugins::now_ms()/1000+600,"nonce":nonce});
+    let now = crate::plugins::now_ms() / 1000;
+    let mut claims = json!({"iss":issuer,"aud":"client","sub":sub,"preferred_username":"Alice","iat":now,"exp":now.saturating_add_signed(expires_in)});
+    if let Some(nonce) = nonce {
+        claims["nonce"] = json!(nonce);
+    }
     let key = EncodingKey::from_ec_pem(include_bytes!("fixtures/ec-private.pem")).unwrap();
     let token = encode(&header, &claims, &key).unwrap();
     if !bad_signature {
@@ -75,6 +90,7 @@ impl Provider {
         let state = Arc::new(Mutex::new(ProviderState {
             refresh_status: 200,
             subject: "subject".into(),
+            expires_in: 600,
             ..Default::default()
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -130,8 +146,9 @@ impl Provider {
                             }
                             match url.path() {
                                 "/.well-known/openid-configuration" => {
-                                    let supported = state.lock().unwrap().scopes_supported.clone();
-                                    let mut discovery = json!({"issuer":issuer,"authorization_endpoint":format!("{issuer}/authorize"),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/jwks")});
+                                    let state = state.lock().unwrap();
+                                    let supported = state.scopes_supported.clone();
+                                    let mut discovery = json!({"issuer":issuer,"authorization_endpoint":format!("{issuer}/authorize{}", state.authorization_query),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/jwks")});
                                     if let Some(scopes) = supported { discovery["scopes_supported"] = json!(scopes); }
                                     reply(&mut stream,200,&discovery.to_string(),None);
                                 }
@@ -150,7 +167,7 @@ impl Provider {
                                     let mut state = state.lock().unwrap();
                                     state.authorization_requests += 1;
                                     state.requested_scopes = params["scope"].clone();
-                                    state.requested_prompt = params.get("prompt").cloned();
+                                    state.requested_prompts = url.query_pairs().filter(|(name, _)| name == "prompt").map(|(_, value)| value.into_owned()).collect();
                                     state.challenge = params["code_challenge"].clone();
                                     state.redirect = params["redirect_uri"].clone();
                                     state.nonce = params["nonce"].clone();
@@ -172,7 +189,7 @@ impl Provider {
                                         assert_eq!(URL_SAFE_NO_PAD.encode(Sha256::digest(params["code_verifier"].as_bytes())), state.challenge);
                                     }
                                     let nonce = if state.bad_nonce { "incorrect" } else { &state.nonce };
-                                    let mut body = json!({"id_token":sign(&issuer,&state.subject,nonce,state.bad_signature)});
+                                    let mut body = json!({"id_token":sign(&issuer,&state.subject,(!state.omit_nonce).then_some(nonce),state.expires_in,state.bad_signature)});
                                     if !state.omit_refresh { body["refresh_token"] = json!("refresh-new"); }
                                     reply(&mut stream,200,&body.to_string(),None);
                                 }
@@ -201,14 +218,14 @@ impl Provider {
         json!({"issuer":self.issuer,"clientId":"client","redirectPort":0})
     }
     fn seed(&self, dir: &Path, expires: u64) -> String {
-        let token = sign(&self.issuer, "subject", "", false);
+        let token = sign(&self.issuer, "subject", Some(""), 600, false);
         let cache = json!({"issuer":self.issuer,"client_id":"client","id_token":token,"refresh_token":"refresh-old","token_sha256":hash(&token),"expires_at":expires,"verified_principal_id":format!("{}#subject",self.issuer),"verified_user":"alice"});
-        let deadline = Deadline {
-            cancellation_fd: None,
-            at: Instant::now() + LOGIN_TIMEOUT,
-            cancelled: &|| false,
-        };
-        publish(&cache_path(dir, "work").unwrap(), &cache, &deadline).unwrap();
+        crate::support::atomic_write_with_mode(
+            &cache_path(dir, "work").unwrap(),
+            cache.to_string().as_bytes(),
+            Some(0o600),
+        )
+        .unwrap();
         token
     }
 }
@@ -375,12 +392,13 @@ fn switch_account_bypasses_fresh_cache_and_refresh_and_requests_account_picker()
         let mut config = provider.config();
         config["force_account_select"] = json!(true);
         config["reuse_fresh"] = json!(true);
+        provider.state.lock().unwrap().authorization_query = "?prompt=none&prompt=consent".into();
         let value = result(&dir.0, worker(&dir.0, &config, None, 3000));
         assert!(value.get("error").is_none(), "{value}");
         let state = provider.state.lock().unwrap();
         assert_eq!(state.refresh_requests, 0);
         assert_eq!(state.authorization_requests, 1);
-        assert_eq!(state.requested_prompt.as_deref(), Some("select_account"));
+        assert_eq!(state.requested_prompts, ["select_account"]);
     }
 }
 #[test]
@@ -449,7 +467,7 @@ fn interactive_login_replaces_unreadable_cache() {
 fn oversized_id_token_cannot_replace_a_usable_cache() {
     let dir = Temp::new();
     let provider = Provider::new();
-    provider.seed(&dir.0, 0);
+    provider.seed(&dir.0, crate::plugins::now_ms() / 1000 + 600);
     let path = cache_path(&dir.0, "work").unwrap();
     let mut cache = read(&dir.0);
     let deadline = Deadline {
@@ -473,7 +491,7 @@ fn oversized_id_token_cannot_replace_a_usable_cache() {
 fn cache_publication_obeys_the_readers_byte_limit() {
     let dir = Temp::new();
     let provider = Provider::new();
-    provider.seed(&dir.0, 0);
+    provider.seed(&dir.0, crate::plugins::now_ms() / 1000 + 600);
     let path = cache_path(&dir.0, "work").unwrap();
     let mut cache = read(&dir.0);
     cache["refresh_token"] = json!("");
@@ -492,37 +510,60 @@ fn cache_publication_obeys_the_readers_byte_limit() {
 }
 #[test]
 fn refresh_identity_and_rejected_bearer_generation() {
-    for changed in [false, true] {
+    let dir = Temp::new();
+    let provider = Provider::new();
+    let token = provider.seed(&dir.0, crate::plugins::now_ms() / 1000 + 600);
+    provider.state.lock().unwrap().omit_refresh = true;
+    let rejected = hash(&token);
+    let value = refresh(&dir.0, &provider.config(), Some(&rejected)).unwrap();
+    assert_ne!(value.0, token);
+    assert_eq!(read(&dir.0)["refresh_token"], "refresh-old");
+    assert_eq!(
+        refresh(&dir.0, &provider.config(), Some(&rejected))
+            .unwrap()
+            .0,
+        value.0
+    );
+    assert_eq!(provider.state.lock().unwrap().refresh_requests, 1);
+}
+
+#[test]
+fn refresh_rejects_subject_nonce_and_expiry_changes_without_replacing_cache() {
+    for failure in ["subject", "nonce", "expired"] {
         let dir = Temp::new();
         let provider = Provider::new();
-        let token = provider.seed(&dir.0, crate::plugins::now_ms() / 1000 + 600);
+        provider.seed(&dir.0, 0);
+        let before = read(&dir.0);
         {
             let mut state = provider.state.lock().unwrap();
-            state.omit_refresh = true;
-            if changed {
-                state.subject = "changed".into();
+            match failure {
+                "subject" => state.subject = "changed".into(),
+                "nonce" => state.bad_nonce = true,
+                _ => state.expires_in = -1,
             }
         }
-        let rejected = hash(&token);
-        let value = refresh(&dir.0, &provider.config(), Some(&rejected)).unwrap();
-        assert_ne!(value.0, token);
-        assert_eq!(
-            read(&dir.0)["refresh_token"],
-            if changed {
-                Value::Null
-            } else {
-                json!("refresh-old")
-            }
-        );
-        assert_eq!(provider.state.lock().unwrap().refresh_requests, 1);
-        assert_eq!(
-            refresh(&dir.0, &provider.config(), Some(&rejected))
-                .unwrap()
-                .0,
-            value.0
-        );
-        assert_eq!(provider.state.lock().unwrap().refresh_requests, 1);
+        let error = refresh(&dir.0, &provider.config(), None).unwrap_err();
+        assert!(error.contains(failure), "{failure}: {error}");
+        assert_eq!(read(&dir.0), before);
     }
+}
+
+#[test]
+fn optional_refresh_nonce_does_not_discard_the_original_nonce() {
+    let dir = Temp::new();
+    let provider = Provider::new();
+    let config = provider.config();
+    let login = result(&dir.0, worker(&dir.0, &config, None, 3000));
+    let login_token = login["token"].as_str().unwrap();
+    provider.state.lock().unwrap().omit_nonce = true;
+    let (refreshed, _) = refresh(&dir.0, &config, Some(&hash(login_token))).unwrap();
+    assert!(payload(&refreshed).unwrap().get("nonce").is_none());
+    provider.state.lock().unwrap().omit_nonce = false;
+    let (restored, _) = refresh(&dir.0, &config, Some(&hash(&refreshed))).unwrap();
+    assert_eq!(
+        payload(&restored).unwrap()["nonce"],
+        payload(login_token).unwrap()["nonce"]
+    );
 }
 #[test]
 fn fresh_cache_refreshes_only_after_definitive_token_rejection() {
@@ -531,7 +572,7 @@ fn fresh_cache_refreshes_only_after_definitive_token_rejection() {
     provider.seed(&dir.0, crate::plugins::now_ms() / 1000 + 600);
     let path = cache_path(&dir.0, "work").unwrap();
     let mut cache = read(&dir.0);
-    let invalid = sign(&provider.issuer, "subject", "", true);
+    let invalid = sign(&provider.issuer, "subject", Some(""), 600, true);
     cache["id_token"] = json!(invalid);
     cache["token_sha256"] = json!(hash(&invalid));
     fs::write(&path, cache.to_string()).unwrap();
@@ -648,13 +689,16 @@ fn refresh_unavailable_preserves_previous_verified_cache() {
 }
 #[test]
 fn invalid_signature_nonce_and_missing_openid_never_publish() {
-    for failure in ["signature", "nonce", "openid"] {
+    for failure in ["signature", "nonce", "openid", "expired"] {
         let dir = Temp::new();
         let provider = Provider::new();
         {
             let mut state = provider.state.lock().unwrap();
             state.bad_signature = failure == "signature";
             state.bad_nonce = failure == "nonce";
+            if failure == "expired" {
+                state.expires_in = -1;
+            }
             if failure == "openid" {
                 state.scopes_supported = Some(vec!["profile".into()]);
             }
@@ -865,6 +909,14 @@ fn cancellation_interrupts_active_discovery_token_and_jwks_reads() {
         }
         let process = worker(&dir.0, &provider.config(), None, 3000);
         reached.recv_timeout(Duration::from_secs(2)).unwrap();
+        if stall == "/.well-known/openid-configuration" {
+            let lock =
+                FileLock::acquire_interruptible(&path.with_extension("json.lock"), &mut || {
+                    Err("Discovery must not hold the cache lock".into())
+                })
+                .unwrap();
+            drop(lock);
+        }
         let start = Instant::now();
         std::os::unix::net::UnixDatagram::unbound()
             .unwrap()
@@ -900,14 +952,19 @@ fn cache_lock_deadline_and_cancellation_do_not_open_a_browser() {
                 .with_extension("json.lock"),
         )
         .unwrap();
-    let value = result(&dir.0, worker(&dir.0, &provider.config(), None, 600));
-    assert!(value["error"]
-        .as_str()
-        .unwrap()
-        .contains("OIDC_LOGIN_TIMEOUT"));
+    let checks_at = |timeout| {
+        let value = result(&dir.0, worker(&dir.0, &provider.config(), None, timeout));
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .contains("OIDC_LOGIN_TIMEOUT"));
+        value["cancellation_checks"].as_u64().unwrap()
+    };
+    let short = checks_at(600);
+    let long = checks_at(1200);
     assert!(
-        value["cancellation_checks"].as_u64().unwrap() < 30,
-        "Lock contention must back off rather than poll cancellation at 50 Hz: {value}"
+        long < short + 15,
+        "Extending the contention window by 600ms must not add 50 Hz polling: {short} -> {long}"
     );
     let process = worker(&dir.0, &provider.config(), None, 3000);
     std::os::unix::net::UnixDatagram::unbound()
