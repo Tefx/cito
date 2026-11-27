@@ -31,7 +31,7 @@ const about='Review routing '+'🦀'.repeat(105);
 const entries=new Map(), steering=[];
 let streaming=false, nextEntry=0;
 const transcript=()=>join(root,`${session}.jsonl`);
-const context={cwd:'/repo',isIdle:()=>!streaming,sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work',getSessionFile:transcript,getBranch:()=>branch,getEntries:()=>[...branch,...entries.get(session)??[]]},ui:{setStatus:(_k,v)=>badges.push(v),notify:(s,t)=>notices.push({s,t})}};
+const context={cwd:'/repo',isIdle:()=>!streaming,sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work',getSessionFile:transcript,getBranch:()=>branch,getEntries:()=>[...branch,...entries.get(session)??[]]},ui:{setStatus:(k,v)=>{assert.equal(k,'cito');badges.push(v);},notify:(s,t)=>notices.push({s,t})}};
 function append(message, write=true) {
  const entry={type:'custom_message',id:`entry-${++nextEntry}`,...message};
  if(!entries.has(session))entries.set(session,[]);
@@ -78,7 +78,7 @@ try {
  // The first session_start owns the transition; all later socket operations use that session.
  const early={op:'deliver',session_id:recovered.session_id,batch_id:'before-start',content:'Wake after session_start',wake:true};
  assert.equal((await request({op:'status',session_id:recovered.session_id,badge:'listening before start'})).ok,true);
- assert.equal(badges.at(-1),'listening before start');
+ assert.equal(badges.at(-1),'◉');
  const badgeWrites=badges.length;
  session=undefined;
  assert.deepEqual(await request({op:'ping'}),{ok:true});
@@ -93,12 +93,37 @@ try {
  assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true,details:{citoBatchId:early.batch_id}},o:{triggerTurn:true,deliverAs:'steer'}}]);
  session=recovered.session_id;
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
- assert.equal(badges.at(-1),'listening before start','Repeated session_start must retain the session badge');
+ assert.equal(badges.at(-1),'◉','Repeated session_start must retain the session badge');
  assert.equal((await request(early)).deduplicated,true);assert.equal(messages.length,1,'Repeated session_start must retain batch deduplication');
  session='session-a';await handlers.get('session_tree')({},context);assert.equal(badges.at(-1),undefined);
  messages.length=0;
  assert.equal(attempts,2);assert.deepEqual(registrations,[{name:'cito',config:{command:join(state,'bin/cito-mcp'),args:[]}}]);assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(join(state,'sockets')).mode&0o777,0o700);
  assert.deepEqual(await request({op:'ping'}),{ok:true});assert.equal((await request({op:'identify'})).session_id,'session-a');
+ async function checkBadge(badge, ...writes) {
+  const before=badges.length;
+  assert.deepEqual(await request({op:'status',session_id:session,badge}),{ok:true});
+  assert.equal((await request({op:'identify'})).badge,badge);
+  assert.deepEqual(badges.slice(before),writes);
+ }
+ await checkBadge('Cito · alice','◉');
+ await checkBadge('Cito · alice (0)');
+ await checkBadge('Cito · alice (2)','◉ 2');
+ await checkBadge('Cito · bob (02)  ');
+ await checkBadge('Cito · alice (99)','◉ 99');
+ await checkBadge('Cito · alice (120)','◉ 99+');
+ await checkBadge('Cito · alice (121)');
+ await checkBadge('',undefined);
+ await checkBadge(null);
+ context.ui.theme={fg:(c,t)=>`[${c}:${t}]`};
+ await checkBadge('Cito · alice','[accent:◉]');
+ await checkBadge('Cito · alice (2)','[accent:◉ 2]');
+ const beforeContextChange=badges.length;
+ await handlers.get('session_info_changed')({}, {...context});
+ assert.deepEqual(badges.slice(beforeContextChange),['[accent:◉ 2]']);
+ delete context.ui.theme;
+ await handlers.get('session_info_changed')({},context);
+ assert.equal(badges.at(-1),'◉ 2');
+ await checkBadge(null,undefined);
  const delivery={op:'deliver',id:17,session_id:session,batch_id:'one',content:'<card> café',wake:false};assert.equal((await request(delivery,true)).deduplicated,false);assert.equal((await request(delivery)).deduplicated,true);assert.equal(messages.length,1);assert.deepEqual(messages[0],{m:{customType:'cito-notification',content:'<card> café',display:true,details:{citoBatchId:'one'}},o:{triggerTurn:false,deliverAs:'followUp'}});
  assert.equal((await request({...delivery,session_id:'wrong'})).error,'SESSION_MISMATCH');assert.equal((await request({...delivery,batch_id:'invalid',wake:'yes'})).error,'INVALID_REQUEST');
  failSend=true;assert.equal((await request({...delivery,batch_id:'retry'})).error,'BRIDGE_ERROR');failSend=false;assert.equal((await request({...delivery,batch_id:'retry',wake:true})).deduplicated,false);assert.equal(messages.at(-1).o.triggerTurn,true);
@@ -155,11 +180,14 @@ try {
  for(let width=1;width<=12;width++)for(const line of narrow.render(width)){const cells=Array.from(line.replaceAll('\u4e2d','XX').replaceAll('👩‍💻','XX').replaceAll('é','e')).length;assert(cells<=width,`width ${width}: ${line}`);}
  let c=0;const theme={fg:(_n,t)=>{c++;return t},bg:(_n,t)=>t,bold:t=>t};const card=renderer({content:[{type:'text',text:'hello café 👩‍💻 é'}]},{expanded:false},theme);assert(card.render(12).some(s=>s.includes('hello')));assert.deepEqual(card.render(0),[]);const before=c;card.invalidate();card.render(10);assert(c>before);
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;writeFileSync(join(state,'config.json'),JSON.stringify({daemonPort:1}));process.env.CITO_DAEMON_PORT=' '+port+' ';
- for(const arg of ['on --hub work Review','team --hub=work Pair','off --hub work']) {
+ for(const arg of ['on --hub Work-Internal Review','team --hub=Work-Internal Pair','off --hub Work-Internal']) {
   await command.handler(arg,context);
-  if(arg.startsWith('on'))assert.equal(badges.at(-1),'Cito · alice-very-l');
+  if(arg.startsWith('on')) {
+   assert.equal(badges.at(-1),'◉');
+   assert.equal((await request({op:'identify'})).badge,'Cito · alice-very-l');
+  }
  }
- assert.deepEqual(calls.map(v=>v.params.arguments),[{about:'Review',scope:'self',hub:'work'},{about:'Pair',scope:'workspace',hub:'work'},{hub:'work'}]);assert(calls.every(v=>v.params._meta.endpoint_pid===process.pid));assert(calls.every(v=>v.params._meta.expected_session_id==='session-a'));
+ assert.deepEqual(calls.map(v=>v.params.arguments),[{about:'Review',scope:'self',hub:'Work-Internal'},{about:'Pair',scope:'workspace',hub:'Work-Internal'},{hub:'Work-Internal'}]);assert(calls.every(v=>v.params._meta.endpoint_pid===process.pid));assert(calls.every(v=>v.params._meta.expected_session_id==='session-a'));
  process.env.CITO_DAEMON_PORT='0';process.env.CITO_CONFIG_PATH='~/bridge-config.json';writeFileSync(join(process.env.HOME,'bridge-config.json'),JSON.stringify({daemonPort:port}));await command.handler('on',context);assert.equal(calls.length,4);assert.equal(calls.at(-1).params.arguments.about,about);
  await command.handler('on --hub INVALID!',context);assert.equal(calls.length,4);assert.equal(notices.at(-1).t,'warning');
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
@@ -233,7 +261,7 @@ try {
  assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about,current.badge],[session,'/repo','Work',about,'Retained badge']);
  await handlers.get('session_start')({reason:'reload'},context);
  assert.equal((await request(beforeReload)).deduplicated,true);
- assert.equal(badges.at(-1),'Retained badge');
+ assert.equal(badges.at(-1),'◉');
  const offAfterReload=begin('');
  await request({op:'ping'});
  assert.equal(calls.length,reloadCallCount,'The new command must wait for the old instance’s in-flight request');

@@ -18,6 +18,7 @@ export interface BridgeContext {
   };
   ui: {
     setStatus(key: string, value: string | undefined): void;
+    theme?: { fg(color: "accent" | "dim", text: string): string; bold?(text: string): string };
     notify?(message: string, type?: "info" | "warning" | "error"): void;
   };
 }
@@ -233,7 +234,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   const piHome = expandHome(process.env.CITO_PI_HOME ?? "~/.pi/agent");
   const subcommands = ["on", "private", "team", "off"];
   const commands = session.commands;
-  const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+  const hubPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
   const hubUsage = "Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]";
 
@@ -317,15 +318,22 @@ export default function citoBridge(pi: BridgeAPI): void {
     session.renderBadge = renderBadge;
     renderBadge();
   }
-  let renderedBadge: string | undefined;
+  let renderedStatus: string | undefined;
   let renderedContext: BridgeContext | undefined;
   function renderBadge(): void {
     const ctx = session.context;
-    if (ctx && (ctx !== renderedContext || renderedBadge !== session.activeBadge)) {
-      ctx.ui.setStatus("cito", session.activeBadge);
-      renderedContext = ctx;
-      renderedBadge = session.activeBadge;
+    if (!ctx) return;
+    let status: string | undefined;
+    if (session.activeBadge) {
+      // Project the display without rewriting the badge used by daemon reconciliation.
+      const unread = Number(/\((\d+)\)\s*$/.exec(session.activeBadge)?.[1] ?? 0);
+      const raw = unread > 0 ? `◉ ${unread > 99 ? "99+" : String(unread)}` : "◉";
+      status = ctx.ui.theme ? ctx.ui.theme.fg("accent", raw) : raw;
     }
+    if (ctx === renderedContext && status === renderedStatus) return;
+    ctx.ui.setStatus("cito", status);
+    renderedContext = ctx;
+    renderedStatus = status;
   }
   function unlinkSocket(): void {
     if (!ownsSocket) return;
