@@ -1,5 +1,9 @@
 //! Cached discovery and serialized, endpoint-local badge effects. No worker owns a DB lock.
-use super::{identity::string, state::LocalState};
+use super::{
+    identity::{normalize_hub_name, normalize_slug, string},
+    registration::is_generic_session_label,
+    state::LocalState,
+};
 use crate::plugins::{
     now_ms, plugin_request_with_progress, selected_plugin_dir, LoadedPlugins, NativeConfig,
     PluginDescriptor,
@@ -852,7 +856,13 @@ fn desired_badges(
     state: &LocalState,
     live_active: &[Value],
 ) -> Result<BTreeMap<Target, Intent>, String> {
-    let rows = state.db.query("SELECT * FROM local_listeners WHERE harness != 'human' ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC", &[])?;
+    let rows = state.db.query(
+        "SELECT l.*, EXISTS(SELECT 1 FROM session_custom_titles t
+            WHERE t.harness=l.harness AND t.session_id=l.session_id) AS custom_title
+         FROM local_listeners l WHERE harness != 'human'
+         ORDER BY (status='ACTIVE') DESC,binding_generation DESC,hub ASC,listener_id ASC",
+        &[],
+    )?;
     let is_live = |row: &Value| {
         row["status"] == "ACTIVE"
             && live_active.iter().any(|live| {
@@ -901,32 +911,39 @@ fn desired_badges(
 }
 
 fn format_badge(row: &Value, unread: u64) -> String {
-    let public = string(row, "public_id");
-    // Both supported canonical suffix lengths use the same readable slug. The
-    // original formatter removed its fixed 12-character suffix plus separator.
-    let slug = if !public.is_empty() {
-        public
-            .rsplit_once('-')
-            .map(|(slug, _)| slug.to_string())
-            .unwrap_or_default()
-    } else {
-        let repo = string(row, "repo").rsplit('/').next().unwrap_or("");
-        let cwd = std::path::Path::new(string(row, "cwd"))
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        [
-            string(row, "tag"),
-            repo,
-            cwd,
-            string(row, "title"),
-            string(row, "harness"),
-        ]
-        .into_iter()
-        .map(normalize_badge_slug)
-        .find(|s| !s.is_empty())
-        .unwrap_or_default()
-    };
+    let owner = row["owner_user"]
+        .as_str()
+        .filter(|user| !user.trim().is_empty())
+        .unwrap_or_else(|| string(row, "user"));
+    let owner_slug = normalize_slug(owner);
+    // A canonical owner-based ID does not describe the session.
+    let slug = string(row, "public_id")
+        .rsplit_once('-')
+        .filter(|(prefix, _)| !prefix.is_empty() && *prefix != owner_slug)
+        .map(|(prefix, _)| prefix.to_owned())
+        .unwrap_or_else(|| {
+            let repo = string(row, "repo").rsplit('/').next().unwrap_or("");
+            let cwd = std::path::Path::new(string(row, "cwd"))
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let title = string(row, "title");
+            // SQLite projects EXISTS as an integer; projected JSON rows use a boolean.
+            let custom = row["custom_title"] == true || row["custom_title"] == 1;
+            [
+                Some(string(row, "tag")),
+                custom.then_some(title),
+                Some(repo),
+                Some(cwd),
+                (!is_generic_session_label(title, owner, "")).then_some(title),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(normalize_hub_name)
+            .map(|slug| slug.to_ascii_lowercase())
+            .find(|slug| slug != "session" && *slug != owner_slug)
+            .unwrap_or_else(|| string(row, "harness").to_owned())
+        });
     let short: String = slug.chars().take(12).collect();
     let short = short.trim_end_matches('-');
     let short = if short.is_empty() {
@@ -940,21 +957,6 @@ fn format_badge(row: &Value, unread: u64) -> String {
         format!("Cito · {short}")
     }
 }
-fn normalize_badge_slug(raw: &str) -> String {
-    let mut result = String::new();
-    for ch in raw.chars() {
-        if result.len() >= 20 {
-            break;
-        }
-        if ch.is_ascii_alphanumeric() {
-            result.push(ch.to_ascii_lowercase());
-        } else if !result.is_empty() && !result.ends_with('-') {
-            result.push('-');
-        }
-    }
-    result.trim_end_matches('-').into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2088,6 +2090,64 @@ print(json.dumps(response), flush=True)
         activity.shutdown()?;
         assert_reaped(&f);
         Ok(())
+    }
+
+    #[test]
+    fn badges_prefer_session_metadata_to_an_owner_based_public_id() -> Result<(), String> {
+        let f = Fixture::new()?;
+        f.listener("work", "active", Some(42), 1)?;
+        f.state.db.execute(
+            "UPDATE local_listeners SET public_id='alice-0123456789abcdef', repo='acme/service'",
+            &[],
+        )?;
+        let badge = || -> Result<_, String> {
+            let row = f
+                .state
+                .listener("work", "c_abcdefghijkl")?
+                .ok_or("Missing listener")?;
+            Ok(
+                desired_badges(&f.state, std::slice::from_ref(&row))?[&Target::of(&row)]
+                    .badge
+                    .clone(),
+            )
+        };
+        assert_eq!(badge()?.as_deref(), Some("Cito · service"));
+        f.state.set_custom_title("agent", "active", "Review Desk")?;
+        assert_eq!(badge()?.as_deref(), Some("Cito · review-desk"));
+        f.state
+            .db
+            .execute("UPDATE local_listeners SET tag='Priority'", &[])?;
+        assert_eq!(badge()?.as_deref(), Some("Cito · priority"));
+        Ok(())
+    }
+
+    #[test]
+    fn badge_formatter_skips_generic_and_owner_labels_before_harness() {
+        let mut row = json!({
+            "user":"Alice.Smith", "public_id":"alice-smith-0123456789abcdef",
+            "tag":"Session", "title":"Alice Smith", "custom_title":true,
+            "repo":"acme/alice-smith", "cwd":"/work/checkout", "harness":"agent"
+        });
+        assert_eq!(format_badge(&row, 2), "Cito · checkout (2)");
+        row["cwd"] = json!("/work/alice-smith");
+        row["custom_title"] = json!(false);
+        row["title"] = json!("Code Review");
+        assert_eq!(format_badge(&row, 0), "Cito · code-review");
+        row["title"] = json!("Coding Session");
+        assert_eq!(format_badge(&row, 0), "Cito · agent");
+        row["owner_user"] = json!("Alice Smith");
+        row["user"] = json!("bob");
+        row["tag"] = json!("Work");
+        for public in [
+            "alice-smith-0123456789abcdef",
+            "-0123456789abcdef",
+            "malformed",
+        ] {
+            row["public_id"] = json!(public);
+            assert_eq!(format_badge(&row, 0), "Cito · work");
+        }
+        row["public_id"] = json!("topic-name-0123456789abcdef");
+        assert_eq!(format_badge(&row, 0), "Cito · topic-name");
     }
 
     #[test]

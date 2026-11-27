@@ -476,12 +476,16 @@ pub fn format_status(payload: &Value) -> String {
             .to_owned()
     };
     let _ = writeln!(text, "LISTENING AGENT SESSIONS");
-    for row in payload["listeners"]
+    let mut listeners = payload["listeners"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|r| r["harness"] != "human")
-    {
+        .peekable();
+    if listeners.peek().is_none() {
+        let _ = writeln!(text, "  (none)");
+    }
+    for row in listeners {
         let _ = writeln!(
             text,
             "  {} · {} · {}",
@@ -491,7 +495,7 @@ pub fn format_status(payload: &Value) -> String {
         );
     }
     let _ = writeln!(text, "AVAILABLE SESSIONS");
-    for row in payload["available"]
+    let mut available = payload["available"]
         .as_array()
         .into_iter()
         .flatten()
@@ -502,13 +506,60 @@ pub fn format_status(payload: &Value) -> String {
                 .flatten()
                 .any(|hub| hub == &payload["hub"])
         })
-    {
+        .peekable();
+    if available.peek().is_none() {
+        let _ = writeln!(text, "  (none)");
+    }
+    let home = super::plugins::system_home_dir();
+    let home_basename = std::path::Path::new(&home)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let user = payload["hubs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|hub| hub["name"] == payload["hub"])
+        .and_then(|hub| hub["user"].as_str())
+        .unwrap_or("");
+    for row in available {
+        let app = label(row);
+        let title = row["title"].as_str().unwrap_or("").trim();
+        let harness = row["harness"].as_str().unwrap_or("");
+        let compact_id;
+        let title = if title.is_empty()
+            || (row["custom_title"] != true
+                && (super::registration::is_generic_session_label(title, user, home_basename)
+                    || title.eq_ignore_ascii_case(&app)
+                    || title.eq_ignore_ascii_case(harness)))
+        {
+            compact_id = row["session_id"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(8)
+                .collect::<String>();
+            compact_id.as_str()
+        } else {
+            title
+        };
+        let cwd = row["cwd"].as_str().unwrap_or("");
+        let compact_cwd = std::path::Path::new(cwd)
+            .strip_prefix(&home)
+            .ok()
+            .map(|path| {
+                if path.as_os_str().is_empty() {
+                    "~".into()
+                } else {
+                    format!("~/{}", path.display())
+                }
+            });
         let _ = writeln!(
             text,
             "  {} · {} · {}{}",
-            label(row),
-            row["session_id"].as_str().unwrap_or(""),
-            row["cwd"].as_str().unwrap_or(""),
+            app,
+            title,
+            compact_cwd.as_deref().unwrap_or(cwd),
             if row["needs_reload"] == true {
                 " · Reload the app integration to listen"
             } else {
@@ -784,6 +835,30 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_formats_readable_available_sessions_for_the_selected_hub() {
+        let home = super::super::plugins::system_home_dir();
+        let output = format_status(&json!({
+            "hub":"work", "harnesses":[{"id":"editor","display_name":"Editor"}],
+            "listeners":[{"harness":"human","hub":"work"}],
+            "available":[
+                {"harness":"editor","title":"Review routing","session_id":"visible-id","cwd":format!("{home}/service"),"listening_hubs":["personal"]},
+                {"harness":"editor","title":"Session","session_id":"baadf00d-cafe-47b1-beca-238e0bd64e9d","cwd":format!("{home}-other/service"),"needs_reload":true},
+                {"harness":"editor","title":"Editor","session_id":"pid-24","cwd":home},
+                {"harness":"editor","title":"Already listening","listening_hubs":["work"]}
+            ]
+        }));
+        assert_eq!(
+            output,
+            format!("LISTENING AGENT SESSIONS\n  (none)\nAVAILABLE SESSIONS\n  Editor · Review routing · ~/service\n  Editor · baadf00d · {home}-other/service · Reload the app integration to listen\n  Editor · pid-24 · ~\nHUMAN INBOXES\nHUBS\n")
+        );
+        let empty = format_status(&json!({"hub":"work","available":[{"listening_hubs":["work"]}]}));
+        assert!(
+            empty.starts_with("LISTENING AGENT SESSIONS\n  (none)\nAVAILABLE SESSIONS\n  (none)\n")
+        );
+    }
+
     #[test]
     fn explicit_and_plugin_harness_selectors_conflict_in_both_orders() {
         let descriptor = super::super::plugins::parse_manifest(

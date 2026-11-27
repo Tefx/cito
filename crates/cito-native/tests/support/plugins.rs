@@ -1518,6 +1518,180 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
 }
 
 #[test]
+fn pi_legacy_endpoint_timeout_recovers_about_without_changing_identity() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let script = f.dir.join("pi.mjs");
+    fs::write(&script, "console.log('ready'); process.stdin.resume();").unwrap();
+    let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let pid = f.pid(process);
+    let identity = cito_native::support::process_identity(pid).unwrap();
+    let endpoints = f.state.join("pi/endpoints");
+    let sockets = f.state.join("sockets");
+    let sessions = f.home.join(".pi/agent/sessions/--repo--");
+    for path in [&endpoints, &sockets, &sessions] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let cache_path = endpoints.join(format!("{pid}.json"));
+    let legacy = json!({"identity":identity,"session":{
+        "ok":true,"session_id":"active-session","cwd":"/repo","session_name":"Cached title",
+        "badge":"Waiting (2)","about":"Private note"
+    }});
+    let mut legacy_outer = legacy.clone();
+    legacy_outer["cache_version"] = json!(2);
+    let mut legacy_both = legacy_outer.clone();
+    legacy_both["session"]["about_version"] = json!(2);
+    let historical = [legacy, legacy_outer, legacy_both];
+    let ops = ["resolve_caller", "verify"];
+    let write_transcript = |name: &str, id: &str, content: &str| {
+        fs::write(
+            sessions.join(name),
+            format!(
+                "{}\n{}\n",
+                json!({"type":"session","id":id,"cwd":"/repo","name":"Transcript title"}),
+                json!({"type":"message","message":{"role":"user","content":content}}),
+            ),
+        )
+        .unwrap();
+    };
+    let cases = [
+        (
+            "<skill> is the literal opening tag under review.\nNunc working memory (session-local)\n</skill>\nPrivate note",
+            "<skill> is the literal opening tag under review.",
+        ),
+        (
+            "<skill name=\"review\">\nNunc working memory (session-local)\n</skill>\nReview routing",
+            "Review routing",
+        ),
+        (
+            "Prompt <skill\nNunc working memory (session-local)\n</skill>\nPrivate note",
+            "Prompt <skill",
+        ),
+        (
+            "Prompt <skill> inline\nNunc working memory (session-local)\n</skill>\nPrivate note",
+            "Prompt <skill> inline",
+        ),
+    ];
+    let listener = UnixListener::bind(sockets.join(format!("pi-pid-{pid}.sock"))).unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let request_count = ((cases.len() + 1) * historical.len() + 1) * ops.len();
+    let server = std::thread::spawn(move || {
+        for _ in 0..request_count {
+            let (_stream, request) = bridge_request(&listener);
+            assert_eq!(request["op"], "identify");
+            release_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+        }
+    });
+    let assert_summary = |cache: &Value, expected: Value| {
+        for op in ops {
+            // Seed independently: neither operation may see a prior repair.
+            fs::write(&cache_path, cache.to_string()).unwrap();
+            let result = f.plugin(
+                PI,
+                json!({"op":op,"endpoint_pid":pid,"_meta":{"expected_session_id":"active-session"}}),
+            );
+            release_tx.send(()).unwrap();
+            assert_eq!(result["ok"], true, "{op}: {result}");
+            let caller = &result["caller"];
+            assert_eq!(caller.get("about"), Some(&expected), "{result}");
+            assert_eq!(caller["session_id"], "active-session");
+            assert_eq!(caller["cwd"], "/repo");
+            assert_eq!(caller["title"], "Cached title");
+            assert_eq!(caller["badge"], "Waiting (2)");
+            assert_eq!(caller["process_identity"], identity);
+            let published: Value = read_json(&cache_path);
+            assert!(published.get("cache_version").is_none(), "{published}");
+            assert_eq!(published["identity"], identity);
+            assert_eq!(published["session"]["about_version"], 3);
+            assert_eq!(published["session"]["about"], expected);
+        }
+    };
+    write_transcript("other.jsonl", "other-session", "Unrelated prompt");
+    for cache in &historical {
+        assert_summary(cache, Value::Null);
+    }
+    for (content, expected) in cases {
+        write_transcript("active.jsonl", "active-session", content);
+        cito_native::support::cached_file_projection(
+            &json!({"state_dir":f.state}),
+            "pi/transcript-cache-v3/about-v3",
+            &sessions.join("active.jsonl"),
+            || Ok(json!({"session_id":"active-session","about":"Private note"})),
+        )
+        .unwrap();
+        for cache in &historical {
+            assert_summary(cache, json!(expected));
+        }
+    }
+    let projection = cito_native::support::cached_file_projection(
+        &json!({"state_dir":f.state}),
+        "pi/transcript-cache-v3/about-v4",
+        &sessions.join("active.jsonl"),
+        || panic!("The current transcript projection was not published"),
+    )
+    .unwrap();
+    assert_eq!(projection["about"], cases.last().unwrap().1);
+
+    let mut current = historical[2].clone();
+    current["session"]["about_version"] = json!(3);
+    current["session"]["about"] = json!("Current bridge summary");
+    assert_summary(&current, json!("Current bridge summary"));
+    server.join().unwrap();
+}
+
+#[test]
+fn pi_unversioned_identify_does_not_publish_an_unverified_about() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let script = f.dir.join("pi.mjs");
+    fs::write(&script, "console.log('ready'); process.stdin.resume();").unwrap();
+    let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let pid = f.pid(process);
+    let sockets = f.state.join("sockets");
+    fs::create_dir_all(&sockets).unwrap();
+    let listener = UnixListener::bind(sockets.join(format!("pi-pid-{pid}.sock"))).unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, request) = bridge_request(&listener);
+            assert_eq!(request["op"], "identify");
+            writeln!(
+                stream,
+                "{}",
+                json!({"ok":true,"session_id":"active-session","cwd":"/repo","session_name":"Work","about":"Private note"})
+            )
+            .unwrap();
+            let (_stream, request) = bridge_request(&listener);
+            assert_eq!(request["op"], "identify");
+            release_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+        }
+    });
+    let resolve = || f.plugin(PI, json!({"op":"resolve_caller","endpoint_pid":pid}));
+    let cache_path = f.state.join(format!("pi/endpoints/{pid}.json"));
+    for discover in [false, true] {
+        let live = if discover {
+            f.plugin(PI, json!({"op":"discover_sessions"}))["sessions"][0].clone()
+        } else {
+            resolve()["caller"].clone()
+        };
+        let published: Value = read_json(&cache_path);
+        let cached = resolve();
+        release_tx.send(()).unwrap();
+        assert!(published.get("cache_version").is_none(), "{published}");
+        assert_eq!(published["session"]["about_version"], 3);
+        assert_eq!(cached["ok"], true, "{cached}");
+        for session in [&live, &published["session"], &cached["caller"]] {
+            assert_eq!(session["session_id"], "active-session", "{session}");
+            assert_eq!(session.get("about"), Some(&Value::Null), "{session}");
+        }
+        fs::remove_file(&cache_path).unwrap();
+    }
+    server.join().unwrap();
+}
+
+#[test]
 fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -2290,7 +2464,7 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
         json!({"type":"session","id":"active-session","cwd":cwd}),
         json!({"type":"session_info","name":"Work"}),
         json!({"type":"message","message":{"role":"assistant","content":"Not a prompt"}}),
-        json!({"type":"message","message":{"role":"user","content":[{"type":"image"},{"type":"text","text":" Review\u{7}\nrouting "},{"type":"text","text":"🦀".repeat(140)}]}}),
+        json!({"type":"message","message":{"role":"user","content":[{"type":"image"},{"type":"text","text":"Prompt <skill\nNunc working memory (session-local)"},{"type":"text","text":"</skill>\nPrivate note"}]}}),
     ];
     fs::write(
         sessions.join("active.jsonl"),
@@ -2307,10 +2481,7 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     assert_eq!(enrolled["ok"], true, "{enrolled}");
     assert_eq!(enrolled["caller"]["session_id"], "active-session");
     assert_eq!(enrolled["caller"]["title"], "Work");
-    assert_eq!(
-        enrolled["caller"]["about"],
-        format!("Review routing {}", "🦀".repeat(105))
-    );
+    assert_eq!(enrolled["caller"]["about"], "Prompt <skill");
     let cache_path = f
         .state
         .join(format!("pi/endpoints/{}.json", f.pid(process)));

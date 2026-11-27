@@ -644,6 +644,7 @@ fn v45_menu_candidate_timestamp_empty_drawer_and_active_rename_stability() {
     frame["hubs"][0]["status"] = json!("connected");
     frame["listeners"] = json!([listener()]);
     f.send(p, frame.clone());
+    control(&f, p, "toggle_my_remote");
     control(&f, p, "rename:personal:repo-abcdefghijkl");
     f.send(
         p,

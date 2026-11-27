@@ -298,13 +298,21 @@ pub fn resolve_builtin_plugins_dir() -> Option<PathBuf> {
         .into_iter()
         .find(|path| path.is_dir())
 }
-pub(super) fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
-    [
-        root.join("Resources/plugins"),
-        root.join("plugins"),
-        root.join("share/cito/plugins"),
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
-    ]
+
+#[cfg(debug_assertions)]
+pub(super) const DEV_CHECKOUT_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
+pub(super) fn bundled_plugin_roots(root: Option<&Path>) -> impl Iterator<Item = PathBuf> + '_ {
+    let roots = root.into_iter().flat_map(|root| {
+        [
+            root.join("Resources/plugins"),
+            root.join("plugins"),
+            root.join("share/cito/plugins"),
+        ]
+    });
+    #[cfg(debug_assertions)]
+    let roots = roots.chain([Path::new(DEV_CHECKOUT_ROOT).join("plugins")]);
+    roots
 }
 fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -320,10 +328,8 @@ fn builtin_plugin_roots(state_dir: Option<&Path>, executable: Option<&Path>) -> 
     if let Some(state_dir) = state_dir {
         roots.push(staged_plugins_dir(state_dir));
     }
-    if let Some(dir) = executable.and_then(Path::parent) {
-        roots.extend(bundled_plugin_roots(&dir.join("..")).into_iter().take(3));
-    }
-    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
+    let package_root = executable.and_then(Path::parent).map(|dir| dir.join(".."));
+    roots.extend(bundled_plugin_roots(package_root.as_deref()));
     roots
 }
 

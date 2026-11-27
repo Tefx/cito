@@ -27,11 +27,12 @@ interface SessionEntry {
   customType?: string; details?: { citoBatchId?: string };
 }
 interface SessionState {
-  sessionId?: string; cwd: string; sessionName: string; about: string;
+  sessionId?: string; cwd: string; sessionName: string; about: string; aboutVersion?: number;
   activeBadge?: string; commandGen: number; context?: BridgeContext;
   commands: Map<string, Promise<void>>;
   renderBadge?: () => void;
 }
+const ABOUT_VERSION = 3;
 const sessionKey = Symbol.for("cito.pi.sessionState");
 const host = globalThis as typeof globalThis & { [sessionKey]?: SessionState };
 
@@ -82,13 +83,61 @@ function contentText(content: unknown): string {
   return typeof content === "string" ? content : Array.isArray(content)
     ? content.filter(part => part?.type === "text" && typeof part.text === "string").map(part => part.text).join("\n") : "";
 }
-function promptAbout(manager: BridgeContext["sessionManager"]): string {
-  for (const entry of manager.getBranch?.() ?? manager.getEntries?.() ?? []) {
-    if (entry.type !== "message" || entry.message?.role !== "user") continue;
-    const text = contentText(entry.message.content).replace(/\p{White_Space}/gu, " ").replace(/\p{Cc}/gu, "").replace(/ +/g, " ").trim();
-    if (text) return Array.from(text).slice(0, 120).join("").trimEnd();
+const aboutLineBreak = /[\r\n\u0085\u2028\u2029]/u;
+function stripSkillPrefix(raw: string): string {
+  const open = "<skill", close = "</skill>";
+  const horizontal = (ch: string | undefined) => ch === " " || ch === "\t";
+  const lineBreak = (ch: string | undefined) => ch !== undefined && aboutLineBreak.test(ch);
+  const skipHorizontal = (i: number) => {
+    while (horizontal(raw[i])) i++;
+    return i;
+  };
+  const opener = (i: number) => raw.startsWith(open, i)
+    && (raw[i + open.length] === ">" || horizontal(raw[i + open.length]));
+  const closesAt = (i: number) => {
+    if (!raw.startsWith(close, i)) return false;
+    const next = skipHorizontal(i + close.length);
+    return next === raw.length || lineBreak(raw[next]) || opener(next);
+  };
+
+  let cursor = 0;
+  for (;;) {
+    while (horizontal(raw[cursor]) || lineBreak(raw[cursor])) cursor++;
+    if (!opener(cursor)) break;
+    let i = cursor + open.length;
+    while (i < raw.length && raw[i] !== ">" && !lineBreak(raw[i])) i++;
+    if (raw[i] !== ">") break;
+
+    i = skipHorizontal(i + 1);
+    if (lineBreak(raw[i])) {
+      // Only a close at the start of a body line can end a multiline wrapper.
+      while (i < raw.length) {
+        i = skipHorizontal(i + 1);
+        if (closesAt(i)) break;
+        while (i < raw.length && !lineBreak(raw[i])) i++;
+      }
+    } else {
+      while (i < raw.length && !lineBreak(raw[i]) && !raw.startsWith(close, i)) i++;
+    }
+    if (!closesAt(i)) break;
+    cursor = i + close.length;
+  }
+  return raw.slice(cursor);
+}
+function sanitizeAboutText(raw: string): string {
+  const remaining = stripSkillPrefix(raw);
+  const marker = remaining.indexOf("Nunc working memory (session-local");
+  const text = marker < 0 ? remaining : remaining.slice(0, marker);
+  for (const line of text.split(aboutLineBreak)) {
+    const summary = line.replace(/\p{White_Space}+/gu, " ").replace(/\p{Cc}/gu, "").replace(/ +/g, " ").replace(/^ | $/g, "");
+    if (summary) return Array.from(summary).slice(0, 80).join("").replace(/ $/, "");
   }
   return "";
+}
+function promptAbout(manager: BridgeContext["sessionManager"]): string {
+  const entry = (manager.getBranch?.() ?? manager.getEntries?.() ?? [])
+    .find(entry => entry.type === "message" && entry.message?.role === "user");
+  return sanitizeAboutText(contentText(entry?.message?.content));
 }
 function cardLines(content: unknown): string[] {
   const clean = stripVTControlCharacters(contentText(content)).replace(/\t/g, "  ").replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, "");
@@ -223,6 +272,11 @@ export default function citoBridge(pi: BridgeAPI): void {
   try { registerMcpServer(); }
   catch { /* session_start retries and surfaces any persistent failure. */ }
   const session: SessionState = host[sessionKey] ??= { cwd: "", sessionName: "", about: "", commandGen: 0, commands: new Map() };
+  if (session.aboutVersion !== ABOUT_VERSION) {
+    session.about = "";
+    session.aboutVersion = undefined;
+  }
+  let refreshedAbout = false;
   const pending = new Set<string>();
   let lastActiveMs = Date.now();
   let server: Server | undefined;
@@ -303,7 +357,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     const next = ctx.sessionManager.getSessionId();
     if (next?.trim() && next !== session.sessionId) {
       session.sessionId = next;
-      session.about = "";
+      refreshedAbout = false;
       session.activeBadge = undefined;
       session.commandGen++;
       pending.clear();
@@ -312,7 +366,11 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (next?.trim()) {
       session.cwd = ctx.cwd;
       session.sessionName = ctx.sessionManager.getSessionName() ?? "";
-      if (!session.about) session.about = promptAbout(ctx.sessionManager);
+      if (!refreshedAbout || !session.about || session.aboutVersion !== ABOUT_VERSION) {
+        session.about = promptAbout(ctx.sessionManager);
+        session.aboutVersion = ABOUT_VERSION;
+        refreshedAbout = true;
+      }
     }
     session.context = ctx;
     session.renderBadge = renderBadge;
@@ -327,7 +385,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (session.activeBadge) {
       // Project the display without rewriting the badge used by daemon reconciliation.
       const unread = Number(/\((\d+)\)\s*$/.exec(session.activeBadge)?.[1] ?? 0);
-      const raw = unread > 0 ? `📡 ${unread > 99 ? "99+" : String(unread)}` : "📡";
+      const raw = unread > 0 ? `💬 ${unread > 99 ? "99+" : String(unread)}` : "💬";
       const tone = unread > 0 ? "accent" : "dim";
       status = ctx.ui.theme ? ctx.ui.theme.fg(tone, raw) : raw;
     }
@@ -350,7 +408,8 @@ export default function citoBridge(pi: BridgeAPI): void {
     const currentId = session.sessionId;
     if (!currentId) return { ok: false, error: "SESSION_NOT_READY" };
     if (req.op === "identify") return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid,
-      session_id: currentId, session_name: session.sessionName, cwd: session.cwd, about: session.about, badge: session.activeBadge ?? null, updated_at_ms: lastActiveMs };
+      session_id: currentId, session_name: session.sessionName, cwd: session.cwd, about: session.about,
+      about_version: session.aboutVersion ?? null, badge: session.activeBadge ?? null, updated_at_ms: lastActiveMs };
     if (req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
@@ -659,10 +718,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         if (session.sessionId !== commandSessionId || generation !== session.commandGen) return;
         const ui = session.context?.ui;
         if (tool === "cito_listen") {
-          const publicId = String(payload.listener_id).trim().split(":").at(-1)!;
-          const slug = publicId.includes("-") ? publicId.slice(0, publicId.lastIndexOf("-")) : publicId;
-          const short = Array.from(slug).slice(0, 12).join("").replace(/-+$/, "") || "cito";
-          session.activeBadge ??= `Cito · ${short}`;
+          session.activeBadge ??= "Cito";
           ui?.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
         } else if (targetHub) {
           ui?.notify?.(`Cito stopped listening on ${targetHub}`, "info");
@@ -677,7 +733,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       session.renderBadge?.();
   }
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
-  pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); session.about = ""; update(ctx); });
+  pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); refreshedAbout = false; update(ctx); });
   pi.on("session_shutdown", async event => {
     shuttingDown = true;
     session.context = undefined;

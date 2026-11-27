@@ -318,6 +318,7 @@ fn v39_reload_hint_retains_full_tooltip_and_activity_reset_requeries() {
     frame["available"] = json!([{"harness":"fixture","session_id":"reload","title":"Review","cwd":"/tmp","needs_reload":true}]);
     frame["activity_has_any"] = json!(true);
     f.send(p, frame);
+    control(&f, p, "toggle_available");
     let hint = inspect(&f, p).menu("candidate_hint:fixture:reload");
     assert_eq!(
         hint["tooltip"],
@@ -416,6 +417,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
     ]);
     frame["my_remote_listeners"] = json!([agent.clone()]);
     send_companion(&f, p, frame);
+    control(&f, p, "toggle_my_remote");
     let remote = inspect(&f, p).menu("remote:personal:home");
     let remote_info = nodes(&remote["children"])
         .into_iter()
@@ -982,21 +984,28 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         .collect::<Vec<_>>());
     frame["available"] = json!((0..6).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":"Review","cwd":"/tmp","endpoint_pid":4242})).collect::<Vec<_>>());
     f.send(p, frame.clone());
-    let scrolls = ["active_scroll", "my_remote_scroll", "available_scroll"];
-    for id in scrolls {
-        f.send(p, json!({"op":"test_scroll","id":id,"offset":20}));
+    control(&f, p, "toggle_my_remote");
+    control(&f, p, "toggle_available");
+    // The available document starts with a 28pt group header. Scroll into its first candidate.
+    let scrolls = [
+        ("active_scroll", 20),
+        ("my_remote_scroll", 20),
+        ("available_scroll", 48),
+    ];
+    for (id, offset) in scrolls {
+        f.send(p, json!({"op":"test_scroll","id":id,"offset":offset}));
     }
     let scrolled = inspect(&f, p);
-    for id in scrolls {
-        assert_eq!(scrolled.menu(id)["content_y"], 20, "{id}");
+    for (id, offset) in scrolls {
+        assert_eq!(scrolled.menu(id)["content_y"], offset, "{id}");
     }
     frame["unread_count"] = json!(1);
     f.send(p, frame.clone());
     let refreshed = inspect(&f, p);
-    for id in scrolls {
+    for (id, offset) in scrolls {
         assert_eq!(
             refreshed.menu(id)["content_y"],
-            20,
+            offset,
             "{id} must survive a rebuild"
         );
     }
@@ -1027,22 +1036,46 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         f.send(p, frame.clone());
         assert_eq!(inspect(&f, p).menu(scroll_id)["content_y"], 20);
     }
-    // A new expanded group changes identifiers, never the existing group's key.
+    // A second expanded harness shares the same viewport and does not move the anchor.
     let mut expanded = frame.clone();
     for i in 0..6 {
         expanded["available"].as_array_mut().unwrap().push(json!({"harness":"second","session_id":format!("other-{i}"),"title":"Review","cwd":"/tmp","endpoint_pid":4242}));
     }
     f.send(p, expanded);
+    let snapshot = inspect(&f, p);
+    let available_scroll = snapshot.menu("available_scroll");
+    assert_eq!(available_scroll["height"], 200);
+    assert_eq!(available_scroll["content_y"], 48);
+    let available_rows = nodes(&available_scroll["children"]);
+    for id in [
+        "toggle_group:fixture",
+        "candidate:fixture:candidate-0",
+        "toggle_group:second",
+        "candidate:second:other-0",
+    ] {
+        assert!(available_rows.iter().any(|node| node["id"] == id), "{id}");
+    }
     assert_eq!(
-        inspect(&f, p).menu("available_scroll:fixture")["content_y"],
-        20
+        nodes(&snapshot["items"])
+            .iter()
+            .filter(|node| node["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("available_scroll")))
+            .count(),
+        1
     );
     control(&f, p, "toggle_group:second");
-    assert_eq!(inspect(&f, p).menu("available_scroll")["content_y"], 20);
-    control(&f, p, "toggle_group:second");
+    let grouped = inspect(&f, p);
+    assert!(grouped.menu("candidate:second:other-0").is_null());
+    assert_eq!(grouped.menu("available_scroll")["content_y"], 48);
+    control(&f, p, "toggle_available");
+    assert!(inspect(&f, p).menu("available_scroll").is_null());
+    control(&f, p, "toggle_available");
+    let reopened = inspect(&f, p);
+    assert_eq!(reopened.menu("available_scroll")["content_y"], 48);
     assert_eq!(
-        inspect(&f, p).menu("available_scroll:fixture")["content_y"],
-        20
+        reopened.menu("toggle_group:second")["symbol"],
+        "chevron.right"
     );
     let mut inserted = frame["available"][0].clone();
     inserted["session_id"] = json!("inserted");
@@ -1053,19 +1086,19 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     f.send(p, frame.clone());
     assert_eq!(
         inspect(&f, p).menu("available_scroll")["content_y"],
-        64,
+        92,
         "Keep candidate-0 at the same screen position after an insertion"
     );
     frame["available"][0]["needs_reload"] = json!(true);
     f.send(p, frame.clone());
     assert_eq!(
         inspect(&f, p).menu("available_scroll")["content_y"],
-        78,
+        106,
         "Keep the anchor after a row above it grows"
     );
     frame["available"].as_array_mut().unwrap().remove(0);
     f.send(p, frame.clone());
-    assert_eq!(inspect(&f, p).menu("available_scroll")["content_y"], 20);
+    assert_eq!(inspect(&f, p).menu("available_scroll")["content_y"], 48);
     control(&f, p, "open_directory");
     send_companion(
         &f,
@@ -1954,6 +1987,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     state["settings"]["host_hub"]["lan_invite_command"] = Value::Null;
     state["available"] = json!([{"harness":"fixture","session_id":"reload","title":"Reload bridge","cwd":"/tmp","needs_reload":true}]);
     f.send(l.ui, state);
+    l.control("toggle_available");
     l.control("open_settings");
     l.control("settings_tab:hubs");
     for (id, expected) in [

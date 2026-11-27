@@ -235,7 +235,7 @@ fn v48_host_hub_and_nonconnected_drawers_gate_only_projected_affordances() {
 }
 
 #[test]
-fn v48_candidate_readiness_counts_and_collapse_share_one_predicate() {
+fn candidate_readiness_counts_and_listen_actions_share_one_predicate() {
     let _lock = serial();
     let (f, ui) = ui_fixture();
     for (index, pid_bound, endpoint, reload, open) in [
@@ -251,15 +251,26 @@ fn v48_candidate_readiness_counts_and_collapse_share_one_predicate() {
         frame["harnesses"][0]["pid_bound"] = json!(pid_bound);
         frame["available"] = json!([{"harness":harness,"session_id":"candidate","title":"Review","cwd":"/tmp","endpoint_pid":endpoint,"needs_reload":reload}]);
         f.send(ui, frame);
+        if index == 0 {
+            control(&f, ui, "toggle_available");
+        }
         let s = inspect(&f, ui);
         assert_eq!(
             s.menu(&format!("toggle_group:{harness}"))["text"],
             format!("Fixture · 1 {}", if open { "open" } else { "recent" })
         );
-        assert_eq!(
-            !s.menu(&format!("candidate:{harness}:candidate")).is_null(),
-            open
-        );
+        assert!(s
+            .menu(&format!("candidate:{harness}:candidate"))
+            .is_object());
+        if reload {
+            assert!(s.menu(&format!("reload:{harness}:candidate")).is_object());
+            assert!(s.menu(&format!("listen:{harness}:candidate")).is_null());
+        } else {
+            assert_eq!(
+                s.menu(&format!("listen:{harness}:candidate"))["enabled"],
+                open
+            );
+        }
     }
 }
 

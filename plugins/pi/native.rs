@@ -177,25 +177,131 @@ fn prompt_about(row: &Value) -> Option<String> {
             .filter(|part| part["type"] == "text")
             .filter_map(|part| part["text"].as_str()),
     );
-    let mut previous_space = true;
-    let mut summary: String = parts
-        .flat_map(|part| part.chars().chain([' ']))
-        .filter_map(|ch| {
-            if ch.is_whitespace() {
-                (!std::mem::replace(&mut previous_space, true)).then_some(' ')
-            } else if ch.is_control() {
-                None
-            } else {
-                previous_space = false;
-                Some(ch)
-            }
+    Some(sanitize_about_text(&parts.collect::<Vec<_>>().join("\n")))
+}
+const ABOUT_LINE_BREAKS: [char; 5] = ['\r', '\n', '\u{85}', '\u{2028}', '\u{2029}'];
+
+fn strip_skill_prefix(mut remaining: &str) -> &str {
+    const OPEN: &str = "<skill";
+    const CLOSE: &str = "</skill>";
+    const HORIZONTAL: [char; 2] = [' ', '\t'];
+    let line_break = |ch| ABOUT_LINE_BREAKS.contains(&ch);
+    let opener = |text: &str| {
+        text.strip_prefix(OPEN)
+            .is_some_and(|tail| tail.starts_with(['>', ' ', '\t']))
+    };
+    let closes_at = |text: &str| {
+        text.strip_prefix(CLOSE).is_some_and(|tail| {
+            let next = tail.trim_start_matches(HORIZONTAL);
+            next.is_empty() || next.starts_with(ABOUT_LINE_BREAKS) || opener(next)
         })
-        .take(120)
-        .collect();
-    if summary.ends_with(' ') {
-        summary.pop();
+    };
+
+    loop {
+        remaining = remaining.trim_start_matches(|ch| HORIZONTAL.contains(&ch) || line_break(ch));
+        if !opener(remaining) {
+            return remaining;
+        }
+        let opening = &remaining[OPEN.len()..];
+        let Some(end) = opening.find(|ch| ch == '>' || line_break(ch)) else {
+            return remaining;
+        };
+        let Some(body) = opening[end..].strip_prefix('>') else {
+            return remaining;
+        };
+
+        let body = body.trim_start_matches(HORIZONTAL);
+        let close = if body.starts_with(ABOUT_LINE_BREAKS) {
+            // Only a close at the start of a body line can end a multiline wrapper.
+            let mut lines = body;
+            let mut close = None;
+            while let Some((i, ch)) = lines.char_indices().find(|&(_, ch)| line_break(ch)) {
+                lines = lines[i + ch.len_utf8()..].trim_start_matches(HORIZONTAL);
+                if closes_at(lines) {
+                    close = Some(lines);
+                    break;
+                }
+            }
+            close
+        } else {
+            body.char_indices()
+                .find(|&(i, ch)| line_break(ch) || (ch == '<' && body[i..].starts_with(CLOSE)))
+                .map(|(i, _)| &body[i..])
+                .filter(|text| closes_at(text))
+        };
+        let Some(close) = close else {
+            return remaining;
+        };
+        remaining = &close[CLOSE.len()..];
     }
-    (!summary.is_empty()).then_some(summary)
+}
+
+fn sanitize_about_text(raw: &str) -> String {
+    let remaining = strip_skill_prefix(raw);
+    let text = remaining
+        .split_once("Nunc working memory (session-local")
+        .map_or(remaining, |(prefix, _)| prefix);
+    for line in text.split(ABOUT_LINE_BREAKS) {
+        let line: String = line
+            .chars()
+            .filter(|ch| ch.is_whitespace() || !ch.is_control())
+            .collect();
+        let summary = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !summary.is_empty() {
+            let mut short: String = summary.chars().take(80).collect();
+            if short.ends_with(' ') {
+                short.pop();
+            }
+            return short;
+        }
+    }
+    String::new()
+}
+fn transcripts(req: &Value, cwd: &str) -> impl Iterator<Item = fs::DirEntry> {
+    let encoded = format!("--{}--", cwd.trim_start_matches('/').replace('/', "-"));
+    fs::read_dir(paths(req).0.join("sessions").join(encoded))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry.path().extension().is_some_and(|s| s == "jsonl")
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+        })
+}
+fn transcript_projection(req: &Value, path: &Path) -> Result<Value> {
+    use std::io::BufRead;
+    // Existing projections may have lost the boundary; recover from source.
+    cached_file_projection(req, "pi/transcript-cache-v3/about-v4", path, || {
+        let mut value =
+            json!({"session_id":path.file_stem().and_then(|s| s.to_str()).unwrap_or("")});
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            let Ok(row) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if row["type"] == "session" || row.get("type").is_none() {
+                if let Some(id) = raw_str_at(&row, "id") {
+                    value["session_id"] = json!(id);
+                }
+            }
+            if value["about"].is_null() {
+                if let Some(about) = prompt_about(&row) {
+                    value["about"] = json!(about);
+                }
+            }
+            if matches!(
+                row["type"].as_str(),
+                None | Some("session" | "session_info")
+            ) {
+                if let Some(name) = str_at(&row, "session_name").or_else(|| str_at(&row, "name")) {
+                    value["session_name"] = json!(name);
+                }
+            }
+        }
+        Ok(value)
+    })
 }
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(
@@ -245,17 +351,11 @@ fn process_candidates(
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(cwd);
-        let encoded = format!("--{}--", cwd.trim_start_matches('/').replace('/', "-"));
-        let directory = paths(req).0.join("sessions").join(encoded);
-        let latest = fs::read_dir(directory)
-            .ok()
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|s| s == "jsonl"))
+        let latest = transcripts(req, cwd)
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        let mut v = json!({"session_id":format!("pid-{p}"),"session_name":basename,"cwd":cwd});
+        let mut v = json!({"session_id":format!("pid-{p}"),"session_name":basename,"cwd":cwd,
+            "about":Value::Null,"about_version":ABOUT_VERSION});
         // CWD alone cannot attribute a transcript when another live process shares it.
         let shared_cwd = all_processes.iter().any(|other| {
             *other != p
@@ -263,40 +363,7 @@ fn process_candidates(
                 && process_cwd(*other).is_ok_and(|path| path == cwd)
         });
         if let Some((modified, path)) = latest.filter(|_| !shared_cwd) {
-            use std::io::BufRead;
-            let projection = cached_file_projection(req, "pi/transcript-cache-v2", &path, || {
-                let mut value =
-                    json!({"session_id":path.file_stem().and_then(|s| s.to_str()).unwrap_or("")});
-                let file = fs::File::open(&path).map_err(|e| e.to_string())?;
-                for line in std::io::BufReader::new(file).lines() {
-                    let line = line.map_err(|e| e.to_string())?;
-                    let Ok(row) = serde_json::from_str::<Value>(&line) else {
-                        continue;
-                    };
-                    if row["type"] == "session" || row.get("type").is_none() {
-                        if let Some(id) = raw_str_at(&row, "id") {
-                            value["session_id"] = json!(id);
-                        }
-                    }
-                    if value["about"].is_null() {
-                        if let Some(about) = prompt_about(&row) {
-                            value["about"] = json!(about);
-                        }
-                    }
-                    if matches!(
-                        row["type"].as_str(),
-                        None | Some("session" | "session_info")
-                    ) {
-                        if let Some(name) =
-                            str_at(&row, "session_name").or_else(|| str_at(&row, "name"))
-                        {
-                            value["session_name"] = json!(name);
-                        }
-                    }
-                }
-                Ok(value)
-            });
-            if let Ok(projection) = projection {
+            if let Ok(projection) = transcript_projection(req, &path) {
                 v["session_id"] = projection["session_id"].clone();
                 v["about"] = projection["about"].clone();
                 if let Some(name) = projection.get("session_name") {
@@ -328,6 +395,31 @@ fn process_candidates(
     }
     Ok(())
 }
+const ABOUT_VERSION: u64 = 3;
+
+fn recover_about(req: &Value, p: u32, identity: Option<&Value>, session: &mut Value) -> Result<()> {
+    session["about"] = Value::Null;
+    if let Some(((sid, cwd), identity)) = raw_str_at(session, "session_id")
+        .zip(raw_str_at(session, "cwd"))
+        .zip(identity)
+    {
+        let about = transcripts(req, cwd).find_map(|entry| {
+            let projection = transcript_projection(req, &entry.path()).ok()?;
+            if projection["session_id"] != sid {
+                return None;
+            }
+            projection["about"].as_str().map(str::to_owned)
+        });
+        // Fence PID reuse while reading the transcript.
+        if &process_identity(p)? != identity {
+            return Err("Endpoint identity changed".into());
+        }
+        session["about"] = json!(about);
+    }
+    session["about_version"] = json!(ABOUT_VERSION);
+    Ok(())
+}
+
 fn cached_session(req: &Value, p: u32) -> Result<Value> {
     let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json")))?;
     let identity = process_identity(p)?;
@@ -336,7 +428,14 @@ fn cached_session(req: &Value, p: u32) -> Result<Value> {
     {
         return Err("Endpoint identity changed".into());
     }
-    Ok(cached["session"].clone())
+    let mut session = cached["session"].clone();
+    if !session.is_object() {
+        return Err("Invalid cached Pi session".into());
+    }
+    if session["about_version"] != ABOUT_VERSION {
+        recover_about(req, p, Some(&identity), &mut session)?;
+    }
+    Ok(session)
 }
 fn publish_endpoint(req: &Value, p: u32, identity: &Value, session: &Value) -> Result<()> {
     let path = state(req).join(format!("pi/endpoints/{p}.json"));
@@ -376,9 +475,13 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, SocketCandidate)>> {
             return Some(SocketCandidate::Refused);
         }
         let live = reply.is_ok();
-        let v = socket_response_or_cached(reply, p, || cached_session(req, p)).ok()?;
+        let mut v = socket_response_or_cached(reply, p, || cached_session(req, p)).ok()?;
         if live && v["ok"] == true {
-            if let Ok(identity) = process_identity(p) {
+            let identity = process_identity(p).ok();
+            if v["about_version"] != ABOUT_VERSION {
+                recover_about(req, p, identity.as_ref(), &mut v).ok()?;
+            }
+            if let Some(identity) = identity {
                 let _ = publish_endpoint(req, p, &identity, &v);
             }
         }
@@ -423,7 +526,7 @@ fn candidates(req: &Value) -> Result<Candidates> {
             } else {
                 reply
             };
-            if let Ok(v) = response {
+            if let Ok(mut v) = response {
                 responded |= live;
                 if live && v["ok"] != true {
                     return Ok((
@@ -438,6 +541,10 @@ fn candidates(req: &Value) -> Result<Candidates> {
                     && v.get("pi_pid")
                         .is_none_or(|id| id.as_u64() == Some(p as u64))
                 {
+                    if live && v["about_version"] != ABOUT_VERSION {
+                        let identity = process_identity(p).ok();
+                        recover_about(req, p, identity.as_ref(), &mut v)?;
+                    }
                     return Ok((vec![(p, v)], live, None));
                 }
             }
@@ -681,5 +788,91 @@ pub fn handle(req: &Value) -> Result<Value> {
             })
         }
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_about_strips_reference_blocks_and_uses_first_meaningful_line() {
+        let user = |content| json!({"type":"message","message":{"role":"user","content":content}});
+        let row = user(json!([
+            {"type":"image","text":"Not a prompt"},
+            {"type":"text","text":"<skill name=\"review\">\nReference text"},
+            {"type":"text","text":"</skill>\r\n<skill>Another reference</skill>\n\u{7}\n  Review\t routing  \nLater line"}
+        ]));
+        assert_eq!(prompt_about(&row).as_deref(), Some("Review routing"));
+        assert!(prompt_about(
+            &json!({"type":"message","message":{"role":"assistant","content":"Not a prompt"}})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sanitize_about_text_strips_only_closed_leading_wrappers_before_cutting_memory() {
+        for (content, expected) in [
+            (
+                "<skill>Reference</skill>\nNunc working memory (session-local)\nSaved notes",
+                "",
+            ),
+            ("Review Nunc working memory (session-local)\nSaved notes", "Review"),
+            (
+                "<skill> is the literal opening tag under review.\nNunc working memory (session-local)\n</skill>\nPrivate note",
+                "<skill> is the literal opening tag under review.",
+            ),
+            (
+                "<skill name=\"review\">\nNunc working memory (session-local)\n</skill>\nReview routing",
+                "Review routing",
+            ),
+            (
+                "<skill name=\"review\">\nInline note quoting </skill> inside body\n</skill>\nReview routing",
+                "Review routing",
+            ),
+            (
+                "Prompt <skill\nNunc working memory (session-local)\n</skill>\nPrivate note",
+                "Prompt <skill",
+            ),
+            (
+                "Prompt <skill> inline\nNunc working memory (session-local)\n</skill>\nPrivate note",
+                "Prompt <skill> inline",
+            ),
+            (
+                "<skill>foo</skill> inline\nNunc working memory (session-local)",
+                "<skill>foo</skill> inline",
+            ),
+            ("<skill>foo</skill>\nReview routing", "Review routing"),
+            (
+                "<skill>One</skill> \t<skill\tname=\"review\">Two</skill>\rReview routing",
+                "Review routing",
+            ),
+            ("<skills>Keep this</skill>", "<skills>Keep this</skill>"),
+            (
+                " \t\u{85}<skill> \t\u{2028} \t</skill> \t<skill>Two</skill>\u{2029}Review\0\u{a0}\t routing",
+                "Review routing",
+            ),
+            ("<skill>\n</skill> inline\nNunc working memory (session-local)", "<skill>"),
+            ("<skill>\n</skill> inline\n</skill>", ""),
+            ("<skill name=\"review\"\u{2028}>Text</skill>", "<skill name=\"review\""),
+            ("<skill>First</skill>\n<skill> literal\n</skill>", "<skill> literal"),
+        ] {
+            assert_eq!(sanitize_about_text(content), expected, "{content:?}");
+        }
+        let adjacent = "<skill>Reference</skill> ".repeat(16_384);
+        assert_eq!(
+            sanitize_about_text(&format!("{adjacent}\nReview")),
+            "Review"
+        );
+    }
+
+    #[test]
+    fn prompt_about_caps_unicode_characters_not_bytes() {
+        let expected = format!("Review routing {}é", "🦀".repeat(64));
+        let row = json!({"type":"message","message":{"role":"user","content":format!("\n{expected}🦀\nLater line")}});
+        assert_eq!(expected.chars().count(), 80);
+        assert_eq!(prompt_about(&row).as_deref(), Some(expected.as_str()));
+        let short = "🦀".repeat(79);
+        assert_eq!(sanitize_about_text(&format!("{short} later")), short);
     }
 }

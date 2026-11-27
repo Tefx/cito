@@ -13,6 +13,7 @@ fn selecting_a_hub_that_needs_oidc_keeps_its_drawer_open_and_disables_listen() {
         {"harness":"fixture","session_id":"open","title":"Open session","cwd":"/tmp","endpoint_pid":4242}
     ]);
     f.send(p, frame.clone());
+    control(&f, p, "toggle_available");
     let initial = inspect(&f, p);
     assert_eq!(initial.menu("drawer:work")["hidden"], false);
     assert_eq!(initial.menu("listen:fixture:open")["enabled"], true);

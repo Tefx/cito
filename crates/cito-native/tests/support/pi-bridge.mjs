@@ -25,9 +25,13 @@ process.env.CITO_PI_ALLOW_HEADLESS_DISCOVERY='1';
 const handlers=new Map(), messages=[], badges=[], notices=[], registrations=[], calls=[];
 let session='session-a', renderer, toolRenderer, command, attempts=0, failSend=false, stallHttp=false, holdHttp=false, heldArrival;
 const held=[];
-const branch=[{type:'message',message:{role:'assistant',content:'Not the user prompt'}},
- {type:'message',message:{role:'user',content:[{type:'image'},{type:'text',text:'  Review\u0007\n routing '},{type:'text',text:'🦀'.repeat(140)}]}}];
-const about='Review routing '+'🦀'.repeat(105);
+const firstPrompt={type:'message',message:{role:'user',content:[
+ {type:'image',text:'Not a prompt'},
+ {type:'text',text:'<skill name="review">\nReference text'},
+ {type:'text',text:'</skill>\r\n<skill>Another reference</skill>\n\u0007\n  Review\t routing '+'🦀'.repeat(64)+'é🦀\nLater line'},
+]}};
+const branch=[{type:'message',message:{role:'assistant',content:'Not the user prompt'}},firstPrompt];
+const about='Review routing '+'🦀'.repeat(64)+'é';
 const entries=new Map(), steering=[];
 let streaming=false, nextEntry=0;
 const transcript=()=>join(root,`${session}.jsonl`);
@@ -75,10 +79,41 @@ try {
  session='baadf00d-cafe-47b1-beca-238e0bd64e9d';await handlers.get('session_start')({},context);
  const recovered=await request({op:'identify'});assert.equal(recovered.session_id,session);
  assert.equal(recovered.session_name,'Work');assert.equal(recovered.about,about);
+ assert.equal(recovered.about_version,3);
+ assert.equal(Array.from(recovered.about).length,80);
+ const laterPrompt={type:'message',message:{role:'user',content:'Not the first user prompt'}};
+ for(const [content,expected] of [
+  ['<skill>Reference</skill>\nNunc working memory (session-local)\nSaved notes',''],
+  ['Review Nunc working memory (session-local)\nSaved notes','Review'],
+  ['<skill> is the literal opening tag under review.\nNunc working memory (session-local)\n</skill>\nPrivate note','<skill> is the literal opening tag under review.'],
+  ['<skill name="review">\nNunc working memory (session-local)\n</skill>\nReview routing','Review routing'],
+  ['<skill name="review">\nInline note quoting </skill> inside body\n</skill>\nReview routing','Review routing'],
+  ['Prompt <skill\nNunc working memory (session-local)\n</skill>\nPrivate note','Prompt <skill'],
+  ['Prompt <skill> inline\nNunc working memory (session-local)\n</skill>\nPrivate note','Prompt <skill> inline'],
+  ['<skill>foo</skill> inline\nNunc working memory (session-local)','<skill>foo</skill> inline'],
+  ['<skill>foo</skill>\nReview routing','Review routing'],
+  ['<skill>One</skill> \t<skill\tname="review">Two</skill>\rReview routing','Review routing'],
+  ['<skills>Keep this</skill>','<skills>Keep this</skill>'],
+  [' \t\u0085<skill> \t\u2028 \t</skill> \t<skill>Two</skill>\u2029Review\u0000\u00a0\t routing','Review routing'],
+  ['<skill>\n</skill> inline\nNunc working memory (session-local)','<skill>'],
+  ['<skill>\n</skill> inline\n</skill>',''],
+  ['<skill name="review"\u2028>Text</skill>','<skill name="review"'],
+  ['<skill>First</skill>\n<skill> literal\n</skill>','<skill> literal'],
+  ['🦀'.repeat(79)+' later','🦀'.repeat(79)],
+  ['<skill>Reference</skill> '.repeat(16_384)+'\nReview','Review'],
+ ]) {
+  branch.splice(1,2,{type:'message',message:{role:'user',content}},laterPrompt);
+  await handlers.get('session_tree')({},context);
+  const identified=await request({op:'identify'});
+  assert.equal(identified.about,expected,JSON.stringify(content));
+  assert.equal(identified.about_version,3);
+ }
+ branch.splice(1,2,firstPrompt);
+ await handlers.get('session_tree')({},context);
  // The first session_start owns the transition; all later socket operations use that session.
  const early={op:'deliver',session_id:recovered.session_id,batch_id:'before-start',content:'Wake after session_start',wake:true};
  assert.equal((await request({op:'status',session_id:recovered.session_id,badge:'listening before start'})).ok,true);
- assert.equal(badges.at(-1),'📡');
+ assert.equal(badges.at(-1),'💬');
  const badgeWrites=badges.length;
  session=undefined;
  assert.deepEqual(await request({op:'ping'}),{ok:true});
@@ -93,7 +128,7 @@ try {
  assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true,details:{citoBatchId:early.batch_id}},o:{triggerTurn:true,deliverAs:'steer'}}]);
  session=recovered.session_id;
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
- assert.equal(badges.at(-1),'📡','Repeated session_start must retain the session badge');
+ assert.equal(badges.at(-1),'💬','Repeated session_start must retain the session badge');
  assert.equal((await request(early)).deduplicated,true);assert.equal(messages.length,1,'Repeated session_start must retain batch deduplication');
  session='session-a';await handlers.get('session_tree')({},context);assert.equal(badges.at(-1),undefined);
  messages.length=0;
@@ -105,24 +140,24 @@ try {
   assert.equal((await request({op:'identify'})).badge,badge);
   assert.deepEqual(badges.slice(before),writes);
  }
- await checkBadge('Cito · alice','📡');
+ await checkBadge('Cito · alice','💬');
  await checkBadge('Cito · alice (0)');
- await checkBadge('Cito · alice (2)','📡 2');
+ await checkBadge('Cito · alice (2)','💬 2');
  await checkBadge('Cito · bob (02)  ');
- await checkBadge('Cito · alice (99)','📡 99');
- await checkBadge('Cito · alice (120)','📡 99+');
+ await checkBadge('Cito · alice (99)','💬 99');
+ await checkBadge('Cito · alice (120)','💬 99+');
  await checkBadge('Cito · alice (121)');
  await checkBadge('',undefined);
  await checkBadge(null);
  context.ui.theme={fg:(c,t)=>`[${c}:${t}]`};
- await checkBadge('Cito · alice','[dim:📡]');
- await checkBadge('Cito · alice (2)','[accent:📡 2]');
+ await checkBadge('Cito · alice','[dim:💬]');
+ await checkBadge('Cito · alice (2)','[accent:💬 2]');
  const beforeContextChange=badges.length;
  await handlers.get('session_info_changed')({}, {...context});
- assert.deepEqual(badges.slice(beforeContextChange),['[accent:📡 2]']);
+ assert.deepEqual(badges.slice(beforeContextChange),['[accent:💬 2]']);
  delete context.ui.theme;
  await handlers.get('session_info_changed')({},context);
- assert.equal(badges.at(-1),'📡 2');
+ assert.equal(badges.at(-1),'💬 2');
  await checkBadge(null,undefined);
  const delivery={op:'deliver',id:17,session_id:session,batch_id:'one',content:'<card> café',wake:false};assert.equal((await request(delivery,true)).deduplicated,false);assert.equal((await request(delivery)).deduplicated,true);assert.equal(messages.length,1);assert.deepEqual(messages[0],{m:{customType:'cito-notification',content:'<card> café',display:true,details:{citoBatchId:'one'}},o:{triggerTurn:false,deliverAs:'followUp'}});
  assert.equal((await request({...delivery,session_id:'wrong'})).error,'SESSION_MISMATCH');assert.equal((await request({...delivery,batch_id:'invalid',wake:'yes'})).error,'INVALID_REQUEST');
@@ -180,14 +215,14 @@ try {
  for(let width=1;width<=12;width++)for(const line of narrow.render(width)){const cells=Array.from(line.replaceAll('\u4e2d','XX').replaceAll('👩‍💻','XX').replaceAll('é','e')).length;assert(cells<=width,`width ${width}: ${line}`);}
  let c=0;const theme={fg:(_n,t)=>{c++;return t},bg:(_n,t)=>t,bold:t=>t};const card=renderer({content:[{type:'text',text:'hello café 👩‍💻 é'}]},{expanded:false},theme);assert(card.render(12).some(s=>s.includes('hello')));assert.deepEqual(card.render(0),[]);const before=c;card.invalidate();card.render(10);assert(c>before);
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;writeFileSync(join(state,'config.json'),JSON.stringify({daemonPort:1}));process.env.CITO_DAEMON_PORT=' '+port+' ';
- for(const arg of ['on --hub Work-Internal Review','team --hub=Work-Internal Pair','off --hub Work-Internal']) {
+ for(const arg of ['on --hub Work Review','team --hub=Work Pair','off --hub Work']) {
   await command.handler(arg,context);
   if(arg.startsWith('on')) {
-   assert.equal(badges.at(-1),'📡');
-   assert.equal((await request({op:'identify'})).badge,'Cito · alice-very-l');
+   assert.equal(badges.at(-1),'💬');
+   assert.equal((await request({op:'identify'})).badge,'Cito');
   }
  }
- assert.deepEqual(calls.map(v=>v.params.arguments),[{about:'Review',scope:'self',hub:'Work-Internal'},{about:'Pair',scope:'workspace',hub:'Work-Internal'},{hub:'Work-Internal'}]);assert(calls.every(v=>v.params._meta.endpoint_pid===process.pid));assert(calls.every(v=>v.params._meta.expected_session_id==='session-a'));
+ assert.deepEqual(calls.map(v=>v.params.arguments),[{about:'Review',scope:'self',hub:'Work'},{about:'Pair',scope:'workspace',hub:'Work'},{hub:'Work'}]);assert(calls.every(v=>v.params._meta.endpoint_pid===process.pid));assert(calls.every(v=>v.params._meta.expected_session_id==='session-a'));
  process.env.CITO_DAEMON_PORT='0';process.env.CITO_CONFIG_PATH='~/bridge-config.json';writeFileSync(join(process.env.HOME,'bridge-config.json'),JSON.stringify({daemonPort:port}));await command.handler('on',context);assert.equal(calls.length,4);assert.equal(calls.at(-1).params.arguments.about,about);
  await command.handler('on --hub INVALID!',context);assert.equal(calls.length,4);assert.equal(notices.at(-1).t,'warning');
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
@@ -244,7 +279,7 @@ try {
  stallHttp=true;
  try {await command.handler('on',context);assert.equal(timeoutRequested,15000);assert.equal(notices.at(-1).t,'error');}
  finally {AbortSignal.timeout=timeout;stallHttp=false;}
- // A fresh module must identify the same session before the next session_start.
+ // FB-08: a fresh module must identify the same session before the next session_start.
  session='edd50a9a-982b-447a-8541-bbb3b2c8531a';
  await handlers.get('session_start')({},context);
  const beforeReload={...early,session_id:session,batch_id:'reload'};
@@ -258,10 +293,13 @@ try {
  reloaded.default(api);
  await waitForSocket();
  const current=await request({op:'identify'});
- assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about,current.badge],[session,'/repo','Work',about,'Retained badge']);
+ assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about,current.about_version,current.badge],[session,'/repo','Work',about,3,'Retained badge']);
+ context.sessionManager.getBranch().find(row=>row.message?.role==='user').message.content='Review after reload';
  await handlers.get('session_start')({reason:'reload'},context);
+ const refreshed=await request({op:'identify'});
+ assert.deepEqual([refreshed.session_id,refreshed.cwd,refreshed.session_name,refreshed.about,refreshed.about_version,refreshed.badge],[session,'/repo','Work','Review after reload',3,'Retained badge']);
  assert.equal((await request(beforeReload)).deduplicated,true);
- assert.equal(badges.at(-1),'📡');
+ assert.equal(badges.at(-1),'💬');
  const offAfterReload=begin('');
  await request({op:'ping'});
  assert.equal(calls.length,reloadCallCount,'The new command must wait for the old instance’s in-flight request');
@@ -326,6 +364,7 @@ try {
 } finally {await handlers.get('session_shutdown')?.({},context);server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}
 assert.equal(existsSync(path),false);
 assert.equal(existsSync(sentinel),false);
+
 process.env.CITO_STATE_DIR='';
 assert.throws(()=>bridge({...api,registerMcpServer:()=>assert.fail('Empty state directory reached MCP setup')}),/CITO_STATE_DIR must not be empty/);
 process.env.CITO_STATE_DIR=state;

@@ -277,6 +277,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
     frame["available"] =
         json!([{"harness":"fixture","session_id":"recent","title":"Recent session","cwd":"/tmp"}]);
     send_companion(&f, p, frame.clone());
+    control(&f, p, "toggle_available");
     let s = inspect(&f, p);
     assert_eq!(s.menu("toggle_group:fixture")["text"], "Fixture · 1 open");
     assert!(!s.menu("candidate:fixture:recent").is_null());
@@ -688,6 +689,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         frame["available"] =
             json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
         send_companion(&f, p, frame.clone());
+        control(&f, p, "toggle_available");
         // Extreme input intentionally truncates. The strict V29 oracle must detect it
         // while every geometry, contrast, jargon, and address invariant stays intact.
         let stress_inspect = || {
@@ -896,13 +898,95 @@ fn hub_drawer_wraps_status_when_packed_actions_need_the_width() {
 }
 
 #[test]
+fn appkit_available_scroll_restores_each_hubs_own_viewport() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    frame["harnesses"].as_array_mut().unwrap().push(json!({
+        "id":"second","display_name":"Second","sf_symbol":"terminal","tint":"blue","tier":"stable","order":1
+    }));
+    frame["available"] = json!([
+        ("fixture", "personal", "work"),
+        ("second", "work", "personal")
+    ]
+    .into_iter()
+    .flat_map(|(harness, hub, other_hub)| (0..8).map(move |i| json!({
+        "harness":harness,"session_id":format!("{hub}-{i}"),"title":format!("Review {i}"),
+        "cwd":"/tmp","endpoint_pid":4242,"listening_hubs":[other_hub]
+    })))
+    .collect::<Vec<_>>());
+    f.send(p, frame);
+    control(&f, p, "toggle_available");
+
+    let inspect_scroll = |harness: &str, other_harness: &str, offset: i32| {
+        let snapshot = inspect(&f, p);
+        assert!(snapshot
+            .menu(&format!("toggle_group:{harness}"))
+            .is_object());
+        assert!(snapshot
+            .menu(&format!("toggle_group:{other_harness}"))
+            .is_null());
+        assert_eq!(
+            nodes(&snapshot["items"])
+                .iter()
+                .filter(|node| node["id"] == "available_scroll")
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.menu("available_scroll")["content_y"], offset);
+    };
+    let scroll_to = |offset| {
+        f.send(
+            p,
+            json!({"op":"test_scroll","id":"available_scroll","offset":offset}),
+        );
+    };
+    scroll_to(100);
+    inspect_scroll("fixture", "second", 100);
+    control(&f, p, "hub:work");
+    inspect_scroll("second", "fixture", 0);
+    scroll_to(18);
+    inspect_scroll("second", "fixture", 18);
+    control(&f, p, "hub:personal");
+    inspect_scroll("fixture", "second", 100);
+    control(&f, p, "hub:work");
+    inspect_scroll("second", "fixture", 18);
+}
+
+#[test]
 fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut frame = state();
     frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":if i == 1 { "~/Documents/A-very-long-ancestor/Projects/service" } else if i == 2 { "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else if i == 3 { "/srv/Documents/A-very-long-ancestor/Projects/service" } else if i == 4 { "/srv/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else { "/tmp/work" },"branch":"main","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
     f.send(p, frame.clone());
+    assert_eq!(
+        inspect(&f, p).menu("toggle_available")["text"],
+        "AVAILABLE SESSIONS · 0"
+    );
     control(&f, p, "target_hub:work");
+    let collapsed = inspect(&f, p);
+    assert_eq!(collapsed.menu("available_header")["height"], 26);
+    assert_eq!(
+        collapsed.menu("toggle_available")["text"],
+        "AVAILABLE SESSIONS · 5"
+    );
+    assert_eq!(
+        collapsed.menu("toggle_available")["symbol"],
+        "chevron.right"
+    );
+    for id in [
+        "available_scroll",
+        "toggle_group:fixture",
+        "listen:fixture:candidate-0",
+    ] {
+        assert!(collapsed.menu(id).is_null(), "{id}");
+    }
+    control(&f, p, "toggle_available");
+    assert_eq!(
+        inspect(&f, p).menu("toggle_available")["symbol"],
+        "chevron.down"
+    );
     for (style, native_style) in [("legacy", 0), ("overlay", 1)] {
         f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
         let snapshot = inspect(&f, p);
@@ -922,7 +1006,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         assert_eq!(snapshot["overlapping_siblings"], json!([]), "{style}");
     }
     let s = inspect(&f, p);
-    assert_eq!(s.menu("available_scroll")["height"], 176);
+    assert_eq!(s.menu("available_scroll")["height"], 200);
     let candidate = s.menu("candidate:fixture:candidate-0");
     assert_eq!(candidate["height"], 44);
     let title = s.menu("candidate_title:fixture:candidate-0");
@@ -1008,29 +1092,63 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         .menu("session:personal:repo-abcdefghijkl")
         .is_null());
     let original_available = frame["available"].clone();
-    let auto_before = inspect(&f, p).menu("toggle_auto_listen");
-    // Auto-Listen explains reload blockers and seeds historical groups once.
+    control(&f, p, "toggle_available");
+    let collapsed = inspect(&f, p);
+    assert!(collapsed.menu("available_scroll").is_null());
+    assert!(collapsed.menu("auto_listen_reload_status").is_null());
+    let auto_before = collapsed.menu("toggle_auto_listen");
+    assert_eq!(auto_before["text"], "Auto-Listen");
+    // Auto-Listen explains reload blockers without opening the disclosure.
     frame["hubs"][1]["auto_listen"] = json!(true);
     frame["available"] = json!([
         {"harness":"fixture","session_id":"reload","title":"Reload","cwd":"/tmp","endpoint_pid":4242,"needs_reload":true}
     ]);
     f.send(p, frame.clone());
-    let s = inspect(&f, p);
-    let auto_after = s.menu("toggle_auto_listen");
-    assert_eq!(auto_after["width"], auto_before["width"]);
-    assert_eq!(auto_after["x"], auto_before["x"]);
-    assert!(nodes(&s["items"])
-        .iter()
-        .any(|n| n["text"] == "Auto-Listen is on — run /reload below to finish connecting"));
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, p, Some(appearance));
+        let toggle = s.menu("toggle_available");
+        let auto_after = s.menu("toggle_auto_listen");
+        assert_eq!(toggle["symbol"], "chevron.right");
+        assert_eq!(auto_after["text"], "Auto-Listen: On");
+        assert_eq!(auto_after["width"], auto_before["width"]);
+        assert_eq!(auto_after["x"], auto_before["x"]);
+        assert_eq!(
+            auto_after["x"].as_f64().unwrap() + auto_after["width"].as_f64().unwrap(),
+            368.0
+        );
+        assert!(
+            toggle["x"].as_f64().unwrap() + toggle["width"].as_f64().unwrap()
+                < auto_after["x"].as_f64().unwrap()
+        );
+        for control in [toggle, auto_after] {
+            assert!(
+                control["label_measured_width"].as_f64().unwrap()
+                    <= control["label_width"].as_f64().unwrap()
+            );
+        }
+        assert_eq!(s["clipped_views"], json!([]), "{appearance}");
+        assert_eq!(s["overlapping_siblings"], json!([]), "{appearance}");
+        assert!(s.menu("reload:fixture:reload").is_null());
+        let banner = s.menu("auto_listen_reload_status");
+        assert_eq!(banner["hidden"], false);
+        assert!(nodes(&banner["children"]).iter().any(
+            |n| n["text"] == "Run /reload in 1 session to finish connecting with Auto-Listen."
+        ));
+    }
+    control(&f, p, "toggle_available");
+    let expanded = inspect(&f, p);
+    assert!(expanded.menu("reload:fixture:reload").is_object());
+    assert!(expanded.menu("auto_listen_reload_status").is_object());
+    assert!(expanded.menu("available_scroll").is_null());
     frame["available"] = json!([
         {"harness":"fixture","session_id":"recent","title":"History","cwd":"/tmp"}
     ]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
-    assert_eq!(s.menu("toggle_group:fixture")["symbol"], "chevron.right");
-    assert!(s.menu("candidate:fixture:recent").is_null());
-    control(&f, p, "toggle_group:fixture");
-    let recent = inspect(&f, p).menu("listen:fixture:recent");
+    assert!(s.menu("auto_listen_reload_status").is_null());
+    assert_eq!(s.menu("toggle_group:fixture")["symbol"], "chevron.down");
+    assert_eq!(s.menu("toggle_group:fixture")["text"], "Fixture · 1 recent");
+    let recent = s.menu("listen:fixture:recent");
     assert_eq!(recent["enabled"], false);
     assert_eq!(recent["tooltip"], "Open this session to listen");
     control(&f, p, "listen:fixture:recent");
@@ -1107,6 +1225,18 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     initial["my_remote_listeners"] = json!([peer("remote"), other_network, unscoped]);
     initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","cwd":"/tmp","endpoint_pid":4242}]);
     send_companion(&f, p, initial);
+    let collapsed = inspect(&f, p);
+    assert_eq!(
+        collapsed.menu("toggle_my_remote")["text"],
+        "MY OTHER HOSTS · 2"
+    );
+    assert_eq!(
+        collapsed.menu("toggle_my_remote")["symbol"],
+        "chevron.right"
+    );
+    assert!(collapsed.menu("remote:personal:unscoped").is_null());
+    control(&f, p, "toggle_my_remote");
+    control(&f, p, "toggle_available");
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert!(s.menu("remote:work:work-peer").is_null());
@@ -1414,7 +1544,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     control(&f, p, "copy_dir:work:long-remote");
     assert_eq!(inspect(&f, p)["clipboard"], full);
     let mut many = state();
-    many["listeners"] = json!((0..6)
+    many["listeners"] = json!((0..3)
         .map(|i| {
             let mut row = listener();
             row["session_id"] = json!(format!("session-{i}"));
@@ -1422,11 +1552,19 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
             row
         })
         .collect::<Vec<_>>());
-    send_companion(&f, p, many);
+    send_companion(&f, p, many.clone());
     control(&f, p, "hub:personal");
+    let inline = inspect(&f, p);
+    assert_eq!(inline["count"], 3);
+    assert!(inline.menu("active_scroll").is_null());
+    let mut fourth = listener();
+    fourth["session_id"] = json!("session-3");
+    fourth["scoped_id"] = json!("personal:session-3");
+    many["listeners"].as_array_mut().unwrap().push(fourth);
+    send_companion(&f, p, many);
     let scrolled = inspect(&f, p);
-    assert_eq!(scrolled.menu("active_scroll")["height"], 256);
-    for i in 0..6 {
+    assert_eq!(scrolled.menu("active_scroll")["height"], 220);
+    for i in 0..4 {
         assert_eq!(
             scrolled.menu(&format!("session:personal:session-{i}"))["height"],
             64

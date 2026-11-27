@@ -1,3 +1,6 @@
+use super::plugins::bundled_plugin_roots;
+#[cfg(debug_assertions)]
+use super::plugins::DEV_CHECKOUT_ROOT;
 #[cfg(test)]
 use crate::plugins::random_hex;
 use crate::plugins::CITO_VERSION;
@@ -55,12 +58,15 @@ pub fn resolve_stable_package_root(raw: &str) -> String {
 
 pub fn resolve_package_root() -> PathBuf {
     if let Ok(exe) = env::current_exe() {
-        // Cargo executables live under a profile directory, not the package bin/.
-        // OUT_DIR also covers an explicitly configured Cargo target directory.
-        let checkout = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        if let Some(profile) = Path::new(env!("OUT_DIR")).ancestors().nth(3) {
-            if exe.starts_with(profile) && checkout.join("Cargo.toml").is_file() {
-                return checkout;
+        #[cfg(debug_assertions)]
+        {
+            // Cargo executables live under a profile directory, not the package bin/.
+            // OUT_DIR also covers an explicitly configured Cargo target directory.
+            let checkout = Path::new(DEV_CHECKOUT_ROOT);
+            if let Some(profile) = Path::new(env!("OUT_DIR")).ancestors().nth(3) {
+                if exe.starts_with(profile) && checkout.join("Cargo.toml").is_file() {
+                    return checkout.to_path_buf();
+                }
             }
         }
         if let Some(exe_dir) = exe.parent() {
@@ -73,28 +79,30 @@ pub fn resolve_package_root() -> PathBuf {
             return parent.to_path_buf();
         }
     }
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+    #[cfg(debug_assertions)]
+    let fallback = DEV_CHECKOUT_ROOT;
+    // Do not search the working directory when the executable path is unavailable.
+    #[cfg(not(debug_assertions))]
+    let fallback = "/";
+    PathBuf::from(fallback)
 }
 
 pub fn resolve_bundled_plugin_dir(id: &str) -> PathBuf {
     bundled_plugin_dir(&resolve_package_root(), id)
 }
 
-use super::plugins::bundled_plugin_roots;
-
 pub(super) fn resolve_bundled_plugins_root() -> Option<PathBuf> {
-    bundled_plugin_roots(&resolve_package_root())
-        .into_iter()
-        .find(|dir| dir.is_dir())
+    bundled_plugin_roots(Some(&resolve_package_root())).find(|dir| dir.is_dir())
 }
 
 fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
-    bundled_plugin_roots(root)
-        .into_iter()
+    bundled_plugin_roots(Some(root))
         .map(|dir| dir.join(id))
         .find(|dir| dir.join("plugin.json").is_file())
         .unwrap_or_else(|| {
-            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")).join(id)
+            #[cfg(debug_assertions)]
+            let root = Path::new(DEV_CHECKOUT_ROOT);
+            root.join("plugins").join(id)
         })
 }
 
@@ -2275,10 +2283,12 @@ mod tests {
             fs::write(bundled.join("plugin.json"), "{}").unwrap();
             assert_eq!(bundled_plugin_dir(&package, "sample"), bundled);
         }
-        assert_eq!(
-            bundled_plugin_dir(&root.join("missing"), "sample"),
-            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins/sample"))
-        );
+        let missing_package = root.join("missing");
+        #[cfg(debug_assertions)]
+        let expected = Path::new(DEV_CHECKOUT_ROOT).join("plugins/sample");
+        #[cfg(not(debug_assertions))]
+        let expected = missing_package.join("plugins/sample");
+        assert_eq!(bundled_plugin_dir(&missing_package, "sample"), expected);
         fs::remove_dir_all(root).unwrap();
     }
 

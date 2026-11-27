@@ -1735,12 +1735,14 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     l.until(|s| s["settings_open"] == false);
 
     // A real plugin discovery response travels through SessionActivity, snapshot,
-    // and the UI, including mixed 36/46-point rows in the scroll document.
+    // and the UI, including Listen and /reload rows in the unified scroll document.
     let options = f.state.join("plugins/fixture/options.json");
     let sessions:Vec<Value>=(0..5).map(|i|json!({"harness":"fixture","session_id":format!("reload-{i}"),"title":"Work session","cwd":"/tmp","endpoint_pid":std::process::id(),"needs_reload":i%2==0,"reload_hint":"Run /reload in Fixture to enable 1-click listen"})).collect();
     fs::write(&options,json!({"session_id":"session-1","status":"alive","outcome":"delivered_unconfirmed","sessions":sessions}).to_string()).unwrap();
     f.action_ok(json!({"op":"setup_apply","harness":"fixture"}));
     f.send(l.ui, json!({"op":"test_menu_open"}));
+    l.until(|s| s.menu("toggle_available").is_object());
+    l.control("toggle_available");
     l.until(|s| !s.menu("reload:fixture:reload-0").is_null());
     l.snapshot("menu", "r4_needs_reload_candidates.png");
     l.control("reload:fixture:reload-0");
@@ -2943,6 +2945,14 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     compact_menu["listeners"][0]["listen_mode"] = json!("manual");
     compact_menu["listeners"][0]["title"] = json!("Release review");
     send_companion(&f, p, compact_menu);
+    let site = inspect(&f, p);
+    assert_eq!(
+        site.menu("toggle_available")["text"],
+        "AVAILABLE SESSIONS · 0"
+    );
+    assert_eq!(site.menu("toggle_available")["symbol"], "chevron.right");
+    assert_eq!(site.menu("toggle_auto_listen")["text"], "Auto-Listen: On");
+    assert!(site.menu("available_empty_target").is_null());
     capture("menu", "menu_site");
     send_companion(&f, p, frame);
 
@@ -3296,6 +3306,7 @@ fn correlation_editor_keys_and_modal_escape() {
     frame["harnesses"] = json!((0..6).map(|i| json!({"id":format!("agent-{i}"),"display_name":format!("Agent {i}"),"kind":"agent","sf_symbol":"terminal","tint":"blue","tier":"stable","order":i})).collect::<Vec<_>>());
     frame["my_remote_listeners"] = json!([peer("remote")]);
     f.send(p, frame);
+    control(&f, p, "toggle_my_remote");
     control(&f, p, "copy_remote:personal:remote");
     assert_eq!(
         inspect(&f, p)["clipboard"],

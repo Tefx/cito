@@ -31286,7 +31286,7 @@ phases:
 - id: v74
   name: V74 Menu Progressive Disclosure, Pi 💬 Statusbar Badge & Full-Stack Metadata/Badge
     DSE Closure
-  status: pending
+  status: done
   gate: All V74-* obligations closed (Pi 💬 badge & duplicate-slicer removal, symmetric
     TS/Rust promptAbout sanitization, format_badge owner-slug fallback, readable CLI
     AVAILABLE SESSIONS, macOS Menu progressive disclosure & ghost-state removal, tests
@@ -31307,7 +31307,7 @@ phases:
   - id: v74.rust_ts_metadata_and_badges
     name: 'Wave 1 Track A: Pi 💬 Badge, Symmetric Prompt Sanitization, Badge Owner-Slug
       & CLI Status Closure'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -31423,10 +31423,28 @@ phases:
     - crates/cito-native/src/core/cli.rs
     - crates/cito-native/tests/support/pi-bridge.mjs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T16:15:12.463091Z'
+    done_at: '2026-11-27T16:30:11.789077+00:00'
+    evidence: 'Integrated commits 3bbcb9d9a2636f2b84dca1f97b84ff69a8cd3913 and e202aab18b9d719eb9c800ffb5a75907f91e01f9
+      onto main. Modified: plugins/pi/cito-bridge.ts, plugins/pi/native.rs, crates/cito-native/src/core/session_activity.rs,
+      crates/cito-native/src/core/cli.rs, crates/cito-native/tests/support/pi-bridge.mjs,
+      crates/cito-native/tests/support/plugins.rs. Verified: node --experimental-strip-types
+      --test crates/cito-native/tests/support/pi-bridge.mjs (1 passed), cargo fmt
+      --all -- --check (exit 0), cargo clippy --workspace --all-targets --locked --
+      -D warnings (exit 0), cargo test --package cito-native --lib --locked (465 passed,
+      4 ignored), cargo test --package cito-native --bin cito-plugin-pi --locked (2
+      passed), cargo test --workspace --locked --test native pi (28/28 passed after
+      updating stale plugins.rs:2310 expectation to "Review"), cli (17 passed), mcp_and_inbox
+      (35 passed), session_activity (1 passed). Confirmed Pi 💬 / 💬 N / 💬 99+ statusbar
+      badge, deleted duplicate publicId slicer, symmetric TS/Rust <skill> & Nunc working
+      memory stripping capped at 80 chars, format_badge owner-slug fallback fix, and
+      readable CLI AVAILABLE SESSIONS output with zero Larva/PI_PERSONA/internal-name
+      leaks and raw identify.badge preserved.'
   - id: v74.macos_menu_progressive_disclosure
     name: 'Wave 1 Track B: macOS Menu Progressive Disclosure, Ghost-State De-Bloat
       & UI Tests/Docs'
-    status: pending
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
       \ contract-and-simplicity]\n\nBase commit: c28f9b148adeedc02c3d2f9924b5b2595e6fbe98\
       \ (product version stays 0.23.0; do NOT bump version or mutate bin/ or plugins/*/bin/\
@@ -31508,10 +31526,27 @@ phases:
     - docs/DESIGN.md
     - README.md
     agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T16:15:12.463293Z'
+    done_at: '2026-11-27T16:30:17.274186+00:00'
+    evidence: 'Integrated rebased commit 66b67ff on main (from 2d69011a65e96652e16c3d5f2c145a01d5caa74c).
+      Modified: src/macos/Companion.swift, src/macos/MenuSurface.swift, crates/cito-native/tests/support/ui/{menu,directory,capabilities,render_stability,oidc_settlement,oracle_e2e}.rs,
+      docs/DESIGN.md, README.md. Verified: /usr/bin/swiftc -warnings-as-errors -typecheck
+      -target arm64-apple-macos13.0 src/macos/*.swift (exit 0), cargo fmt --all --
+      --check (exit 0), cargo clippy --workspace --all-targets --locked -- -D warnings
+      (exit 0), ui::menu:: (18 passed), ui::directory:: (18 passed), ui::capabilities::
+      (9 passed), ui::render_stability:: (11 passed), ui::oidc_settlement:: (13 passed),
+      ui::oracle_e2e:: (30 passed). Confirmed default-collapsed myRemoteCollapsed
+      & availableCollapsed, unified available_scroll (<=200pt) with scroll preservation,
+      active_scroll threshold >3 cards (220pt), reload banner preserved while collapsed,
+      invariant toggle_auto_listen geometry, deleted autoCollapsedRecentGroups / menuScrollKeys
+      / available_scroll:<harness> split-IDs, unchanged candidateIsOpen, English/vendor-neutral
+      docs sync, and noted menu_site Light/Dark rendered at 760x460px (down from 760x512px)
+      for Wave 2 screenshot refresh.'
   - id: v74.stage_and_screenshots
     name: 'Wave 2 Consolidation: Stage Signed arm64 Binaries, Refresh menu-dark.png
       & Full Workspace Regression'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -31611,68 +31646,90 @@ phases:
     - v74.rust_ts_metadata_and_badges
     - v74.macos_menu_progressive_disclosure
     agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T16:30:20.908589Z'
+    done_at: '2026-11-27T16:55:57.160813+00:00'
+    evidence: 'Integrated commit 7b73ee51d9bc27b06146db72e5fd4ec8e4e97df4 onto main.
+      Staged all 7 Darwin arm64 signed binaries at v0.23.0 (cargo build --release
+      --locked with 0 compiler warnings; ./bin/cito-native-darwin-arm64 --version
+      -> cito v0.23.0; all 7 passed lipo -archs == arm64 and codesign -v --strict:
+      bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64, plugins/claude/bin/cito-claude-hook,
+      plugins/claude/bin/cito-plugin-claude, plugins/codex/bin/cito-plugin-codex,
+      plugins/pi/bin/cito-plugin-pi, plugins/telegram/bin/cito-plugin-telegram). Regenerated
+      site/assets/screenshots/menu-dark.png (760x460, visual read verified crisp with
+      collapsed Available Sessions and zero clipping/truncation) and synchronized
+      the 3 intrinsic dimension references in site/index.html, site/docs/guide.html,
+      and crates/cito-native/tests/support/distribution.rs:674. Full regression passed:
+      swiftc -warnings-as-errors (exit 0), pi-bridge.mjs (1 passed), site-clipboard.mjs
+      (1 passed), release.py check (0.23.0), Python packaging (35 passed), cargo fmt
+      --check (exit 0), cargo clippy --workspace --all-targets --locked -- -D warnings
+      (exit 0), cargo test --workspace --locked -- --test-threads=2 (833 passed, 0
+      failed, 5 ignored across 9 targets).'
   - id: v74.gate_final
-    name: Final FULL Verification Gate for Phase v74
-    status: pending
-    description: 'step_type: gate
-
-      repo_change_policy: no_repo_change
-
-      [REQUIRES_SKILL: contract-and-simplicity]
-
-
-      Independent FULL verification gate for Phase `v74` (diff range `c28f9b148adeedc02c3d2f9924b5b2595e6fbe98..HEAD`).
-
-
-      Deliver:
-
-      - Audit every `V74-*` obligation across the integrated diff (`V74-PiChatEmojiBadge`,
-      `V74-PiDuplicateSlugRemoval`, `V74-PromptAboutSanitization` TS+Rust parity,
-      `V74-CoreFormatBadgeOwnerSlugFix`, `V74-CliStatusReadableAvailable`, `V74-TrackATests`,
-      `V74-MenuProgressiveDisclosure`, `V74-MenuGhostStateDeBloat`, `V74-MenuTestsAndDocs`,
-      `V74-StageBinaries`, `V74-RefreshMenuScreenshot`, `V74-FullWorkspaceRegression`)
-      for `(D, S, E)` closure, sibling symmetry, and Law II `Pi_down` de-bloat completeness.
-
-      - Verify policy invariants: zero `Larva` / `PI_PERSONA` / internal company or
-      environment names in diff and modified files; strictly English-only UI/UX strings,
-      comments, errors, and docs (`README.md`, `docs/DESIGN.md`); product version
-      remains `0.23.0` and git tag `v0.23.0` is untouched; `git status` is clean.
-
-      - Verify all 7 staged Darwin `arm64` binaries pass `lipo -archs`, `codesign
-      -v --strict`, and `./bin/cito-native-darwin-arm64 --version` (`cito v0.23.0`),
-      visually inspect refreshed `site/assets/screenshots/menu-dark.png` via `read`,
-      and confirm full workspace test suite green (reusing fresh `v74.stage_and_screenshots`
-      pass evidence if `HEAD` is unchanged and running live verification checks).
-
-
-      Boundary:
-
-      - Owner: `gate-reviewer` (read-only FULL gate; modify zero files).
-
-      - `scope.allowed_paths`: none (read-only).
-
-      - `scope.blocked_paths`: all repository files (read-only audit).
-
-
-      Admit:
-
-      - Zero blocking Tier 1 `[CONTRACT / WIRE]` or `[SIMPLICITY / DE-BLOAT]` findings;
-      all `V74-*` obligations verified with file:symbol and command receipts; `PASS`
-      or `FAIL` verdict with explicit Coverage Receipt.
-
-
-      Recovery:
-
-      - On any blocking finding, emit `FAIL` with exact `file:line`, violated invariant,
-      counterexample, and smallest closure fix without modifying repository files.'
+    name: Final DELTA Verification Gate for Phase v74 (R3 PIVOT_PI_DOWN Closure &
+      Clean Binaries)
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nIndependent DELTA verification gate for Phase\
+      \ `v74` verifying `PIVOT_PI_DOWN` arbitration (`01a21e4b`) closure across `v74.repair_pi_sanitizers_r3`\
+      \ and `v74.repair_stage_clean_binaries_r3` (reusing verified prior DELTA evidence\
+      \ for untouched `F3`/`F4`/`W1` surfaces, and auditing the R3 repair diff through\
+      \ `HEAD`).\n\nDeliver:\n- Verify `PIVOT_PI_DOWN` closure for `(D, S, E)` conservation,\
+      \ TS/Rust sibling symmetry, and Law II `Pi_down` completeness:\n  - `F1-LINE-INITIAL-LITERAL`:\
+      \ Both `plugins/pi/cito-bridge.ts:sanitizeAboutText` and `plugins/pi/native.rs:sanitize_about_text`\
+      \ replace regex stripping with symmetric O(N) leading-prefix `<skill>` block\
+      \ strippers (`crates/cito-native/src/core/daemon/companion_projection.rs` untouched),\
+      \ covering all 6 cases: line-initial literal `<skill> is the literal opening\
+      \ tag under review.\\nNunc working memory (session-local)\\n</skill>\\nPrivate\
+      \ note` -> `\"<skill> is the literal opening tag under review.\"`, `<skill name=\"\
+      review\">` quoting memory -> `\"Review routing\"`, `Prompt <skill` -> `\"Prompt\
+      \ <skill\"`, `Prompt <skill> inline` -> `\"Prompt <skill> inline\"`, multi-line\
+      \ `<skill>` quoting inline `` `</skill>` ``, and single-line `<skill>foo</skill>\
+      \ inline` vs `<skill>foo</skill>\\nbar`.\n  - `F2-CACHE-VERSION-COLLISION` (`Pi_down`):\
+      \ `ENDPOINT_CACHE_VERSION` completely deleted from `plugins/pi/native.rs` (`publish_endpoint`\
+      \ writes `{\"identity\": ..., \"session\": ...}`); single canonical provenance\
+      \ `ABOUT_VERSION = 3` in TS & Rust and `\"pi/transcript-cache-v3/about-v4\"\
+      ` transcript cache namespace; `cito-bridge.ts` clears `session.about = \"\"\
+      ` and `session.aboutVersion = undefined` on module load when `aboutVersion !==\
+      \ 3`, emits `about_version: session.aboutVersion ?? null` in `identify`, and\
+      \ stamps `aboutVersion = 3` in `update(ctx)`; `native.rs` gates `cached_session`,\
+      \ `socket_candidates`, and `candidates` strictly on `v[\"about_version\"] !=\
+      \ 3` and stamps `about_version: 3` in `recover_about` (even when `about` is\
+      \ `null`) and `process_candidates`.\n  - `F5-SYNTHETIC-PREDECESSOR`: Synthetic\
+      \ `predecessor.ts` deleted from `crates/cito-native/tests/support/pi-bridge.mjs`;\
+      \ zero `Symbol.for('cito.pi.sessionState')` / `Symbol.for(\"cito.pi.sessionState\"\
+      )` references anywhere in `crates/cito-native/tests/`; black-box `plugins.rs`\
+      \ timeout tests cover versionless, `cache_version: 2`, and `cache_version: 2`\
+      \ + `about_version: 2` caches across both `resolve_caller` and `verify`; run\
+      \ ephemeral `/tmp` git-pinned predecessor (`c28f9b1`, `37cc5c1`, `3ee1219` ->\
+      \ `HEAD`) `/reload` verification and clean up `/tmp` on exit.\n  - `Clean Staged\
+      \ Binaries`: all 7 staged Darwin `arm64` binaries pass `lipo -archs` (`arm64`),\
+      \ `codesign -v --strict`, `./bin/cito-native-darwin-arm64 --version` (`cito\
+      \ v0.23.0`), and `0/0/0/0/0` scan (`/Users/`, `/home/`, `/.cargo/registry`,\
+      \ `Larva`, `PI_PERSONA`).\n- Verify policy invariants: zero `Larva` / `PI_PERSONA`\
+      \ / internal names in modified files; strictly English-only UI/docs/comments;\
+      \ product version remains `0.23.0` and tag `v0.23.0` untouched; `git status`\
+      \ clean; reuse `v74.repair_stage_clean_binaries_r3` full-suite pass evidence\
+      \ if `HEAD` matches while running live binary/policy/predecessor-reload spot\
+      \ checks.\n\nBoundary:\n- Owner: `gate-reviewer` (read-only DELTA gate; modify\
+      \ zero repository files).\n- `scope.allowed_paths`: none (read-only).\n- `scope.blocked_paths`:\
+      \ all repository files (read-only audit).\n\nAdmit:\n- Zero blocking Tier 1\
+      \ `[CONTRACT / WIRE]` or `[SIMPLICITY / DE-BLOAT]` findings; `F1-LINE-INITIAL-LITERAL`,\
+      \ `F2-CACHE-VERSION-COLLISION`, `F5-SYNTHETIC-PREDECESSOR`, ephemeral git-pinned\
+      \ predecessor `/reload` probe (`c28f9b1`, `37cc5c1`, `3ee1219` -> `HEAD`), and\
+      \ re-staged clean binaries explicitly verified with `file:symbol` and command\
+      \ receipts; emit `PASS` (or `FAIL`) with Coverage Receipt.\n\nRecovery:\n- On\
+      \ any remaining blocking finding, emit `FAIL` with exact `file:line`, violated\
+      \ invariant, counterexample, and smallest closure fix without modifying repository\
+      \ files."
     verification: git status --short && git rev-parse v0.23.0 && ./bin/cito-native-darwin-arm64
       --version && for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
       plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
       plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
-      lipo -archs "$b" && codesign -v --strict "$b"; done && rg -n "Larva|PI_PERSONA"
-      plugins/pi/cito-bridge.ts plugins/pi/native.rs crates/cito-native/src/core/session_activity.rs
-      crates/cito-native/src/core/cli.rs src/macos/Companion.swift src/macos/MenuSurface.swift
-      docs/DESIGN.md README.md || true
+      lipo -archs "$b" && codesign -v --strict "$b" && ! strings -a "$b" | grep -E
+      "(/Users/[^/]+/|/home/[^/]+/|/\.cargo/registry|Larva|PI_PERSONA)"; done && !
+      rg -n "Larva|PI_PERSONA|ENDPOINT_CACHE_VERSION" plugins/pi/cito-bridge.ts plugins/pi/native.rs
+      && ! rg -n "Symbol\.for\(['\"]cito\.pi\.sessionState['\"]\)" crates/cito-native/tests/
     evidence_template: Verdict (PASS/FAIL); Coverage Receipt across all V74-* obligations
       and modified files; grep receipts confirming zero Larva/PI_PERSONA/internal
       names and English-only UI/code/docs; binary version (`cito v0.23.0`) + lipo/codesign
@@ -31681,13 +31738,766 @@ phases:
     refs:
     - plugins/pi/cito-bridge.ts
     - plugins/pi/native.rs
-    - crates/cito-native/src/core/session_activity.rs
-    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/plugins.rs
+    - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
+    - plugins/pi/bin/cito-plugin-pi
+    depends_on:
+    - v74.repair_stage_clean_binaries_r3
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-27T19:19:57.479678Z'
+    done_at: '2026-11-27T19:23:54.564045+00:00'
+    evidence: 'PASS (gate.report.v2 DELTA POSITIVE_GATE_EVIDENCE on git:9512e011ac1cd2e22a161bed3774ac67ecb04454,
+      validator exit 0 valid:true binding_checked:true). All 12 V74-* obligations
+      PROVEN: F1-LINE-INITIAL-LITERAL closed via symmetric O(N) leading-prefix <skill>
+      block parser in plugins/pi/cito-bridge.ts & plugins/pi/native.rs (companion_projection.rs
+      untouched); F2-CACHE-VERSION-COLLISION closed by removing ENDPOINT_CACHE_VERSION
+      and enforcing single ABOUT_VERSION = 3 + pi/transcript-cache-v3/about-v4 across
+      TS identify, cached_session, socket_candidates, candidates, recover_about, and
+      process_candidates; F5-SYNTHETIC-PREDECESSOR closed with 0 Symbol.for matches
+      under crates/cito-native/tests/, public branch reload test in pi-bridge.mjs,
+      legacy/v2 timeout tests across resolve_caller & verify in plugins.rs, and ephemeral
+      git-pinned c28f9b1/37cc5c1/3ee1219 -> HEAD reload probes. All 7 arm64 binaries
+      verified (0/0/0/0/0 scan, codesign exit 0, ./bin/cito-native-darwin-arm64 --version
+      == cito v0.23.0); exact-tree regression 837 passed (482 unit + 355 integration,
+      0 failed, 5 ignored), swiftc -warnings-as-errors, 2/2 Node tests, 35/35 Python
+      packaging tests, release.py check 0.23.0, and tag v0.23.0 ancestor preserved.'
+  - id: v74.repair_pi_sanitizers
+    name: 'Repair F1/F2: Pi Sanitizer Boundary Ordering & Reload/Cache Versioning'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nRepair blocking findings F1 and F2 from `v74.gate_final`\
+      \ (`FAIL`). Product version remains `0.23.0`; do NOT bump versions or mutate\
+      \ `bin/` or `plugins/*/bin/`.\n\nDeliver:\n- [V74-F1-SanitizerOrder] `plugins/pi/cito-bridge.ts:promptAbout`\
+      \ & `plugins/pi/native.rs:prompt_about`: enforce strict boundary-first ordering\
+      \ across both TS and Rust — split/truncate at `\"Nunc working memory (session-local\"\
+      ` BEFORE stripping `<skill\\b[\\s\\S]*?</skill>` XML blocks so an unclosed `<skill`\
+      \ opener before the memory header cannot swallow the boundary and leak trailing\
+      \ memory lines after a `</skill>` inside memory. Add matching fresh-message\
+      \ counterexample tests (`<skill` opener before `Nunc working memory (session-local)`\
+      \ containing `</skill>\\nPrivate note`) in `crates/cito-native/tests/support/pi-bridge.mjs`\
+      \ and `plugins/pi/native.rs` / `crates/cito-native/tests/support/plugins.rs`,\
+      \ verifying both socket `identify` and transcript-derived `resolve_caller`.\n\
+      - [V74-F2-ReloadAndCacheEpoch] `plugins/pi/cito-bridge.ts` & `plugins/pi/native.rs`:\n\
+      \  1. On TS bridge module `/reload` transition, immediately sanitize existing\
+      \ `session.about` on module load (so pre-`session_start` `identify` never returns\
+      \ stale unsanitized `about`) AND recompute `promptAbout(ctx.sessionManager)`\
+      \ once per module epoch inside `update(ctx)`.\n  2. Version Rust endpoint cache\
+      \ with `\"cache_version\": 2` in `plugins/pi/native.rs:publish_endpoint` and\
+      \ check it in `cached_session`: when reading a legacy endpoint cache (missing\
+      \ or `< 2`) on `identify` timeout, recompute/sanitize `about` (from transcript/sanitizer)\
+      \ without losing `session_id`, `cwd`, `session_name`, or badge state.\n  3.\
+      \ Add discriminating transition tests covering old-to-new `/reload` in `crates/cito-native/tests/support/pi-bridge.mjs`\
+      \ and same-PID timeout on a legacy `pi/endpoints/<pid>.json` cache in `plugins/pi/native.rs`\
+      \ or `crates/cito-native/tests/support/plugins.rs`.\n\nImplementation Notes:\n\
+      - Inspect `plugins/pi/cito-bridge.ts` (`promptAbout`, module reload/session\
+      \ preservation, `update(ctx)`, `identify` handler) and `plugins/pi/native.rs`\
+      \ (`prompt_about`, `publish_endpoint`, `cached_session`, `resolve_caller`) completely\
+      \ (`entry..exit`).\n- Share one sanitization helper in TS (used by both `promptAbout`\
+      \ and reload-time `session.about` sanitization) and one in Rust (used by both\
+      \ `prompt_about` and legacy cache sanitization) to avoid duplicate sanitizer\
+      \ drift.\n- Keep all code comments, fixtures, and errors English-only and vendor-neutral\
+      \ with zero `Larva` / `PI_PERSONA` references.\n\nBoundary:\n- Owner: `software-engineer`\
+      \ (parallel repair track, strictly file-disjoint from `v74.repair_menu_scroll_and_docs`).\n\
+      - `scope.allowed_paths`: `plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`,\
+      \ `crates/cito-native/tests/support/pi-bridge.mjs`, `crates/cito-native/tests/support/plugins.rs`.\n\
+      - `scope.blocked_paths`: `plan.yaml`, `bin/**`, `plugins/*/bin/**`, `Cargo.toml`,\
+      \ `Cargo.lock`, secrets/credentials.\n- Rollback: standard git revert within\
+      \ worktree.\n\nAdmit:\n- Both F1 boundary-order counterexample tests (TS + Rust,\
+      \ socket `identify` + transcript `resolve_caller`) and both F2 transition tests\
+      \ (`/reload` epoch refresh + legacy `pi/endpoints/<pid>.json` cache timeout)\
+      \ pass cleanly.\n- Fast targeted verification passes with zero warnings.\n\n\
+      Recovery:\n- If an existing test in `plugins.rs` or `pi-bridge.mjs` asserts\
+      \ raw legacy endpoint JSON shape without `cache_version`, update only the affected\
+      \ expectation within `allowed_paths` while preserving backward-compatible fallback\
+      \ on legacy caches."
+    verification: node crates/cito-native/tests/support/pi-bridge.mjs && cargo test
+      --package cito-native --bin cito-plugin-pi --locked && cargo test --package
+      cito-native --test native support::plugins --locked && cargo fmt --check &&
+      cargo clippy --workspace --all-targets --locked -- -D warnings
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T17:09:18.086285Z'
+    done_at: '2026-11-27T17:20:11.856056+00:00'
+    evidence: 'Integrated rebased commit 886fb7b on main (from 5b07a6ac20dd9b839863ada1efef6d3e6dd32017).
+      Closed F1 & F2 cleanly across plugins/pi/cito-bridge.ts, plugins/pi/native.rs,
+      crates/cito-native/tests/support/pi-bridge.mjs, and crates/cito-native/tests/support/plugins.rs:
+      split "Nunc working memory (session-local" before stripping <skill> blocks via
+      shared sanitizeAboutText/sanitize_about_text helpers, sanitize legacy session.about
+      on TS bridge reload and refresh once per epoch in update(ctx) while retaining
+      sessionId/activeBadge/commandGen, version endpoint cache (ENDPOINT_CACHE_VERSION
+      = 2) and recover/sanitize legacy endpoint cache about on identify timeout without
+      losing session_id/cwd/identity. Verified: pi-bridge.mjs (1 passed), cargo fmt
+      --check (exit 0), clippy -D warnings (exit 0), cargo test --package cito-native
+      --bin cito-plugin-pi (2 passed), cargo test --workspace --locked --test native
+      pi (29 passed), socket_discovery_retains_verified_sessions_across_750ms_timeouts
+      (1 passed), u2_live_process_discovery_is_configured_owned_and_collision_safe
+      (1 passed).'
+  - id: v74.repair_menu_scroll_and_docs
+    name: 'Repair F3/W1: Hub-Keyed Menu Scroll Preservation & Website Enrollment Copy'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Repair blocking finding F3 and warning W1 from `v74.gate_final` (`FAIL`). Product
+      version remains `0.23.0`; do NOT bump versions or mutate `bin/` or `plugins/*/bin/`.
+
+
+      Deliver:
+
+      - [V74-F3-HubKeyedMenuScroll] `src/macos/Companion.swift` & `src/macos/MenuSurface.swift`:
+      keep ONE `available_scroll` per render, add `renderedScrollHub: String` tracking
+      the Hub that built the currently mounted scroll views, capture scroll offsets
+      and row anchors (`menuScrollOffsets` / `menuScrollAnchors`) for all menu scroll
+      containers (`active_scroll`, `my_remote_scroll`, `available_scroll`) keyed against
+      the pre-switch `renderedScrollHub` (`"\(id):\(renderedScrollHub)"`) BEFORE `menu.removeAllItems()`,
+      restore against the incoming `targetHub` (`"\(id):\(targetHub)"`), and advance
+      `renderedScrollHub = targetHub` for the rebuilt menu. Add a discriminating two-disjoint-Hub
+      regression test in `crates/cito-native/tests/support/ui/directory.rs` or `crates/cito-native/tests/support/ui/menu.rs`
+      (`personal` scrolled to `100` -> switch to `work` starts at `0` -> scroll `work`
+      to `18` -> return to `personal` restores `100`).
+
+      - [V74-W1-SiteEnrollmentCopy] `site/index.html` (line ~113) & `site/docs/guide.html`
+      (lines ~100-119): update the English website enrollment callout, guide paragraph,
+      and figure caption so readers are explicitly instructed to expand **Available
+      Sessions** before clicking **`+ Listen`**, matching `README.md`, `docs/DESIGN.md`,
+      and `site/assets/screenshots/menu-dark.png`.
+
+
+      Implementation Notes:
+
+      - Inspect `src/macos/Companion.swift` (scroll state declarations) and `src/macos/MenuSurface.swift:rebuild`
+      completely (`entry..exit`) to ensure `renderedScrollHub` is initialized cleanly
+      on first render and updated whenever the menu rebuilds (including when no scroll
+      views are mounted on the incoming Hub).
+
+      - Check whether `site/index.html` / `site/docs/guide.html` copy affects `crates/cito-native/tests/support/site-clipboard.mjs`
+      or `packaging/release.py check` and ensure both pass cleanly.
+
+      - Keep all UI strings, comments, tests, and website docs strictly English-only
+      with vendor-neutral examples (`personal`, `work`, `alice`, `bob`).
+
+
+      Boundary:
+
+      - Owner: `frontend-engineer` (parallel repair track, strictly file-disjoint
+      from `v74.repair_pi_sanitizers`).
+
+      - `scope.allowed_paths`: `src/macos/Companion.swift`, `src/macos/MenuSurface.swift`,
+      `crates/cito-native/tests/support/ui/menu.rs`, `crates/cito-native/tests/support/ui/directory.rs`,
+      `site/index.html`, `site/docs/guide.html`.
+
+      - `scope.blocked_paths`: `plan.yaml`, `bin/**`, `plugins/*/bin/**`, `Cargo.toml`,
+      `Cargo.lock`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - Two-disjoint-Hub scroll preservation test (`personal` `100` -> `work` `0`
+      -> `work` `18` -> `personal` `100`) passes while preserving ONE `available_scroll`
+      per render.
+
+      - `site/index.html` and `site/docs/guide.html` accurately describe expanding
+      **Available Sessions** before clicking **`+ Listen`**, and all listed Swift/UI/site
+      checks pass with zero warnings.
+
+
+      Recovery:
+
+      - If an existing headless UI test relies on unkeyed scroll restoration within
+      a single Hub, verify single-Hub rebuild still restores identically when `renderedScrollHub
+      == targetHub`.'
+    verification: swiftc -typecheck -warnings-as-errors -target arm64-apple-macos13.0
+      src/macos/*.swift && cargo test --package cito-native --test native support::ui::menu
+      --locked && cargo test --package cito-native --test native support::ui::directory
+      --locked && node crates/cito-native/tests/support/site-clipboard.mjs && python3
+      packaging/release.py check && cargo fmt --check && cargo clippy --workspace
+      --all-targets --locked -- -D warnings
+    refs:
     - src/macos/Companion.swift
     - src/macos/MenuSurface.swift
-    - site/assets/screenshots/menu-dark.png
-    - docs/DESIGN.md
-    - README.md
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    - site/index.html
+    - site/docs/guide.html
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T17:09:18.087112Z'
+    done_at: '2026-11-27T17:19:29.108860+00:00'
+    evidence: 'Integrated commit 8f8b4e57247fee4412cfc9d7fec5230b2727bdba onto main.
+      Added Companion.renderedScrollHub, refactored MenuSurface.captureScrollOffsets
+      to save scroll offsets/anchors keyed by "\(id):\(renderedScrollHub)" before
+      menu.removeAllItems(), restored against "\(id):\(targetHub)", and added discriminating
+      two-disjoint-Hub regression test appkit_available_scroll_restores_each_hubs_own_viewport
+      (personal 100 -> work 0 -> work 18 -> personal 100 -> work 18, single available_scroll
+      per render). Updated site/index.html and site/docs/guide.html enrollment copy
+      and alt text to instruct expanding Available Sessions before + Listen. Verified:
+      swiftc -warnings-as-errors (exit 0), cargo fmt --check (exit 0), clippy -D warnings
+      (exit 0), ui::menu:: (19 passed), ui::directory:: (18 passed), site-clipboard.mjs
+      (1 passed), release.py check (0.23.0).'
+  - id: v74.repair_stage_clean_binaries
+    name: 'Repair F4: Strip Builder Paths, Stage Clean Signed Binaries & Full Regression'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Post-merge repair consolidation for blocking finding F4 after `v74.repair_pi_sanitizers`
+      and `v74.repair_menu_scroll_and_docs`. Product version MUST remain `0.23.0`
+      on unreleased `main`; do NOT move tag `v0.23.0` or bump Cargo/package versions.
+
+
+      Deliver:
+
+      - [V74-F4-GateDevCheckoutPaths] `crates/cito-native/src/core/setup.rs` & `crates/cito-native/src/core/plugins.rs`:
+      gate all `CARGO_MANIFEST_DIR` and `OUT_DIR` dev-checkout fallback paths behind
+      `#[cfg(debug_assertions)]` (or `cfg!(debug_assertions)` without expanding `env!("CARGO_MANIFEST_DIR")`
+      / `env!("OUT_DIR")` literals into release builds) so release binaries never
+      embed the builder''s local checkout/worktree path while debug/test builds retain
+      full checkout fallback behavior.
+
+      - [V74-F4-StageCleanBinaries] Build and stage all 7 release binaries (`bin/cito-native-darwin-arm64`,
+      `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,
+      `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`)
+      via `RUSTFLAGS="--remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace
+      -D warnings" cargo build --release --locked`.
+
+      - [V74-F4-BinaryAuditAndFullRegression] Scan ALL 7 staged binaries with `strings`
+      to confirm zero `/Users/<account>` or `/.cargo/registry` paths; verify `lipo
+      -archs == arm64`, `codesign -v --strict`, and `./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0`; run full workspace regression (`swiftc -typecheck`,
+      `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D
+      warnings`, `pi-bridge.mjs`, `site-clipboard.mjs`, `packaging/release.py check`,
+      `packaging` unittest, and `cargo test --workspace --locked -- --test-threads=2`).
+
+
+      Implementation Notes:
+
+      - Inspect `crates/cito-native/src/core/setup.rs:55-105` (keep `#[cfg(test)]`
+      test code at line ~2280 working) and `crates/cito-native/src/core/plugins.rs:300-335`
+      completely (`entry..exit`).
+
+      - Prefer compile-time `#[cfg(debug_assertions)]` over runtime `if cfg!(debug_assertions)`
+      around `env!("CARGO_MANIFEST_DIR")` and `env!("OUT_DIR")` so macro expansion
+      never emits builder path string literals into release `.rodata`.
+
+      - Verify `strings` output across all 7 binaries (6 Rust binaries + `cito-ui-darwin-arm64`)
+      catches both `$HOME` (`/Users/<account>`) and `/.cargo/registry` (or `CARGO_HOME`
+      if set differently, adding `--remap-path-prefix` for `$CARGO_HOME` if needed).
+
+
+      Boundary:
+
+      - Owner: `devops-engineer` (post-merge consolidation).
+
+      - `scope.allowed_paths`: `crates/cito-native/src/core/setup.rs`, `crates/cito-native/src/core/plugins.rs`,
+      `bin/**`, `plugins/*/bin/**`.
+
+      - `scope.blocked_paths`: `plan.yaml`, `Cargo.toml`, `Cargo.lock`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - All 7 staged binaries report `lipo -archs` == `arm64`, pass `codesign -v --strict`,
+      report `cito v0.23.0` on `./bin/cito-native-darwin-arm64 --version`, and contain
+      zero `/Users/<account>` or `/.cargo/registry` strings.
+
+      - Full workspace regression suite passes with zero failures and zero warnings.
+
+
+      Recovery:
+
+      - If `strings` still reveals a remappable path from a non-default `CARGO_HOME`
+      or `RUSTUP_HOME`, add its `--remap-path-prefix` during release build without
+      altering Cargo manifests; if a regression fails outside `allowed_paths`, report
+      exact diagnostics and stop without touching out-of-scope files.'
+    verification: swiftc -typecheck -warnings-as-errors -target arm64-apple-macos13.0
+      src/macos/*.swift && cargo fmt --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && node crates/cito-native/tests/support/pi-bridge.mjs
+      && node crates/cito-native/tests/support/site-clipboard.mjs && python3 packaging/release.py
+      check && python3 -m unittest discover -s packaging -p 'test_*.py' -v && ./bin/cito-native-darwin-arm64
+      --version && for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      lipo -archs "$b" && codesign -v --strict "$b" && ! strings "$b" | grep -E "(/Users/[^/]+/|/\.cargo/registry)";
+      done && cargo test --workspace --locked -- --test-threads=2
+    refs:
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
     depends_on:
-    - v74.stage_and_screenshots
-    agent: gate-reviewer
+    - v74.repair_pi_sanitizers
+    - v74.repair_menu_scroll_and_docs
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T17:20:16.520306Z'
+    done_at: '2026-11-27T17:53:50.607006+00:00'
+    evidence: 'Integrated commit 2235918ebf377c5fcece16926d846e47d8698136 onto main.
+      Gated CARGO_MANIFEST_DIR and OUT_DIR dev-checkout fallback paths behind #[cfg(debug_assertions)]
+      in crates/cito-native/src/core/plugins.rs and setup.rs (verified checkout discovery
+      in release mode and isolated empty-package discovery). Built and staged all
+      7 Darwin arm64 binaries at v0.23.0 with RUSTFLAGS Cargo-home/workspace remapping
+      + -D warnings + strip -S + ad-hoc codesign; verified all 7 staged binaries show
+      0/0/0/0/0 matches for /Users/, /home/, /.cargo/registry, Larva, PI_PERSONA across
+      both strings -a and raw bytes, lipo -archs == arm64, codesign -v --strict exit
+      0, and ./bin/cito-native-darwin-arm64 --version == cito v0.23.0. Full workspace
+      regression passed: swiftc -warnings-as-errors (exit 0), pi-bridge.mjs (1 passed),
+      site-clipboard.mjs (1 passed), release.py check (0.23.0), Python packaging (35
+      passed), cargo fmt --check (exit 0), clippy -D warnings (exit 0), cargo test
+      --workspace --locked -- --test-threads=2 (835 passed: 481 unit + 354 integration,
+      0 failed, 5 ignored, 0 filtered out).'
+  - id: v74.repair_pi_sanitizers_r2
+    name: 'Repair F1/F2 (R2): Valid <skill> Block Sanitizer, About Versioning & Real
+      Reload Test'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nRepair the two remaining Pi sanitizer/lifecycle\
+      \ edge cases (`F1`, `F2`) and remove the white-box `globalThis` test mutation\
+      \ flagged by `v74.gate_final` (`FAIL`). Product version remains `0.23.0`; do\
+      \ NOT bump versions or mutate `bin/` or `plugins/*/bin/`.\n\nDeliver:\n- [V74-F1-ValidSkillBlockOrder]\
+      \ `plugins/pi/cito-bridge.ts:sanitizeAboutText` & `plugins/pi/native.rs:sanitize_about_text`:\
+      \ symmetrically distinguish genuine `<skill>` XML blocks (valid opening tag\
+      \ `<skill(?:[ \\t][^>\\r\\n]*)?>` at start of line or immediately following\
+      \ `</skill>`, paired with `</skill>`) from literal/unclosed `<skill` tokens\
+      \ on a user line — strip complete valid `<skill>` blocks first, then split at\
+      \ `\"Nunc working memory (session-local\"`, then extract the first non-empty\
+      \ line <= 80 Unicode chars (`\"\"` if none). Verify all 3 counterexamples in\
+      \ TS (`pi-bridge.mjs` socket `identify`) and Rust (`plugins/pi/native.rs` unit\
+      \ + `crates/cito-native/tests/support/plugins.rs` `resolve_caller`):\n  1. `\"\
+      <skill name=\\\"review\\\">\\nNunc working memory (session-local)\\n</skill>\\\
+      nReview routing\"` -> `\"Review routing\"`\n  2. `\"Prompt <skill\\nNunc working\
+      \ memory (session-local)\\n</skill>\\nPrivate note\"` -> `\"Prompt <skill\"\
+      `\n  3. `\"Prompt <skill> inline\\nNunc working memory (session-local)\\n</skill>\\\
+      nPrivate note\"` -> `\"Prompt <skill> inline\"`\n- [V74-F2-AboutVersionTs] `plugins/pi/cito-bridge.ts`:\
+      \ define `ABOUT_VERSION = 2`, emit `about_version: ABOUT_VERSION` in `identify`,\
+      \ and store `aboutVersion?: number` on `SessionState`; on bridge init, if `session.aboutVersion\
+      \ !== ABOUT_VERSION`, clear `session.about = \"\"` immediately (preserving `sessionId`,\
+      \ `activeBadge`, `commandGen`, `sessionName`, `cwd`); in `update(ctx)`, recompute\
+      \ `promptAbout(ctx.sessionManager)` and set `session.aboutVersion = ABOUT_VERSION`.\n\
+      - [V74-F2-AboutVersionRust] `plugins/pi/native.rs`: when live `identify` returns\
+      \ `v[\"about_version\"] != 2` (across both `socket_candidates` and `candidates`\
+      \ before returning or calling `publish_endpoint`), do NOT return or persist\
+      \ unverified `v[\"about\"]` — recompute from matching transcript if available,\
+      \ else set `v[\"about\"] = Value::Null`; in `cached_session`, when `cached[\"\
+      cache_version\"] != ENDPOINT_CACHE_VERSION`, recompute from matching transcript\
+      \ if available, else set `session[\"about\"] = Value::Null` (retaining `session_id`,\
+      \ `cwd`, `session_name`, `identity`).\n- [V74-F2-RealReloadAndCacheTests] `crates/cito-native/tests/support/pi-bridge.mjs`:\
+      \ remove `globalThis[Symbol.for('cito.pi.sessionState')].about = ...` white-box\
+      \ overwrite and replace with a real predecessor-to-target module reload lifecycle\
+      \ test (loading a predecessor bridge module inside the temp test dir without\
+      \ `aboutVersion`, verifying legacy `about` before reload, reloading `plugins/pi/cito-bridge.ts?reload`,\
+      \ verifying pre-`session_start` `identify` omits legacy `\"Private note\"` while\
+      \ preserving `session_id` and `badge`, and post-`session_start` `identify` restores\
+      \ sanitized `about`). In `plugins/pi/native.rs` / `crates/cito-native/tests/support/plugins.rs`,\
+      \ cover both legacy `pi/endpoints/<pid>.json` timeout without transcript (`about\
+      \ == null`, `session_id` preserved) AND live `identify` without `about_version:\
+      \ 2` followed by timeout (`about == null`, `session_id` preserved).\n\nImplementation\
+      \ Notes:\n- Inspect `plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`, `crates/cito-native/tests/support/pi-bridge.mjs`,\
+      \ and `crates/cito-native/tests/support/plugins.rs` around the affected symbols\
+      \ (`entry..exit`).\n- Consider bumping `transcript_projection` cache key from\
+      \ `\"pi/transcript-cache-v3/about-v2\"` to `\"pi/transcript-cache-v3/about-v3\"\
+      ` in `plugins/pi/native.rs` so cached projections written by prior F1 logic\
+      \ cannot persist.\n- Share one Rust helper to verify/resolve `about` for both\
+      \ live unversioned `identify` responses (`socket_candidates` and `candidates`)\
+      \ and legacy `cached_session` entries (re-checking `process_identity(p)` after\
+      \ transcript reads).\n- Keep all comments, fixtures, and errors English-only\
+      \ and vendor-neutral with zero `Larva` / `PI_PERSONA` references.\n\nBoundary:\n\
+      - Owner: `software-engineer`.\n- `scope.allowed_paths`: `plugins/pi/cito-bridge.ts`,\
+      \ `plugins/pi/native.rs`, `crates/cito-native/tests/support/pi-bridge.mjs`,\
+      \ `crates/cito-native/tests/support/plugins.rs`.\n- `scope.blocked_paths`: `plan.yaml`,\
+      \ `bin/**`, `plugins/*/bin/**`, `Cargo.toml`, `Cargo.lock`, secrets/credentials.\n\
+      - Rollback: standard git revert within worktree.\n\nAdmit:\n- All 3 F1 counterexamples\
+      \ pass symmetrically in TS (`pi-bridge.mjs`) and Rust (`plugins/pi/native.rs`\
+      \ + `plugins.rs`).\n- Zero `globalThis[Symbol.for('cito.pi.sessionState')].about\
+      \ =` white-box mutation in `pi-bridge.mjs`; real predecessor-to-target reload\
+      \ test and both Rust legacy-cache / unversioned-identify timeout tests pass.\n\
+      - Fast targeted verification passes with zero warnings.\n\nRecovery:\n- If an\
+      \ existing test asserts legacy `identify` fields without `about_version`, update\
+      \ only affected test fixtures within `allowed_paths` while preserving backward-compatible\
+      \ fallback on unversioned peers."
+    verification: node crates/cito-native/tests/support/pi-bridge.mjs && cargo test
+      --package cito-native --bin cito-plugin-pi --locked && cargo test --package
+      cito-native --test native support::plugins --locked && cargo fmt --check &&
+      cargo clippy --workspace --all-targets --locked -- -D warnings
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T18:03:19.472113Z'
+    done_at: '2026-11-27T18:15:22.876912+00:00'
+    evidence: 'Integrated commit 25e8cb833494b3945e4c7809b0da8cb1cea969ea onto main.
+      Closed both F1 and F2 round-2 findings cleanly across plugins/pi/cito-bridge.ts,
+      plugins/pi/native.rs, crates/cito-native/tests/support/pi-bridge.mjs, and crates/cito-native/tests/support/plugins.rs:
+      restricted <skill> stripping to boundary-aligned single-line valid openers before
+      splitting at "Nunc working memory (session-local", added ABOUT_VERSION=2 in
+      cito-bridge.ts (clearing unversioned session.about on init while keeping sessionId/activeBadge/commandGen,
+      and refreshing in update(ctx)), and checked about_version/cache_version == 2
+      across cached_session, socket_candidates, and candidates(resolve_caller/verify)
+      in native.rs via shared recover_about (recomputing from transcript or setting
+      null). Replaced globalThis overwrite in pi-bridge.mjs with a real predecessor-to-target
+      module reload lifecycle test. Verified: pi-bridge.mjs (1 passed), cargo fmt
+      --check (exit 0), clippy -D warnings (exit 0), cargo test --package cito-native
+      --bin cito-plugin-pi (2 passed), cargo test --workspace --locked --test native
+      pi (30 passed), socket_discovery_retains_verified_sessions_across_750ms_timeouts
+      (1 passed).'
+  - id: v74.repair_stage_clean_binaries_r2
+    name: Repair Stage Clean Binaries (R2) & Full Workspace Regression
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Post-repair consolidation after `v74.repair_pi_sanitizers_r2`. Product version
+      MUST remain `0.23.0` on unreleased `main`; do NOT move tag `v0.23.0` or bump
+      Cargo/package versions.
+
+
+      Deliver:
+
+      - [V74-R2-StageCleanBinaries] Rebuild and re-stage all 7 Darwin `arm64` release
+      binaries (`bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`,
+      `plugins/claude/bin/cito-plugin-claude`, `plugins/codex/bin/cito-plugin-codex`,
+      `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`)
+      at `0.23.0` using `--remap-path-prefix` + `-D warnings` + `strip -S` + ad-hoc
+      `codesign` (matching `v74.repair_stage_clean_binaries`).
+
+      - [V74-R2-BinaryAuditAndFullRegression] Verify `0/0/0/0/0` path/token scan (`/Users/`,
+      `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`) across all 7 binaries,
+      `lipo -archs == arm64`, `codesign -v --strict`, `./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0`, and pass full workspace regression (`swiftc -typecheck
+      -warnings-as-errors`, `cargo fmt --check`, `cargo clippy --workspace --all-targets
+      --locked -- -D warnings`, `pi-bridge.mjs`, `site-clipboard.mjs`, `packaging/release.py
+      check`, `packaging` unittest, and `cargo test --workspace --locked -- --test-threads=2`).
+
+
+      Implementation Notes:
+
+      - Pass `RUSTFLAGS="--remap-path-prefix=$HOME=/build-home --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo-home
+      --remap-path-prefix=$(pwd)=/workspace -D warnings"` to `cargo build --release
+      --locked`, then apply `strip -S` and ad-hoc `codesign --force --sign -` to staged
+      binaries as established in `v74.repair_stage_clean_binaries`.
+
+      - Check both `strings -a` and raw binary scan for `/Users/`, `/home/`, `/.cargo/registry`,
+      `Larva`, and `PI_PERSONA` across all 7 binaries.
+
+      - Keep `git status` clean of untracked scratch files after staging.
+
+
+      Boundary:
+
+      - Owner: `devops-engineer` (post-repair consolidation).
+
+      - `scope.allowed_paths`: `bin/**`, `plugins/*/bin/**`.
+
+      - `scope.blocked_paths`: `plan.yaml`, `Cargo.toml`, `Cargo.lock`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - All 7 staged binaries report `lipo -archs == arm64`, pass `codesign -v --strict`,
+      report `cito v0.23.0` on `./bin/cito-native-darwin-arm64 --version`, and report
+      `0/0/0/0/0` on `/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`.
+
+      - Full workspace regression suite passes with zero failures and zero warnings.
+
+
+      Recovery:
+
+      - If a path/token scan reveals an unremapped builder path (e.g., custom `CARGO_HOME`/`RUSTUP_HOME`),
+      add its `--remap-path-prefix` during release build without altering manifests;
+      if a regression fails outside `allowed_paths`, report exact diagnostics and
+      stop without touching out-of-scope files.'
+    verification: swiftc -typecheck -warnings-as-errors -target arm64-apple-macos13.0
+      src/macos/*.swift && cargo fmt --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && node crates/cito-native/tests/support/pi-bridge.mjs
+      && node crates/cito-native/tests/support/site-clipboard.mjs && python3 packaging/release.py
+      check && python3 -m unittest discover -s packaging -p 'test_*.py' -v && ./bin/cito-native-darwin-arm64
+      --version && for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      lipo -archs "$b" && codesign -v --strict "$b" && ! strings -a "$b" | grep -E
+      "(/Users/[^/]+/|/home/[^/]+/|/\.cargo/registry|Larva|PI_PERSONA)"; done && cargo
+      test --workspace --locked -- --test-threads=2
+    refs:
+    - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
+    - plugins/pi/bin/cito-plugin-pi
+    depends_on:
+    - v74.repair_pi_sanitizers_r2
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T18:15:29.930951Z'
+    done_at: '2026-11-27T18:32:32.987181+00:00'
+    evidence: 'Integrated commit 3ee1219f4fb78a6782fb2ed9f4f680aa7ec5cd86 onto main.
+      Built and staged all 7 Darwin arm64 binaries at v0.23.0 with --remap-path-prefix
+      + -D warnings + strip -S + ad-hoc codesign; verified all 7 binaries show 0/0/0/0/0
+      matches for /Users/, /home/, /.cargo/registry, Larva, PI_PERSONA across both
+      strings -a and raw bytes, lipo -archs == arm64, codesign -v --strict exit 0,
+      and ./bin/cito-native-darwin-arm64 --version == cito v0.23.0. Full workspace
+      regression passed: swiftc -warnings-as-errors (exit 0), pi-bridge.mjs (1 passed),
+      site-clipboard.mjs (1 passed), release.py check (0.23.0), Python packaging (35
+      passed), cargo fmt --check (exit 0), clippy -D warnings (exit 0), cargo test
+      --workspace --locked -- --test-threads=2 (836 passed: 481 unit + 355 integration,
+      0 failed, 5 ignored across 9 targets).'
+  - id: v74.repair_pi_sanitizers_r3
+    name: Pivot Pi Skill Block Stripper, Single ABOUT_VERSION=3 Authority & Hermetic
+      Reload Tests (R3)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Execute `PIVOT_PI_DOWN` arbitration (`01a21e4b`) closing R2 `v74.gate_final`
+      `FAIL` findings (`F1-LINE-INITIAL-LITERAL`, `F2-CACHE-VERSION-COLLISION`, `F5-SYNTHETIC-PREDECESSOR`).
+      Product version stays `0.23.0`; do NOT touch `companion_projection.rs`, `bin/**`,
+      or `plugins/*/bin/**`.
+
+
+      Deliver:
+
+      - [V74-R3-LeadingSkillStripper] `plugins/pi/cito-bridge.ts:sanitizeAboutText`
+      & `plugins/pi/native.rs:sanitize_about_text`: replace regex `<skill>` stripping
+      with a symmetric O(N) leading-prefix `<skill>` block stripper — skip leading
+      whitespace/linebreaks; strip single-line `<skill(?:[ \t][^>\r\n]*)?>...</skill>`
+      with no inline prose on that line OR multi-line `<skill(?:[ \t][^>\r\n]*)?>`
+      with only horizontal whitespace after `>` closed by a line containing only optional
+      horizontal whitespace + `</skill>` + optional horizontal whitespace before EOF/linebreak/`<skill`;
+      stop at the first non-wrapper token; then split at `"Nunc working memory (session-local"`,
+      take the first non-empty line, drop non-whitespace `Cc`, collapse whitespace,
+      and cap at 80 Unicode chars (`""` if none). Verify all 6 cases in TS & Rust:
+      (1) `"<skill> is the literal opening tag under review.\nNunc working memory
+      (session-local)\n</skill>\nPrivate note"` -> `"<skill> is the literal opening
+      tag under review."`; (2) `"<skill name=\"review\">\nNunc working memory (session-local)\n</skill>\nReview
+      routing"` -> `"Review routing"`; (3) `"Prompt <skill\nNunc working memory (session-local)\n</skill>\nPrivate
+      note"` -> `"Prompt <skill"`; (4) `"Prompt <skill> inline\nNunc working memory
+      (session-local)\n</skill>\nPrivate note"` -> `"Prompt <skill> inline"`; (5)
+      multi-line `<skill>` quoting inline `` `</skill>` `` does not close prematurely;
+      (6) single-line `<skill>foo</skill> inline` kept vs `<skill>foo</skill>\nbar`
+      stripped to `"bar"`.
+
+      - [V74-R3-SingleAboutVersion3] `plugins/pi/cito-bridge.ts` & `plugins/pi/native.rs`
+      (`Pi_down`): delete `ENDPOINT_CACHE_VERSION` from `native.rs` (`publish_endpoint`
+      writes `{"identity": identity, "session": session}`; legacy outer `cache_version`
+      ignored); advance single provenance `ABOUT_VERSION = 3` in TS & Rust and transcript
+      projection cache `"pi/transcript-cache-v3/about-v4"`. In `cito-bridge.ts`, reset
+      `session.about = ""` and `session.aboutVersion = undefined` on module load if
+      `session.aboutVersion !== 3`, emit `about_version: session.aboutVersion ?? null`
+      in `identify`, and set `session.aboutVersion = 3` in `update(ctx)`. In `native.rs`,
+      gate `cached_session`, `socket_candidates`, and `candidates` strictly on `v["about_version"]
+      != 3`, and stamp `about_version: 3` in `recover_about` (even when `about` is
+      `null`) and `process_candidates`.
+
+      - [V74-R3-HermeticReloadAndTimeoutTests] `crates/cito-native/tests/support/pi-bridge.mjs`
+      & `crates/cito-native/tests/support/plugins.rs`: delete synthetic `predecessor.ts`
+      (`pi-bridge.mjs:350-423`) completely (`0` `Symbol.for("cito.pi.sessionState")`
+      refs anywhere in `crates/cito-native/tests/`); extend `pi-bridge.mjs` real `/reload`
+      test via public `branch` mutation before `session_start({reason: "reload"})`;
+      expand `plugins.rs` timeout tests across versionless, `cache_version: 2` (no
+      `about_version`), and `cache_version: 2` + `about_version: 2` predecessor caches
+      for both `resolve_caller` and `verify` on real timeout before any fresh `identify`,
+      removing obsolete `cache_version == 2` assertions and asserting `session["about_version"]
+      == 3`. Run an ephemeral `/tmp` git-pinned predecessor (`c28f9b1`, `37cc5c1`,
+      `3ee1219` -> `HEAD`) `/reload` probe cleaned up on exit.
+
+
+      Implementation Notes:
+
+      - Inspect `plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`, `crates/cito-native/tests/support/pi-bridge.mjs`,
+      and `crates/cito-native/tests/support/plugins.rs` completely around affected
+      symbols (`entry..exit`).
+
+      - Ensure `recover_about` re-fences `process_identity(p)` after reading transcripts
+      before returning or persisting `about_version: 3`, and never trusts unverified
+      legacy `about`.
+
+      - Keep all comments, fixtures, and errors English-only and vendor-neutral with
+      zero `Larva` / `PI_PERSONA` references; delete all `/tmp` probe artifacts before
+      finishing.
+
+
+      Boundary:
+
+      - Owner: `software-engineer`.
+
+      - `scope.allowed_paths`: `plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`,
+      `crates/cito-native/tests/support/pi-bridge.mjs`, `crates/cito-native/tests/support/plugins.rs`.
+
+      - `scope.blocked_paths`: `crates/cito-native/src/core/daemon/companion_projection.rs`,
+      `bin/**`, `plugins/*/bin/**`, `Cargo.toml`, `Cargo.lock`, `plan.yaml`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - All 6 F1 cases pass symmetrically in TS and Rust; `ENDPOINT_CACHE_VERSION`
+      removed; single `ABOUT_VERSION = 3` authority enforced across TS/Rust/cache/transcript;
+      zero `Symbol.for` in `crates/cito-native/tests/`; all 3 predecessor cache shapes
+      pass on timeout across `resolve_caller` and `verify`; ephemeral `/tmp` git-pinned
+      predecessor (`c28f9b1`, `37cc5c1`, `3ee1219` -> `HEAD`) `/reload` probe passes
+      and cleans up.
+
+
+      Recovery:
+
+      - If an existing test in `plugins.rs` or `pi-bridge.mjs` asserts `cache_version
+      == 2` or `about_version == 2`, update only expectations within `allowed_paths`
+      to match the single `ABOUT_VERSION = 3` authority.'
+    verification: node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs
+      && cargo test --package cito-native --bin cito-plugin-pi --locked && cargo test
+      --workspace --locked --test native pi -- --test-threads=1 && cargo fmt --all
+      -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings
+      && ! grep -rn "Symbol\.for" crates/cito-native/tests/
+    refs:
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/plugins.rs
+    depends_on:
+    - v74.repair_stage_clean_binaries_r2
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T18:51:39.436591Z'
+    done_at: '2026-11-27T19:05:42.503184+00:00'
+    evidence: 'Integrated commit 6c60b457edcb28fa7d6eabfba29515d18035f56c onto main.
+      Replaced regex <skill> stripping with symmetric O(N) linear leading-prefix block
+      scanner in plugins/pi/cito-bridge.ts and plugins/pi/native.rs; deleted ENDPOINT_CACHE_VERSION
+      and enforced single canonical ABOUT_VERSION = 3 + pi/transcript-cache-v3/about-v4
+      across TS identify, cached_session, socket_candidates, candidates, recover_about,
+      and process_candidates; deleted synthetic predecessor.ts (0 Symbol.for matches
+      in crates/cito-native/tests/); expanded plugins.rs timeout tests across versionless,
+      cache_version=2, and about_version=2 payloads on both resolve_caller and verify.
+      Verified: grep -rn "Symbol\.for" crates/cito-native/tests/ (0 matches), pi-bridge.mjs
+      (1/1 in 812ms), cargo fmt --check (exit 0), clippy -D warnings (exit 0), cito-plugin-pi
+      (3/3), native pi (30/30), and ephemeral /tmp git-pinned reload probe across
+      c28f9b1/37cc5c1/3ee1219 -> HEAD.'
+  - id: v74.repair_stage_clean_binaries_r3
+    name: Repair Stage Clean Binaries (R3) & Full Workspace Regression
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Post-repair consolidation after `v74.repair_pi_sanitizers_r3`. Product version
+      MUST remain `0.23.0` on unreleased `main`; do NOT move tag `v0.23.0` or bump
+      Cargo/package versions.
+
+
+      Deliver:
+
+      - [V74-R3-StageCleanBinaries] Rebuild and re-stage all 7 Darwin `arm64` release
+      binaries (`bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`,
+      `plugins/claude/bin/cito-plugin-claude`, `plugins/codex/bin/cito-plugin-codex`,
+      `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`)
+      at `0.23.0` using `RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo
+      --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace
+      -D warnings" cargo build --release --locked` + `strip -S` + `codesign --force
+      --sign -`.
+
+      - [V74-R3-BinaryAuditAndFullRegression] Verify `0/0/0/0/0` path/token scan (`/Users/`,
+      `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`) across all 7 binaries,
+      `lipo -archs == arm64`, `codesign -v --strict`, `./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0`, and pass full workspace regression (`swiftc -typecheck
+      -warnings-as-errors`, `pi-bridge.mjs`, `site-clipboard.mjs`, `packaging/release.py
+      check`, Python `packaging` tests, `cargo fmt --all -- --check`, `cargo clippy
+      --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace
+      --locked -- --test-threads=2`).
+
+
+      Implementation Notes:
+
+      - Check both `strings -a` and raw binary scan for `/Users/`, `/home/`, `/.cargo/registry`,
+      `Larva`, and `PI_PERSONA` across all 7 binaries.
+
+      - Keep `git status` clean of untracked scratch files after staging.
+
+
+      Boundary:
+
+      - Owner: `devops-engineer` (post-repair consolidation).
+
+      - `scope.allowed_paths`: `bin/**`, `plugins/*/bin/**`.
+
+      - `scope.blocked_paths`: `plan.yaml`, `Cargo.toml`, `Cargo.lock`, secrets/credentials.
+
+      - Rollback: standard git revert within worktree.
+
+
+      Admit:
+
+      - All 7 staged binaries report `lipo -archs == arm64`, pass `codesign -v --strict`,
+      report `cito v0.23.0` on `./bin/cito-native-darwin-arm64 --version`, and report
+      `0/0/0/0/0` on `/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`.
+
+      - Full workspace regression suite passes with zero failures and zero warnings.
+
+
+      Recovery:
+
+      - If a path/token scan reveals an unremapped builder path, add its `--remap-path-prefix`
+      during release build without altering manifests; if a regression fails outside
+      `allowed_paths`, report exact diagnostics and stop without touching out-of-scope
+      files.'
+    verification: swiftc -typecheck -warnings-as-errors -target arm64-apple-macos13.0
+      src/macos/*.swift && cargo fmt --all -- --check && cargo clippy --workspace
+      --all-targets --locked -- -D warnings && node --experimental-strip-types --test
+      crates/cito-native/tests/support/pi-bridge.mjs && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p 'test_*.py' -v && ./bin/cito-native-darwin-arm64 --version && for b in bin/cito-native-darwin-arm64
+      bin/cito-ui-darwin-arm64 plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude
+      plugins/codex/bin/cito-plugin-codex plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram;
+      do lipo -archs "$b" && codesign -v --strict "$b" && ! strings -a "$b" | grep
+      -E "(/Users/[^/]+/|/home/[^/]+/|/\.cargo/registry|Larva|PI_PERSONA)"; done &&
+      cargo test --workspace --locked -- --test-threads=2
+    refs:
+    - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
+    - plugins/pi/bin/cito-plugin-pi
+    depends_on:
+    - v74.repair_pi_sanitizers_r3
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T19:05:46.709869Z'
+    done_at: '2026-11-27T19:19:54.415701+00:00'
+    evidence: 'Integrated commit d793df9fcc692e4f25c39aac2eb5546e0e19f67a onto main.
+      Rebuilt and staged clean Darwin arm64 release binaries at 0.23.0 with --remap-path-prefix
+      + -D warnings + strip -S + ad-hoc codesign; verified all 7 binaries show 0/0/0/0/0
+      matches for /Users/, /home/, /.cargo/registry, Larva, PI_PERSONA across both
+      strings -a and raw bytes, lipo -archs == arm64, codesign -v --strict exit 0,
+      and ./bin/cito-native-darwin-arm64 --version == cito v0.23.0. Full sequential
+      workspace regression passed: swiftc -warnings-as-errors (exit 0), pi-bridge.mjs
+      (1 passed), site-clipboard.mjs (1 passed), release.py check (0.23.0), Python
+      packaging (35 passed), cargo fmt --check (exit 0), clippy -D warnings (exit
+      0), cargo test --workspace --locked -- --test-threads=2 (837 passed: 482 unit
+      + 355 integration, 0 failed, 5 ignored).'

@@ -10,8 +10,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     weak var menuHubStrip: SegmentedPillStrip?
     let cardMenu: NSMenu = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" ? HeadlessMenu() : NSMenu()
     var hubDrawerVisibility: [String: Bool] = [:]
+    var renderedScrollHub: String = ""
     var menuScrollOffsets: [String: NSPoint] = [:]
-    var menuScrollKeys: [String: String] = [:]
     var menuScrollAnchors: [String: (rowId: String, deltaY: CGFloat)] = [:]
     static let statusIcons: [StatusIconState: NSImage] = [
         .idle: makeCitoStatusIcon(.idle), .active: makeCitoStatusIcon(.active), .warning: makeCitoStatusIcon(.warning)
@@ -37,9 +37,9 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     var selectedTargetHub: String = ""
     var renamingSessionKey: String?
     weak var renameField: NSTextField?
-    var myRemoteCollapsed = false
+    var myRemoteCollapsed = true
+    var availableCollapsed = true
     var collapsedGroups = Set<String>()
-    var autoCollapsedRecentGroups = Set<String>()
     var directoryWarnings: [String] = []
     var directoryQueryError: String?
     var directoryActionError: String?
