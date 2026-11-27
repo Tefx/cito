@@ -102,11 +102,16 @@ fn resolve(url: &url::Url, deadline: HttpDeadline<'_>) -> io::Result<Vec<SocketA
             RESOLVERS.fetch_sub(1, Ordering::Relaxed);
         }
     }
-    RESOLVERS
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            (n < 16).then_some(n + 1)
-        })
-        .map_err(|_| io::Error::other("HTTP resolver busy"))?;
+    let mut n = RESOLVERS.load(Ordering::Relaxed);
+    loop {
+        if n >= 16 {
+            return Err(io::Error::other("HTTP resolver busy"));
+        }
+        match RESOLVERS.compare_exchange_weak(n, n + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => n = actual,
+        }
+    }
     let reservation = Reservation;
     let url = url.clone();
     let (send, receive) = mpsc::sync_channel(1);

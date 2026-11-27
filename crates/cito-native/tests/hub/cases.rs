@@ -3676,6 +3676,8 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
             .start_server(bind, 0, HubAuth::new("none", None, None, None).unwrap())
             .unwrap();
         let address = format!("127.0.0.1:{}", server.port());
+        let other_port = if server.port() == 1 { 2 } else { 1 };
+        let other_address = format!("127.0.0.1:{other_port}");
         let base = format!("http://{address}");
         for (host, origin, media, status) in [
             (address.clone(), None, "application/json", 200),
@@ -3687,7 +3689,7 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
             ),
             (
                 address.clone(),
-                Some(format!("http://127.0.0.1:{}", server.port() + 1)),
+                Some(format!("http://{other_address}")),
                 "application/json",
                 403,
             ),
@@ -3697,12 +3699,7 @@ fn http_browser_boundary_and_idle_sse_shutdown() {
                 "application/json",
                 403,
             ),
-            (
-                format!("127.0.0.1:{}", server.port() + 1),
-                None,
-                "application/json",
-                403,
-            ),
+            (other_address, None, "application/json", 403),
             (address.clone(), None, "text/plain", 415),
             (
                 format!("hub.example:{}", server.port()),

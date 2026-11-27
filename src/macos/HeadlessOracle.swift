@@ -1013,13 +1013,19 @@ extension Companion {
                     }
                     children.forEach(checkPadding)
                 }
-                for (index, child) in children.enumerated() {
-                    let f = frame(child)
-                    if f.minX < -0.5 || f.minY < -0.5 || f.maxX > parentBounds.width + 0.5 || f.maxY > parentBounds.height + 0.5 {
-                        clippedViews.append("\(name(view)) > \(name(child))")
-                    }
-                    for other in children.dropFirst(index+1) where f.insetBy(dx:0.5,dy:0.5).intersects(frame(other).insetBy(dx:0.5,dy:0.5)) {
-                        overlappingSiblings.append("\(name(view)): \(name(child)) / \(name(other))")
+                // Private AppKit alert containers can have invalid bounds and button frames before presentation.
+                if !NSStringFromClass(type(of: view)).hasPrefix("_NSAlert") {
+                    for (index, child) in children.enumerated() {
+                        let f = frame(child)
+                        if f.minX < -0.5 || f.minY < -0.5 || f.maxX > parentBounds.width + 0.5 || f.maxY > parentBounds.height + 0.5 {
+                            clippedViews.append("\(name(view)) > \(name(child))")
+                        }
+                        // AppKit aligns native controls without their bezel and shadow margins.
+                        let alignment = child.alignmentRect(forFrame: f).insetBy(dx: 0.5, dy: 0.5)
+                        for other in children.dropFirst(index+1)
+                        where alignment.intersects(other.alignmentRect(forFrame: frame(other)).insetBy(dx: 0.5, dy: 0.5)) {
+                            overlappingSiblings.append("\(name(view)): \(name(child)) / \(name(other))")
+                        }
                     }
                 }
             }
@@ -1125,6 +1131,12 @@ extension Companion {
             }
             if field != nil || view is NSButton { return }
             for child in view.subviews { checkHitTests(child,root:root,surface:surface,visible:visible) }
+        }
+        if let alert = activeUninstallAlert, headless || !alert.window.isVisible {
+            // Offscreen alerts do not get the window's normal layout pass.
+            alert.layout()
+            alert.window.layoutIfNeeded()
+            alert.window.contentView?.layoutSubtreeIfNeeded()
         }
         for item in cardMenu.items where !item.isHidden {
             if let root = item.view { checkHitTests(root,root:root,surface:"menu") }

@@ -51,12 +51,15 @@ impl HttpConnection {
 
 impl HttpWork {
     fn try_start() -> Option<Self> {
-        HTTP_WORKERS
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n < 64).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
+        let mut n = HTTP_WORKERS.load(Ordering::Relaxed);
+        while n < 64 {
+            match HTTP_WORKERS.compare_exchange_weak(n, n + 1, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return Some(Self),
+                Err(actual) => n = actual,
+            }
+        }
+        None
     }
 }
 

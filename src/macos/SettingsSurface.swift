@@ -270,8 +270,12 @@ extension Companion {
         if !targets.isEmpty || chromeChanged { settingsRebuildCount += 1 }
         let renderedHub = effectiveChannelHub
         for tab in SettingsTab.allCases where targets.contains(tab) {
-            let scroll = root.subviews.compactMap { $0 as? SettingsScrollView }.first { $0.identifier?.rawValue == tab.scrollId }
-                ?? makeSettingsScroll(in: root)
+            let scroll: NSScrollView
+            if let existing = root.subviews.compactMap({ $0 as? SettingsScrollView }).first(where: { $0.identifier?.rawValue == tab.scrollId }) {
+                scroll = existing
+            } else {
+                scroll = makeSettingsScroll(in: root)
+            }
             switch tab {
             case .apps: buildAppsTab(in: scroll)
             case .channels: buildChannelsTab(in: scroll, renderedHub: renderedHub)

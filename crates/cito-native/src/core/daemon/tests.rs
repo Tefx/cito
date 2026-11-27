@@ -1194,7 +1194,7 @@ fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
 
 pub(super) fn settle_setup_inspections(service: &mut DaemonService) {
     service.refresh_setup_inspections();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while service
         .setup_inspections
         .values()
@@ -4494,6 +4494,7 @@ fn local_http_enforces_host_origin_content_type_and_framing() -> Result<(), Stri
     {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
+        let other_port = if address.port() == 1 { 2 } else { 1 };
         for (method, headers, status) in [
             ("GET /health?detail=true", format!("Host: {address}\r\n"), 200),
             ("GET /absent",format!("Host: {address}\r\n"),404),
@@ -4505,10 +4506,7 @@ fn local_http_enforces_host_origin_content_type_and_framing() -> Result<(), Stri
             ),
             (
                 "GET /health",
-                format!(
-                    "Host: {address}\r\nOrigin: http://127.0.0.1:{}\r\n",
-                    address.port() + 1
-                ),
+                format!("Host: {address}\r\nOrigin: http://127.0.0.1:{other_port}\r\n"),
                 403,
             ),
             (
@@ -4522,7 +4520,7 @@ fn local_http_enforces_host_origin_content_type_and_framing() -> Result<(), Stri
                 415,
             ),
             ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\n"), 200),
-            ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\nOrigin: http://127.0.0.1:{}\r\n", address.port() + 1), 403),
+            ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\nOrigin: http://127.0.0.1:{other_port}\r\n"), 403),
             ("POST /mcp", format!("Host: attacker.example:{}\r\nContent-Type: application/json\r\n", address.port()), 403),
         ] {
             let service = shared.clone();

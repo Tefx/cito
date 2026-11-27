@@ -109,6 +109,8 @@ extension Companion {
         if headless {
             alert.window.appearance = testAppearance
             alert.layout()
+            alert.window.layoutIfNeeded()
+            alert.window.contentView?.layoutSubtreeIfNeeded()
             alert.window.contentView?.identifier = NSUserInterfaceItemIdentifier("uninstall_alert_sheet")
             for button in alert.buttons {
                 button.target = self
@@ -128,6 +130,8 @@ extension Companion {
         confirm.title = purge ? "Disconnect & Delete Data" : "Disconnect Apps"
         confirm.toolTip = purge ? "Disconnect all Agent Apps and delete local data and Hub settings" : "Disconnect all Agent Apps and keep Cito running"
         alert.layout()
+        alert.window.layoutIfNeeded()
+        alert.window.contentView?.layoutSubtreeIfNeeded()
     }
 
     @objc private func pressOffscreenAlertButton(_ sender: NSButton) {
