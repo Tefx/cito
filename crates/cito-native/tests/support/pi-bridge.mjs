@@ -78,7 +78,7 @@ try {
  // The first session_start owns the transition; all later socket operations use that session.
  const early={op:'deliver',session_id:recovered.session_id,batch_id:'before-start',content:'Wake after session_start',wake:true};
  assert.equal((await request({op:'status',session_id:recovered.session_id,badge:'listening before start'})).ok,true);
- assert.equal(badges.at(-1),'◉');
+ assert.equal(badges.at(-1),'📡');
  const badgeWrites=badges.length;
  session=undefined;
  assert.deepEqual(await request({op:'ping'}),{ok:true});
@@ -93,7 +93,7 @@ try {
  assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true,details:{citoBatchId:early.batch_id}},o:{triggerTurn:true,deliverAs:'steer'}}]);
  session=recovered.session_id;
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
- assert.equal(badges.at(-1),'◉','Repeated session_start must retain the session badge');
+ assert.equal(badges.at(-1),'📡','Repeated session_start must retain the session badge');
  assert.equal((await request(early)).deduplicated,true);assert.equal(messages.length,1,'Repeated session_start must retain batch deduplication');
  session='session-a';await handlers.get('session_tree')({},context);assert.equal(badges.at(-1),undefined);
  messages.length=0;
@@ -105,24 +105,24 @@ try {
   assert.equal((await request({op:'identify'})).badge,badge);
   assert.deepEqual(badges.slice(before),writes);
  }
- await checkBadge('Cito · alice','◉');
+ await checkBadge('Cito · alice','📡');
  await checkBadge('Cito · alice (0)');
- await checkBadge('Cito · alice (2)','◉ 2');
+ await checkBadge('Cito · alice (2)','📡 2');
  await checkBadge('Cito · bob (02)  ');
- await checkBadge('Cito · alice (99)','◉ 99');
- await checkBadge('Cito · alice (120)','◉ 99+');
+ await checkBadge('Cito · alice (99)','📡 99');
+ await checkBadge('Cito · alice (120)','📡 99+');
  await checkBadge('Cito · alice (121)');
  await checkBadge('',undefined);
  await checkBadge(null);
  context.ui.theme={fg:(c,t)=>`[${c}:${t}]`};
- await checkBadge('Cito · alice','[accent:◉]');
- await checkBadge('Cito · alice (2)','[accent:◉ 2]');
+ await checkBadge('Cito · alice','[dim:📡]');
+ await checkBadge('Cito · alice (2)','[accent:📡 2]');
  const beforeContextChange=badges.length;
  await handlers.get('session_info_changed')({}, {...context});
- assert.deepEqual(badges.slice(beforeContextChange),['[accent:◉ 2]']);
+ assert.deepEqual(badges.slice(beforeContextChange),['[accent:📡 2]']);
  delete context.ui.theme;
  await handlers.get('session_info_changed')({},context);
- assert.equal(badges.at(-1),'◉ 2');
+ assert.equal(badges.at(-1),'📡 2');
  await checkBadge(null,undefined);
  const delivery={op:'deliver',id:17,session_id:session,batch_id:'one',content:'<card> café',wake:false};assert.equal((await request(delivery,true)).deduplicated,false);assert.equal((await request(delivery)).deduplicated,true);assert.equal(messages.length,1);assert.deepEqual(messages[0],{m:{customType:'cito-notification',content:'<card> café',display:true,details:{citoBatchId:'one'}},o:{triggerTurn:false,deliverAs:'followUp'}});
  assert.equal((await request({...delivery,session_id:'wrong'})).error,'SESSION_MISMATCH');assert.equal((await request({...delivery,batch_id:'invalid',wake:'yes'})).error,'INVALID_REQUEST');
@@ -183,7 +183,7 @@ try {
  for(const arg of ['on --hub Work-Internal Review','team --hub=Work-Internal Pair','off --hub Work-Internal']) {
   await command.handler(arg,context);
   if(arg.startsWith('on')) {
-   assert.equal(badges.at(-1),'◉');
+   assert.equal(badges.at(-1),'📡');
    assert.equal((await request({op:'identify'})).badge,'Cito · alice-very-l');
   }
  }
@@ -261,7 +261,7 @@ try {
  assert.deepEqual([current.session_id,current.cwd,current.session_name,current.about,current.badge],[session,'/repo','Work',about,'Retained badge']);
  await handlers.get('session_start')({reason:'reload'},context);
  assert.equal((await request(beforeReload)).deduplicated,true);
- assert.equal(badges.at(-1),'◉');
+ assert.equal(badges.at(-1),'📡');
  const offAfterReload=begin('');
  await request({op:'ping'});
  assert.equal(calls.length,reloadCallCount,'The new command must wait for the old instance’s in-flight request');

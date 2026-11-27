@@ -327,8 +327,9 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (session.activeBadge) {
       // Project the display without rewriting the badge used by daemon reconciliation.
       const unread = Number(/\((\d+)\)\s*$/.exec(session.activeBadge)?.[1] ?? 0);
-      const raw = unread > 0 ? `◉ ${unread > 99 ? "99+" : String(unread)}` : "◉";
-      status = ctx.ui.theme ? ctx.ui.theme.fg("accent", raw) : raw;
+      const raw = unread > 0 ? `📡 ${unread > 99 ? "99+" : String(unread)}` : "📡";
+      const tone = unread > 0 ? "accent" : "dim";
+      status = ctx.ui.theme ? ctx.ui.theme.fg(tone, raw) : raw;
     }
     if (ctx === renderedContext && status === renderedStatus) return;
     ctx.ui.setStatus("cito", status);
