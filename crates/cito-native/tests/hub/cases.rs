@@ -362,7 +362,8 @@ fn human_replies_resolve_stored_ids_before_hub_qualifiers() {
         ("in_reply_to", "plain-missing", "plain-missing"),
         ("signal_id", "work:thread:missing", "thread:missing"),
         ("signal_id", "event:1", "event:1"),
-        ("signal_id", "Not-a-hub:1", "Not-a-hub:1"),
+        ("signal_id", "Acme-Cloud:thread:source", "thread:source"),
+        ("signal_id", "Local:1", "Local:1"),
     ] {
         let reply = e
             .rpc(

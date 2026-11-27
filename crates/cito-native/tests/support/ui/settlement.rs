@@ -117,7 +117,7 @@ fn companion_decodes_complete_passive_listener_and_attachment_collections() {
 }
 
 #[test]
-fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banners_redraw() {
+fn settings_refresh_scalars_and_channels_and_state_banners_redraw() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut cfg = settings();
@@ -153,74 +153,30 @@ fn truncated_settings_refresh_scalars_without_replacing_channels_and_state_banne
     control(&f, p, "dismiss_settings_error");
 
     cfg["channels"] = json!([]);
-    cfg["apps"] = json!([]);
     cfg["hubs"][0]["human_paused"] = json!(true);
     cfg["hubs"][0]["status"] = json!("disconnected");
     cfg["channel_inventory_error"] = json!("Service unavailable.");
     cfg["launch_at_login"] = json!(true);
-    f.send(p, json!({"op":"settings","truncated":true,"truncated_collections":["channels","apps"],"settings":cfg}));
-    let stale = inspect(&f, p);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let unavailable = inspect(&f, p);
     assert_eq!(
-        stale.settings("channel_inventory_error")["text"],
+        unavailable.settings("channel_inventory_error")["text"],
         "Service unavailable."
     );
-    assert_eq!(stale.settings("toggle_inbox")["text"], "Resume Inbox");
-    assert!(!stale.settings("settings_channel:channel").is_null());
-    assert_eq!(stale["settings_launch_at_login"], true);
+    assert_eq!(unavailable.settings("toggle_inbox")["text"], "Resume Inbox");
+    assert!(unavailable.settings("settings_channel:channel").is_null());
+    assert_eq!(unavailable["settings_launch_at_login"], true);
 
     cfg["channel_inventory_error"] = Value::Null;
+    cfg["channels"] = base["settings"]["channels"].clone();
     cfg["hubs"][0]["human_paused"] = json!(false);
     base["settings"] = cfg;
-    base["truncated"] = json!(true);
-    base["truncated_collections"] = json!(["channels", "apps"]);
     base.as_object_mut().unwrap().remove("warning");
     f.send(p, base);
     let fresh = inspect(&f, p);
     assert!(fresh.settings("channel_inventory_error").is_null());
     assert_eq!(fresh.settings("toggle_inbox")["text"], "Pause Inbox");
     assert!(!fresh.settings("settings_channel:channel").is_null());
-}
-
-#[test]
-fn settings_shedding_respects_flat_and_dotted_keys_without_freezing_other_collections() {
-    let _lock = serial();
-    let (f, p) = ui_fixture();
-    let original = settings();
-    for (key, preserved) in [
-        ("apps", "apps"),
-        ("settings.apps", "apps"),
-        ("channels", "channels"),
-        ("settings.channels", "channels"),
-        ("hubs", "hubs"),
-        ("settings.hubs", "hubs"),
-    ] {
-        f.send(
-            p,
-            json!({"op":"settings","hub":"personal","settings":original}),
-        );
-        let mut update = original.clone();
-        for collection in ["apps", "channels", "hubs"] {
-            update[collection] = json!([]);
-        }
-        // A cached channel inventory belongs to a Hub that still exists.
-        if preserved == "channels" {
-            update["hubs"] = json!([original["hubs"][0]]);
-        }
-        f.send(p, json!({"op":"settings","hub":"personal","settings":update,"truncated":true,"truncated_collections":[key]}));
-        let projection = render_state(&f, p);
-        for collection in ["apps", "channels", "hubs"] {
-            let count = if collection == preserved {
-                original[collection].as_array().unwrap().len()
-            } else {
-                update[collection].as_array().unwrap().len()
-            };
-            assert_eq!(
-                projection["collection_counts"][format!("settings.{collection}")],
-                count,
-                "{key}: {collection}"
-            );
-        }
-    }
 }
 
 #[test]

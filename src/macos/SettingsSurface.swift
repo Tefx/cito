@@ -31,6 +31,34 @@ private final class SettingsScrollView: NSScrollView {
     }
 }
 
+private final class SettingsPillClipView: NSClipView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let hit = super.hitTest(point) { return hit }
+        // A sibling Settings document scroll can leave AppKit's clip hit test
+        // without a target even though the pills still occupy this viewport.
+        let local = convert(point, from: superview)
+        guard !isHiddenOrHasHiddenAncestor, bounds.contains(local) else { return nil }
+        return documentView?.hitTest(local)
+    }
+}
+
+func mountSettingsPills(in container: NSView, frame: NSRect, id: String, geometry: PillTrackGeometry,
+                       pills: [MenuControl], selected: MenuControl?, handoff: SegmentedPillStrip.Handoff?) {
+    let strip = SegmentedPillStrip.mount(in: container, frame: frame, id: id, spacing: 4,
+        geometry: geometry, pills: pills, selected: selected, handoff: handoff)
+    let document = strip.documentView
+    let offset = strip.contentView.bounds.origin
+    let clip = SettingsPillClipView(frame: strip.contentView.frame)
+    // NSScrollView reads its background from the clip view. Carry over the
+    // translucent fill without adding a second layer above the moving thumb.
+    clip.backgroundColor = strip.backgroundColor
+    clip.drawsBackground = strip.drawsBackground
+    strip.contentView = clip
+    strip.documentView = document
+    clip.scroll(to: offset)
+    strip.reflectScrolledClipView(clip)
+}
+
 // Reserve wrapping height and intrinsic-width siblings at the narrowest
 // viewport this fixed-size panel can have under either scroller style.
 func settingsScrollerAllowance(_ scroll: NSScrollView) -> CGFloat {
@@ -48,8 +76,11 @@ struct SettingsPresentation {
     var host: HostHubSummary?
     var hubForm: Companion.HubFormState
     var hostPort: Companion.HostHubPortState
-    var invite: Companion.HubInviteState
+    var inviteRequestId: String?
+    var hostPortFeedback: Date?
+    var inviteFeedback: Date?
     var channels: ChannelsPresentation
+    var mountedChannels: ChannelsPresentation?
     var pending: [SettingsTab: Set<String>]
     var banner: String?
     var launchAtLogin: Bool
@@ -57,10 +88,11 @@ struct SettingsPresentation {
     func changedTabs(from old: Self) -> Set<SettingsTab> {
         var tabs: Set<SettingsTab> = []
         if apps != old.apps || harnesses != old.harnesses || appChecks != old.appChecks { tabs.insert(.apps) }
-        if hubRows != old.hubRows || host != old.host || hubForm != old.hubForm || hostPort != old.hostPort || invite != old.invite {
+        if hubRows != old.hubRows || host != old.host || hubForm != old.hubForm || hostPort != old.hostPort ||
+            inviteRequestId != old.inviteRequestId || hostPortFeedback != old.hostPortFeedback || inviteFeedback != old.inviteFeedback {
             tabs.insert(.hubs)
         }
-        if channels != old.channels { tabs.insert(.channels) }
+        if channels != old.channels || mountedChannels != old.mountedChannels { tabs.insert(.channels) }
         for tab in SettingsTab.allCases where pending[tab] != old.pending[tab] { tabs.insert(tab) }
         return tabs
     }
@@ -69,40 +101,35 @@ struct SettingsPresentation {
 extension Companion {
     func settingsPresentation() -> SettingsPresentation {
         let channel = channelsPresentation()
+        let mountedHub = mountedChannelsSettings?.hub
+        let mounted = mountedHub.flatMap { $0 == channel.hub ? nil : channelsPresentation(hub: $0) }
         var pending: [SettingsTab: Set<String>] = [:]
         for (id, control) in pendingControls {
-            guard let tab = SettingsTab.affected(by: control.op), tab != .channels || control.hub == channel.hub else { continue }
+            guard let tab = SettingsTab.affected(by: control.op),
+                  tab != .channels || control.hub == channel.hub || control.hub == mountedHub else { continue }
             pending[tab, default: []].insert(id)
         }
-        return SettingsPresentation(apps: resolvedSettingsApps, harnesses: harnesses, appChecks: settingsApps.checkedUntil,
-            hubRows: resolvedSettingsHubs, host: settings?.host_hub, hubForm: hubForm, hostPort: hostPort, invite: hubInvite,
-            channels: channel, pending: pending, banner: settingsBannerError, launchAtLogin: settings?.launch_at_login == true)
+        return SettingsPresentation(apps: resolvedSettingsApps, harnesses: harnesses, appChecks: feedback.deadlines(for: .appCheck),
+            hubRows: resolvedSettingsHubs, host: settings?.host_hub, hubForm: hubForm,
+            hostPort: hostPort, inviteRequestId: hubInvite.requestId,
+            hostPortFeedback: feedback.deadline(.init(.hostPort)), inviteFeedback: feedback.deadline(.init(.invite)),
+            channels: channel, mountedChannels: mounted, pending: pending, banner: settingsBannerError, launchAtLogin: settings?.launch_at_login == true)
     }
 
-    func pendingLabel(_ control: MenuControl, _ pending: Bool, _ title: String) {
-        guard pending else { return }
-        let pairedWidth = MenuControl.toggleWidth(control.identifier?.rawValue ?? "", title: control.label.stringValue,
-            font: control.label.font ?? .systemFont(ofSize: 11, weight: .medium), paddingX: control.paddingX)
-        control.clearFeedback(title: title, accessibilityLabel: title)
-        control.isEnabled = false; control.setLeadingSymbol(nil)
-        control.toolTip = title
-        let right = control.frame.maxX
-        control.pendingWidth = max(pairedWidth, control.frame.width, MenuControl.intrinsicWidth(title))
-        control.frame.size.width = control.pendingWidth
-        control.frame.origin.x = right - control.pendingWidth
-    }
-    func rebuildFeedbackAfter(_ seconds: Double, tab: SettingsTab) {
-        RunLoop.main.add(Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
-            self?.rebuildSettingsPanel(preservingEditor: true, tabs: [tab])
-        }, forMode: .common)
-    }
-
-    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, channelSave: PendingControl? = nil, savedRequest: String? = nil, sourceOp: String? = nil, confirmHubSave: Bool = false, savedHub: String? = nil, truncated: Bool = false) {
+    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, channelSave: PendingControl? = nil, savedRequest: String? = nil, sourceOp: String? = nil, confirmHubSave: Bool = false, savedHub: String? = nil) {
         let target = settingsHub(value, hub: hub)
         for old in settings?.hubs ?? [] where !old.sharesChannelAuthority(with: value.hubs.first { $0.name == old.name }) {
             // A reused Hub name cannot carry local edits or in-flight receipts across accounts.
             if settingsActiveTab == "channels", mountedChannelsSettings?.hub == old.name { settingsPanel?.makeFirstResponder(nil) }
-            settingsChannels.editors = settingsChannels.editors.filter { !$0.key.hasPrefix(old.name + "|") }
+            for channel in settingsChannels.inventory[old.name] ?? [] {
+                let key = channelEditorKey(hub: old.name, principal: old.user ?? "local", channel: channel.id)
+                feedback.expire(channelSaveFeedbackKey(key, scope: "hub"))
+            }
+            for key in settingsChannels.editors.keys.filter({ $0.hasPrefix(old.name + "|") }) {
+                settingsChannels.editors.removeValue(forKey: key)
+                feedback.expire(.init(.channelPair, key))
+                feedback.expire(channelSaveFeedbackKey(key, scope: "user"))
+            }
             settingsChannels.inventory.removeValue(forKey: old.name)
             settingsChannels.errors.removeValue(forKey: old.name)
             pendingControls = pendingControls.filter { $0.value.hub != old.name || !Self.channelControlOps.contains($0.value.op) }
@@ -113,7 +140,7 @@ extension Companion {
             if settingsVisible && !settingsChannels.selectedHub.isEmpty { emit(["op": "open_settings", "hub": settingsChannels.selectedHub], userInitiated:false) }
         }
         reconcileHubSettings(value, savedRequest: savedRequest, confirmHubSave: confirmHubSave, savedHub: savedHub)
-        reconcileChannelSettings(value, target: target, channelSave: channelSave, sourceOp: sourceOp, truncated: truncated)
+        reconcileChannelSettings(value, target: target, channelSave: channelSave, sourceOp: sourceOp)
     }
 
     // MARK: - Surface 3: Native AppKit Settings Window (520 × 460 pt)
@@ -149,22 +176,13 @@ extension Companion {
             rebuildSettingsPanel()
         case "escape":
             if settingsActiveTab == "hubs" && hubForm.isOpen { hubForm = HubFormState(); rebuildSettingsPanel() }
-            else if settingsActiveTab == "channels", let mounted = mountedChannelsSettings {
-                let hub = mounted.hub
-                let channels = mounted.channels
-                let editingGateway = channels.filter { settingsChannels.editors["\(hub)|\($0.id)"]?.editingGateway == true }
-                let editing = editingGateway.isEmpty ? channels.filter { settingsChannels.editors["\(hub)|\($0.id)"]?.editingPersonal == true } : editingGateway
-                guard !editing.isEmpty else { closeSettingsPanel(); return }
-                for channel in editing {
-                    let key = "\(hub)|\(channel.id)"
-                    clearChannelDrafts(channel, scope: editingGateway.isEmpty ? "user" : "hub", hub: hub)
-                    if editingGateway.isEmpty { settingsChannels.editors[key]?.resetPersonal() }
-                    else { settingsChannels.editors[key]?.resetGateway() }
-                }
-                rebuildSettingsPanel()
-            }
+            else if settingsActiveTab == "channels", let mounted = mountedChannelsSettings { cancelChannelEditing(in: mounted) }
             else { closeSettingsPanel() }
         case "return":
+            if let focused = settingsPanel?.firstResponder as? MenuControl {
+                if !focused.isHiddenOrHasHiddenAncestor { focused.performClick(nil) }
+                return
+            }
             let id = (settingsPanel?.firstResponder as? NSTextView)?.delegate as? NSTextField
             let field=id?.identifier?.rawValue ?? ""
             let actionId: String
@@ -222,7 +240,7 @@ extension Companion {
         rebuildSettingsPanel(preservingEditor: true, syncFields: false, tabs: settingsDeferredTabs)
     }
 
-    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false, revealChannel: String? = nil, revealPairing: Bool = false, revealEditorScope: String = "hub", syncFields: Bool = true, scrollerStyle: NSScroller.Style? = nil, tabs: Set<SettingsTab>? = nil) {
+    func rebuildSettingsPanel(preservingEditor: Bool? = nil, revealAddHub: Bool = false, revealChannel: String? = nil, revealPairing: Bool = false, revealEditorScope: String = "hub", syncFields: Bool = true, scrollerStyle: NSScroller.Style? = nil, tabs: Set<SettingsTab>? = nil) {
         if let scrollerStyle {
             // A style notification changes geometry, not the mounted Settings state.
             for case let scroll as SettingsScrollView in settingsPanel?.contentView?.subviews ?? [] {
@@ -238,16 +256,34 @@ extension Companion {
         let allTabs = Set(SettingsTab.allCases)
         let full = tabs == nil || settingsDirty
         var targets = full ? allTabs : tabs ?? []
-        if preservingEditor, let active = SettingsTab(rawValue: settingsActiveTab), targets.contains(active),
-           settingsFieldControls.values.contains(where: { $0.currentEditor() != nil && $0.currentEditor() === window.firstResponder }) {
+        let active = SettingsTab(rawValue: settingsActiveTab)
+        let focusedField = settingsFieldControls.values.first { $0.currentEditor() != nil && $0.currentEditor() === window.firstResponder }
+        let channelFocus = active == .channels && targets.contains(.channels) ? mountedChannelsSettings?.settlementFocus : nil
+        let hubFocus = active == .hubs && targets.contains(.hubs) ? hubSettlementFocus : nil
+        let settlementFocus = channelFocus ?? hubFocus
+        if settlementFocus != nil, focusedField != nil { window.makeFirstResponder(nil) }
+        // The emitter's tab-only channel repaint is a pending-state update,
+        // not an instruction to replace a live field editor.
+        let preserve = (preservingEditor ?? (tabs == [.channels])) || (!syncFields && tabs != nil)
+        if preserve, settlementFocus == nil, let active, targets.contains(active), focusedField != nil {
             settingsDeferredTabs.insert(active)
             targets.remove(active)
-            if active == .hubs { refreshMountedHubFormFeedback() }
+            if active == .hubs {
+                refreshMountedHubFormFeedback()
+                refreshMountedHostPortFeedback()
+            } else if active == .channels {
+                mountedChannelsSettings?.refreshMountedActions()
+            }
         }
         settingsDirty = false
         settingsDeferredTabs.subtract(targets)
         let replaceChrome = full && targets == allTabs
-        let active = SettingsTab(rawValue: settingsActiveTab)
+        let stripIDs = ["settings_tab_track", "channel_hub_strip", "host_hub_addr_track", "settings_hub_auth_track"]
+        let focusedSegment = window.firstResponder as? MenuControl
+        let handoffs = Dictionary(uniqueKeysWithValues: stripIDs.compactMap { id -> (String, SegmentedPillStrip.Handoff)? in
+            let strip: SegmentedPillStrip? = findView(in: root, id: id)
+            return strip.map { (id, $0.capture()) }
+        })
         let replacingEditor = active.map { targets.contains($0) } == true
         let focused = replacingEditor ? settingsFieldControls.first { $0.value.currentEditor() != nil && $0.value.currentEditor() === window.firstResponder } : nil
         let focusedId = focused?.key
@@ -265,7 +301,10 @@ extension Companion {
             root.subviews.filter { !($0 is NSVisualEffectView) }.forEach { $0.removeFromSuperview() }
         }
 
-        if replaceChrome { mountSettingsChrome(in: root) }
+        let header: NSView? = findView(in: root, id: "settings_header")
+        if header == nil {
+            mountSettingsChrome(in: root, handoff: handoffs["settings_tab_track"])
+        }
         let chromeChanged = updateSettingsChrome(in: root)
         if !targets.isEmpty || chromeChanged { settingsRebuildCount += 1 }
         let renderedHub = effectiveChannelHub
@@ -278,16 +317,27 @@ extension Companion {
             }
             switch tab {
             case .apps: buildAppsTab(in: scroll)
-            case .channels: buildChannelsTab(in: scroll, renderedHub: renderedHub)
-            case .hubs: buildHubsTab(in: scroll)
+            case .channels: buildChannelsTab(in: scroll, renderedHub: renderedHub, handoff: handoffs["channel_hub_strip"])
+            case .hubs: buildHubsTab(in: scroll, handoffs: handoffs)
             }
         }
 
         window.invalidateShadow()
-        if let id = focusedId, let field = settingsFieldControls[id],
+        if let settlementFocus {
+            for id in settlementFocus {
+                if let control: MenuControl = findView(in: root, id: id), !control.isHiddenOrHasHiddenAncestor, control.isEnabled {
+                    control.scrollToVisible(control.bounds)
+                    if window.makeFirstResponder(control) { break }
+                }
+            }
+        } else if let id = focusedId, let field = settingsFieldControls[id],
            !(id.hasPrefix("channel_field:") || id.hasPrefix("pairing_instruction:")) || previousChannelHub == renderedHub {
             window.makeFirstResponder(field)
             if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }
+        } else if let focusedSegment, focusedSegment.segmentArrow != nil, focusedSegment.window !== window,
+                  let id = focusedSegment.identifier?.rawValue, let pill: MenuControl = findView(in: root, id: id),
+                  pill.visibleRect.width > 0 && !pill.isHiddenOrHasHiddenAncestor {
+            window.makeFirstResponder(pill)
         }
         if targets.contains(.hubs) && revealAddHub && hubForm.isOpen,
            let scroll: NSScrollView = findView(in: root, id: "settings_hubs_tab"),
@@ -339,52 +389,33 @@ extension Companion {
     }
 
 
-    private func mountSettingsChrome(in root: NSView) {
+    private func mountSettingsChrome(in root: NSView, handoff: SegmentedPillStrip.Handoff?) {
         // Header & Segmented Tab Bar (520 × 48 pt, y: 412)
         let header = NSView(frame: NSRect(x: 0, y: 412, width: 520, height: 48))
         header.identifier = NSUserInterfaceItemIdentifier("settings_header")
 
         let tabPadding: CGFloat = 8
-        let tabWidths = [("Agent Apps","square.grid.2x2"),("Human Channels","bubble.left.and.bubble.right"),("Hubs & Network","network")].map {
-            MenuControl.intrinsicWidth($0.0, leadingSymbol:$0.1, paddingX:tabPadding)
+        let options = [(SettingsTab.apps, "Agent Apps", "square.grid.2x2"),
+                       (.channels, "Human Channels", "bubble.left.and.bubble.right"),
+                       (.hubs, "Hubs & Network", "network")]
+        let pills = options.map { tab, title, symbol in
+            let width = MenuControl.intrinsicWidth(title, leadingSymbol: symbol, paddingX: tabPadding)
+            let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 24), leadingSymbol: symbol, paddingX: tabPadding)
+            pill.identifier = NSUserInterfaceItemIdentifier("settings_tab:\(tab.rawValue)")
+            pill.pressed = { [weak self] in
+                guard let self, settingsActiveTab != tab.rawValue else { return }
+                settingsActiveTab = tab.rawValue
+                if tab == .channels { refreshChannelSettingsIfNeeded() }
+                rebuildSettingsPanel()
+            }
+            return pill
         }
-        let tabsWidth = tabWidths.reduce(0,+) + 12
-        let tabsTrack = makePillTrack(NSRect(x:max(78,floor((520-tabsWidth)/2)),y:10,width:tabsWidth,height:28),radius:9)
-        tabsTrack.identifier = NSUserInterfaceItemIdentifier("settings_tab_track")
-        header.addSubview(tabsTrack)
-        let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: tabWidths[0], height: 24), leadingSymbol: "square.grid.2x2", radius: 7, paddingX: tabPadding)
-        appsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:apps")
-        appsTab.style = settingsActiveTab == "apps" ? .prominent : .subtleHeader
-        appsTab.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.settingsActiveTab = "apps"
-            self.rebuildSettingsPanel()
-        }
-        tabsTrack.addSubview(appsTab)
-
-        let channelsTab = MenuControl("Human Channels", frame: NSRect(x: tabWidths[0]+6, y: 2, width: tabWidths[1], height: 24), leadingSymbol: "bubble.left.and.bubble.right", radius: 7, paddingX: tabPadding)
-        channelsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:channels")
-        channelsTab.style = settingsActiveTab == "channels" ? .prominent : .subtleHeader
-        channelsTab.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.settingsActiveTab = "channels"
-            self.refreshChannelSettingsIfNeeded()
-            self.rebuildSettingsPanel()
-        }
-        tabsTrack.addSubview(channelsTab)
-
-        let hubsTab = MenuControl("Hubs & Network", frame: NSRect(x: tabWidths[0]+tabWidths[1]+10, y: 2, width: tabWidths[2], height: 24), leadingSymbol: "network", radius: 7, paddingX: tabPadding)
-        hubsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:hubs")
-        hubsTab.style = settingsActiveTab == "hubs" ? .prominent : .subtleHeader
-        hubsTab.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.settingsActiveTab = "hubs"
-            self.rebuildSettingsPanel()
-        }
-        tabsTrack.addSubview(hubsTab)
-
-        header.addSubview(roundedView(NSRect(x: 0, y: 0, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
+        let width = PillTrackGeometry.trailingWidth(widths: pills.map { $0.frame.width }, spacing: 4)
         root.addSubview(header)
+        mountSettingsPills(in: header, frame: NSRect(x: max(78, floor((520 - width) / 2)), y: 10, width: width, height: 28),
+            id: "settings_tab_track", geometry: PillTrackGeometry(pillHeight: 24, pillRadius: 7), pills: pills,
+            selected: pills.first { $0.identifier?.rawValue == "settings_tab:\(settingsActiveTab)" }, handoff: handoff)
+        header.addSubview(roundedView(NSRect(x: 0, y: 0, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         // Persistent Footer (520 × 44 pt, y: 0)
         let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 44))
         footerBar.identifier = NSUserInterfaceItemIdentifier("settings_footer")
@@ -406,6 +437,10 @@ extension Companion {
     }
 
     private func updateSettingsChrome(in root: NSView) -> Bool {
+        if let track: SegmentedPillStrip = findView(in: root, id: "settings_tab_track"),
+           let selected: MenuControl = findView(in: track, id: "settings_tab:\(settingsActiveTab)") {
+            track.select(selected)
+        }
         let login: NSButton? = findView(in: root, id: "settings_launch_at_login")
         let state: NSControl.StateValue = settings?.launch_at_login == true ? .on : .off
         let loginChanged = login?.state != state

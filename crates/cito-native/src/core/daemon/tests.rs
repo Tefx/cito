@@ -899,6 +899,7 @@ fn invite_join_settles_each_request_and_records_its_saved_hub() -> Result<(), St
     for (request, target) in [
         ("parse", "work"),
         ("existing", "work"),
+        ("mixed-case", "Work-2"),
         ("derived", derived.as_str()),
         ("reject", "work"),
         ("warn", "warning"),
@@ -907,6 +908,11 @@ fn invite_join_settles_each_request_and_records_its_saved_hub() -> Result<(), St
         let mut invite = json!({"name":target,"url":"local://","set_default":false});
         if request == "derived" {
             invite.as_object_mut().unwrap().remove("name");
+        }
+        if request == "mixed-case" {
+            invite["name"] = json!("Work");
+            invite["url"] = json!("https://hub.example.com");
+            invite["enabled"] = json!(false);
         }
         if request == "reject" {
             invite["authMode"] = json!("token");
@@ -953,7 +959,7 @@ fn invite_join_settles_each_request_and_records_its_saved_hub() -> Result<(), St
             _ => {
                 let result = result?;
                 assert_eq!(result["committed"], true);
-                assert_eq!(s.raw_config()?["hubs"][target]["url"], "local://");
+                assert_eq!(s.raw_config()?["hubs"][target]["url"], invite["url"]);
                 assert!(!s.last_hub_errors.contains_key(target));
                 assert_eq!(
                     frames.iter().map(|v| string(v, "op")).collect::<Vec<_>>(),
@@ -977,13 +983,13 @@ fn hub_edit_reset_name_restores_the_advertised_name() -> Result<(), String> {
         TestDirectory(std::env::temp_dir().join(format!("cito-hub-name-{}", random_uuid_v4())));
     let engine = TestEngine(HubEngine::open(&dir.join("hub"))?);
     let mut auth = HubAuth::new("none", None, None, None)?;
-    auth.advertise_name(Some("Office Mac"))?;
+    auth.advertise_name(Some("Acme Cloud"))?;
     let auth = Arc::new(auth);
     let server = engine.start_server("127.0.0.1", 0, auth.clone())?;
     let url = format!("http://{}", server.address);
     let config = profile_config(
         &dir,
-        json!({"default_hub":"work","hub_order":["office-mac","local","work"],"hubs":{"local":{"url":"local://"},"work":{"url":url}}}),
+        json!({"default_hub":"work","hub_order":["Acme-Cloud","local","work"],"hubs":{"local":{"url":"local://"},"work":{"url":url}}}),
     );
     let mut service = TestService::open(&config, &test_plugins(vec![]))?;
     let receipt = service.action(&json!({
@@ -991,37 +997,295 @@ fn hub_edit_reset_name_restores_the_advertised_name() -> Result<(), String> {
     }))?;
     assert_eq!(receipt["committed"], true);
     let raw = service.raw_config()?;
-    assert_eq!(raw["default_hub"], "office-mac");
-    assert_eq!(raw["hub_order"], json!(["local", "office-mac"]));
+    assert_eq!(raw["default_hub"], "Acme-Cloud");
+    assert_eq!(raw["hub_order"], json!(["local", "Acme-Cloud"]));
     assert!(raw["hubs"].get("work").is_none());
-    assert_eq!(raw["hubs"]["office-mac"]["url"], url);
-    assert!(raw["hubs"]["office-mac"].get("reset_name").is_none());
+    assert_eq!(raw["hubs"]["Acme-Cloud"]["url"], url);
+    assert!(raw["hubs"]["Acme-Cloud"].get("reset_name").is_none());
 
     // A simultaneous endpoint change is not a collision with the edited profile.
     let replacement = engine.start_server("127.0.0.1", 0, auth)?;
     let next_url = format!("http://{}", replacement.address);
     assert_eq!(
         service.action(&json!({
-            "op":"setup_save_hub","edit":true,"original_name":"office-mac","reset_name":true,
+            "op":"setup_save_hub","edit":true,"original_name":"Acme-Cloud","reset_name":true,
             "config":{"url":next_url},
         }))?["committed"],
         true
     );
     let raw = service.raw_config()?;
-    assert_eq!(raw["hubs"]["office-mac"]["url"], next_url);
-    assert!(raw["hubs"].get("office-mac-2").is_none());
+    assert_eq!(raw["hubs"]["Acme-Cloud"]["url"], next_url);
+    assert!(raw["hubs"].get("Acme-Cloud-2").is_none());
     // An explicit rename to an occupied name still fails, without marking its owner as failed.
     assert!(service
         .action(&json!({
-            "op":"setup_save_hub","edit":true,"original_name":"office-mac","name":"local"
+            "op":"setup_save_hub","edit":true,"original_name":"Acme-Cloud","name":"local"
         }))
         .is_err());
     assert_eq!(service.raw_config()?, raw);
     let settings = service.settings();
     let hubs = settings["hubs"].as_array().unwrap();
-    assert!(hubs.iter().find(|h| h["name"] == "office-mac").unwrap()["error"].is_string());
+    assert!(hubs.iter().find(|h| h["name"] == "Acme-Cloud").unwrap()["error"].is_string());
     assert!(hubs.iter().find(|h| h["name"] == "local").unwrap()["error"].is_null());
     Ok(())
+}
+
+#[test]
+fn advertised_explicit_hub_names_reach_standalone_health() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-hub-name-{}", random_uuid_v4())));
+    let engine = TestEngine(HubEngine::open(&dir.join("hub"))?);
+    let mut auth = crate::core::auth::HubAuth::new("none", None, None, None)?;
+    auth.advertise_name(Some("Work_Internal"))?;
+    for reserved in ["local", "Local", "LOCAL"] {
+        assert_eq!(
+            auth.advertise_name(Some(reserved)).unwrap_err(),
+            "INVALID_INPUT: Invalid Hub name (local is reserved)"
+        );
+    }
+    assert_eq!(auth.health()["name"], "Work_Internal");
+    let server = engine.start_server("127.0.0.1", 0, Arc::new(auth))?;
+    let url = format!("http://{}", server.address);
+    assert_eq!(
+        crate::core::config::probe_hub_health(&url, true)["name"],
+        "Work_Internal"
+    );
+    Ok(())
+}
+
+#[test]
+fn hub_invite_parser_drops_inactive_edit_fields() -> Result<(), String> {
+    use super::host_hub::parse_hub_invite;
+
+    let plain = r#"{"name":"work","url":"local://"}"#;
+    let inactive =
+        r#"{"name":"work","url":"local://","edit":false,"original_name":null,"reset_name":false}"#;
+    assert_eq!(parse_hub_invite(inactive)?, parse_hub_invite(plain)?);
+    assert_eq!(
+        parse_hub_invite("cito setup --hub Local --url local://"),
+        Err("INVALID_INPUT: Invalid hub invite".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_hub_names_round_trip_and_reject_case_folded_collisions() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-hub-name-{}", random_uuid_v4())));
+    let config = profile_config(&dir, json!({}));
+    let plugins = test_plugins(vec![]);
+    let underscore_url = "https://underscore.example.com";
+    let hyphen_url = "https://hyphen.example.com";
+    let invite_url = "https://invite.example.com";
+    let service = Arc::new(Mutex::new(DaemonService::open(&config, &plugins)?));
+    {
+        let _cleanup = ServiceCleanup {
+            service: service.clone(),
+        };
+        let save = |action: Value| -> Result<_, String> {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let body = action.to_string();
+            write!(client, "POST /action HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            let stream = crate::core::http_boundary::accept_test_client(&listener)?;
+            http_actions::handle_http(stream, service.clone(), Arc::new(json!({})));
+            let response = crate::plugins::read_http_response(&mut client)?;
+            let body: Value = serde_json::from_str(&response.body).unwrap();
+            Ok((response.status, body))
+        };
+        let add = |name, url| {
+            save(json!({
+                "op":"setup_save_hub","name":name,"name_explicit":true,
+                "url":url,"enabled":false,"authMode":"none",
+            }))
+        };
+        let (status, receipt) = add("  Work_Internal  ", underscore_url)?;
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["committed"], true);
+        let read_config = || -> Value {
+            serde_json::from_slice(&fs::read(&config.config_path).unwrap()).unwrap()
+        };
+        let saved = read_config();
+        assert_eq!(saved["hubs"]["Work_Internal"]["url"], underscore_url);
+        assert!(saved["hubs"].get("Work-Internal").is_none());
+
+        let collision = (
+            400,
+            json!({"ok":false,"error":"INVALID_INPUT: Hub name already exists"}),
+        );
+        assert_eq!(add("work_internal", hyphen_url)?, collision);
+        assert_eq!(read_config(), saved);
+
+        let (status, receipt) = add("Work-Internal", hyphen_url)?;
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["committed"], true);
+        let saved = read_config();
+        assert_eq!(saved["hubs"]["Work_Internal"]["url"], underscore_url);
+        assert_eq!(saved["hubs"]["Work-Internal"]["url"], hyphen_url);
+        assert_eq!(
+            save(json!({
+                "op":"setup_save_hub","edit":true,"original_name":"Work-Internal","name":"work_internal",
+            }))?,
+            collision
+        );
+        assert_eq!(read_config(), saved);
+
+        let (status, receipt) = save(json!({
+            "op":"setup_save_hub","edit":true,"original_name":"local","url":"local://","user":"alice",
+        }))?;
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["committed"], true);
+        assert_eq!(read_config()["hubs"]["local"]["user"], "alice");
+
+        let before = fs::read(&config.config_path).unwrap();
+        for invite in [
+            json!({"name":"local","url":"local://","edit":true,"original_name":"local","user":"eve"}),
+            json!({"name":"work","url":"local://","edit":true}),
+            json!({"name":"work","url":"local://","original_name":"local"}),
+            json!({"name":"work","url":"local://","reset_name":true}),
+            json!({"hub":"LOCAL","url":"local://"}),
+        ] {
+            for parse_only in [false, true] {
+                assert_eq!(
+                    save(
+                        json!({"op":"paste_hub_invite","invite":invite.to_string(),"parse_only":parse_only})
+                    )?,
+                    (
+                        400,
+                        json!({"ok":false,"error":"INVALID_INPUT: Invalid hub invite"})
+                    ),
+                    "{invite}, parse_only={parse_only}"
+                );
+                assert_eq!(fs::read(&config.config_path).unwrap(), before);
+            }
+        }
+        let saved = read_config();
+        let invite = |name, url| {
+            save(json!({
+                "op":"paste_hub_invite",
+                "invite":json!({"name":name,"url":url,"enabled":false,"set_default":false}).to_string(),
+            }))
+        };
+        for (name, url, error) in [
+            ("local", "local://", "INVALID_INPUT: Invalid hub invite"),
+            ("local", invite_url, "INVALID_INPUT: Invalid hub invite"),
+            (" Local ", invite_url, "INVALID_INPUT: Invalid hub invite"),
+            ("!local", invite_url, "INVALID_INPUT: Invalid hub name"),
+            ("___", invite_url, "INVALID_INPUT: Invalid hub invite"),
+        ] {
+            assert_eq!(
+                invite(name, url)?,
+                (400, json!({"ok":false,"error":error})),
+                "{name}"
+            );
+            assert_eq!(read_config(), saved);
+        }
+        let (status, receipt) = invite("Invite_Internal", invite_url)?;
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["committed"], true);
+        let saved = read_config();
+        assert_eq!(saved["hubs"]["Invite_Internal"]["url"], invite_url);
+        assert!(saved["hubs"].get("Invite-Internal").is_none());
+    }
+    drop(service);
+
+    let reopened = TestService::open(&config, &plugins)?;
+    let settings = reopened.settings();
+    let hubs = settings["hubs"].as_array().unwrap();
+    for (name, url) in [
+        ("Work_Internal", underscore_url),
+        ("Work-Internal", hyphen_url),
+        ("Invite_Internal", invite_url),
+    ] {
+        assert_eq!(hubs.iter().find(|h| h["name"] == name).unwrap()["url"], url);
+    }
+    let local = hubs.iter().find(|h| h["name"] == "local").unwrap();
+    assert_eq!(local["url"], "local://");
+    assert_eq!(local["user"], "alice");
+    assert!(hubs.iter().all(|h| h["name"] != "work_internal"));
+    Ok(())
+}
+
+#[test]
+fn case_only_hub_rename_preserves_oidc_credentials_and_profile() -> Result<(), String> {
+    let dir =
+        TestDirectory(std::env::temp_dir().join(format!("cito-hub-case-{}", random_uuid_v4())));
+    let config = profile_config(
+        &dir,
+        json!({
+            "hub_order":["local","work-internal"],
+            "hubs":{
+                "local":{"url":"local://"},
+                "work-internal":{"url":"https://hub.example.com","enabled":false,"authMode":"oidc","issuer":"https://id.example.com","clientId":"client"},
+            },
+        }),
+    );
+    let mut service = TestService::open(&config, &test_plugins(vec![]))?;
+    fs::write(
+        config.state_dir.join("oidc-token-work-internal.json"),
+        "retained credential",
+    )
+    .unwrap();
+    let result = service.action(&json!({
+        "op":"setup_save_hub","edit":true,"original_name":"work-internal","name":"Work-Internal",
+    }))?;
+    assert_eq!(result["committed"], true);
+    let saved = service.raw_config()?;
+    assert!(saved["hubs"].get("work-internal").is_none());
+    assert_eq!(saved["hubs"]["Work-Internal"]["authMode"], "oidc");
+    assert_eq!(saved["hub_order"], json!(["local", "Work-Internal"]));
+    // Checking path existence alone cannot distinguish casing on APFS.
+    let token_files: Vec<_> = fs::read_dir(&config.state_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("oidc-token-"))
+        .collect();
+    assert_eq!(token_files, ["oidc-token-Work-Internal.json"]);
+    assert_eq!(
+        fs::read_to_string(config.state_dir.join(&token_files[0])).unwrap(),
+        "retained credential"
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_send_accepts_mixed_case_hub_prefixes_but_not_mixed_case_harnesses() {
+    use crate::plugins::{validate_harness_id, validate_hub_name};
+    assert!(validate_hub_name("local"));
+    assert!(validate_hub_name("Work-Internal"));
+    assert!(validate_hub_name(&"A".repeat(32)));
+    for name in ["", "Local", "LOCAL", "-Work", "Wörk", &"A".repeat(33)] {
+        assert!(!validate_hub_name(name), "{name}");
+    }
+    assert!(validate_harness_id("work-internal"));
+    assert!(!validate_harness_id("Work-Internal"));
+
+    let tools = super::mcp::tools_list();
+    let schema = |name| {
+        &tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()["inputSchema"]["properties"]
+    };
+    let pattern = schema("cito_send")["to"]["pattern"].as_str().unwrap();
+    assert!(pattern.starts_with("^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,31}:)?"));
+    assert!(pattern.contains("(?:/[a-z0-9][a-z0-9_-]{0,31})?"));
+    assert_eq!(
+        schema("cito_find")["harness"]["pattern"],
+        "^[a-z0-9][a-z0-9_-]{0,31}$"
+    );
+    let validate_to =
+        |to| super::mcp::validate_tool_input("cito_send", &json!({"to":to,"message":"hello"}));
+    assert!(validate_to("Work-Internal:alice/fixture#abc").is_ok());
+    assert!(validate_to("Local:alice/fixture#abc").is_err());
+    assert!(validate_to("Work-Internal:alice/Fixture#abc").is_err());
 }
 
 #[test]
@@ -3702,8 +3966,8 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
                 assert_eq!(service.raw_config()?, candidate);
             }
             for (requested, url, expected) in [
-                ("Office Mac", "https://office.example.com", "office-mac"),
-                ("Work", "local://", "work"),
+                ("Acme Cloud", "https://hub.example.com", "Acme-Cloud"),
+                ("Work Internal", "local://", "Work-Internal"),
                 ("", "https://node.example.com", "node"),
                 ("", "https://node.other.example.com", "node-2"),
                 ("", "https://local.example.com", "local-2"),
@@ -3745,7 +4009,7 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
             )?;
             assert!(service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"user","name":"user","url":"http://"})).is_err());
             let user_error = service.last_hub_errors["user"].clone();
-            for requested in ["!!!", "local", "Office Mac"] {
+            for requested in ["!!!", "local", "Local", "LOCAL", "acme-cloud"] {
                 let before = fs::read(&config.config_path).map_err(|e| e.to_string())?;
                 assert!(service.action(&json!({"op":"setup_save_hub","name":requested,"name_explicit":true,"url":"https://different.example.com","enabled":false,"authMode":"none"})).is_err());
                 assert_eq!(
@@ -3759,9 +4023,9 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
             for (op, requested, canonical, url) in [
                 (
                     "setup_save_hub",
-                    Some("Office Mac"),
-                    "office-mac",
-                    "https://office.example.com",
+                    Some("Acme Cloud"),
+                    "Acme-Cloud",
+                    "https://hub.example.com",
                 ),
                 (
                     "setup_save_hub",
@@ -3798,9 +4062,9 @@ fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
                     .is_null());
                 assert_eq!(service.last_hub_errors["work"], work_error);
             }
-            service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"office-mac","name":"Office Mac","url":"https://updated.example.com","enabled":false,"authMode":"none"}))?;
+            service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"Acme-Cloud","name":"Acme Cloud","url":"https://updated.example.com","enabled":false,"authMode":"none"}))?;
             assert_eq!(
-                service.raw_config()?["hubs"]["office-mac"]["url"],
+                service.raw_config()?["hubs"]["Acme-Cloud"]["url"],
                 "https://updated.example.com"
             );
             Ok(())

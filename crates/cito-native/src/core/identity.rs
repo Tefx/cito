@@ -16,22 +16,41 @@ pub fn local_host_name() -> String {
     "localhost".into()
 }
 pub fn normalize_slug(raw: &str) -> String {
+    match normalize_hub_name(raw) {
+        Some(mut slug) => {
+            slug.make_ascii_lowercase();
+            slug
+        }
+        None => "user".into(),
+    }
+}
+
+pub(super) fn resolve_explicit_hub_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if crate::plugins::validate_hub_name(name) {
+        return Some(name.to_owned());
+    }
+    // Only an explicit `local` can select the reserved Hub; callers enforce its URL rules.
+    normalize_hub_name(name)
+        .filter(|name| name != "local" && crate::plugins::validate_hub_name(name))
+}
+
+pub(super) fn normalize_hub_name(raw: &str) -> Option<String> {
     let mut out = String::new();
     for ch in raw.chars() {
+        if out.len() == 32 {
+            break;
+        }
         if ch.is_ascii_alphanumeric() {
-            if out.len() < 32 {
-                out.push(ch.to_ascii_lowercase());
-            }
-        } else if !out.is_empty() && !out.ends_with('-') && out.len() < 32 {
+            out.push(ch);
+        } else if !out.is_empty() && !out.ends_with('-') {
             out.push('-');
         }
     }
-    let out = out.trim_end_matches('-');
-    if out.is_empty() {
-        "user".into()
-    } else {
-        out.into()
+    if out.ends_with('-') {
+        out.pop();
     }
+    (!out.is_empty()).then_some(out)
 }
 fn legacy_digest(principal: &str, harness: &str, session: &str) -> [u8; 32] {
     Sha256::digest(format!("cito-v2|{principal}|{harness}|{session}")).into()

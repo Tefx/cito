@@ -462,14 +462,22 @@ pub(super) fn available_hub_name(
     });
     let mut name = base.clone();
     let mut suffix = 2;
-    while name == "local"
-        || hubs
-            .and_then(|h| h.get(&name))
-            .is_some_and(|existing| match editing {
-                Some(original) => name != original,
-                None => existing["url"] != *url,
-            })
-    {
+    loop {
+        if !name.eq_ignore_ascii_case("local") {
+            let other = hubs.and_then(|hubs| {
+                hubs.iter().find(|(other, _)| {
+                    other.eq_ignore_ascii_case(&name) && editing != Some(other.as_str())
+                })
+            });
+            match other {
+                None => return name,
+                // Reuse the saved spelling when rejoining the same profile.
+                Some((saved, existing)) if editing.is_none() && existing["url"] == *url => {
+                    return saved.clone();
+                }
+                _ => {}
+            }
+        }
         let ending = format!("-{suffix}");
         name = format!(
             "{}{}",
@@ -478,7 +486,6 @@ pub(super) fn available_hub_name(
         );
         suffix += 1;
     }
-    name
 }
 
 /// Bounded, credential-free discovery. Call outside configuration and service locks.

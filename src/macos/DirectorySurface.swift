@@ -1,5 +1,22 @@
 import AppKit
 
+private final class DirectorySearchField: NSSearchField {
+    func focusForSearch() {
+        if window?.makeFirstResponder(self) == true { selectText(nil) }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        // Fall back to the ANSI F position on input sources without a Latin F.
+        if flags == [.command], event.charactersIgnoringModifiers?.lowercased() == "f" ||
+            (panelShortcutCharacter(event) == nil && event.keyCode == 3) {
+            focusForSearch()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     func clearDirectoryActionError() {
         let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError : nil
@@ -16,22 +33,36 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
     func updateDirectoryWarnings() {
         guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
+        guard let label = directoryWarningLabel, let warning = label.superview, let scroll = directoryScrollView,
+              let retry = warning.subviews.first(where: { $0.identifier?.rawValue == "directory_query_retry" }) else { return }
         let error = directoryActionError ?? (directoryActionWarning == nil ? directoryQueryError : nil)
-        let hasError = error != nil
-        let hasWarning = hasError || directoryActionWarning != nil || !directoryWarnings.isEmpty
-        directoryWarningLabel?.isHidden = !hasWarning
-        if hasError {
-            directoryWarningLabel?.stringValue = directoryMode == "activity" ? "Cannot update Activity. Please try again." : "Cannot refresh Directory. Showing the last available results."
+        let hasWarning = error != nil || directoryActionWarning != nil || !directoryWarnings.isEmpty
+        warning.isHidden = !hasWarning
+        label.isHidden = !hasWarning
+        retry.isHidden = directoryQueryError == nil
+        if error != nil {
+            label.stringValue = directoryMode == "activity" ? "Cannot update Activity. Please try again." : "Cannot refresh Directory. Showing the last available results."
         } else if directoryActionWarning != nil {
-            directoryWarningLabel?.stringValue = "Action completed. Results may be incomplete."
+            label.stringValue = "Action completed. Results may be incomplete."
         } else {
-            directoryWarningLabel?.stringValue = "Some Hubs are unavailable. Results may be incomplete."
+            label.stringValue = "Some Hubs are unavailable. Results may be incomplete."
         }
         // The daemon supplies warnings with their Hub labels intact.
-        directoryWarningLabel?.toolTip = (error ?? directoryActionWarning) ?? directoryWarnings.joined(separator: "\n")
-        directoryWarningLabel?.textColor = hasError ? CitoPalette.dangerText : CitoPalette.secondaryText
-        let bottom: CGFloat = directoryComposerBar?.isHidden == false ? 28 + (directoryComposerBar?.frame.height ?? 44) : 28
-        directoryScrollView?.frame = NSRect(x:0,y:bottom,width:560,height:362-bottom-(hasWarning ? 28 : 0))
+        label.toolTip = (error ?? directoryActionWarning) ?? directoryWarnings.joined(separator: "\n")
+        label.textColor = error != nil ? CitoPalette.dangerText : CitoPalette.secondaryText
+        let top = directoryFacetBar?.frame.minY ?? 362
+        var warningHeight: CGFloat = 0
+        if hasWarning {
+            layoutBar(in: warning, insetLeft: 16, insetRight: 16, y: 0, height: 28, flexible: label, trailing: [retry])
+            label.frame.size.height = measureWrappedHeight(label.stringValue, width: label.frame.width, font: label.font ?? .systemFont(ofSize: 11))
+            warningHeight = max(retry.isHidden ? 20 : retry.frame.height, label.frame.height) + 8
+            layoutBar(in: warning, insetLeft: 16, insetRight: 16, y: 0, height: warningHeight, flexible: label, trailing: [retry])
+        }
+        warning.frame.origin.y = top - warningHeight
+        warning.frame.size.height = warningHeight
+        let bottom: CGFloat = directoryComposerBar?.isHidden == false ? directoryComposerBar?.frame.maxY ?? 72 : 28
+        scroll.frame = NSRect(x: 0, y: bottom, width: warning.frame.width, height: max(0, warning.frame.minY - bottom))
+        if serverDirectoryQuery == nil && directoryAllPeers.isEmpty { updateDirectoryEmptyState() }
     }
 
     func showMessageCopyError(_ message: String) {
@@ -115,34 +146,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         // Top Search Bar (560 × 46 pt, y: 394)
         let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
         searchBar.identifier = NSUserInterfaceItemIdentifier("directory_search_bar")
-        let modeTrack = makePillTrack(NSRect(x:78,y:9,width:174,height:28),radius:8)
-        modeTrack.identifier = NSUserInterfaceItemIdentifier("directory_mode_track")
-        searchBar.addSubview(modeTrack)
-
-        let dirPill = MenuControl("Directory", frame: NSRect(x: 16, y: 11, width: 76, height: 24), radius: 7)
-        dirPill.identifier = NSUserInterfaceItemIdentifier("dir_mode:directory")
-        dirPill.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        dirPill.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.switchDirectoryMode("directory")
-        }
-        dirPill.frame.origin = NSPoint(x:2,y:2)
-        modeTrack.addSubview(dirPill)
-        directoryModeDirPill = dirPill
-
-        let actTitle = unreadCount > 0 ? "Activity · \(unreadCount)" : "Activity"
-        let actPill = MenuControl(actTitle, frame: NSRect(x: 96, y: 11, width: 88, height: 24), radius: 7)
-        actPill.identifier = NSUserInterfaceItemIdentifier("dir_mode:activity")
-        actPill.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        actPill.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.switchDirectoryMode("activity")
-        }
-        actPill.frame.origin = NSPoint(x:82,y:2)
-        modeTrack.addSubview(actPill)
-        directoryModeActPill = actPill
-
-        let searchField = NSSearchField(frame: NSRect(x: 256, y: 9, width: 290, height: 28))
+        let searchField = DirectorySearchField(frame: NSRect(x: 256, y: 9, width: 290, height: 28))
         searchField.identifier = NSUserInterfaceItemIdentifier("directory_search")
         searchField.setAccessibilityLabel("Search directory and activity")
         searchField.placeholderString = "Search by user, repo, title, host, or #id…"
@@ -156,70 +160,37 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         // Facet Bar (560 × 32 pt, y: 362)
         let facetBar = NSView(frame: NSRect(x: 0, y: 362, width: 560, height: 32))
         facetBar.identifier = NSUserInterfaceItemIdentifier("directory_facet_bar")
-        let facetSeparator = roundedView(NSRect(x: 151, y: 9, width: 1, height: 14), radius: 0, color: .separatorColor)
-        facetSeparator.identifier = NSUserInterfaceItemIdentifier("directory_facet_separator")
-        facetBar.addSubview(facetSeparator)
-        let scopeTrack = makePillTrack(NSRect(x:16,y:3,width:129,height:26),radius:13,bordered:false)
-        scopeTrack.identifier = NSUserInterfaceItemIdentifier("directory_scope_track")
-        facetBar.addSubview(scopeTrack)
-        let scopePills: [(String, String, CGFloat, CGFloat)] = [
-            ("dir_scope:all", "All Nodes", 16, 74),
-            ("dir_scope:mine", "Mine", 94, 47)
-        ]
-        for (id, title, x, w) in scopePills {
-            let pill = MenuControl(title, frame: NSRect(x: x-16, y: 0, width: w, height: 22), radius: 11)
-            pill.identifier = NSUserInterfaceItemIdentifier(id)
-            pill.label.font = .systemFont(ofSize: 11, weight: .medium)
-            let scopeVal = id == "dir_scope:mine" ? "mine" : "all"
-            pill.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.directoryScopeFilter = scopeVal
+        let facetFrame = facetBar.bounds.insetBy(dx: 16, dy: 0)
+        let geometry = Self.directoryFacetGeometry
+        let scopePills = [("all", "All Nodes"), ("mine", "Mine")].map { value, title in
+            directoryFacetPill(title, id: "dir_scope:\(value)") { [weak self] in
+                guard let self else { return }
+                self.directoryScopeFilter = value
                 self.updateDirectoryFacetStyles()
                 self.applyDirectoryFilter()
                 self.queryDirectory()
             }
-            pill.frame.origin=NSPoint(x:x-14,y:2)
-            scopeTrack.addSubview(pill)
-            directoryFacetControls[id] = pill
         }
-        let allHarnessesPill = MenuControl("All Apps", frame: NSRect(x: 138, y: 5, width: 68, height: 22), radius: 11)
-        allHarnessesPill.identifier = NSUserInterfaceItemIdentifier("dir_harness:all")
-        allHarnessesPill.label.font = .systemFont(ofSize: 11, weight: .medium)
-        allHarnessesPill.pressed = { [weak self] in
-            guard let self = self else { return }
-            self.directoryHarnessFilter = "all"
-            self.rebuildDirectoryFacetBar()
-            self.applyDirectoryFilter()
-            self.queryDirectory()
-        }
-        directoryFacetControls["dir_harness:all"] = allHarnessesPill
+        let scopeTrack = SegmentedPillStrip.mount(in: facetBar, frame: facetFrame, id: "directory_scope_track",
+                                                  geometry: geometry, pills: scopePills,
+                                                  selected: directoryFacetControls["dir_scope:\(directoryScopeFilter)"])
+        let facetSeparator = roundedView(NSRect(x: scopeTrack.frame.maxX + 6, y: 9, width: 1, height: 14), radius: 0, color: .separatorColor)
+        facetSeparator.identifier = NSUserInterfaceItemIdentifier("directory_facet_separator")
+        facetBar.addSubview(facetSeparator)
 
-        let activityTrack = makePillTrack(NSRect(x:16,y:3,width:226,height:26),radius:13,bordered:false)
-        activityTrack.identifier = NSUserInterfaceItemIdentifier("activity_filter_track")
-        activityTrack.isHidden = true
-        facetBar.addSubview(activityTrack)
-        let actPills: [(String, String, String, CGFloat, CGFloat)] = [
-            ("act_filter:me", "me", "For Me", 16, 64),
-            ("act_filter:all", "all", "All Activity", 84, 86),
-            ("act_filter:unread", "unread", "Unread", 174, 64)
-        ]
-        for (id, filterVal, title, x, w) in actPills {
-            let pill = MenuControl(title, frame: NSRect(x: x-16, y: 0, width: w, height: 22), radius: 11)
-            pill.identifier = NSUserInterfaceItemIdentifier(id)
-            pill.label.font = .systemFont(ofSize: 11, weight: .medium)
-            pill.isHidden = true
-            pill.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.activityClearConfirm=false
-                self.activityFilter = filterVal
+        let actPills = [("me", "For Me"), ("all", "All Activity"), ("unread", "Unread")].map { value, title in
+            directoryFacetPill(title, id: "act_filter:\(value)") { [weak self] in
+                guard let self else { return }
+                self.activityClearConfirm = false
+                self.activityFilter = value
                 self.queryDirectory()
-                self.updateDirectoryFacetStyles()
                 self.applyActivityFilter()
             }
-            pill.frame.origin=NSPoint(x:x-14,y:2)
-            activityTrack.addSubview(pill)
-            directoryFacetControls[id] = pill
         }
+        let activityTrack = SegmentedPillStrip.mount(in: facetBar, frame: facetFrame, id: "activity_filter_track",
+                                                     geometry: geometry, pills: actPills,
+                                                     selected: directoryFacetControls["act_filter:\(activityFilter)"])
+        activityTrack.isHidden = true
         let markReadBtn = MenuControl("✓ Read All", frame: NSRect(x: 390, y: 5, width: 88, height: 22), radius: 11)
         markReadBtn.identifier = NSUserInterfaceItemIdentifier("activity_mark_all_read")
         markReadBtn.label.font = .systemFont(ofSize: 11, weight: .medium)
@@ -270,11 +241,27 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryTableView = table
         directoryScrollView = scroll
         root.addSubview(scroll)
-        let warning = textLabel("",NSRect(x:16,y:338,width:528,height:20),size:11,color:CitoPalette.secondaryText)
-        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning_label")
+        let warning = NSView(frame: NSRect(x: 0, y: 362, width: root.bounds.width, height: 0))
+        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning")
         warning.isHidden = true
+        let warningLabel = textLabel("", .zero, size: 11, color: CitoPalette.secondaryText)
+        warningLabel.identifier = NSUserInterfaceItemIdentifier("directory_warning_label")
+        warningLabel.isHidden = true
+        warningLabel.maximumNumberOfLines = 0
+        warningLabel.lineBreakMode = .byWordWrapping
+        warning.addSubview(warningLabel)
+        directoryWarningLabel = warningLabel
+        let retry = MenuControl("Retry", frame: NSRect(x: 0, y: 0, width: MenuControl.intrinsicWidth("Retry"), height: 22))
+        retry.identifier = NSUserInterfaceItemIdentifier("directory_query_retry")
+        retry.toolTip = "Retry the current search"
+        retry.setAccessibilityLabel("Retry search")
+        retry.isHidden = true
+        retry.pressed = { [weak self] in
+            guard let self, self.directoryQueryError != nil else { return }
+            self.queryDirectory()
+        }
+        warning.addSubview(retry)
         root.addSubview(warning)
-        directoryWarningLabel = warning
 
         // Bottom Single-Line ComposerBar (560 × 44 pt, y: 28)
         let composer = roundedView(NSRect(x: 0, y: 28, width: 560, height: 44), radius: 0,
@@ -360,22 +347,55 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         } else { directoryShortcutsLabel?.stringValue = "↵ Copy Address   ⇧↵ Message   \(escape)" }
     }
 
+    private static let directoryFacetGeometry = PillTrackGeometry(pillHeight: 22, pillRadius: 11)
+
+    private func directoryPill(_ title: String, id: String, font: NSFont, geometry: PillTrackGeometry,
+                               action: @escaping () -> Void) -> MenuControl {
+        let width = MenuControl.intrinsicWidth(title, font: font)
+        let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: geometry.pillHeight), radius: geometry.pillRadius)
+        pill.identifier = NSUserInterfaceItemIdentifier(id)
+        pill.label.font = font
+        pill.layoutContents()
+        pill.pressed = action
+        return pill
+    }
+
+    private func directoryFacetPill(_ title: String, id: String, action: @escaping () -> Void) -> MenuControl {
+        let pill = directoryPill(title, id: id, font: .systemFont(ofSize: 11, weight: .medium),
+                                 geometry: Self.directoryFacetGeometry, action: action)
+        directoryFacetControls[id] = pill
+        return pill
+    }
+
     func updateDirectoryModePills() {
         guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
         updateDirectoryShortcuts()
-        directoryModeDirPill?.style = directoryMode == "directory" ? .prominent : .subtleHeader
-        directoryModeActPill?.style = directoryMode == "activity" ? .prominent : .subtleHeader
-        directorySearchField?.placeholderString = directoryMode == "activity" ? "Search messages, people, or sessions…" : "Search by user, repo, title, host, or #id…"
+        guard let search = directorySearchField, let bar = search.superview else { return }
+        search.placeholderString = directoryMode == "activity" ? "Search messages, people, or sessions…" : "Search by user, repo, title, host, or #id…"
         let actTitle = unreadCount > 0 ? "Activity · \(unreadCount)" : "Activity"
-        directoryModeActPill?.label.stringValue = actTitle
-        directoryModeActPill?.setAccessibilityLabel(actTitle)
-        if let act = directoryModeActPill, let dir = directoryModeDirPill, let search = directorySearchField, let track = act.superview, let bar = track.superview {
-            dir.frame.size.width = MenuControl.intrinsicWidth("Directory", font:dir.label.font ?? .systemFont(ofSize:11.5))
-            act.frame.size.width = MenuControl.intrinsicWidth(actTitle, font:act.label.font ?? .systemFont(ofSize:11.5))
-            track.frame.size.width = max(174, dir.frame.width + act.frame.width + 8)
-            layoutBar(in:track,insetLeft:2,insetRight:2,y:2,height:24,spacing:4,leading:[dir,act])
-            layoutBar(in: bar, insetLeft: 78, insetRight: 14, y: 9, height: 28, spacing: 4, leading: [track], flexible: search)
+        let previous = bar.subviews.compactMap { $0 as? SegmentedPillStrip }.first
+        if let previous, let dir = directoryModeDirPill, let act = directoryModeActPill, act.label.stringValue == actTitle {
+            previous.select(directoryMode == "activity" ? act : dir)
+            return
         }
+        let handoff = previous?.capture()
+        previous?.removeFromSuperview()
+        let geometry = PillTrackGeometry(pillHeight: 24, pillRadius: 7)
+        let font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+        let dir = directoryPill("Directory", id: "dir_mode:directory", font: font, geometry: geometry) { [weak self] in
+            self?.switchDirectoryMode("directory")
+        }
+        let act = directoryPill(actTitle, id: "dir_mode:activity", font: font, geometry: geometry) { [weak self] in
+            self?.switchDirectoryMode("activity")
+        }
+        directoryModeDirPill = dir
+        directoryModeActPill = act
+        let track = SegmentedPillStrip.mount(in: bar, frame: NSRect(x: 78, y: 9, width: bar.bounds.width - 92, height: 28),
+                                             id: "directory_mode_track", geometry: geometry, pills: [dir, act],
+                                             selected: directoryMode == "activity" ? act : dir, handoff: handoff)
+        // The strip deliberately shares the full-size title bar with the window buttons.
+        track.automaticallyAdjustsContentInsets = false
+        layoutBar(in: bar, insetLeft: 78, insetRight: 14, y: 9, height: 28, spacing: 4, leading: [track], flexible: search)
     }
 
     func switchDirectoryMode(_ mode: String) {
@@ -395,7 +415,16 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    func openComposer(target: String, hub: String = "", replySignalId: String? = nil, displayTarget: String? = nil) {
+    @discardableResult
+    func openComposer(target: String, hub: String = "", replySignalId: String? = nil, displayTarget: String? = nil) -> Bool {
+        if directoryComposerBar?.isHidden == false, (hub, target) != (composerTargetHub, composerTarget) {
+            let draft = composerInputField?.currentEditor()?.string ?? composerInputField?.stringValue ?? ""
+            if pendingComposer != nil || !draft.isEmpty {
+                setComposerStatus("Send or press Esc to discard your current draft first.")
+                directoryPanel?.makeFirstResponder(composerInputField)
+                return false
+            }
+        }
         activityClearConfirm=false; updateDirectoryFacetStyles()
         ensureDirectoryPanel()
         setComposerStatus("")
@@ -422,6 +451,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         if !headless, let window = directoryPanel, let field = composerInputField {
             window.makeFirstResponder(field)
         }
+        return true
     }
 
     func closeComposer() {
@@ -477,7 +507,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
     func rebuildDirectoryFacetBar() {
         guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
-        guard let facetBar = directoryFacetBar else { return }
+        guard let facetBar = directoryFacetBar,
+              let separator = facetBar.subviews.first(where: { $0.identifier?.rawValue == "directory_facet_separator" }) else { return }
         let signature = harnesses.filter { $0.id != "human" && ($0.kind == nil || $0.kind == "agent" || $0.kind == "agent-harness") }
             .sorted { ($0.order, $0.id) < ($1.order, $1.id) }
             .map { (id: $0.id, display_name: $0.display_name) }
@@ -490,34 +521,30 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             return
         }
         lastDirectoryFacetSignature = signature
-        for v in directoryDynamicHarnessViews { v.removeFromSuperview() }
-        directoryDynamicHarnessViews.removeAll()
-        for key in directoryFacetControls.keys where key.hasPrefix("dir_harness:") && key != "dir_harness:all" {
+        let previous = facetBar.subviews.first { $0.identifier?.rawValue == "directory_harness_scroll" } as? SegmentedPillStrip
+        let handoff = previous?.capture()
+        previous?.removeFromSuperview()
+        for key in directoryFacetControls.keys where key.hasPrefix("dir_harness:") {
             directoryFacetControls.removeValue(forKey: key)
         }
 
-        let pillFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        var harnessPills: [NSView] = directoryFacetControls["dir_harness:all"].map { [$0] } ?? []
-        for (harness, name) in signature {
-            let title = signature.count <= 3 ? name.replacingOccurrences(of:" (Experimental)",with:"") : harness
-            let width = max(42, ceil(measureTextWidth(title, font: pillFont)) + 20)
-            let id = "dir_harness:\(harness)"
-            let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
-            pill.identifier = NSUserInterfaceItemIdentifier(id); pill.label.font = pillFont
-            pill.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.directoryHarnessFilter = harness
-                self.rebuildDirectoryFacetBar()
+        let apps = [(id: "all", display_name: "All Apps")] + signature.map { app in
+            (id: app.id, display_name: signature.count <= 3 ? app.display_name.replacingOccurrences(of: " (Experimental)", with: "") : app.id)
+        }
+        let pills = apps.map { app in
+            directoryFacetPill(app.display_name, id: "dir_harness:\(app.id)") { [weak self] in
+                guard let self else { return }
+                self.directoryHarnessFilter = app.id
+                self.updateDirectoryFacetStyles()
                 self.applyDirectoryFilter()
                 self.queryDirectory()
             }
-            harnessPills.append(pill); directoryFacetControls[id] = pill
         }
-        let strip = mountPillStrip(in: facetBar, frame: NSRect(x: 157, y: 3, width: 387, height: 26),
-                                  id: "directory_harness_scroll", trackRadius: 13, pills: harnessPills) {
-            $0.identifier?.rawValue == "dir_harness:\(directoryHarnessFilter)"
-        }
-        directoryDynamicHarnessViews.append(strip)
+        let x = separator.frame.maxX + 6
+        let selected = directoryFacetControls["dir_harness:\(directoryHarnessFilter)"]
+        if pills.count == 1 { selected?.style = .prominent }
+        _ = SegmentedPillStrip.mount(in: facetBar, frame: NSRect(x: x, y: 0, width: max(0, facetBar.bounds.width - 16 - x), height: facetBar.bounds.height),
+                                 id: "directory_harness_scroll", geometry: Self.directoryFacetGeometry, pills: pills, selected: selected, handoff: handoff)
         updateDirectoryFacetStyles()
     }
 
@@ -538,25 +565,19 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryFacetControls["activity_clear"]?.isEnabled = count > 0
         let isActivity = directoryMode == "activity"
         directoryFacetBar?.subviews.first { $0.identifier?.rawValue == "directory_facet_separator" }?.isHidden = isActivity
-        directoryFacetBar?.subviews.first { $0.identifier?.rawValue == "directory_scope_track" }?.isHidden = isActivity
-        directoryFacetBar?.subviews.first { $0.identifier?.rawValue == "activity_filter_track" }?.isHidden = !isActivity
-        for v in directoryDynamicHarnessViews { v.isHidden = isActivity }
-        for (id, pill) in directoryFacetControls {
-            if id.hasPrefix("act_filter:") {
-                pill.isHidden = !isActivity
-                pill.style = (id == "act_filter:\(activityFilter)") ? .prominent : .subtleHeader
-            } else if id == "activity_mark_all_read" || id == "activity_clear" {
-                pill.isHidden = !isActivity
-                pill.style = id == "activity_clear" ? .destructiveHover : .neutral
-            } else {
-                pill.isHidden = isActivity
-                let active = (id == "dir_scope:\(directoryScopeFilter)") || (id == "dir_harness:\(directoryHarnessFilter)")
-                pill.style = active ? .prominent : .subtleHeader
-                if !isActivity && active && id.hasPrefix("dir_harness:") { pill.scrollToVisible(pill.bounds) }
-            }
+        for (trackID, selectionID, hidden) in [
+            ("directory_scope_track", "dir_scope:\(directoryScopeFilter)", isActivity),
+            ("directory_harness_scroll", "dir_harness:\(directoryHarnessFilter)", isActivity),
+            ("activity_filter_track", "act_filter:\(activityFilter)", !isActivity || activityClearConfirm)
+        ] {
+            let strip = directoryFacetBar?.subviews.first { $0.identifier?.rawValue == trackID } as? SegmentedPillStrip
+            strip?.isHidden = hidden
+            if let selected = directoryFacetControls[selectionID] { strip?.select(selected) }
         }
-        if isActivity, let bar = directoryFacetBar, let markRead = directoryFacetControls["activity_mark_all_read"], let clear = directoryFacetControls["activity_clear"] {
-            layoutBar(in: bar, insetRight: 16, y: 5, height: 22, trailing: [markRead,clear])
+        if let bar = directoryFacetBar, let markRead = directoryFacetControls["activity_mark_all_read"], let clear = directoryFacetControls["activity_clear"] {
+            markRead.isHidden = !isActivity || activityClearConfirm
+            clear.isHidden = markRead.isHidden
+            layoutBar(in: bar, insetRight: 16, y: 5, height: 22, trailing: [markRead, clear])
         }
         if isActivity, let table = directoryTableView {
             for row in 0..<table.numberOfRows {
@@ -569,7 +590,6 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let mounted = bar.subviews.filter { $0.identifier?.rawValue.hasPrefix("activity_clear_confirm") == true }
         if !(isActivity && activityClearConfirm) { mounted.forEach { $0.removeFromSuperview() } }
         if isActivity && activityClearConfirm {
-            bar.subviews.filter { ($0 is MenuControl || $0.identifier?.rawValue == "activity_filter_track") && $0.identifier?.rawValue.hasPrefix("activity_clear_confirm") != true }.forEach { $0.isHidden=true }
             let description = directoryQuery.isEmpty ? "Clear \(count) \(activityFilter == "me" ? "For Me" : activityFilter == "all" ? "All Activity" : "Unread") messages?" : "Clear \(count) matching messages?"
             if let label = mounted.first(where: { $0 is NSTextField }) as? NSTextField {
                 label.stringValue = description; label.toolTip = description
@@ -603,6 +623,17 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let box=NSView(frame:NSRect(x:20,y:110,width:520,height:140))
         box.identifier=NSUserInterfaceItemIdentifier("directory_empty_state")
         box.isHidden = !empty
+        if empty && serverDirectoryQuery == nil && directoryAllPeers.isEmpty {
+            if directoryQueryError == nil {
+                let loading = textLabel(directoryMode == "activity" ? "Loading Activity…" : "Loading Directory…",
+                                        NSRect(x: 20, y: 96, width: 480, height: 22), size: 15, weight: .semibold)
+                loading.identifier = NSUserInterfaceItemIdentifier("directory_loading")
+                loading.alignment = .center
+                box.addSubview(loading)
+            }
+            root.addSubview(box)
+            return
+        }
         let title:String, subtitle:String, id:String, label:String
         let action:()->Void
         if directoryMode=="directory" {
@@ -755,7 +786,6 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func refreshDirectoryViews(revealSelection: Bool = false) {
-        pruneCopyFeedback()
         updateDirectoryWarnings()
         updateDirectoryModePills()
         rebuildDirectoryFacetBar()
@@ -854,6 +884,12 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             table.scrollRowToVisible(row)
             table.layoutSubtreeIfNeeded()
         case "return":
+            if let focused = directoryPanel?.firstResponder as? NSControl,
+               (focused is MenuControl || focused is NSButton), !focused.isHiddenOrHasHiddenAncestor,
+               !focused.visibleRect.isEmpty {
+                if focused.isEnabled { focused.performClick(nil) }
+                return
+            }
             if !(directoryComposerBar?.isHidden ?? true) {
                 let searchFocused = directorySearchField.map { field in
                     directoryPanel?.firstResponder === field || (field.currentEditor() != nil && directoryPanel?.firstResponder === field.currentEditor())
@@ -875,12 +911,13 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             let peer=directoryFilteredPeers[directorySelectedIndex]
             openComposer(target: peer.scoped_id, hub: peer.hub ?? "", displayTarget: peer.display_address)
         case "command-comma": openSettingsPanel()
-        case "command-k":
-            if let field = directorySearchField, directoryPanel?.makeFirstResponder(field) == true { field.selectText(nil) }
+        case "command-f", "command-k":
+            (directorySearchField as? DirectorySearchField)?.focusForSearch()
         case "command-1": switchDirectoryMode("directory")
         case "command-2": switchDirectoryMode("activity")
-        case "delete":
-            guard directoryMode == "activity", !activityClearConfirm, !(directoryPanel?.firstResponder is NSTextView),
+        case "delete", "backspace":
+            guard directoryMode == "activity", !activityClearConfirm, let window = directoryPanel, window.isKeyWindow,
+                  let table = directoryTableView, window.firstResponder === table,
                   activityFilteredItems.indices.contains(directorySelectedIndex) else { return }
             deleteActivity(activityFilteredItems[directorySelectedIndex])
         case "command-w": if headless && directoryVisible { directoryPanel?.performClose(nil) }
@@ -901,22 +938,16 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    func pruneCopyFeedback(at now: Date = Date()) {
-        directoryCopiedUntil = directoryCopiedUntil.filter { $0.value > now }
-        activityCopiedUntil = activityCopiedUntil.filter { $0.value > now }
-    }
-
     func copyPeer(_ peer: RemotePeer, control: MenuControl?) {
-        pruneCopyFeedback()
-        directoryCopiedUntil[peer.scoped_id] = Date().addingTimeInterval(1.2)
-        copyText(peer.display_address, control: control)
+        copyText(peer.display_address, control: control, key: peer.copyFeedbackKey)
     }
 
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
-        pruneCopyFeedback()
         if item.message_truncated != true {
-            activityCopiedUntil["\(item.hub)|\(item.signal_id)"] = Date().addingTimeInterval(1.2)
-            latestDirectoryActionRequestId = nil; clearDirectoryActionError(); copyText(item.message,control:control); return
+            latestDirectoryActionRequestId = nil
+            clearDirectoryActionError()
+            copyText(item.message, control: control, key: item.copyFeedbackKey)
+            return
         }
         let request = UUID().uuidString
         pendingMessageCopy = PendingMessageCopy(requestId:request,hub:item.hub,signalId:item.signal_id)
@@ -943,7 +974,6 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self = self else { return }
                 self.replyToActivity(item)
             }
-            restoreCopyFeedback(until: activityCopiedUntil["\(item.hub)|\(item.signal_id)"], control: cell.copyControl)
             return cell
         }
         guard directoryFilteredPeers.indices.contains(row) else { return nil }
@@ -954,13 +984,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             guard let self = self else { return }
             self.openComposer(target: peer.scoped_id, hub: peer.hub ?? "", replySignalId: nil, displayTarget: peer.display_address)
         }
-        restoreCopyFeedback(until: directoryCopiedUntil[peer.scoped_id], control: cell.copyControl)
         return cell
-    }
-
-    private func restoreCopyFeedback(until: Date?, control: MenuControl) {
-        guard control.feedbackTimer?.isValid != true, let remaining = until?.timeIntervalSinceNow, remaining > 0 else { return }
-        control.copied(for: remaining)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -991,8 +1015,8 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func replyToActivity(_ item: ActivityItem) {
-        guard let target = item.replyTarget else { return }
+        guard let target = item.replyTarget,
+              openComposer(target: target, hub: item.hub, replySignalId: item.signal_id, displayTarget: item.from_display_address) else { return }
         if item.unread && item.target_harness == "human" { emit(["op":"ack_signals","hub":item.hub,"signal_ids":[item.signal_id]]) }
-        openComposer(target: target, hub: item.hub, replySignalId: item.signal_id, displayTarget: item.from_display_address)
     }
 }

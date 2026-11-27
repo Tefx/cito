@@ -69,14 +69,14 @@ fn health_advertises_names_without_disclosing_credentials() {
     );
     auth.advertise_name(None).unwrap();
     assert_eq!(auth.health()["name"], "example");
-    auth.advertise_name(Some("Office Mac")).unwrap();
-    assert_eq!(auth.health()["name"], "office-mac");
-    for raw in ["!!!", "Local"] {
+    auth.advertise_name(Some(" __Work / Internal-- ")).unwrap();
+    assert_eq!(auth.health()["name"], "Work-Internal");
+    for raw in ["!!!", "local", "Local", "LOCAL"] {
         assert!(auth
             .advertise_name(Some(raw))
             .unwrap_err()
             .starts_with("INVALID_INPUT:"));
-        assert_eq!(auth.health()["name"], "office-mac");
+        assert_eq!(auth.health()["name"], "Work-Internal");
     }
     auth.redirect_port = Some(0);
     assert!(auth.health()["oidc"].get("redirect_port").is_none());
@@ -94,7 +94,7 @@ fn hub_landing_page_displays_the_advertised_name_in_an_adaptive_card() {
         crate::plugins::random_uuid_v4()
     )));
     let engine = TestEngine(HubEngine::open(&dir).unwrap());
-    for advertised in [None, Some("Office Mac")] {
+    for advertised in [None, Some("Acme Cloud")] {
         let mut auth = HubAuth::new("token", Some("private-token".into()), None, None).unwrap();
         if let Some(name) = advertised {
             auth.advertise_name(Some(name)).unwrap();
@@ -120,7 +120,7 @@ fn hub_landing_page_displays_the_advertised_name_in_an_adaptive_card() {
             assert!(body.contains(part), "missing {part}");
         }
         assert_eq!(
-            body.contains("<strong>office-mac</strong>"),
+            body.contains("<strong>Acme-Cloud</strong>"),
             advertised.is_some()
         );
         assert!(!body.contains("private-token"));

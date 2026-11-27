@@ -66,7 +66,7 @@ fn edit_hub_focus_and_blank_name_match_the_url_derived_save() {
 }
 
 #[test]
-fn hub_order_controls_follow_authoritative_partial_order_and_default_receipts() {
+fn hub_order_controls_follow_authoritative_order_and_default_receipts() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut cfg = settings();
@@ -103,23 +103,38 @@ fn hub_order_controls_follow_authoritative_partial_order_and_default_receipts() 
     assert_eq!(reorder["hub"], "work");
     assert_eq!(reorder["direction"], "up");
     frame["hubs"].as_array_mut().unwrap().swap(0, 1);
-    frame["settings"]["hubs"] = json!([cfg["hubs"][1], cfg["hubs"][0]]);
+    frame["settings"]["hubs"].as_array_mut().unwrap().swap(0, 1);
     frame["source_op"] = json!("setup_reorder_hub");
     frame["request_id"] = reorder["request_id"].clone();
-    frame["truncated"] = json!(true);
-    frame["truncated_collections"] = json!(["hubs", "settings.hubs"]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(order(&s), ["work", "personal", "relay"]);
     assert_eq!(s.settings("move_hub_up:work")["enabled"], false);
     assert_eq!(s.settings("move_hub_down:work")["enabled"], true);
     assert_eq!(s.menu("hub:work")["x"], 2);
+    let geometry = |snapshot: &Value, title, enabled| {
+        let button = snapshot.settings("set_default_hub:work");
+        assert_eq!(button["text"], title);
+        assert_eq!(button["enabled"], enabled);
+        [
+            button["width"].as_f64().unwrap(),
+            snapshot.settings("move_hub_up:work")["x"].as_f64().unwrap(),
+            snapshot.settings("move_hub_down:work")["x"]
+                .as_f64()
+                .unwrap(),
+        ]
+    };
+    let resting = geometry(&s, "Set Default", true);
     control(&f, p, "set_default_hub:work");
-    assert_eq!(
-        inspect(&f, p).settings("set_default_hub:work")["enabled"],
-        false
-    );
+    assert_eq!(geometry(&inspect(&f, p), "Applying…", false), resting);
+    let rejected = latest(&f, p, "setup_set_default_hub");
+    // Rejection settles to the same row; success removes Set Default by design.
+    f.send(p, json!({"op":"error","source_op":"setup_set_default_hub","request_id":rejected["request_id"],"error":"Could not change the default Hub"}));
+    assert_eq!(geometry(&inspect(&f, p), "Set Default", true), resting);
+    control(&f, p, "set_default_hub:work");
+    assert_eq!(geometry(&inspect(&f, p), "Applying…", false), resting);
     let set_default = latest(&f, p, "setup_set_default_hub");
+    assert_ne!(set_default["request_id"], rejected["request_id"]);
     assert_eq!(set_default["hub"], "work");
     frame["settings"]["hubs"][0]["is_default"] = json!(true);
     frame["settings"]["hubs"][1]["is_default"] = json!(false);
@@ -525,6 +540,54 @@ fn v39_invite_parse_receipts_stay_in_the_form_and_modal_return_cannot_submit() {
 }
 
 #[test]
+fn explicit_hub_name_preserves_underscore_and_rejects_case_folded_collision() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["hubs"][1]["name"] = json!("Work-Internal");
+    open_settings(&f, p, &cfg, "hubs");
+    control(&f, p, "open_add_hub");
+    let url = "https://internal.example.org";
+    input(&f, p, "settings_hub_url", url);
+    input(&f, p, "settings_hub_name", "Work_Internal");
+    control(&f, p, "submit_add_hub");
+    assert_eq!(inspect(&f, p).settings("submit_add_hub")["text"], "Adding…");
+    let request = latest(&f, p, "setup_save_hub");
+    assert_eq!(request["name"], "Work_Internal");
+    assert_eq!(request["name_explicit"], true);
+    assert_eq!(request["url"], url);
+
+    let mut added = cfg["hubs"][1].clone();
+    added["name"] = request["name"].clone();
+    added["url"] = request["url"].clone();
+    cfg["hubs"].as_array_mut().unwrap().push(added);
+    f.send(p, json!({"op":"settings","source_op":"setup_save_hub","request_id":request["request_id"],"hub":request["name"],"ok":true,"settings":cfg}));
+    let settled = inspect(&f, p);
+    assert!(settled.settings("add_hub_form").is_null());
+    for name in ["Work-Internal", "Work_Internal"] {
+        assert_eq!(
+            settled.settings(&format!("settings_hub_name:{name}"))["text"],
+            name
+        );
+    }
+
+    control(&f, p, "open_add_hub");
+    input(&f, p, "settings_hub_url", "https://other.example.org");
+    input(&f, p, "settings_hub_name", "work_internal");
+    control(&f, p, "submit_add_hub");
+    let collision = inspect(&f, p);
+    assert_eq!(
+        collision.settings("settings_hub_name")["text"],
+        "work_internal"
+    );
+    assert_eq!(
+        collision.settings("add_hub_error")["text"],
+        "Hub name already exists. Choose a different name."
+    );
+    assert_eq!(f.frames_for(p, "setup_save_hub").count(), 1);
+}
+
+#[test]
 fn automatic_hub_name_treats_idna_full_stops_like_ascii_dots() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -624,7 +687,8 @@ fn receipt_without_inventory_keeps_an_automatic_name_under_daemon_ownership() {
     assert_eq!(form.settings("settings_hub_name")["text"], "");
     let second = submit();
     assert!(second.get("edit").is_none());
-    assert!(second.get("name").is_none());
+    assert_eq!(second["name"], "remote");
+    assert!(second.get("name_explicit").is_none());
     assert_eq!(f.action(second.clone()).0, 200);
     let saved: Value = read_json(&f.config);
     assert_eq!(saved["hubs"]["remote"]["url"], first["url"]);
@@ -782,8 +846,8 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     });
     control(&f, p, "cancel_add_hub");
     for (requested, url, expected) in [
-        ("Office Mac", "https://office.example.com", "office-mac"),
-        ("Work", "http://127.0.0.1:4291", "work"),
+        ("Office Mac", "https://office.example.com", "Office-Mac"),
+        ("Work", "http://127.0.0.1:4291", "Work"),
         ("", "https://work.example.com", "work-2"),
         ("", "https://personal.example.com", "personal-2"),
         ("", "http://192.0.2.10:4291", "remote"),
@@ -907,6 +971,17 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     control(&f, p, "close_settings");
     control(&f, p, "open_directory");
     control(&f, p, "dir_mode:directory");
+    let loading = inspect(&f, p);
+    assert_eq!(
+        loading.directory("directory_loading")["text"],
+        "Loading Directory…"
+    );
+    assert!(loading.directory("dir_empty_open_apps").is_null());
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"matched_count":0,"online_count":0}),
+    );
     let s = inspect(&f, p);
     assert_eq!(s.directory("directory_empty_state")["hidden"], false);
     assert!(!s.directory("dir_empty_open_apps").is_null());
@@ -1409,6 +1484,7 @@ fn return_on_join_from_clipboard_is_scoped_to_focused_control() {
     // Even with the Add Hub form open, Return while focused on Join from Clipboard
     // activates Join from Clipboard rather than submitting the form.
     control(&f, p, "open_add_hub");
+    f.send(p, json!({"op":"test_end_editing"}));
     f.send(
         p,
         json!({"op":"test_control","id":"paste_hub_invite","drag":[false]}),

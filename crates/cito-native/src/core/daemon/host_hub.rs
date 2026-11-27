@@ -407,9 +407,14 @@ pub(super) fn parse_hub_invite(raw: &str) -> Result<Value, String> {
     let raw = raw.trim();
     let invalid = || "INVALID_INPUT: Invalid hub invite".to_owned();
     let mut value = if raw.starts_with('{') {
-        let value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
-        if !value.is_object() {
+        let mut value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+        if value["edit"] == true || !value["original_name"].is_null() || value["reset_name"] == true
+        {
             return Err(invalid());
+        }
+        let fields = value.as_object_mut().ok_or_else(invalid)?;
+        for key in ["edit", "original_name", "reset_name"] {
+            fields.remove(key);
         }
         value
     } else if raw.starts_with("http://") || raw.starts_with("https://") {
@@ -460,10 +465,9 @@ pub(super) fn parse_hub_invite(raw: &str) -> Result<Value, String> {
     }
     // Leave absent names for setup_save_hub to derive and disambiguate under
     // the configuration lock. Explicit names use the same normalization there.
-    if !string(&value, "name").is_empty()
-        && !string(&value, "name")
-            .chars()
-            .any(|c| c.is_ascii_alphanumeric())
+    let name = string(&value, "name");
+    if name.trim().eq_ignore_ascii_case("local")
+        || (!name.is_empty() && !name.chars().any(|c| c.is_ascii_alphanumeric()))
     {
         return Err(invalid());
     }

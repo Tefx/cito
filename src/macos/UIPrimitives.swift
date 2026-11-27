@@ -49,18 +49,7 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     let rightItems = trailing.filter { !$0.isHidden }
     for case let control as MenuControl in leftItems + rightItems where !control.label.isHidden
         && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.centerSymbolView }) {
-        let id = control.identifier?.rawValue ?? ""
-        // Address chips reserve copy feedback space; scope toggles keep a uniform width.
-        let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
-        let font = control.label.font ?? .systemFont(ofSize:11,weight:.medium)
-        let resting = control.restingTitle
-        let currentWidth = MenuControl.intrinsicWidth(control.label.stringValue, font: font,
-            leadingSymbol: control.leadingSymbolView?.isHidden == false ? control.symbolName : nil, paddingX: control.paddingX)
-        let restingWidth = resting.map {
-            MenuControl.intrinsicWidth($0, font: font, leadingSymbol: control.leadingSymbolView == nil ? nil : control.symbolName, paddingX: control.paddingX)
-        } ?? 0
-        let pairedWidth = MenuControl.toggleWidth(id, title: resting ?? control.label.stringValue, font: font, paddingX: control.paddingX)
-        control.frame.size.width = min(control.maximumWidth, max(control.pendingWidth, reservedWidth, pairedWidth, currentWidth, restingWidth))
+        control.frame.size.width = control.reservedWidth
         control.layoutContents()
     }
     var left = insetLeft
@@ -85,42 +74,261 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     }
 }
 
-func makePillTrack(_ frame: NSRect, radius: CGFloat, bordered: Bool = true) -> SurfaceView {
-    roundedView(frame, radius: radius, color: .labelColor.withAppearanceAlpha(0.06),
-                border: bordered ? .labelColor.withAppearanceAlpha(0.08) : nil)
+struct PillTrackGeometry {
+    static let inset: CGFloat = 2
+
+    let pillHeight: CGFloat
+    let pillRadius: CGFloat
+
+    var trackHeight: CGFloat { pillHeight + 2 * Self.inset }
+    var trackRadius: CGFloat { pillRadius + Self.inset }
+
+    static func trailingWidth(widths: [CGFloat], spacing: CGFloat) -> CGFloat {
+        guard !widths.isEmpty else { return 0 }
+        return widths.reduce(0, +) + CGFloat(widths.count - 1) * spacing + 2 * inset
+    }
 }
 
 enum PillAlignment { case leading, trailing }
-@discardableResult
-func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,
-                    spacing: CGFloat = 4, trackRadius: CGFloat? = nil, pills: [NSView], activePredicate: (NSView) -> Bool) -> NSScrollView {
+
+private func placePillStrip(_ scroll: NSScrollView, in container: NSView, frame: NSRect, id: String,
+                            alignment: PillAlignment, spacing: CGFloat, trackRadius: CGFloat, pills: [MenuControl]) {
     let visible = pills.filter { !$0.isHidden }
-    let totalWidth = visible.isEmpty ? 0 : visible.enumerated().reduce(CGFloat(4)) {
-        $0 + $1.element.frame.width + ($1.offset > 0 ? spacing : 0)
-    }
-    let trackWidth = min(frame.width, max(totalWidth, 0))
+    let totalWidth = PillTrackGeometry.trailingWidth(widths: visible.map { $0.frame.width }, spacing: spacing)
+    let trackWidth = min(frame.width, totalWidth)
     let scrollFrame = NSRect(x: alignment == .trailing ? frame.maxX - trackWidth : frame.minX,
                              y: frame.minY, width: trackWidth, height: frame.height)
-    let scroll = NSScrollView(frame: scrollFrame)
+    scroll.frame = scrollFrame
     scroll.identifier = NSUserInterfaceItemIdentifier(id)
     scroll.drawsBackground = false
     scroll.hasHorizontalScroller = false; scroll.hasVerticalScroller = false
-    if let radius = trackRadius {
-        scroll.wantsLayer = true
-        scroll.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
-        scroll.drawsBackground = true
-        scroll.layer?.cornerRadius = radius
-        scroll.layer?.masksToBounds = true
-    }
+    scroll.wantsLayer = true
+    scroll.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
+    scroll.drawsBackground = true
+    scroll.layer?.cornerRadius = trackRadius
+    scroll.layer?.cornerCurve = .continuous
+    scroll.layer?.masksToBounds = true
     let doc = NSView(frame: NSRect(x: 0, y: 0, width: max(trackWidth, totalWidth), height: frame.height))
-    var cursorX: CGFloat = 2
+    var cursorX = PillTrackGeometry.inset
     for pill in visible {
         pill.frame.origin = NSPoint(x: cursorX, y: (frame.height - pill.frame.height) / 2)
         doc.addSubview(pill); cursorX += pill.frame.width + spacing
     }
     scroll.documentView = doc; container.addSubview(scroll)
-    if let active = visible.first(where: activePredicate) { active.scrollToVisible(active.bounds) }
-    return scroll
+}
+
+/// The scroll document and thumb share a coordinate space, independent of track alignment.
+final class SegmentedPillStrip: NSScrollView {
+    struct Handoff {
+        fileprivate let offset: NSPoint
+        fileprivate let selectedID: NSUserInterfaceItemIdentifier?
+        fileprivate let focusedID: NSUserInterfaceItemIdentifier?
+        fileprivate let rect: NSRect?
+        fileprivate let motion: Motion?
+    }
+    fileprivate struct Motion {
+        let from: NSRect
+        let to: NSRect
+        let start: TimeInterval
+        let duration: TimeInterval
+        var end: TimeInterval { start + duration }
+    }
+
+    private let pills: [MenuControl]
+    private let geometry: PillTrackGeometry
+    private(set) weak var selected: MenuControl?
+    private var overlay: CALayer?
+    private var motion: Motion?
+    var isSliding: Bool { overlay != nil }
+
+    private init(pills: [MenuControl], geometry: PillTrackGeometry) {
+        self.pills = pills; self.geometry = geometry
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    static func mount(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,
+                      spacing: CGFloat = 4, geometry: PillTrackGeometry, pills: [MenuControl],
+                      selected: MenuControl?, handoff: Handoff? = nil) -> SegmentedPillStrip {
+        let visible = pills.filter { !$0.isHidden }
+        let stripWidth = max(0, frame.width)
+        let pillLimit = max(0, stripWidth - 2 * PillTrackGeometry.inset)
+        for pill in visible {
+            pill.maximumWidth = min(pill.maximumWidth, pillLimit)
+            if pill.frame.width > pill.maximumWidth {
+                pill.label.lineBreakMode = .byTruncatingTail
+                if (pill.toolTip ?? "").isEmpty { pill.toolTip = pill.label.stringValue }
+            }
+            pill.setFrameSize(NSSize(width: min(pill.frame.width, pill.maximumWidth), height: geometry.pillHeight))
+            pill.layoutContents()
+            pill.layer?.cornerRadius = geometry.pillRadius
+        }
+        let trackFrame = NSRect(x: frame.minX, y: frame.midY - geometry.trackHeight / 2,
+                                width: stripWidth, height: geometry.trackHeight)
+        let strip = SegmentedPillStrip(pills: visible, geometry: geometry)
+        placePillStrip(strip, in: container, frame: trackFrame, id: id, alignment: alignment,
+                       spacing: spacing, trackRadius: geometry.trackRadius, pills: visible)
+        if visible.count > 1 {
+            for pill in visible {
+                let action = pill.pressed
+                pill.pressed = { [weak strip, weak pill] in
+                    if let pill { strip?.select(pill, userInitiated: true) }
+                    action?()
+                }
+                pill.segmentArrow = { [weak strip, weak pill] direction in
+                    guard let strip, let pill, let index = strip.pills.firstIndex(where: { $0 === pill }) else { return }
+                    let count = strip.pills.count
+                    for step in 1..<count {
+                        let next = strip.pills[(index + count + direction * step) % count]
+                        if next.isEnabled {
+                            next.window?.makeFirstResponder(next)
+                            next.performClick(nil)
+                            return
+                        }
+                    }
+                }
+            }
+        }
+        if let handoff, let doc = strip.documentView {
+            let x = max(0, min(handoff.offset.x, doc.bounds.width - strip.contentView.bounds.width))
+            strip.contentView.scroll(to: NSPoint(x: x, y: 0))
+            strip.reflectScrolledClipView(strip.contentView)
+            if let id = handoff.focusedID, let focused = visible.first(where: { $0.identifier == id }) {
+                focused.window?.makeFirstResponder(focused)
+            }
+        }
+        strip.selected = selected
+        strip.applySelection()
+        if let selected {
+            strip.reveal(selected)
+            if handoff?.selectedID == selected.identifier, let motion = handoff?.motion {
+                if motion.to == selected.frame { strip.slide(motion) }
+                else if let rect = handoff?.rect {
+                    let now = CACurrentMediaTime()
+                    strip.slide(Motion(from: rect, to: selected.frame, start: now, duration: motion.end - now))
+                }
+            }
+        }
+        return strip
+    }
+
+    func capture() -> Handoff {
+        Handoff(offset: contentView.bounds.origin, selectedID: selected?.identifier,
+                focusedID: pills.first { $0.window?.firstResponder === $0 }?.identifier,
+                rect: thumbRect, motion: motion)
+    }
+
+    private var thumbRect: NSRect? {
+        guard let mask = overlay?.mask else { return selected?.frame }
+        return mask.presentation()?.frame ?? motion?.from
+    }
+
+    func select(_ pill: MenuControl, userInitiated: Bool = false) {
+        guard pills.contains(where: { $0 === pill }), selected !== pill else { return }
+        let previous = thumbRect
+        finishSlide()
+        selected = pill
+        applySelection()
+        reveal(pill)
+        if userInitiated, let previous {
+            slide(Motion(from: previous, to: pill.frame, start: CACurrentMediaTime(), duration: CitoMetrics.segmentSlideDuration))
+        }
+    }
+
+    private func reveal(_ pill: MenuControl) {
+        guard let doc = documentView else { return }
+        let target = pill.frame.insetBy(dx: -PillTrackGeometry.inset, dy: 0)
+        doc.scrollToVisible(target)
+    }
+
+    private func applySelection() {
+        for pill in pills {
+            let active = pill === selected
+            if pills.count > 1 {
+                pill.style = active ? .prominent : .subtleHeader
+                pill.setAccessibilityRole(.radioButton)
+                pill.setAccessibilityValue(active ? 1 : 0)
+            }
+            pill.applyVisualState()
+        }
+    }
+
+    private func slide(_ motion: Motion) {
+        guard MenuControl.allowsMotion, pills.count > 1, motion.end > CACurrentMediaTime(),
+              motion.from != motion.to, let doc = documentView else { return }
+        // The opaque mask hides the resting ink exactly where the moving blue fill
+        // paints white ink. Neither a color crossfade nor a whole-label switch can
+        // maintain contrast as a leading/trailing edge crosses the glyphs.
+        doc.wantsLayer = true
+        let overlay = CALayer()
+        overlay.frame = doc.bounds
+        overlay.zPosition = 1
+        overlay.backgroundColor = CitoPalette.prominentFill.cgColor
+        let mask = CALayer()
+        mask.backgroundColor = NSColor.black.cgColor
+        mask.cornerRadius = geometry.pillRadius; mask.cornerCurve = .continuous
+        mask.frame = motion.to
+        overlay.mask = mask
+        let border = CALayer()
+        border.frame = motion.to
+        border.cornerRadius = geometry.pillRadius; border.cornerCurve = .continuous
+        border.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        border.borderWidth = 1
+        overlay.addSublayer(border)
+        for pill in pills {
+            let label = pill.label
+            if !label.isHidden, !label.bounds.isEmpty, let bitmap = label.bitmapImageRepForCachingDisplay(in: label.bounds) {
+                let color = label.textColor
+                label.textColor = .white
+                label.cacheDisplay(in: label.bounds, to: bitmap)
+                label.textColor = color
+                let ink = CALayer(); ink.frame = doc.convert(label.bounds, from: label)
+                ink.contents = bitmap.cgImage
+                overlay.addSublayer(ink)
+            }
+            if let indicator = pill.segmentIndicator {
+                let dot = CALayer(); dot.frame = doc.convert(indicator.bounds, from: indicator)
+                dot.cornerRadius = indicator.cornerRadiusValue; dot.cornerCurve = .continuous
+                dot.backgroundColor = NSColor.white.cgColor
+                overlay.addSublayer(dot)
+            }
+            pill.paintsSegmentThumb = false
+        }
+        self.overlay = overlay
+        self.motion = motion
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        CATransaction.setCompletionBlock { [weak self, weak overlay] in
+            if let self, let overlay, self.overlay === overlay { self.finishSlide() }
+        }
+        doc.layer?.addSublayer(overlay)
+        let position = CABasicAnimation(keyPath: "position")
+        position.fromValue = NSPoint(x: motion.from.midX, y: motion.from.midY)
+        position.toValue = NSPoint(x: motion.to.midX, y: motion.to.midY)
+        let bounds = CABasicAnimation(keyPath: "bounds")
+        bounds.fromValue = NSRect(origin: .zero, size: motion.from.size)
+        bounds.toValue = NSRect(origin: .zero, size: motion.to.size)
+        for component in [position, bounds] {
+            component.duration = motion.duration
+            component.timingFunction = CAMediaTimingFunction(name: .linear)
+        }
+        let animation = CAAnimationGroup()
+        animation.animations = [position, bounds]
+        animation.duration = motion.duration
+        animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 1, 0.32, 1)
+        animation.fillMode = .backwards
+        for layer in [mask, border] {
+            animation.beginTime = layer.convertTime(motion.start, from: nil)
+            layer.add(animation, forKey: "slide")
+        }
+        CATransaction.commit()
+    }
+
+    private func finishSlide() {
+        overlay?.removeFromSuperlayer()
+        overlay = nil; motion = nil
+        for pill in pills { pill.paintsSegmentThumb = true }
+    }
 }
 
 func textLabel(_ title: String, _ frame: NSRect, size: CGFloat = 11, weight: NSFont.Weight = .regular,
@@ -248,7 +456,7 @@ func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harn
 
 func makePillBadge(_ text: String, id: String, height: CGFloat = 20,
                    font: NSFont = .systemFont(ofSize: 9.5, weight: .semibold),
-                   textColor: NSColor, fill: NSColor, border: NSColor? = nil, paddingX: CGFloat = 8, minWidth: CGFloat = 88) -> SurfaceView {
+                   textColor: NSColor, fill: NSColor, border: NSColor? = nil, paddingX: CGFloat = 8, minWidth: CGFloat = 0) -> SurfaceView {
     let label = textLabel(text, .zero, color: textColor)
     label.font = font; label.alignment = .center
     let size = label.cell?.cellSize ?? NSSize(width: measureTextWidth(text, font: font), height: 12)
@@ -384,6 +592,23 @@ final class KeyWindow: NSWindow {
     }
 }
 
+private enum HoverCoordinator {
+    static private var monitor: Any?
+
+    static func update() {
+        if MenuControl.tracksPhysicalPointer && MenuControl.activeHovered != nil {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
+                MenuControl.reconcileActiveHover()
+                return event
+            }
+        } else if let installed = monitor {
+            monitor = nil
+            NSEvent.removeMonitor(installed)
+        }
+    }
+}
+
 /** Menu controls own their clicks so copy and scope changes keep native tracking open. */
 final class MenuTitleField: NSTextField {
     override var stringValue: String { didSet { (superview as? MenuControl)?.setAccessibilityLabel(stringValue) } }
@@ -396,37 +621,28 @@ final class MenuControl: NSControl {
                                leadingSymbol: String? = nil, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat {
         max(minWidth, ceil(measureTextWidth(title, font: font)) + paddingX * 2 + (leadingSymbol == nil ? 0 : 17))
     }
-    static func toggleWidth(_ id: String, title: String, font: NSFont = .systemFont(ofSize:11,weight:.medium), paddingX: CGFloat = 11) -> CGFloat {
-        let states: [(String,String?)]
-        if id.hasPrefix("scope:") { states = [("Self","lock.fill"),("Team","person.2.fill")] }
-        else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)] }
-        else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)] }
-        else if id == "toggle_host_hub" { states = [("Start Sharing",nil),("Stop Sharing",nil)] }
-        else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)] }
-        else if id.hasPrefix("toggle_channel:"), title.hasPrefix("Pause ") || title.hasPrefix("Resume ") {
-            let name=String(title.dropFirst(title.hasPrefix("Pause ") ? 6 : 7))
-            states = [("Pause " + name,nil),("Resume " + name,nil)]
-        }
-        else { return 0 }
-        return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:paddingX) }.max() ?? 0
-    }
     func layoutContents() {
         let font = label.font ?? .systemFont(ofSize: 11)
         let cellH = ceil(label.cell?.cellSize.height ?? (font.ascender - font.descender + font.leading))
         let labelY = floor((bounds.height - cellH) / 2)
-        centerSymbolView?.frame = NSRect(x: floor((bounds.width - 12) / 2), y: floor((bounds.height - 12) / 2), width: 12, height: 12)
-        if !label.isHidden, let icon = leadingSymbolView, !icon.isHidden {
-            // NSTextField needs its drawable insets beyond cellSize to avoid native ellipsis.
-            let textW = max(0, min(bounds.width - 23, ceil(measureTextWidth(label.stringValue, font: font)) + 6))
-            let id = identifier?.rawValue ?? ""
-            let copyChip = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:")
-            let startX: CGFloat = label.alignment == .left ? (copyChip ? 0 : 6) : max(6, floor((bounds.width - 17 - textW) / 2))
-            icon.frame = NSRect(x: startX, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
-            label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - (copyChip ? 17 : 27)) : textW, height: cellH)
+        let width = bounds.width
+        let symbolSize = min(12, width)
+        centerSymbolView?.frame = NSRect(x: floor((width - symbolSize) / 2), y: floor((bounds.height - symbolSize) / 2), width: symbolSize, height: symbolSize)
+        if let dot = segmentIndicator {
+            let size = min(6, width)
+            dot.frame = NSRect(x: min(8, width - size), y: (bounds.height - size) / 2, width: size, height: size)
+            label.frame = NSRect(x: min(16, width), y: labelY, width: max(0, width - 20), height: cellH)
+        } else if !label.isHidden, let icon = leadingSymbolView, !icon.isHidden {
+            let textW = max(0, min(width - 17, ceil(label.requiredSingleLineWidth) + 4))
+            let preferredX: CGFloat = label.alignment == .left ? 6 : max(6, floor((width - (textW + 9)) / 2))
+            let startX = min(preferredX, width - symbolSize)
+            icon.frame = NSRect(x: startX, y: floor((bounds.height - symbolSize) / 2), width: symbolSize, height: symbolSize)
+            let textX = min(width, startX + symbolSize + 1)
+            label.frame = NSRect(x: textX, y: labelY, width: min(textW, width - textX), height: cellH)
         } else {
             // Leave room for the native cell's text insets, including in fixed-width controls.
-            let inset = min(paddingX, max(4, floor((bounds.width - label.requiredSingleLineWidth) / 2)))
-            label.frame = NSRect(x: inset, y: labelY, width: max(0, bounds.width - 2 * inset), height: cellH)
+            let inset = min(paddingX, width / 2, max(4, floor((width - label.requiredSingleLineWidth) / 2)))
+            label.frame = NSRect(x: inset, y: labelY, width: width - 2 * inset, height: cellH)
         }
     }
     let paddingX: CGFloat
@@ -439,14 +655,42 @@ final class MenuControl: NSControl {
     func invalidatePress() { gestureToken &+= 1; isPressed = false }
     var style: Style = .neutral { didSet { layoutContents(); applyVisualState() } }
     var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
-    // Reserve the resting title while pending so draft edits can restore it in place.
-    var pendingWidth: CGFloat = 0
+    var reservedTitles: [(title: String, symbol: String?)] = []
     var maximumWidth: CGFloat = .greatestFiniteMagnitude
-    var feedbackTimer: Timer?
+    var reservedWidth: CGFloat {
+        let font = label.font ?? .systemFont(ofSize: 11, weight: .medium)
+        let restingSymbol = leadingSymbolView == nil ? nil : symbolName
+        let titles = reservedTitles + [(label.stringValue, leadingSymbolView?.isHidden == false ? restingSymbol : nil)]
+            + (restingTitle.map { [($0, restingSymbol)] } ?? [])
+        let width = titles.map { Self.intrinsicWidth($0.0, font: font, leadingSymbol: $0.1, paddingX: paddingX) }.max() ?? 0
+        return min(maximumWidth, width)
+    }
+    func setPending(_ title: String) {
+        var pendingFrame = frame
+        let minimum = max(frame.width, reservedWidth)
+        clearFeedback(title: title, accessibilityLabel: title)
+        isEnabled = false
+        setLeadingSymbol(nil)
+        toolTip = title
+        pendingFrame.size.width = min(maximumWidth, max(minimum, reservedWidth))
+        pendingFrame.origin.x = frame.maxX - pendingFrame.width
+        frame = pendingFrame
+    }
+    private(set) var feedbackKey: TransientFeedbackStore.Key?
+    var segmentArrow: ((Int) -> Void)?
+    var segmentIndicator: SurfaceView? { didSet { layoutContents(); applyVisualState() } }
+    var segmentIndicatorColor: NSColor = .labelColor
+    var paintsSegmentThumb = true { didSet { if oldValue != paintsSegmentThumb { applyVisualState() } } }
     var restingTitle: String?
     var restingAccessibilityLabel: String?
     private(set) var isHovered = false
-    private var isPressed = false { didSet { if oldValue != isPressed { applyVisualState() } } }
+    private(set) var isPressed = false { didSet {
+        if oldValue != isPressed {
+            layer?.removeAnimation(forKey: "hover-backgroundColor")
+            layer?.removeAnimation(forKey: "hover-borderColor")
+            applyVisualState()
+        }
+    } }
     private var trackingArea: NSTrackingArea?
     static weak var activeHovered: MenuControl?
     private static var hoverWatchTimer: Timer?
@@ -454,6 +698,11 @@ final class MenuControl: NSControl {
     static var menuTracking = false { didSet { updateHoverWatchTimer() } }
     // Headless hooks exercise logical transitions without a visible window or physical pointer.
     static var tracksPhysicalPointer = true
+    static var headlessReduceMotion: Bool?
+    static var allowsMotion: Bool {
+        if let headlessReduceMotion { return !headlessReduceMotion }
+        return tracksPhysicalPointer && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
     override var wantsUpdateLayer: Bool { true }
     init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6, paddingX: CGFloat = 11) {
         self.paddingX = paddingX
@@ -524,7 +773,12 @@ final class MenuControl: NSControl {
     func trackWindowPress(nextEvent: () -> NSEvent?) {
         guard isEnabled, pressed != nil, let trackingWindow = window else { return }
         let capturedToken = gestureToken
-        if enclosingMenuItem == nil { trackingWindow.makeFirstResponder(self) }
+        // Ordinary form actions leave the field editor attached. Settlement
+        // moves focus explicitly if the action removes the edited form.
+        let fieldEditor = (trackingWindow.firstResponder as? NSTextView)?.isFieldEditor == true
+        if enclosingMenuItem == nil && (!fieldEditor || segmentArrow != nil) {
+            trackingWindow.makeFirstResponder(self)
+        }
         isPressed = true
         defer { isPressed = false }
         while let event = nextEvent(), event.windowNumber == trackingWindow.windowNumber,
@@ -539,7 +793,10 @@ final class MenuControl: NSControl {
         }
     }
     override func keyDown(with event: NSEvent) {
-        if enclosingMenuItem == nil, event.characters == " ",
+        if enclosingMenuItem == nil, let segmentArrow, [123, 124].contains(event.keyCode),
+           event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+            segmentArrow(event.keyCode == 123 ? -1 : 1)
+        } else if enclosingMenuItem == nil, event.characters == " ",
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             if !event.isARepeat { performClick(nil) }
         } else {
@@ -563,6 +820,10 @@ final class MenuControl: NSControl {
         }
         if isHovered { MenuControl.reconcileActiveHover() }
     }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil && isHovered { setHovered(false) }
+    }
     override func mouseEntered(with event: NSEvent) { setHovered(true) }
     override func mouseExited(with event: NSEvent) { setHovered(false) }
     func setHovered(_ hovered: Bool) {
@@ -573,8 +834,10 @@ final class MenuControl: NSControl {
         } else if MenuControl.activeHovered === self {
             MenuControl.activeHovered = nil
         }
+        let changed = isHovered != hovered
         isHovered = hovered
-        applyVisualState()
+        if changed { applyVisualState(animateHover: !isPressed && Self.allowsMotion) }
+        HoverCoordinator.update()
         MenuControl.updateHoverWatchTimer()
     }
     static func clearHoverWhere(_ predicate: (MenuControl) -> Bool) {
@@ -582,7 +845,7 @@ final class MenuControl: NSControl {
         updateHoverWatchTimer()
     }
     static func reconcileActiveHover() {
-        guard let control = activeHovered else { updateHoverWatchTimer(); return }
+        guard let control = activeHovered else { HoverCoordinator.update(); updateHoverWatchTimer(); return }
         guard tracksPhysicalPointer else { return }
         guard let window = control.window, window.isVisible, !control.isHiddenOrHasHiddenAncestor,
               control.enclosingMenuItem?.isHidden != true else { control.setHovered(false); return }
@@ -604,61 +867,52 @@ final class MenuControl: NSControl {
     }
     override var isEnabled: Bool {
         didSet {
-            if oldValue != isEnabled { invalidatePress() }
+            if oldValue != isEnabled {
+                invalidatePress()
+                if !isEnabled && isHovered { setHovered(false) }
+            }
             applyVisualState()
         }
     }
-    func applyVisualState() {
+    func applyVisualState(animateHover: Bool = false) {
         alphaValue = isEnabled ? 1 : 0.45
-        let fill: NSColor
-        let border: NSColor?
-        let foreground: NSColor
-        let primarySymbol: NSColor
-        let accessorySymbol: NSColor
-        switch style {
-        case .neutral:
-            fill = .labelColor.withAppearanceAlpha(isHovered ? 0.16 : 0.08)
-            border = .labelColor.withAppearanceAlpha(isHovered ? 0.28 : 0.14)
-            foreground = isHovered ? .labelColor : normalColor
-            primarySymbol = foreground
-            accessorySymbol = isHovered ? .labelColor : CitoPalette.secondaryText
-        case .prominent:
-            fill = CitoPalette.prominentFill
-            border = .white.withAlphaComponent(isHovered ? 0.36 : 0.22)
-            foreground = .white; primarySymbol = .white; accessorySymbol = .white
-        case .subtleHeader:
-            fill = isHovered ? .labelColor.withAppearanceAlpha(0.10) : .clear
-            border = nil
-            foreground = isHovered ? .labelColor : normalColor
-            primarySymbol = isHovered ? .labelColor : CitoPalette.secondaryText
-            accessorySymbol = primarySymbol
-        case .destructiveHover:
-            fill = isHovered ? CitoPalette.destructiveFill : .labelColor.withAppearanceAlpha(0.08)
-            border = isHovered ? .white.withAlphaComponent(0.26) : .labelColor.withAppearanceAlpha(0.14)
-            foreground = isHovered ? .white : normalColor
-            primarySymbol = foreground; accessorySymbol = foreground
-        case .destructive:
-            fill = CitoPalette.destructiveFill
-            border = .white.withAlphaComponent(isHovered ? 0.28 : 0.18)
-            foreground = .white
-            primarySymbol = foreground; accessorySymbol = foreground
-        }
-        let isCopied = feedbackTimer?.isValid == true
-        label.textColor = isCopied ? CitoPalette.successText : foreground
-        leadingSymbolView?.contentTintColor = primarySymbol
-        centerSymbolView?.contentTintColor = primarySymbol
-        accessorySymbolView?.contentTintColor = accessorySymbol
+        let renderedStyle = style == .prominent && !paintsSegmentThumb ? .subtleHeader : style
+        let visual = ControlVisuals(style: renderedStyle, normal: normalColor, hovered: isHovered, pressed: isPressed)
+        let isCopied = feedbackKey.map(TransientFeedbackStore.shared.contains) == true
+        label.textColor = isCopied ? CitoPalette.successText : visual.foreground
+        leadingSymbolView?.contentTintColor = visual.symbol
+        centerSymbolView?.contentTintColor = visual.symbol
+        accessorySymbolView?.contentTintColor = visual.accessory
+        segmentIndicator?.fillColor = renderedStyle == .prominent ? .white : segmentIndicatorColor
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // A copied chip uses the canonical surface beneath its translucent fill;
-            // stacking it over a tinted card would lower the specified green below AA.
-            let copiedFill = CitoPalette.copiedFill.usingColorSpace(.sRGB)
-            let copiedBackground = CitoPalette.surfaceBackground.blended(
-                withFraction: copiedFill?.alphaComponent ?? 0,
-                of: copiedFill?.withAlphaComponent(1) ?? .clear)
-            let background = isCopied ? copiedBackground ?? CitoPalette.surfaceBackground : fill
-            layer?.backgroundColor = (isPressed ? NSColor.shadowColor.withAlphaComponent(0.28) : background).cgColor
-            layer?.borderColor = (isCopied ? CitoPalette.copiedBorder : border)?.cgColor
-            layer?.borderWidth = isCopied || border != nil ? 1 : 0
+            guard let layer else { return }
+            let presentation = layer.presentation() ?? layer
+            let oldFill = presentation.backgroundColor
+            let oldBorder = presentation.borderColor
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            // Composite copied ink against a canonical opaque surface, not stacked card tints.
+            if isCopied, let fill = CitoPalette.copiedFill.usingColorSpace(.sRGB) {
+                let alpha = fill.alphaComponent + (isPressed ? 0.04 : 0)
+                layer.backgroundColor = (CitoPalette.surfaceBackground.blended(withFraction: alpha,
+                    of: fill.withAlphaComponent(1)) ?? CitoPalette.surfaceBackground).cgColor
+            } else {
+                layer.backgroundColor = visual.fill.cgColor
+            }
+            let border = isCopied ? CitoPalette.copiedBorder : visual.border
+            layer.borderColor = border?.cgColor
+            layer.borderWidth = border == nil ? 0 : 1
+            // Destructive hover switches the foreground and fill atomically for contrast.
+            if animateHover && style != .destructiveHover {
+                for (property, old, new) in [("backgroundColor", oldFill, layer.backgroundColor), ("borderColor", oldBorder, layer.borderColor)] {
+                    guard let old, let new, old != new else { continue }
+                    let fade = CABasicAnimation(keyPath: property)
+                    fade.fromValue = old
+                    fade.duration = CitoMetrics.controlHoverDuration
+                    layer.add(fade, forKey: "hover-" + property)
+                }
+            }
+            CATransaction.commit()
         }
     }
     override func updateLayer() { applyVisualState() }
@@ -667,9 +921,12 @@ final class MenuControl: NSControl {
         applyVisualState()
     }
     func clearFeedback(title: String, accessibilityLabel: String?) {
-        if feedbackTimer != nil, symbolName != nil { leadingSymbolView?.isHidden = false }
-        feedbackTimer?.invalidate()
-        feedbackTimer = nil
+        if let key = feedbackKey {
+            TransientFeedbackStore.shared.observe(key, restore: nil)
+            if key.action == .control { TransientFeedbackStore.shared.set(key, until: nil) }
+            if symbolName != nil { leadingSymbolView?.isHidden = false }
+            feedbackKey = nil
+        }
         restingTitle = nil
         restingAccessibilityLabel = nil
         label.stringValue = title
@@ -677,22 +934,62 @@ final class MenuControl: NSControl {
         layoutContents()
         applyVisualState()
     }
-    func copied(_ message: String = "✓ Copied", for seconds: TimeInterval = 1.2) {
-        if feedbackTimer == nil {
+    func copied(_ message: String = "✓ Copied", for seconds: TimeInterval = 1.2, key: TransientFeedbackStore.Key? = nil) {
+        let key = key ?? feedbackKey ?? .init(.control, UUID().uuidString)
+        TransientFeedbackStore.shared.set(key, until: Date().addingTimeInterval(seconds))
+        showFeedback(message, key: key)
+    }
+    func showFeedback(_ message: String = "✓ Copied", key: TransientFeedbackStore.Key) {
+        let store = TransientFeedbackStore.shared
+        guard store.deadline(key) != nil else { return }
+        if let previous = feedbackKey, previous != key {
+            clearFeedback(title: restingTitle ?? label.stringValue, accessibilityLabel: restingAccessibilityLabel)
+        }
+        if feedbackKey == nil {
             restingTitle = label.stringValue
             restingAccessibilityLabel = accessibilityLabel()
         }
-        feedbackTimer?.invalidate()
+        feedbackKey = key
         leadingSymbolView?.isHidden = true
-        label.stringValue = message; label.textColor = CitoPalette.successText
+        label.stringValue = message
         layoutContents()
-        let restore = Timer(timeInterval: max(0.001, seconds), repeats: false) { [weak self] _ in
-            guard let self = self else { return }
+        store.observe(key) { [weak self] in
+            guard let self else { return }
             self.clearFeedback(title: self.restingTitle ?? self.label.stringValue, accessibilityLabel: self.restingAccessibilityLabel)
         }
-        feedbackTimer = restore
         applyVisualState()
-        RunLoop.main.add(restore, forMode: .common); RunLoop.main.add(restore, forMode: .eventTracking)
+    }
+}
+
+private struct ControlVisuals {
+    let fill: NSColor
+    let border: NSColor?
+    let foreground: NSColor
+    let symbol: NSColor
+    let accessory: NSColor
+
+    init(style: MenuControl.Style, normal: NSColor, hovered: Bool, pressed: Bool) {
+        let resolved = style == .destructiveHover && (hovered || pressed) ? MenuControl.Style.destructive : style
+        switch resolved {
+        case .prominent, .destructive:
+            let destructive = resolved == .destructive
+            fill = destructive ? (pressed ? CitoPalette.destructivePressedFill : CitoPalette.destructiveFill)
+                : (pressed ? CitoPalette.prominentPressedFill : CitoPalette.prominentFill)
+            border = .white.withAlphaComponent(hovered ? 0.36 : 0.22)
+            foreground = .white; symbol = .white; accessory = .white
+        case .subtleHeader:
+            fill = pressed || hovered ? .labelColor.withAppearanceAlpha(pressed ? 0.18 : 0.10) : .clear
+            border = nil
+            foreground = hovered ? .labelColor : normal
+            symbol = hovered ? .labelColor : CitoPalette.secondaryText
+            accessory = symbol
+        case .neutral, .destructiveHover:
+            fill = .labelColor.withAppearanceAlpha(pressed ? 0.24 : hovered ? 0.16 : 0.08)
+            border = .labelColor.withAppearanceAlpha(pressed ? 0.36 : hovered ? 0.28 : 0.14)
+            foreground = hovered ? .labelColor : normal
+            symbol = foreground
+            accessory = hovered ? .labelColor : CitoPalette.secondaryText
+        }
     }
 }
 

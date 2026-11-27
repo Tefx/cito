@@ -63,7 +63,7 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
 }
 
 #[test]
-fn passive_state_only_preserves_collections_named_by_the_frame_budget() {
+fn state_replaces_collections_and_updates_scalars() {
     use super::lazy_rendering::render_state;
 
     let _lock = serial();
@@ -95,63 +95,32 @@ fn passive_state_only_preserves_collections_named_by_the_frame_budget() {
     ] {
         update[key] = json!([]);
     }
+    update["hubs"] = json!([]);
+    update["settings"]["hubs"] = json!([]);
     update["settings"]["apps"] = json!([]);
     update["settings"]["channels"] = json!([]);
     update["settings"]["launch_at_login"] = json!(true);
     update["unread_count"] = json!(2);
-    update["truncated"] = json!(true);
-    update["truncated_collections"] = json!(["activity"]);
-    f.send(p, update.clone());
-    let partial = render_state(&f, p);
-    assert_eq!(partial["listeners"], 0);
-    assert_eq!(partial["unread_count"], 2);
-    assert_eq!(partial["settings_launch_at_login"], true);
-    assert_eq!(partial["collection_counts"]["activity"], 1);
+    f.send(p, update);
+    let projection = render_state(&f, p);
+    assert_eq!(projection["listeners"], 0);
+    assert_eq!(projection["unread_count"], 2);
+    assert_eq!(projection["settings_launch_at_login"], true);
     for key in [
+        "activity",
         "available",
         "discovery",
+        "hubs",
         "my_remote_listeners",
         "settings.apps",
         "settings.channels",
+        "settings.hubs",
     ] {
         assert!(
             initial["collection_counts"][key].as_u64().unwrap() > 0,
             "{key}"
         );
-        assert_eq!(partial["collection_counts"][key], 0, "{key}");
-    }
-
-    update["truncated_collections"] = json!([]);
-    f.send(p, update);
-    assert_eq!(render_state(&f, p)["collection_counts"]["activity"], 0);
-}
-
-#[test]
-fn legacy_partial_frame_preserves_only_the_affected_hub_list() {
-    use super::lazy_rendering::render_state;
-    let _lock = serial();
-    let (f, p) = ui_fixture();
-    let initial = state_with_settings(settings());
-    for nested in [false, true] {
-        f.send(p, initial.clone());
-        let old = render_state(&f, p)["collection_counts"].clone();
-        let mut update = initial.clone();
-        update["hubs"] = json!([]);
-        update["settings"]["hubs"] = json!([]);
-        update["listeners"] = json!([]);
-        let collection = if nested { "settings.hubs" } else { "hubs" };
-        update["truncated_collections"] = json!([collection]);
-        f.send(p, update);
-        let new = render_state(&f, p);
-        for (key, preserve) in [("hubs", !nested), ("settings.hubs", nested)] {
-            assert!(old[key].as_u64().unwrap() > 0);
-            assert_eq!(
-                new["collection_counts"][key],
-                if preserve { old[key].clone() } else { json!(0) },
-                "{collection}: {key}"
-            );
-        }
-        assert_eq!(new["listeners"], 0);
+        assert_eq!(projection["collection_counts"][key], 0, "{key}");
     }
 }
 
@@ -612,9 +581,10 @@ fn channel_save_expiry_preserves_the_active_marked_text_editor() {
     let save = latest(&f, p, "channel_save");
     f.send(p, json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
     let saved = inspect(&f, p);
-    assert!(nodes(&saved["settings_items"])
-        .iter()
-        .any(|n| n["text"] == "✓ Saved"));
+    assert_eq!(
+        saved.settings("channel_summary:channel")["text"],
+        "Paired · 42 · ✓ Saved"
+    );
     control(&f, p, "edit_user_channel:channel");
     f.send(
         p,

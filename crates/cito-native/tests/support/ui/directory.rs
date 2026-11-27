@@ -2,6 +2,46 @@ use super::settlement::latest;
 use super::*;
 
 #[test]
+fn activity_reply_blocks_cross_recipient_drafts_before_acknowledging() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    frame["activity"] = json!([("one", "alice"), ("two", "bob")].map(|(id, user)| {
+        json!({"hub":"personal","signal_id":id,"listener_id":"c_human","from_user":user,"from_host_name":"laptop",
+            "from_harness":"fixture","from_title":user,"from_scoped_id":format!("personal:{id}"),
+            "target_harness":"human","target_title":"Me","target_scoped_id":"personal:me",
+            "message":"Review?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true})
+    }));
+    frame["unread_count"] = json!(2);
+    f.send(p, frame);
+    f.send(
+        p,
+        json!({"op":"test_open_panel","surface":"directory","mode":"activity"}),
+    );
+    control(&f, p, "reply_activity:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"A draft for Alice"}),
+    );
+    let draft = inspect(&f, p);
+    assert_eq!(draft["composer_target"], "personal:one");
+    control(&f, p, "reply_activity:two");
+    let blocked = inspect(&f, p);
+    assert_eq!(blocked["composer_reply_signal_id"], "one");
+    assert_eq!(
+        blocked.directory("composer_input")["text"],
+        "A draft for Alice"
+    );
+    let acks: Vec<_> = f.frames_for(p, "ack_signals").collect();
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0]["signal_ids"], json!(["one"]));
+    control(&f, p, "composer_cancel");
+    control(&f, p, "reply_activity:two");
+    assert_eq!(inspect(&f, p)["composer_target"], "personal:two");
+    assert_eq!(latest(&f, p, "ack_signals")["signal_ids"], json!(["two"]));
+}
+
+#[test]
 fn v41_directory_copy_drafts_and_activity_confirmation_survive_only_valid_transitions() {
     let _lock = serial();
     let (f, p) = ui_fixture();
@@ -31,6 +71,27 @@ fn v41_directory_copy_drafts_and_activity_confirmation_survive_only_valid_transi
     assert_eq!(
         inspect(&f, p).directory("copy_dir:personal:one")["text"],
         "✓ Copied"
+    );
+    control(&f, p, "copy_dir:personal:two");
+    f.send(
+        p,
+        json!({"op":"test_expire_copy_feedback","id":"copy_dir:personal:one"}),
+    );
+    let expired = inspect(&f, p);
+    assert_eq!(
+        expired.directory("copy_dir:personal:one")["text"],
+        peer("one")["display_address"]
+    );
+    assert_eq!(
+        expired.directory("copy_dir:personal:two")["text"],
+        "✓ Copied"
+    );
+    assert!(expired["directory_copy_remaining"]["personal:one"].is_null());
+    assert!(
+        expired["directory_copy_remaining"]["personal:two"]
+            .as_f64()
+            .unwrap()
+            > 0.0
     );
     control(&f, p, "msg_dir:personal:one");
     f.send(
@@ -513,14 +574,7 @@ fn activity_projection_is_atomic_and_only_unread_human_replies_acknowledge() {
     let summary = |snapshot: &Value| snapshot.directory("directory_summary")["text"].clone();
     assert_eq!(summary(&inspect(&f, p)), "18 messages · 9 unread");
 
-    frame["truncated"] = json!(true);
-    frame["truncated_collections"] = json!(["activity"]);
     frame["unread_count"] = json!(4);
-    frame["activity"] = json!([]);
-    frame["activity_total"] = json!(90);
-    frame["activity_unread_count"] = json!(41);
-    frame["activity_filter"] = json!("me");
-    frame["activity_query"] = json!("foreign slice");
     f.send(p, frame);
     let preserved = inspect(&f, p);
     assert_eq!(preserved["unread_count"], 4);
@@ -1002,6 +1056,20 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         "A failed query must preserve usable rows"
     );
     assert!(!failed.menu("menu_error_row").is_null());
+    let retry = failed.directory("directory_query_retry");
+    assert_eq!(retry["accessibility_label"], "Retry search");
+    assert_eq!(retry["hidden"], false);
+    let previous = latest(&f, p, "query_directory");
+    f.send(
+        p,
+        json!({"op":"test_control","id":"directory_query_retry","pointer":true}),
+    );
+    inspect(&f, p);
+    let retried = latest(&f, p, "query_directory");
+    assert_ne!(retried["request_id"], previous["request_id"]);
+    for key in ["query", "scope", "harness"] {
+        assert_eq!(retried[key], previous[key], "Retry changed {key}");
+    }
     send_fixture(
         &f,
         p,
@@ -1188,6 +1256,69 @@ fn directory_facets_distinguish_display_names_containing_separators() {
     let two = inspect(&f, p);
     assert_eq!(two.directory("dir_harness:fixture")["text"], "First");
     assert_eq!(two.directory("dir_harness:other")["text"], "Second");
+}
+
+#[test]
+fn directory_app_pill_fits_or_truncates_and_reveals_its_full_frame() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let plugin_dir = f.home.join("fixture");
+    fs::create_dir(&plugin_dir).unwrap();
+    let mut frame = state();
+    frame["listeners"] = json!([]);
+    const TRACK: &str = "directory_harness_scroll";
+    const APP: &str = "dir_harness:fixture";
+    const ALL: &str = "dir_harness:all";
+    let number = |view: &Value, key: &str| view[key].as_f64().unwrap();
+    let right = |view: &Value| number(view, "x") + number(view, "width");
+    for (bytes, title) in [
+        (9, "Wide Work"),
+        (
+            59,
+            "WIDE WEB WORKFLOW WORKSPACE WITH WORLDWIDE WORKER WORKBENCH",
+        ),
+    ] {
+        assert_eq!(title.len(), bytes);
+        fs::write(plugin_dir.join("plugin.json"), json!({"id":"fixture","kind":"agent-harness","displayName":title,"command":["./fixture"]}).to_string()).unwrap();
+        let app = cito_native::plugins::parse_manifest_dir(&plugin_dir, false).unwrap();
+        frame["harnesses"][0]["display_name"] = json!(app.display_name);
+        f.send(p, frame.clone());
+        if bytes == 9 {
+            control(&f, p, "open_directory");
+        }
+        control(&f, p, ALL);
+        let initial = inspect(&f, p);
+        assert_eq!(initial.directory(TRACK)["selected_id"], ALL);
+        assert_eq!(initial.directory(TRACK)["content_x"], 0);
+        control(&f, p, APP);
+        let selected = inspect(&f, p); // Also rejects unexpected truncation and clipping.
+        let track = selected.directory(TRACK);
+        let pill = selected.directory(APP);
+        let all = selected.directory(ALL);
+        let label = &pill["children"][0];
+        let offset = number(&track, "content_x");
+        let width = number(&track, "content_width");
+        let doc_width = number(&track, "document_width");
+        assert_eq!(selected["directory_harness"], "fixture");
+        assert_eq!(track["selected_id"], APP);
+        assert_eq!(pill["text"], title);
+        assert_eq!(pill["tooltip"], title);
+        assert_eq!(all["x"], 2);
+        assert_eq!(number(&pill, "x"), right(&all) + 4.0);
+        assert_eq!(right(&pill), doc_width - 2.0);
+        assert!(number(&pill, "x") >= offset && right(&pill) <= offset + width);
+        if bytes == 59 {
+            assert!(doc_width > width && offset > 0.0);
+            assert_eq!(number(&pill, "width"), width - 4.0);
+            assert_eq!(right(&pill) + 2.0, offset + width);
+            assert!(number(label, "label_measured_width") > number(label, "label_width"));
+            assert_eq!(label["truncates_tail"], true);
+        } else {
+            assert_eq!(doc_width, width);
+            assert_eq!(offset, 0.0);
+            assert!(number(label, "label_measured_width") <= number(label, "label_width"));
+        }
+    }
 }
 
 #[test]

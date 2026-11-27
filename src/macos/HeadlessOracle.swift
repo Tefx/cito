@@ -496,14 +496,14 @@ extension Companion {
                     }
                     return true
                 }
-                if op == "test_settings_key" { handleSettingsPanelKey(key) } else { handleDirectoryKey(key) }
+                if op == "test_settings_key" { handleSettingsKey(key) } else { handleDirectoryKey(key) }
                 return true
             }
             if op == "test_expire_copy_feedback", let id = object["id"] as? String {
                 let roots = cardMenu.items.compactMap { $0.view } + [settingsPanel?.contentView, directoryPanel?.contentView].compactMap { $0 }
                 for root in roots {
-                    if let control: MenuControl = findView(in: root, id: id), let timer = control.feedbackTimer {
-                        timer.fire(); timer.invalidate()
+                    if let control: MenuControl = findView(in: root, id: id), let key = control.feedbackKey {
+                        feedback.expire(key)
                         return true
                     }
                 }
@@ -532,7 +532,12 @@ extension Companion {
                 }
                 if let control = roots.lazy.compactMap({ self.findView(in: $0, id: id, as: NSControl.self) }).first {
                     if let control = control as? MenuControl {
-                        if let drag = object["drag"] as? [Bool], let window = control.window, control.enclosingMenuItem == nil {
+                        if object["pointer"] as? Bool == true, let window = control.window, control.enclosingMenuItem == nil,
+                           let down = mouseEvent(.leftMouseDown, in: control), let up = mouseEvent(.leftMouseUp, in: control) {
+                            makeEventProbeKey(window)
+                            NSApp.postEvent(up, atStart: true)
+                            window.sendEvent(down)
+                        } else if let drag = object["drag"] as? [Bool], let window = control.window, control.enclosingMenuItem == nil {
                             func mouse(_ type: NSEvent.EventType, inside: Bool) -> NSEvent? {
                                 let bounds = control.bounds
                                 let location = control.convert(NSPoint(x: inside ? bounds.midX : bounds.maxX + 5, y: bounds.midY), to: nil)
@@ -542,10 +547,20 @@ extension Companion {
                             if let releasedInside = drag.last, let up = mouse(.leftMouseUp, inside: releasedInside) {
                                 // Feed the tracker directly; a nested run loop could handle the next IPC frame before release.
                                 var events = (drag.compactMap { mouse(.leftMouseDragged, inside: $0) } + [up]).makeIterator()
-                                control.trackWindowPress { events.next() }
+                                var inspectPressed = object["inspect_pressed"] as? Bool == true
+                                observe(in: requestedAppearance()) {
+                                    control.trackWindowPress {
+                                        if inspectPressed { inspectPressed = false; inspectMenu() }
+                                        return events.next()
+                                    }
+                                }
                             }
                         } else {
+                            let reduceMotion = object["reduce_motion"] as? Bool
+                            MenuControl.headlessReduceMotion = reduceMotion
+                            defer { MenuControl.headlessReduceMotion = nil }
                             _ = control.accessibilityPerformPress()
+                            if reduceMotion != nil { inspectMenu() }
                         }
                     } else if let button = control as? NSButton, button.isEnabled { button.performClick(nil) }
                     return true
@@ -695,8 +710,15 @@ extension Companion {
             guard !(label.toolTip ?? label.superview?.toolTip ?? "").isEmpty,
                   label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail else { return false }
             if isDataRow(label) || name(label) == "hub_oidc_discovery_summary" { return !(label.toolTip ?? "").isEmpty }
-            let parentID = label.superview?.identifier?.rawValue
             let title = label.stringValue
+            if let pill = label.superview as? MenuControl,
+               let track = pill.enclosingScrollView as? SegmentedPillStrip,
+               pill.toolTip == title, label.lineBreakMode == .byTruncatingTail,
+               pill.frame.width == pill.maximumWidth,
+               pill.frame.width <= track.contentView.bounds.width - 2 * PillTrackGeometry.inset {
+                return true
+            }
+            let parentID = label.superview?.identifier?.rawValue
             return (hubs.count > 1 && parentID == "hub:\(title)") ||
                 ((settings?.hubs.count ?? hubs.count) > 1 && parentID == "settings_hub:\(title)" &&
                  label.identifier?.rawValue == "settings_hub_name:\(title)")
@@ -719,6 +741,27 @@ extension Companion {
         func luminance(_ color: NSColor) -> CGFloat {
             func linear(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c/12.92 : pow((c+0.055)/1.055, 2.4) }
             return 0.2126 * linear(color.redComponent) + 0.7152 * linear(color.greenComponent) + 0.0722 * linear(color.blueComponent)
+        }
+        let trackIDs: Set<String> = ["header_hub_strip", "channel_hub_strip", "directory_harness_scroll",
+            "directory_mode_track", "directory_scope_track", "activity_filter_track", "settings_tab_track",
+            "host_hub_addr_track", "settings_hub_auth_track"]
+        let knownHubNames = Set(hubs.map(\.name) + (settings?.hubs.map(\.name) ?? []))
+        func withoutHubSpan(_ value: String, in view: NSView) -> String {
+            let owner = (view.superview as? MenuControl) ?? view
+            let id = name(owner)
+            for prefix in ["hub:", "channel_hub_selector:", "settings_hub_name:"] where id.hasPrefix(prefix) {
+                let hub = String(id.dropFirst(prefix.count))
+                guard knownHubNames.contains(hub) else { break }
+                if value == hub { return "" }
+                if value.hasPrefix(hub + " · ") { return String(value.dropFirst(hub.count)) }
+            }
+            if id == "directory_warning_label" && value == directoryWarnings.joined(separator: "\n") {
+                return directoryWarnings.map { line in
+                    guard let colon = line.firstIndex(of: ":"), knownHubNames.contains(String(line[..<colon])) else { return line }
+                    return String(line[line.index(after: colon)...])
+                }.joined(separator: "\n")
+            }
+            return value
         }
         func project(_ view: NSView, visible: Bool = true, background: NSColor? = nil, opacity: CGFloat = 1, enabled: Bool = true) -> [String: Any] {
             let visible = visible && !view.isHidden
@@ -746,8 +789,10 @@ extension Companion {
                 let a = luminance(foreground), b = luminance(surface)
                 let ratio = (max(a,b)+0.05)/(min(a,b)+0.05)
                 contrast = ratio
-                if ratio < 4.5 {
-                    let labelName = (label.superview as? MenuControl).map { name($0) } ?? name(label)
+                let control = label.superview as? MenuControl
+                let pressedSemanticFill = control?.isPressed == true && (control?.style == .prominent || control?.style == .destructive)
+                if ratio < (pressedSemanticFill ? 7.0 : 4.5) {
+                    let labelName = control.map(name) ?? name(label)
                     lowContrastLabels.append("\(labelName): \(String(format: "%.2f", Double(ratio)))")
                 }
             }
@@ -781,7 +826,7 @@ extension Companion {
                 if truncated { truncatedLabels.append((label.superview as? MenuControl).map { name($0) } ?? name(label)) }
             }
             func hasJargon(_ text: String) -> Bool {
-                text.range(of:jargonPattern,options:.regularExpression) != nil
+                withoutHubSpan(text, in: view).range(of:jargonPattern,options:.regularExpression) != nil
             }
             if visible, let label = view as? NSTextField, !label.isEditable {
                 let id = name(label)
@@ -824,9 +869,9 @@ extension Companion {
                 if let prefix = scope {
                     let scoped = String(id.dropFirst(prefix.count))
                     let address = listeners.first { $0.scoped_id == scoped }?.display_address ?? (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }?.display_address
-                    let feedback = control.feedbackTimer?.isValid == true
-                    let label = feedback ? (control.restingTitle ?? "") : control.label.stringValue
-                    if feedback && control.accessibilityLabel() != control.label.stringValue { addressMismatches.append(id + ": stale accessibility label") }
+                    let showingFeedback = control.feedbackKey.map(feedback.contains) == true
+                    let label = showingFeedback ? (control.restingTitle ?? "") : control.label.stringValue
+                    if showingFeedback && control.accessibilityLabel() != control.label.stringValue { addressMismatches.append(id + ": stale accessibility label") }
                     let listener = listeners.first { $0.scoped_id == scoped }
                     let peer = (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }
                     let hub = listener?.hub ?? peer?.hub ?? ""
@@ -868,9 +913,6 @@ extension Companion {
                     if scroll.hasVerticalScroller && !scroll.hasHorizontalScroller && doc.frame.width > scroll.contentSize.width + 0.5 {
                         clippedViews.append(name(scroll) + ": document exceeds the viewport width")
                     }
-                    for pill in doc.subviews.compactMap({ $0 as? MenuControl }) where pill.style == .prominent {
-                        if !scroll.contentView.bounds.contains(pill.frame) { clippedViews.append(name(scroll)+": selected pill") }
-                    }
                 }
             }
             let childViews: [NSView]
@@ -900,23 +942,43 @@ extension Companion {
                 }
                 let edgeItems = children.filter { child in child.frame.height > 5 && (child is NSControl || ["settings_app_tier:","stratum_hub_status:","settings_channel_status:","settings_channel_badge:"].contains { child.identifier?.rawValue.hasPrefix($0) == true }) }
                 let id = name(view)
-                if ["header_hub_strip", "targetStrip"].contains(id), let scroll = view as? NSScrollView, !children.isEmpty {
-                    let trailingInset: CGFloat = id == "header_hub_strip" ? 2 : 0
-                    if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - trailingInset - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
+                if trackIDs.contains(id) {
+                    if let track = view as? SegmentedPillStrip {
+                        let pills = children.compactMap { $0 as? MenuControl }
+                        let close: (CGFloat, CGFloat) -> Bool = { abs($0 - $1) < 0.01 }
+                        let trackRadius = track.layer?.cornerRadius ?? 0
+                        if track.layer?.cornerCurve != .continuous || pills.isEmpty || pills.contains(where: { pill in
+                            !close(pill.frame.minY, 2) || !close(parentBounds.maxY - pill.frame.maxY, 2) ||
+                            !close(trackRadius - (pill.layer?.cornerRadius ?? 0), 2) || pill.layer?.cornerCurve != .continuous
+                        }) || !close(pills.map(\.frame.minX).min() ?? 0, 2) {
+                            clippedViews.append(id + ": pills are not concentric with a 2pt inset")
+                        }
+                        if !close(pills.map(\.frame.maxX).max() ?? 0, parentBounds.width - 2) {
+                            clippedViews.append(id + ": trailing pills are not edge anchored")
+                        }
+                        if let selected = track.selected {
+                            if !track.contentView.bounds.contains(selected.frame) {
+                                clippedViews.append(id + ": selected pill is not revealed")
+                            }
+                        } else if !pills.isEmpty {
+                            clippedViews.append(id + ": missing selected pill")
+                        }
+                    } else {
+                        clippedViews.append(id + ": missing segmented track")
+                    }
+                }
+                if id == "directory_warning" {
+                    let retry = children.first { name($0) == "directory_query_retry" }
+                    if parentBounds.isEmpty || !view.visibleRect.contains(parentBounds) ||
+                       (directoryQueryError != nil && retry == nil) || (retry.map { control in
+                        control.bounds.isEmpty || !parentBounds.contains(control.frame) ||
+                        !control.visibleRect.contains(control.bounds) || view.hitTest(control.convert(
+                            NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: view.superview)) !== control
+                    } ?? false) {
+                        clippedViews.append(id + ": warning or Retry is clipped or occluded")
+                    }
                 }
                 let stratum = ["stratum_hub:","stratum_user:"].contains(where: { id.hasPrefix($0) })
-                if id.hasPrefix("channel_recovery_bar:") {
-                    let recovery = edgeItems.filter { name($0).hasPrefix("recover_channel:") }
-                    if let right = recovery.map({ view.convert($0.frame,to:view.superview).maxX }).max(),
-                       let card = view.superview, abs(right - (card.bounds.maxX - 12)) > 1.5 {
-                        let issue = name(card) + ": recovery row is not edge anchored"
-                        nonAnchoredActionBars.append(issue); clippedViews.append(issue)
-                    }
-                    if recovery.contains(where: { abs($0.frame.midY-parentBounds.midY) > 1.5 }) {
-                        let issue = (view.superview.map(name) ?? id) + ": recovery row controls are not vertically centered"
-                        nonAnchoredActionBars.append(issue); clippedViews.append(issue)
-                    }
-                }
                 func checkActionRow(_ row: String, items: [NSView], midY: CGFloat, rightInset: CGFloat) {
                     guard !items.isEmpty else { return }
                     if let right = items.map({ $0.frame.maxX }).max(), abs(right - (parentBounds.maxX - rightInset)) > 1.5 {
@@ -1054,6 +1116,10 @@ extension Companion {
                 result["content_x"] = scroll.contentView.bounds.origin.x
                 result["content_y"] = scroll.contentView.bounds.origin.y
             }
+            if let track = view as? SegmentedPillStrip {
+                result["selected_id"] = track.selected?.identifier?.rawValue
+                result["sliding"] = track.isSliding
+            }
             if let table = view as? NSTableView, table === directoryTableView {
                 result["column_width"] = table.tableColumns.first?.width
             }
@@ -1070,6 +1136,7 @@ extension Companion {
                 result["secure"] = label is NSSecureTextField
                 result["editable"] = label.isEditable
                 result["wraps"] = label.cell?.wraps ?? false
+                result["truncates_tail"] = label.lineBreakMode == .byTruncatingTail
                 result["maximum_lines"] = label.maximumNumberOfLines
                 result["placeholder"] = label.placeholderString ?? ""
                 result["tooltip"] = label.toolTip ?? ""
@@ -1098,6 +1165,7 @@ extension Companion {
                 result["label_measured_width"] = measureTextWidth(control.label.stringValue,font:control.label.font ?? .systemFont(ofSize:12))
                 result["green"] = control.label.textColor == CitoPalette.successText
                 result["hovered"] = control.isHovered
+                result["pressed"] = control.isPressed
                 control.effectiveAppearance.performAsCurrentDrawingAppearance { result["foreground"] = components(control.label.textColor) }
                 if let symbol = control.symbolName { result["symbol"] = symbol }
             }
@@ -1235,8 +1303,8 @@ extension Companion {
                     "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
             },
-            "directory_copy_remaining": directoryCopiedUntil.filter { $0.value > now }.mapValues { $0.timeIntervalSince(now) },
-            "activity_copy_remaining": activityCopiedUntil.filter { $0.value > now }.mapValues { $0.timeIntervalSince(now) },
+            "directory_copy_remaining": feedback.deadlines(for: .directoryCopy).mapValues { $0.timeIntervalSince(now) },
+            "activity_copy_remaining": feedback.deadlines(for: .activityCopy).mapValues { $0.timeIntervalSince(now) },
             "hub_attachment_counts": Dictionary(uniqueKeysWithValues: hubs.map { ($0.name, $0.attachments?.count ?? 0) }),
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,

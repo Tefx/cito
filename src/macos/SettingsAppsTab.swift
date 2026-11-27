@@ -48,25 +48,28 @@ extension Companion {
             status.autoresizingMask = [.width]
             status.identifier=NSUserInterfaceItemIdentifier("settings_app_status:\(app.id)"); status.lineBreakMode = .byTruncatingMiddle
             status.toolTip=([detailText]+app.paths).filter { !$0.isEmpty }.joined(separator:"\n"); card.addSubview(status)
-            let appActionWidth = max(76, MenuControl.intrinsicWidth("Disconnect"))
-            let actionTitle=app.isConfigured || app.status == "error" ? "Check & Repair" : (app.status == "repair_needed" ? "Repair" : "Set Up")
-            let btn = MenuControl(actionTitle,frame:NSRect(x:0,y:0,width:MenuControl.intrinsicWidth(actionTitle),height:24))
+            let checkTitle = "Check & Repair", checkingTitle = "Checking…", settingUpTitle = "Setting Up…", checkedTitle = "✓ Checked"
+            let actionTitle = app.isConfigured || app.status == "error" ? checkTitle : (app.status == "repair_needed" ? "Repair" : "Set Up")
+            let btn = MenuControl(actionTitle,frame:NSRect(x:0,y:0,width:0,height:24))
             btn.identifier = NSUserInterfaceItemIdentifier("setup_app:\(app.id)")
             btn.style = app.isConfigured ? .neutral : .prominent
-            if let until = settingsApps.checkedUntil[app.id], Date() < until { btn.copied("✓ Checked", for: max(0.01, until.timeIntervalSinceNow)) }
-            let appPending = isPending("setup_apply",target:app.id) || isPending("setup_remove_app",target:app.id)
-            btn.isEnabled = !appPending
-            pendingLabel(btn,isPending("setup_apply",target:app.id),actionTitle == "Check & Repair" ? "Checking…" : "Setting Up…")
+            let applying = isPending("setup_apply", target: app.id)
+            btn.reservedTitles = [checkTitle, "Repair", "Set Up", checkingTitle, settingUpTitle, checkedTitle].map { ($0, nil) }
+            let disconnecting = isPending("setup_remove_app", target: app.id)
+            btn.isEnabled = !applying && !disconnecting
+            if applying { btn.setPending(actionTitle == checkTitle ? checkingTitle : settingUpTitle) }
+            else { btn.showFeedback(checkedTitle, key: .init(.appCheck, app.id)) }
             btn.pressed = { [weak self] in
                 self?.emit(["op":"setup_apply","harness":app.id], appCheck: app.isConfigured)
             }
             card.addSubview(btn)
             var trailing: [NSView] = [btn]
             if app.isConfigured {
-                let remove = MenuControl("Disconnect",frame:NSRect(x:0,y:0,width:appActionWidth,height:24))
+                let remove = MenuControl("Disconnect",frame:NSRect(x:0,y:0,width:0,height:24))
                 remove.identifier = NSUserInterfaceItemIdentifier("remove_app:\(app.id)"); remove.style = .destructiveHover
-                remove.isEnabled = !appPending
-                pendingLabel(remove,isPending("setup_remove_app",target:app.id),"Disconnecting…")
+                remove.isEnabled = !applying && !disconnecting
+                remove.reservedTitles = [("Disconnect", nil), ("Disconnecting…", nil)]
+                if disconnecting { remove.setPending("Disconnecting…") }
                 remove.pressed = { [weak self] in self?.emit(["op":"setup_remove_app","harness":app.id]) }
                 card.addSubview(remove); trailing.append(remove)
             }

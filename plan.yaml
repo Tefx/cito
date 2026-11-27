@@ -29594,23 +29594,37 @@ phases:
   name: 'V73 macOS Pill-Track Concentricity, Leading-Symbol Symmetry, Ghost-State
     De-Bloat, Case-Preserving Hub Names & Geometry Oracle Closure [REQUIRES_SKILL:
     contract-and-simplicity]'
-  status: pending
-  gate: 'All admitted obligations ([V73-S1..S3], [V73-R1] case-preserving Hub names,
-    [V73-M1..M4]) verified; zero truncated_collections or handleSettingsPanelKey references
-    in src/macos/; zero company- or environment-specific strings in tracked files;
-    cargo fmt --all --check, cargo clippy --workspace --all-targets --locked -- -D
-    warnings, cargo test --workspace --locked -- --test-threads=2, cargo build --release
-    --locked (clean git status on staged arm64 binaries), and node --test crates/cito-native/tests/support/site-clipboard.mjs
-    pass; v0.23.0 tag d4da4dff3655685c219b6aec4d4a471edf6adb88 preserved as untouched
-    ancestor; clean commit history (0 mcp:/vectl: commits); live dual-host + remote
-    Linux Hub smoke readiness verified.'
+  status: done
+  gate: 'All admitted Wave 1 ([V73-S1..S3], [V73-R1] incl. resolve_explicit_hub_name
+    parity) and Wave 2/3/remediation ([BC-01..BC-05] SegmentedPillStrip bounded pill
+    overflow, ControlVisuals WCAG >= 7.0:1 press fills, HoverCoordinator, TransientFeedbackStore,
+    declarative reservedTitles/setPending incl. Set Default zero-shift, Settings settlement/OIDC,
+    Directory draft safety/keyboard/Retry, strict HeadlessOracle 9-track fitted+overflowing
+    right-edge & non-nil selection closure, screenshots, signed arm64 binaries) obligations
+    verified; zero truncated_collections, handleSettingsPanelKey, toggleWidth, pendingWidth,
+    FeedbackHandle, feedbackTimer, pendingLabel, settingsApps, checkedUntil, pairCopiedUntil,
+    savedUntil, or joinedUntil residue in src/macos/; zero PI_PERSONA/larva or company/internal
+    names in tracked files outside plan.yaml; cargo fmt --all -- --check, cargo clippy
+    --workspace --all-targets --locked -- -D warnings, cargo test --workspace --locked,
+    cargo build --release --locked (isolated cold cargo build --release --locked exits
+    0 with zero compiler warnings, subsequent isolated warm incremental build leaves
+    isolated git status clean, untainted integration checkout git status is clean,
+    and all 7 staged/rebuilt arm64 binaries pass lipo -archs arm64, codesign -v --strict,
+    and --version cito v0.23.0), env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check, and python3 -B -m unittest discover -s packaging
+    pass; visual screenshot check passes; v0.23.0 tag d4da4df preserved as untouched
+    ancestor; any mcp:/vectl: bookkeeping commits in 44e52148..HEAD touch ONLY plan.yaml
+    (squashed by orchestrator after gate pass and before git push origin main); dual-host
+    + remote Linux Hub local readiness/contract prerequisites verified (post-push
+    deployment & live verification on secondary macOS host and remote Linux Hub occur
+    immediately after v73 merges and pushes to origin/main).'
   depends_on:
   - v72
   steps:
   - id: v73.debloat_ui_ghost_state_and_pill_substrate
     name: 'Wave 1: De-Bloat truncated_collections Ghost State, Unify Escape Key Handler
       & Concentric Pill-Track Substrate'
-    status: pending
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -29706,136 +29720,19 @@ phases:
     - crates/cito-native/tests/support/ui/settings_hubs.rs
     - crates/cito-native/tests/support/ui/directory.rs
     agent: frontend-engineer
-  - id: v73.close_concentric_pills_button_symmetry_and_oracle
-    name: 'Wave 2: Close Concentric Pill Tracks, Leading-Symbol Symmetry, Mixed-Case
-      Hub UI, HeadlessOracle Assertions, Screenshots & Signed arm64 Staging'
-    status: pending
-    description: 'step_type: implementation
-
-      repo_change_policy: modifies_repo
-
-      [REQUIRES_SKILL: contract-and-simplicity]
-
-
-      Deliver:
-
-      - [V73-M1] Fix header_hub_strip concentricity & semicircle optical balance (src/macos/MenuSurface.swift):
-      mount header_hub_strip at y: 7, height: 26, trackRadius: hubs.count > 1 ? 13
-      : nil around height: 22, radius: 11 pills (delta_x = delta_y = 2pt, R_track
-      - R_pill = 2pt, .continuous curve), center the 6x6 status dot at (8, 8) inside
-      the R = 11 left semicircle, widen right text clearance to width - 24 (x: 16,
-      natural pill width + 28), and reserve true natural multi-hub pill width in subtitleLimit
-      before truncating Hub pills when header_subtitle is "Personal inbox active".
-      Align channel_hub_strip (src/macos/SettingsChannelsTab.swift) to spacing: 4.
-
-      - [V73-M2] Fix directory_mode_track right-tail overhang, non-concentric radius,
-      and hardcoded facet pill widths (src/macos/DirectorySurface.swift): use concentric
-      radius: 9 around radius: 7 (height: 24) mode pills (9 - 7 = 2pt), remove the
-      max(174, ...) overhang so directory_mode_track closes tightly (2pt right inset)
-      around Directory + Activity when unreadCount == 0 while directorySearchField
-      flexes via layoutBar, and compute All Nodes / Mine (directory_scope_track),
-      For Me / All Activity / Unread (activity_filter_track), and All Apps (dir_harness:all)
-      widths from MenuControl.intrinsicWidth with dynamic directory_facet_separator
-      and directory_harness_scroll placement.
-
-      - [V73-M3] Fix MenuControl.layoutContents() leadingSymbol leftward shift (src/macos/UIPrimitives.swift)
-      and MenuSurface candidate action widths (src/macos/MenuSurface.swift): eliminate
-      double-counted internal NSTextField cell padding in centered leadingSymbol controls
-      (textW = max(0, min(bounds.width - 17, ceil(label.requiredSingleLineWidth) +
-      4)), startX = max(6, floor((bounds.width - (textW + 9)) / 2)), label.x = startX
-      + 13 so visual left/right margins match within <= 2pt with 0 truncations across
-      all font sizes/weights), and size candidate /reload and Listen buttons from
-      MenuControl.intrinsicWidth (adjusting actionX and textWidth).
-
-      - [V73-R1-UI] Update src/macos/Companion.swift (normalizeHubName & hubNameProposal)
-      to preserve explicit/advertised ASCII letter casing ([A-Za-z0-9_-], reserving
-      "local" case-insensitively and checking case-insensitive profile collisions
-      while keeping automaticHubName(url) lowercase), matching the Rust [V73-R1] contract.
-
-      - [V73-M4] Close HeadlessOracle pill-track blind spots (src/macos/HeadlessOracle.swift):
-      assert concentric 4-sided 2pt insets, R_track - R_pill == 2pt, .continuous cornerCurve,
-      and right-edge closure (maxX == contentWidth - 2 when contentWidth <= viewportWidth)
-      across all 9 segmented/pill tracks (header_hub_strip, channel_hub_strip, directory_harness_scroll,
-      directory_mode_track, directory_scope_track, activity_filter_track, settings_tab_track,
-      host_hub_addr_track, settings_hub_auth_track). Add discriminating regressions
-      in crates/cito-native/tests/support/ui/{menu,directory,settings_channels}.rs
-      including a mixed-case Hub pill (e.g. "Work-Internal"), refresh site/assets/screenshots/*.png
-      via CITO_TEST_SNAPSHOT_DIR, and run cargo build --release --locked to stage
-      all updated macOS arm64 binaries (bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
-      plugins/*/bin/*) while keeping crate version at 0.23.0.
-
-
-      Implementation Notes (Non-Binding):
-
-      - Consume the unified concentric track helper from Wave 1 (UIPrimitives.swift)
-      across MenuSurface, DirectorySurface, and Settings* rather than re-encoding
-      magic offsets.
-
-      - Keep all UI tests, examples, and refreshed screenshots strictly vendor-neutral
-      (personal, work, Work-Internal, Acme-Cloud, alice, bob).
-
-
-      Boundary:
-
-      - owner: frontend-engineer; authority: repo implementation + signed arm64 binary
-      staging; rollback: git revert.
-
-      - scope.allowed_paths: src/macos/{MenuSurface.swift,DirectorySurface.swift,UIPrimitives.swift,SettingsChannelsTab.swift,HeadlessOracle.swift,Companion.swift},
-      crates/cito-native/tests/support/ui/{menu,directory,settings_channels}.rs, site/assets/screenshots/*.png,
-      bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64, plugins/*/bin/*.
-
-      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, secrets/credentials.
-
-
-      Admit:
-
-      - All 9 segmented/pill tracks pass HeadlessOracle concentricity, cornerCurve,
-      and right-edge closure assertions.
-
-      - Mixed-case Hub name UI normalization and pill rendering regression ("Work-Internal")
-      passes.
-
-      - cargo build --release --locked stages all updated macOS arm64 binaries cleanly
-      with crate version unchanged at 0.23.0, and site-clipboard.mjs passes.
-
-
-      Recovery:
-
-      - Keep adjustments within scope; stop and report if any of the 9 tracks or mixed-case
-      Hub normalization contradicts Rust [V73-R1] contracts.'
-    verification: 'cargo test --workspace --locked --test native ui:: -- --test-threads=1
-      && cargo build --release --locked && node --test crates/cito-native/tests/support/site-clipboard.mjs'
-    evidence_template: 'Commands + exit codes (cargo test --workspace --locked --test
-      native ui:: -- --test-threads=1, cargo build --release --locked, node --test
-      crates/cito-native/tests/support/site-clipboard.mjs), HeadlessOracle 9-track
-      check summary, mixed-case Hub UI regression receipt, refreshed screenshots list,
-      staged arm64 binaries status (bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
-      plugins/*/bin/*), remaining gaps (NONE or list).'
-    refs:
-    - src/macos/MenuSurface.swift
-    - src/macos/DirectorySurface.swift
-    - src/macos/UIPrimitives.swift
-    - src/macos/SettingsChannelsTab.swift
-    - src/macos/HeadlessOracle.swift
-    - crates/cito-native/tests/support/ui/menu.rs
-    - crates/cito-native/tests/support/ui/directory.rs
-    - crates/cito-native/tests/support/ui/settings_channels.rs
-    - crates/cito-native/tests/support/site-clipboard.mjs
-    - bin/cito-ui-darwin-arm64
-    - src/macos/Companion.swift
-    - bin/cito-native-darwin-arm64
-    - plugins/claude/bin/cito-claude-hook
-    - plugins/claude/bin/cito-plugin-claude
-    - plugins/codex/bin/cito-plugin-codex
-    - plugins/pi/bin/cito-plugin-pi
-    - plugins/telegram/bin/cito-plugin-telegram
-    depends_on:
-    - v73.debloat_ui_ghost_state_and_pill_substrate
-    - v73.support_case_preserving_hub_names
-    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T07:37:17.974633Z'
+    done_at: '2026-11-27T07:52:22.593627+00:00'
+    evidence: 'Wave 1A (v73.debloat_ui_ghost_state_and_pill_substrate) committed as
+      8ed90aeee69138478314ebfebd4ce23e207374de (rebased from ae69922a) and merged
+      onto main, worktree removed. Checks: zero truncated_collections or handleSettingsPanelKey
+      in src/macos/, swiftc -warnings-as-errors, cargo fmt --all -- --check, cargo
+      clippy --workspace --all-targets --locked -- -D warnings, cargo test --workspace
+      --locked --test native ui:: -- --test-threads=1 (165 passed, 0 failed), zero
+      vendor/forbidden tokens.'
   - id: v73.gate_final
     name: 'V73 Independent Full Verification Gate [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: done
     description: 'step_type: gate
 
       repo_change_policy: no_repo_change
@@ -29845,23 +29742,46 @@ phases:
 
       Deliver:
 
-      - Independent FULL verification gate over integrated Phase v73 changes covering
-      [V73-S1..S3], [V73-R1] (case-preserving Hub names + APFS-safe OIDC token rename
-      + MCP schema + cli.rs untouched), and [V73-M1..M4] (9-track concentricity, leadingSymbol
-      symmetry, HeadlessOracle, mixed-case Hub UI, screenshots, and staged arm64 binaries).
+      - Independent verification gate over integrated Phase v73 changes covering Wave
+      1 ([V73-S1..S3], [V73-R1] case-preserving Hub names + `resolve_explicit_hub_name`
+      parity + APFS-safe OIDC token rename + MCP schema + `cli.rs` untouched), Wave
+      2 ([BC-01..BC-05] SegmentedPillStrip with bounded pill overflow, ControlVisuals
+      WCAG >= 7.0:1 press fills, declarative `reservedTitles`/`setPending` incl. Set
+      Default zero-shift, HoverCoordinator, TransientFeedbackStore, MenuSurface, Settings
+      focused-editor settlement dichotomy, collapsed channel_summary Saved slot, OIDC
+      pinned disclosure, Directory draft isolation before ack_signals, Cmd+F/Return/Delete
+      responder priority, cold loading + scoped Retry, README/DESIGN sync), and Wave
+      3/remediation (strict HeadlessOracle right-edge closure in fitted and overflowing
+      regimes + non-nil `track.selected` + truncated-pill tooltip checks, zero legacy
+      shim/timer residue, BC-01..BC-05 + Work_Internal/59-byte/Set-Default regressions,
+      6 refreshed screenshots, and 7 signed arm64 binaries).
 
-      - Verify full Rust/Node/packaging checks: cargo fmt --all --check, cargo clippy
-      --workspace --all-targets --locked -- -D warnings, cargo test --workspace --locked
-      -- --test-threads=2, cargo build --release --locked (confirming clean git status
-      on staged arm64 binaries bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
-      plugins/*/bin/* and crate version 0.23.0), and node --test crates/cito-native/tests/support/site-clipboard.mjs.
+      - Execute and verify full suite: `cargo fmt --all -- --check`, `cargo clippy
+      --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace
+      --locked`, `cargo build --release --locked` (isolated cold `cargo build --release
+      --locked` exits 0 with zero compiler warnings, subsequent isolated warm incremental
+      build leaves isolated `git status` clean, untainted integration checkout `git
+      status` is clean, and all 7 staged/rebuilt arm64 binaries pass `lipo -archs`
+      (`arm64`), `codesign -v --strict`, and `--version` (`cito v0.23.0`)), `env -u
+      NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs`,
+      `python3 packaging/release.py check`, and `python3 -B -m unittest discover -s
+      packaging`.
 
-      - Verify static, hygiene, and git-history invariants: zero truncated_collections
-      or handleSettingsPanelKey references in src/macos/, zero company- or environment-specific
-      strings in tracked files, all 9 segmented/pill tracks asserted in HeadlessOracle,
-      v0.23.0 tag commit d4da4dff3655685c219b6aec4d4a471edf6adb88 preserved as an
-      untouched ancestor, clean origin/main commit history (0 mcp:/vectl: noise commits),
-      and dual-host + remote Linux Hub live smoke readiness.
+      - Visually inspect all 6 refreshed screenshots (`site/assets/screenshots/*.png`)
+      for optical concentricity, leading-symbol balance, contrast, and zero clipped/overlapping
+      text.
+
+      - Verify static, hygiene, and git-history invariants: zero `truncated_collections`,
+      `handleSettingsPanelKey`, `toggleWidth`, `pendingWidth`, `FeedbackHandle`, `feedbackTimer`,
+      `pendingLabel`, `settingsApps`, `checkedUntil`, `pairCopiedUntil`, `savedUntil`,
+      or `joinedUntil` residue in `src/macos/`; zero `PI_PERSONA`/`larva` or company/internal
+      names in tracked files outside `plan.yaml`; `v0.23.0` tag commit `d4da4df` (`d4da4dff3655685c219b6aec4d4a471edf6adb88`)
+      preserved as untouched ancestor; any `mcp:`/`vectl:` bookkeeping commits in
+      `44e52148..HEAD` touch ONLY `plan.yaml` (orchestrator squashes them after `v73.gate_final`
+      passes and before `git push origin main`); and dual-host + remote Linux Hub
+      live smoke local readiness/contract prerequisites verified (post-push deployment
+      & live verification on the secondary macOS host and remote Linux Hub occur immediately
+      after `v73` merges and pushes to `origin/main`).
 
 
       Boundary:
@@ -29870,24 +29790,25 @@ phases:
       smoke inspection (no_repo_change); rollback: N/A.
 
       - scope.blocked_paths: plan.yaml, src/**, crates/**, site/**, bin/**, plugins/**,
-      secrets/credentials.
+      README.md, docs/**, secrets/credentials.
 
 
       Admit:
 
-      - Every required check command exits 0 with zero warnings, clean git status
-      on staged arm64 binaries, zero vendor-specific strings in tracked files, confirmed
-      ancestor relation for d4da4dff3655685c219b6aec4d4a471edf6adb88, and PASS dual-host
-      + remote Linux Hub live smoke readiness receipt.
+      - All required build, lint, test, packaging, codesign/lipo/version, screenshot
+      visual inspection, hygiene, git-history ancestor/bookkeeping, and dual-host
+      + remote Linux Hub local readiness checks PASS with zero warnings or regressions.
 
 
       Recovery:
 
       - On any failure, emit FAIL with exact file:line, command output, and defect
       classification without mutating the repository.'
-    verification: cargo fmt --all --check && cargo clippy --workspace --all-targets
-      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=2
-      && cargo build --release --locked && node --test crates/cito-native/tests/support/site-clipboard.mjs
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked && cargo build --release
+      --locked && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -B -m unittest discover -s
+      packaging
     evidence_template: Exact commands + exit codes (cargo fmt --all --check, cargo
       clippy --workspace --all-targets --locked -- -D warnings, cargo test --workspace
       --locked -- --test-threads=2, cargo build --release --locked, node --test crates/cito-native/tests/support/site-clipboard.mjs),
@@ -29896,25 +29817,79 @@ phases:
       (d4da4dff3655685c219b6aec4d4a471edf6adb88), dual-host + remote Linux Hub live
       smoke readiness receipt, and final PASS/FAIL verdict.
     refs:
+    - src/macos/PaletteAndMetrics.swift
     - src/macos/UIPrimitives.swift
-    - src/macos/MenuSurface.swift
-    - src/macos/DirectorySurface.swift
-    - src/macos/HeadlessOracle.swift
-    - crates/cito-native/tests/support/site-clipboard.mjs
-    - bin/cito-ui-darwin-arm64
-    - crates/cito-native/src/core/plugins.rs
-    - crates/cito-native/src/core/identity.rs
-    - crates/cito-native/src/core/daemon/http_actions.rs
-    - crates/cito-native/src/core/daemon/mcp.rs
+    - src/macos/Models.swift
     - src/macos/Companion.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/SettingsAppsTab.swift
+    - src/macos/SettingsChannelsTab.swift
+    - src/macos/SettingsHubsTab.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - src/macos/HeadlessOracle.swift
+    - README.md
+    - docs/DESIGN.md
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - packaging/release.py
+    - site/assets/screenshots/menu-dark.png
+    - site/assets/screenshots/directory-dark.png
+    - site/assets/screenshots/activity-dark.png
+    - site/assets/screenshots/settings-apps-dark.png
+    - site/assets/screenshots/settings-channels-dark.png
+    - site/assets/screenshots/settings-hubs-dark.png
     - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
     depends_on:
-    - v73.close_concentric_pills_button_symmetry_and_oracle
+    - v73.fix_reserved_invite_boundary
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-27T13:40:23.566701Z'
+    done_at: '2026-11-27T13:50:40.742892+00:00'
+    evidence: 'Validator receipt:
+
+      - review_report_validator.py --kind gate --binding /tmp/cito-v73-gate-binding.json
+      /tmp/cito-v73-gate-report.json -> exit 0, valid=true, binding_checked=true,
+      evidence_disposition=POSITIVE_GATE_EVIDENCE (report: /tmp/cito-v73-gate-report.json,
+      target_ref: git:7b7305cf4e81d55708ebbc931edbcc808ddce9d4)
+
+
+      Verification (all 10 bound requirements PROVEN):
+
+      - cargo fmt --all -- --check -> exit 0
+
+      - cargo clippy --workspace --all-targets --locked -- -D warnings -> exit 0
+
+      - /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - cargo test --workspace --locked -- --test-threads=2 -> 827 passed, 0 failed,
+      5 ignored subprocess workers (incl. 170/170 UI tests, 42/42 reserved-invite
+      loopback probes, standalone Work_Internal /health, Invite_Internal round-trip,
+      Set Default zero-shift, 59-byte Directory pill reveal & 2pt insets)
+
+      - cargo build --release --locked (isolated cold + warm) -> exit 0, 0 compiler
+      warnings, clean warm & integration status, all 7 staged/rebuilt binaries arm64
+      + codesign -v --strict, cito-native --version == cito v0.23.0
+
+      - env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      -> 1 passed
+
+      - python3 packaging/release.py check -> 0.23.0; python3 -B -m unittest discover
+      -s packaging -> 35 passed
+
+      - Hygiene & git ancestor: zero retired shims or forbidden tokens outside plan.yaml;
+      annotated tag v0.23.0 -> d4da4dff3655685c219b6aec4d4a471edf6adb88 preserved
+      as untouched ancestor; all 34 bookkeeping commits in 44e52148..7b7305cf touched
+      only plan.yaml (ready for post-gate squash before push).
+
+
+      Verdict: PASS (POSITIVE_GATE_EVIDENCE)'
   - id: v73.support_case_preserving_hub_names
     name: 'Wave 1: Support Case-Preserving Hub Names, APFS-Safe Token Rename & MCP
       Schema Alignment'
-    status: pending
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
       \ contract-and-simplicity]\n\nDeliver:\n- [V73-R1] Support case-preserving Hub\
       \ names across Rust core, Hub advertisement, OIDC token cache, and MCP schema:\n\
@@ -29978,3 +29953,1333 @@ phases:
     - crates/cito-native/tests/hub/cases.rs
     - crates/cito-native/tests/hub/login_cases.rs
     agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T07:37:17.974930Z'
+    done_at: '2026-11-27T07:52:03.594594+00:00'
+    evidence: 'Wave 1B (v73.support_case_preserving_hub_names) committed as 7589934
+      (rebased from a505452a) and merged onto main, worktree removed. Checks: cargo
+      fmt --all -- --check, cargo clippy --workspace --all-targets --locked -- -D
+      warnings, cargo test --workspace --locked --lib core:: (446 passed, 0 failed,
+      4 ignored), cargo test --workspace --locked --test native hub_rename (1 passed),
+      cli.rs untouched, zero vendor/forbidden tokens.'
+  - id: v73.implement_experience_kernel_and_menu_surface
+    name: 'Wave 2A: Experience Kernel (SegmentedPillStrip, ControlVisuals, HoverCoordinator,
+      TransientFeedbackStore) & MenuSurface Closure'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [BC-02] src/macos/UIPrimitives.swift:SegmentedPillStrip — unified concentric
+      pill-track substrate (trackHeight = pillHeight + 4, trackRadius = pillRadius
+      + 2, 2pt 4-side inset, .continuous corner curves on track/pills/thumb; unclipped
+      strips close at maxPillMaxX == contentWidth - 2; overflow scroll strips enforce
+      2pt trailing document inset and reveal selected pill). Resting state and all
+      headless or accessibilityDisplayShouldReduceMotion runs keep style == .prominent
+      + 1pt border on selected MenuControl and .subtleHeader on unselected pills with
+      ZERO overlapping sibling NSViews. Explicit user segment clicks (!headless &&
+      !reduceMotion) animate a non-intercepting sliding thumb (~180ms near-critically-damped,
+      zero bounce/overshoot, retargeting from presentation(), preserving track-local
+      rect across Menu/Settings rebuilds without animating passive refreshes or resetting
+      scroll offsets) with coordinated foreground contrast >= 4.5:1 throughout. Multi-option
+      strips (>= 2 options, incl. multi-Hub Menu strip) expose AXRadioButton + accessibilityValue
+      (1/0) and <-/-> key navigation when focused in a panel; single-Hub Menu pill
+      (hubs.count == 1) stays AXButton.
+
+      - [BC-03] src/macos/{PaletteAndMetrics.swift,UIPrimitives.swift}:ControlVisuals,MenuControl,HoverCoordinator
+      — single-account 4pt cell inset in MenuControl.layoutContents so leadingSymbol
+      buttons center icon + gap + label symmetrically without truncation; optional
+      leadingSymbol parameter on compactAddressLabel; Listen & /reload sized via intrinsicWidth.
+      Pressed .prominent and .destructive controls use opaque darkened semantic fills
+      with >= 7.0:1 WCAG 2.1 contrast vs #FFFFFF in Light and Dark (removing 0.28
+      alpha shadowColor replacement); .neutral/.subtleHeader step alpha cleanly (resting
+      -> hover -> press), ~90ms hover crossfade (0ms under headless/Reduce Motion),
+      0ms press-down. Replace hardcoded control-ID toggleWidth/layoutBar prefix sniffing
+      with declarative reservedTitles + setPending. Replace unconditional app-local
+      mouse-move monitor with demand-armed HoverCoordinator (0 idle mouseMoved callbacks
+      when nothing hovered; preserve MenuSurface .eventTracking hoverWatchTimer).
+
+      - [BC-01/04/05] src/macos/{UIPrimitives.swift,Models.swift,Companion.swift}:TransientFeedbackStore,normalizeHubName,composerDraftIdempotencyKey
+      — single TransientFeedbackStore keyed by (action, target, authority) with one
+      coalesced expiry timer replacing feedbackTimer, directoryCopiedUntil, activityCopiedUntil,
+      settingsApps.checkedUntil/SettingsAppsState, hostPort.savedUntil, hubInvite.joinedUntil,
+      ChannelUiState.pairCopiedUntil, dead savedUntil["hub"], and Companion calls
+      to rebuildFeedbackAfter; delete dead ChannelAttachment.channel_id and dead savedUntil["hub"].
+      Update Companion.normalizeHubName to match Rust [A-Za-z0-9][A-Za-z0-9_-]{0,31}
+      + space-to-hyphen case preservation (Work Internal -> Work-Internal, Office
+      Mac -> Office-Mac) + case-insensitive "local" rejection (URL-derived blank-name
+      proposals stay lowercase slugs). Bind composer_result/send_signal error attribution
+      to composerDraftIdempotencyKey (falling back to Directory notice if closed/replaced;
+      keep ignoring unmatched trailing generic errors).
+
+      - [Menu] src/macos/MenuSurface.swift — header_hub_strip concentric 26pt/R13,
+      6x6 dot centered in 22pt pill, 24pt dot-pill chrome, true 2-pill width reservation
+      even when left text is "Personal inbox active"; Menu copy confirmations ("✓
+      Copied") survive background state rebuilds; statusTooltip preserves warning
+      icon precedence and appends "· N unread" when unreadCount > 0; keep stop_all
+      hidden when orderedListeners.isEmpty; migrate MenuSurface pendingLabel calls
+      to setPending.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Cut-set seam for parallel Steps 2 & 3 and consolidation Step 4: because src/macos/*.swift
+      compiles as one target, keep minimal compile-safe computed/forwarding bridges
+      backed solely by TransientFeedbackStore/SegmentedPillStrip/reservedTitles (zero
+      duplicate timers or duplicate backing maps) for any legacy properties still
+      referenced by unmigrated Settings*.swift, Directory*.swift, or HeadlessOracle.swift,
+      marking them [DEFER_TO_CONSOLIDATE] for deletion in v73.close_oracle_tests_and_screenshots.
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation in isolated worktree;
+      rollback: git revert.
+
+      - scope.allowed_paths: src/macos/PaletteAndMetrics.swift, src/macos/UIPrimitives.swift,
+      src/macos/Models.swift, src/macos/Companion.swift, src/macos/MenuSurface.swift.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, bin/**, plugins/*/bin/**,
+      secrets/credentials.
+
+
+      Admit:
+
+      - SegmentedPillStrip, ControlVisuals WCAG >= 7.0:1 press fills, reservedTitles/setPending,
+      demand-armed HoverCoordinator, TransientFeedbackStore, case-preserving normalizeHubName,
+      composerDraftIdempotencyKey attribution, and MenuSurface closure compile and
+      pass targeted UI tests.
+
+
+      Recovery:
+
+      - Keep fixes within the 5 owned files; stop and report if any Settings/Directory/Oracle
+      caller breaks compilation without a clean single-authority bridge.'
+    verification: cargo test --workspace --locked --test native ui::menu -- --test-threads=1
+      && cargo test --workspace --locked --test native ui::render_stability -- --test-threads=1
+    refs:
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/UIPrimitives.swift
+    - src/macos/Models.swift
+    - src/macos/Companion.swift
+    - src/macos/MenuSurface.swift
+    depends_on:
+    - v73.debloat_ui_ghost_state_and_pill_substrate
+    - v73.support_case_preserving_hub_names
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T08:37:40.479093Z'
+    done_at: '2026-11-27T09:09:15.563885+00:00'
+    evidence: 'Artifact:
+
+      - Commit: f8b225550cf71bd236f9ccc71fa2ce4206616e53 (merged onto main, worktree
+      removed; 5 authorized Swift files only)
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings -> exit 0
+
+      - Run: cargo test --workspace --locked --test native ui::render_stability --
+      --test-threads=1 -> 11 passed
+
+      - Run: cargo test --workspace --locked --test native ui::directory -- --test-threads=1
+      -> 15 passed
+
+      - Run: cargo test --workspace --locked --test native ui::menu -- --test-threads=1
+      -> 17 passed, 1 expected-baseline failure (menu.rs:973 R11->R13 superseded by
+      BC-02, scheduled for v73.close_oracle_tests_and_screenshots)
+
+      - Run: cargo test --workspace --locked --test native ui::settings_hubs -- --test-threads=1
+      -> 23 passed, 1 expected-baseline failure (settings_hubs.rs:832 office-mac->Office-Mac
+      superseded by BC-05/V73-R1, scheduled for v73.close_oracle_tests_and_screenshots)
+
+      - Offscreen AppKit probes: SegmentedPillStrip 26pt/R13 geometry, AXRadioButton/AXButton
+      roles & values, arrow navigation, scroll handoff, 180ms thumb animation installation,
+      WCAG pressed contrast 9.80:1 & 8.63:1 vs white.
+
+
+      Spec link:
+
+      - plan.yaml#v73.implement_experience_kernel_and_menu_surface (BC-01..BC-05)'
+  - id: v73.close_settings_surfaces_and_docs
+    name: 'Wave 2B-1: Settings Surfaces (Pill Tracks, Settlement Dichotomy, Collapsed
+      Saved Slot, OIDC Disclosure) & Docs Sync'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [BC-02/03] src/macos/{SettingsSurface.swift,SettingsAppsTab.swift,SettingsChannelsTab.swift,SettingsHubsTab.swift}
+      — wire settings_tab_track, channel_hub_strip (spacing: 4), host_hub_addr_track,
+      and settings_hub_auth_track onto SegmentedPillStrip, TransientFeedbackStore,
+      reservedTitles, and setPending. Remove rebuildFeedbackAfter and legacy pendingLabel
+      from SettingsSurface.swift; ensure apply_host_hub_port reserves Apply / Applying…
+      / ✓ Saved with zero sibling shift and stays disabled after settlement when port
+      is unchanged.
+
+      - [BC-04-Focus] src/macos/{SettingsSurface.swift,SettingsChannelsTab.swift,SettingsHubsTab.swift}
+      — Focused-Editor Settlement Dichotomy: when a matching authoritative success
+      removes/collapses the submitted form (Add/Edit Hub close, or clean Gateway/Personal
+      channel save with no newer post-submit edits), end editing on that submitted
+      field, rebuild the collapsed view, and place focus on a surviving control (Edit…
+      / Change Token… / Hub row). When the submitted form survives (any failure, Host
+      Port apply, Send Test, or newer draft edits typed after submit), preserve active
+      NSTextView/selection/IME/Undo and update mounted buttons & inline errors in
+      place at both submission and receipt using current (hub, principal) capabilities.
+
+      - [BC-04-Saved] src/macos/SettingsChannelsTab.swift — Collapsed Personal ✓ Saved
+      Slot: on a collapsing personal channel save, keep "Paired · <account>" intact
+      AND display "✓ Saved" alongside it on channel_summary:<id> with zero collapsed
+      card-height change across confirmation and expiry; use button feedback when
+      the editor remains mounted.
+
+      - [BC-05-OIDC] src/macos/SettingsHubsTab.swift — OIDC Pinned Disclosure: when
+      oidcExpanded is pinned open by unsaved manual OIDC overrides (added values or
+      explicitly cleared saved values), set manual_hub_oidc.isEnabled = false with
+      mode-accurate tooltip ("Clear manual OIDC fields to return to automatic discovery"
+      when adding vs. "Restore saved OIDC settings to collapse manual fields" when
+      editing — avoid uppercase "OIDC:" colon pattern), updating live on controlTextDidChange
+      without detaching the field editor.
+
+      - [Docs] README.md, docs/DESIGN.md — document case-preserving Hub name normalization
+      (Office Mac -> Office-Mac) in README.md; remove retired collection-shedding
+      preservation prose and align §5 UI contracts in docs/DESIGN.md (English only,
+      strictly vendor-neutral names).
+
+
+      Implementation Notes (Non-Binding):
+
+      - Runs in parallel with v73.close_directory_ergonomics_and_draft_safety (0 file
+      overlap). Consume SegmentedPillStrip, TransientFeedbackStore, reservedTitles,
+      and setPending from Step 1 without mutating Step-1 files.
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation in isolated worktree;
+      rollback: git revert.
+
+      - scope.allowed_paths: src/macos/SettingsSurface.swift, src/macos/SettingsAppsTab.swift,
+      src/macos/SettingsChannelsTab.swift, src/macos/SettingsHubsTab.swift, README.md,
+      docs/DESIGN.md.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, bin/**, plugins/*/bin/**,
+      secrets/credentials.
+
+
+      Admit:
+
+      - All 4 Settings tracks use SegmentedPillStrip + TransientFeedbackStore + reservedTitles;
+      rebuildFeedbackAfter deleted from SettingsSurface.swift; BC-04 settlement dichotomy,
+      collapsed channel_summary slot, BC-05 OIDC pinned disclosure, and README/DESIGN
+      updates pass targeted settings UI checks (expecting intentional baseline test
+      updates to land in Step 4).
+
+
+      Recovery:
+
+      - Keep fixes within the 6 owned files; stop and report if any required TransientFeedbackStore
+      or SegmentedPillStrip hook is missing from Step 1.'
+    verification: cargo test --workspace --locked --test native ui::settlement --
+      --test-threads=1 && cargo test --workspace --locked --test native ui::oidc_settlement
+      -- --test-threads=1
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/SettingsAppsTab.swift
+    - src/macos/SettingsChannelsTab.swift
+    - src/macos/SettingsHubsTab.swift
+    - README.md
+    - docs/DESIGN.md
+    depends_on:
+    - v73.implement_experience_kernel_and_menu_surface
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T09:09:25.744476Z'
+    done_at: '2026-11-27T09:47:00.216870+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 8978c8a23a6a7348e01abdea4a6d37615e42b75b (merged onto main, worktree
+      removed; 6 allowed files only)
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings -> exit 0
+
+      - Run: cargo test --workspace --locked --test native ui::settings_ -- --test-threads=1
+      -> 43 passed, 2 expected-baseline failures (settings_channels.rs:353, settings_hubs.rs:832)
+
+      - Run: cargo test --workspace --locked --test native ui::oidc_settlement --
+      --test-threads=1 -> 9 passed, 3 expected-baseline failures (oidc_settlement.rs:65,293,501)
+
+      - Headless AppKit probes: Host Port Apply width/disabled state, focused-editor
+      settlement dichotomy, live OIDC pinning, constant-height Paired · <account>
+      · ✓ Saved summary. Note: MenuControl mouseDown focus-steal on surviving-form
+      clicks requires a 1-file UIPrimitives.swift fix before Wave 3.
+
+
+      Spec link:
+
+      - plan.yaml#v73.close_settings_surfaces_and_docs (BC-04, BC-05)'
+  - id: v73.close_directory_ergonomics_and_draft_safety
+    name: 'Wave 2B-2: Directory/Activity Pill Tracks, Draft Safety, Keyboard Priority
+      & Scoped Retry'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [BC-02/03] src/macos/{DirectorySurface.swift,DirectoryCell.swift} — wire directory_mode_track
+      (concentric R9, remove 174pt min-width empty tail so track closes tightly around
+      Directory + Activity when unreadCount == 0 while search flexes), directory_scope_track,
+      directory_harness_scroll, and activity_filter_track onto SegmentedPillStrip,
+      MenuControl.intrinsicWidth (dynamic directory_facet_separator and directory_harness_scroll
+      placement), and TransientFeedbackStore (removing all reads/writes to directoryCopiedUntil,
+      activityCopiedUntil, and feedbackTimer).
+
+      - [BC-05-Draft] src/macos/DirectorySurface.swift — Composer Recipient Isolation:
+      when composer is open with non-empty draft text OR an unsettled pendingComposer,
+      clicking row Message or Reply for a different (hub, target) MUST be rejected
+      BEFORE replyToActivity emits ack_signals (do NOT mark unread message B read),
+      preserving A''s draft, focusing composerInputField, and setting inline composer
+      status "Send or press Esc to discard your current draft first.". Same-recipient
+      (hub, target) reply switching (in_reply_to update) and empty-composer switching
+      remain allowed.
+
+      - [BC-05-Keys] src/macos/DirectorySurface.swift — Keyboard & Responder Priority:
+      support Cmd+F (with ANSI keyCode fallback, alongside Cmd+K) to focus and select
+      directorySearchField; route Return to a focused visible MenuControl/NSButton
+      before table-row actions; restrict Delete/Backspace activity deletion to when
+      Directory is key window AND directoryTableView holds focus.
+
+      - [BC-05-Retry] src/macos/DirectorySurface.swift — Cold Loading & Scoped Query
+      Retry: show cold loading state ONLY before the first accepted directory frame
+      has arrived AND when directoryAllPeers has no state-seeded rows. Expose a disjoint
+      Retry button ONLY for directoryQueryError != nil (never for copy/delete/send
+      notices), dynamically sizing directoryScrollView from actual warning container
+      height so wrapped errors and Retry never overlap or clip, and re-running queryDirectory()
+      on click.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Runs in parallel with v73.close_settings_surfaces_and_docs (0 file overlap).
+      Consume SegmentedPillStrip, intrinsicWidth, and TransientFeedbackStore from
+      Step 1 without mutating Step-1 files.
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation in isolated worktree;
+      rollback: git revert.
+
+      - scope.allowed_paths: src/macos/DirectorySurface.swift, src/macos/DirectoryCell.swift.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, bin/**, plugins/*/bin/**,
+      secrets/credentials.
+
+
+      Admit:
+
+      - All 4 Directory/Activity tracks use SegmentedPillStrip + intrinsicWidth +
+      TransientFeedbackStore; cross-recipient draft protection blocks before ack_signals
+      while preserving same-recipient reply switching; Cmd+F, Return responder priority,
+      Delete focus guard, cold loading, and scoped query Retry pass targeted directory
+      tests.
+
+
+      Recovery:
+
+      - Keep fixes within DirectorySurface.swift and DirectoryCell.swift; stop and
+      report if any required Step-1 kernel hook is missing.'
+    verification: cargo test --workspace --locked --test native ui::directory -- --test-threads=1
+    refs:
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    depends_on:
+    - v73.implement_experience_kernel_and_menu_surface
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T09:09:25.744695Z'
+    done_at: '2026-11-27T09:28:49.685694+00:00'
+    evidence: 'Artifact:
+
+      - Commit: d5583074df195372442729c69cff4a8a8b0bc792 (merged onto main, worktree
+      removed; only DirectorySurface.swift & DirectoryCell.swift changed)
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings -> exit 0
+
+      - Run: cargo test --workspace --locked --test native ui::directory -- --test-threads=1
+      -> 15 passed, 0 failed
+
+      - Headless AppKit probes: 2pt concentric inset, Retry placement/requery, ANSI
+      Cmd+F fallback, focused Return, Delete focus gating, cross-recipient draft preservation
+      before ack_signals.
+
+
+      Spec link:
+
+      - plan.yaml#v73.close_directory_ergonomics_and_draft_safety (BC-05)'
+  - id: v73.close_oracle_tests_and_screenshots
+    name: 'Wave 3: HeadlessOracle, Legacy Shim Consolidation, BC-01..BC-05 UI Tests,
+      Screenshots & Signed arm64 Staging'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [BC-01..05-Oracle] src/macos/HeadlessOracle.swift — remove dead "targetStrip"
+      and channel_recovery_bar: branches; wire TransientFeedbackStore into address-copy
+      checks and deterministic targeted expiry; add 2pt concentric inset / R_track
+      - R_pill == 2pt / .continuous curve / right-edge closure / selected-reveal checks
+      across all 9 tracks (header_hub_strip, channel_hub_strip, directory_harness_scroll,
+      directory_mode_track, directory_scope_track, activity_filter_track, settings_tab_track,
+      host_hub_addr_track, settings_hub_auth_track) while keeping >= 6pt card-padding
+      checks distinct from 2pt pill tracks; exclude verified Hub-name spans from jargonPattern;
+      verify warning banner + Retry bounds and hit-testing.
+
+      - [Consolidate-Shims] src/macos/{UIPrimitives.swift,Models.swift,Companion.swift}
+      — delete any remaining Step-1 [DEFER_TO_CONSOLIDATE] transitional compatibility
+      adapters (feedbackTimer, directoryCopiedUntil, activityCopiedUntil, settingsApps.checkedUntil/SettingsAppsState,
+      hostPort.savedUntil, hubInvite.joinedUntil, ChannelUiState.pairCopiedUntil/savedUntil,
+      toggleWidth, mountPillStrip) once HeadlessOracle.swift is migrated, leaving
+      TransientFeedbackStore, SegmentedPillStrip, and reservedTitles as the sole authorities.
+
+      - [Tests] crates/cito-native/tests/support/ui/*.rs — update baseline assertions
+      intentionally superseded by v73 (oracle_e2e.rs:2640-2698 channel_hub_strip 4pt
+      gap; settings_channels.rs:357 & oracle_e2e.rs:2021 channel_summary asserting
+      both "Paired · <account>" and "✓ Saved"; settings_hubs.rs:908-916 cold loading
+      then correlated empty directory fixture; settings_hubs.rs:785 & oracle_e2e.rs:1546
+      case-preserving Work / Office-Mac), keeping directory.rs:1407-1449 same-recipient
+      consecutive reply test intact. Add discriminating BC-01..BC-05 regressions (Light/Dark,
+      .overlay/.legacy scrollbars, Reduce Motion, focused Return collapsing vs. surviving
+      settlement, cross-recipient draft block before ack_signals, Menu rebuild preserving
+      "✓ Copied", pressed .prominent/.destructive contrast >= 7.0:1, Cmd+F, OIDC pinned
+      disclosure disable/re-enable, query Retry, and Work-Internal Hub pills).
+
+      - [Artifacts] site/assets/screenshots/*.png, bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
+      plugins/*/bin/* — regenerate all 6 screenshots via CITO_TEST_SNAPSHOT_DIR, run
+      cargo build --release --locked (keeping CITO_VERSION at 0.23.0), and verify
+      strict codesign on all 7 arm64 binaries.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Keep all tests, fixtures, and regenerated screenshots strictly English and
+      vendor-neutral (personal, work, Work-Internal, Office-Mac, Acme-Cloud, alice,
+      bob).
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation + screenshot regeneration
+      + signed arm64 binary staging; rollback: git revert.
+
+      - scope.allowed_paths: src/macos/HeadlessOracle.swift, src/macos/UIPrimitives.swift,
+      src/macos/Models.swift, src/macos/Companion.swift, crates/cito-native/tests/support/ui/*.rs,
+      site/assets/screenshots/*.png, bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
+      plugins/claude/bin/cito-claude-hook, plugins/claude/bin/cito-plugin-claude,
+      plugins/codex/bin/cito-plugin-codex, plugins/pi/bin/cito-plugin-pi, plugins/telegram/bin/cito-plugin-telegram.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, secrets/credentials.
+
+
+      Admit:
+
+      - All 9 tracks pass HeadlessOracle concentricity, cornerCurve, right-edge, and
+      selected-reveal checks; zero legacy feedback timers/maps/shims remain in src/macos/;
+      cargo test --workspace --locked --test native ui:: passes; all 6 screenshots
+      refreshed; cargo build --release --locked stages all 7 arm64 binaries with strict
+      codesign and crate version 0.23.0.
+
+
+      Recovery:
+
+      - Keep fixes within scope; stop and report if any regression exposes a contract
+      contradiction across Steps 1-3.'
+    verification: 'cargo test --workspace --locked --test native ui:: -- --test-threads=1
+      && cargo build --release --locked && node crates/cito-native/tests/support/site-clipboard.mjs'
+    refs:
+    - src/macos/HeadlessOracle.swift
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/settlement.rs
+    - crates/cito-native/tests/support/ui/oidc_settlement.rs
+    - crates/cito-native/tests/support/ui/render_stability.rs
+    - site/assets/screenshots/menu-dark.png
+    - site/assets/screenshots/directory-dark.png
+    - site/assets/screenshots/activity-dark.png
+    - site/assets/screenshots/settings-apps-dark.png
+    - site/assets/screenshots/settings-channels-dark.png
+    - site/assets/screenshots/settings-hubs-dark.png
+    - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
+    - plugins/claude/bin/cito-claude-hook
+    - plugins/claude/bin/cito-plugin-claude
+    - plugins/codex/bin/cito-plugin-codex
+    - plugins/pi/bin/cito-plugin-pi
+    - plugins/telegram/bin/cito-plugin-telegram
+    depends_on:
+    - v73.close_settings_surfaces_and_docs
+    - v73.close_directory_ergonomics_and_draft_safety
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T09:47:05.564385Z'
+    done_at: '2026-11-27T10:43:50.578958+00:00'
+    evidence: 'Artifact:
+
+      - Commit: c39d45ea41724ed94173c022a1170a835e287611 (merged onto main, worktree
+      removed)
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings -> exit 0
+
+      - Run: cargo test --workspace --locked --test native ui:: -- --test-threads=1
+      -> 168 passed, 0 failed
+
+      - Run: node --test crates/cito-native/tests/support/site-clipboard.mjs -> exit
+      0
+
+      - Run: cargo build --release --locked -> exit 0 (0 warnings); all 7 Darwin arm64
+      binaries restaged and passed codesign -v --strict; ./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0; all 6 site/assets/screenshots/*.png regenerated.
+
+
+      Spec link:
+
+      - plan.yaml#v73.close_oracle_tests_and_screenshots (BC-01..BC-05, V73-M1..M4)'
+  - id: v73.fix_hub_name_parity
+    name: Fix Rust Explicit Hub Name Parity (resolve_explicit_hub_name)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V73-R1-Parity] crates/cito-native/src/core/identity.rs:resolve_explicit_hub_name
+      — add a single shared helper `pub(super) fn resolve_explicit_hub_name(raw: &str)
+      -> Option<String>` that trims whitespace, returns `Some(trimmed.to_string())`
+      verbatim when `crate::plugins::validate_hub_name(trimmed)` passes (preserving
+      valid explicit aliases with underscores such as `Work_Internal`), and falls
+      back to `normalize_hub_name(trimmed)` otherwise.
+
+      - [V73-R1-Callers] Wire `resolve_explicit_hub_name` across every explicit Hub-name
+      ingress site: `crates/cito-native/src/core/setup.rs` (explicit CLI Hub naming),
+      `crates/cito-native/src/core/daemon/http_actions.rs` (`save_hub`, `invite_hub_name`,
+      and pending/affected-hub tracking), and `crates/cito-native/src/core/auth.rs`
+      (`advertise_name` explicit branch; keep automatic URL/hostname derivation lowercase).
+
+      - [V73-R1-Preserve] Preserve case-folded collision detection, APFS-safe case-only
+      `oidc-token-*.json` rename, `cito_send.to` schema, and untouched `crates/cito-native/src/core/cli.rs`
+      lowercase-only diagnostic prefix stripper.
+
+      - [Tests] crates/cito-native/src/core/daemon/tests.rs — add discriminating regressions
+      exercising `Work_Internal` vs `Work-Internal` write-read round-trip, explicit
+      invite/advertise underscore preservation, and case-folded existing-profile collision
+      rejection.
+
+
+      Implementation Notes (Non-Binding):
+
+      - Cut-set seam with Swift `Companion.normalizeHubName`: trim -> preserve valid
+      `[A-Za-z0-9][A-Za-z0-9_-]{0,31}` verbatim -> otherwise collapse non-alphanumeric
+      runs to `-`, trim `-`, cap at 32 bytes; reject case-insensitive `"local"` outside
+      `local://`.
+
+      - Do NOT stage `bin/*` or `plugins/*/bin/*` in this step; `v73.close_pill_oracle_tests_and_staging`
+      stages all 7 release binaries after integrating Rust and Swift fixes.
+
+
+      Boundary:
+
+      - owner: software-engineer; authority: repo implementation in isolated worktree
+      (file-disjoint from parallel Wave A Swift step); rollback: git revert.
+
+      - scope.allowed_paths: crates/cito-native/src/core/identity.rs, crates/cito-native/src/core/setup.rs,
+      crates/cito-native/src/core/auth.rs, crates/cito-native/src/core/daemon/http_actions.rs,
+      crates/cito-native/src/core/daemon/tests.rs.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, bin/**, plugins/*/bin/**,
+      secrets/credentials.
+
+
+      Admit:
+
+      - `Work_Internal` is preserved verbatim across CLI setup, daemon `save_hub`,
+      invite parsing, and explicit hub advertisement; unnormalized input falls back
+      to `normalize_hub_name`; case-folded collisions are rejected; `cli.rs` is untouched.
+
+      - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked
+      -- -D warnings`, and targeted Rust lib + daemon tests pass.
+
+
+      Recovery:
+
+      - Keep fixes within the 5 owned Rust files; stop and report if any downstream
+      consumer breaks on underscore Hub names.'
+    verification: 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked --lib core::'
+    evidence_template: Commands + exit codes (cargo fmt --all -- --check, cargo clippy
+      --workspace --all-targets --locked -- -D warnings, cargo test --workspace --locked
+      --lib core::), summary of resolve_explicit_hub_name wiring and Work_Internal/Work-Internal/case-folded
+      regression tests, remaining gaps (NONE or list).
+    refs:
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    depends_on:
+    - v73.close_oracle_tests_and_screenshots
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T11:41:18.443695Z'
+    done_at: '2026-11-27T11:49:52.030148+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 724f6602aeb773c70ee0d81e53c9439f8e636372 (merged onto main, worktree
+      removed)
+
+      - Modified: crates/cito-native/src/core/{identity,setup,daemon/http_actions,daemon/tests}.rs
+      (resolve_explicit_hub_name shared across CLI setup and daemon /action, preserving
+      valid explicit aliases like Work_Internal verbatim while enforcing case-folded
+      collision detection; cli.rs untouched)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> exit 0
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> exit
+      0
+
+      - Run: cargo test --workspace --locked --lib -- --test-threads=2 -> 460 passed,
+      4 ignored
+
+      - Run: cargo test --workspace --locked --test native -- daemon::config_and_hubs::
+      daemon::discovery_and_setup::setup_inspection_cache_and_hub_rename_migrate_persistent_state
+      hub_http_errors_keep_retryability_through_tools_call --test-threads=2 -> 24
+      passed (incl. new explicit_hub_names_round_trip_and_reject_case_folded_collisions)
+
+
+      Spec link:
+
+      - plan.yaml#v73.fix_hub_name_parity (V73-R1)'
+  - id: v73.migrate_settings_tabs_and_hub_collision
+    name: Migrate Settings Tabs to reservedTitles/TransientFeedbackStore & Case-Folded
+      Hub Collision
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V73-M1/M4-Settings] Migrate every remaining `pendingLabel`, `feedbackTimer`,
+      `settingsApps.checkedUntil`, `hostPort.savedUntil`, and `hubInvite.joinedUntil`
+      call site across `src/macos/SettingsSurface.swift`, `src/macos/SettingsAppsTab.swift`,
+      `src/macos/SettingsChannelsTab.swift`, and `src/macos/SettingsHubsTab.swift`
+      to `reservedTitles` + `MenuControl.setPending` + direct `TransientFeedbackStore`
+      (`feedback`) calls and `MenuControl.feedbackKey`.
+
+      - [V73-M1-Sizing] Wire declarative `reservedTitles` on **Set Default** (`"Set
+      Default"`, `"Applying…"`) and every other stateful action button across `SettingsHubsTab.swift`,
+      `SettingsChannelsTab.swift`, and `SettingsAppsTab.swift` so zero width or neighbor
+      shifts occur across resting, pending, and settled/feedback states.
+
+      - [V73-M4-Presentation] Update `SettingsPresentation` in `src/macos/SettingsSurface.swift`
+      to read app-check, host-port, hub-invite, and channel feedback deadlines directly
+      from `feedback` (`TransientFeedbackStore`) instead of `settingsApps.checkedUntil`,
+      `hostPort.savedUntil`, `hubInvite.joinedUntil`, or `ChannelUiState` deadline
+      projections.
+
+      - [V73-R1-Collision] Update `src/macos/SettingsHubsTab.swift` explicit-add collision
+      check from exact-case (`$0.name == name`) to case-folded (`$0.name.lowercased()
+      == name.lowercased()`).
+
+
+      Implementation Notes (Non-Binding):
+
+      - Runs in parallel with `v73.fix_hub_name_parity` (0 file overlap).
+
+      - Cut-set seam for `v73.delete_legacy_shims_and_bound_pills`: `Companion.swift:1377`
+      still calls `pendingLabel` until the next step migrates `Companion.swift`, so
+      either keep `pendingLabel` in `SettingsSurface.swift` solely as a minimal forwarding
+      stub for `Companion.swift:1377` (to be deleted in the next step) with zero Settings
+      callers remaining.
+
+      - Do NOT stage `bin/*` or mutate `Companion.swift`/`Models.swift`/`UIPrimitives.swift`
+      in this step.
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation in isolated worktree
+      (file-disjoint from `v73.fix_hub_name_parity`); rollback: git revert.
+
+      - scope.allowed_paths: src/macos/SettingsSurface.swift, src/macos/SettingsAppsTab.swift,
+      src/macos/SettingsChannelsTab.swift, src/macos/SettingsHubsTab.swift.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, bin/**, plugins/*/bin/**,
+      secrets/credentials.
+
+
+      Admit:
+
+      - Zero `pendingLabel`, `feedbackTimer`, `settingsApps.checkedUntil`, `hostPort.savedUntil`,
+      or `hubInvite.joinedUntil` calls remain in `SettingsAppsTab.swift`, `SettingsChannelsTab.swift`,
+      or `SettingsHubsTab.swift`; `Set Default` and all sibling Settings action buttons
+      declare `reservedTitles`; explicit-add Hub collision check is case-folded.
+
+      - `/usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift` and targeted Settings UI tests pass.
+
+
+      Recovery:
+
+      - Keep fixes within the 4 owned Settings Swift files; stop and report if any
+      `UIPrimitives`/`Companion` hook is missing for declarative `reservedTitles`/`setPending`.'
+    verification: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift && cargo test --workspace --locked --test native ui::settings_
+      -- --test-threads=1
+    evidence_template: Commands + exit codes (swiftc -warnings-as-errors -typecheck,
+      cargo test --workspace --locked --test native ui::settings_ -- --test-threads=1),
+      rg confirmation of zero remaining legacy pendingLabel/feedbackTimer/savedUntil/joinedUntil
+      callers in Settings*Tab.swift, remaining gaps (NONE or list).
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/SettingsAppsTab.swift
+    - src/macos/SettingsChannelsTab.swift
+    - src/macos/SettingsHubsTab.swift
+    depends_on:
+    - v73.close_oracle_tests_and_screenshots
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T11:41:18.449416Z'
+    done_at: '2026-11-27T12:00:13.122090+00:00'
+    evidence: 'Artifact:
+
+      - Commit: dc784e92a44fdb864602fe588f1c10343bbd416e (rebased & merged onto main,
+      worktree removed)
+
+      - Modified: src/macos/Settings{Surface,AppsTab,ChannelsTab,HubsTab}.swift (declarative
+      reservedTitles on all Settings action buttons incl. Set Default/Applying…, direct
+      TransientFeedbackStore + MenuControl.setPending/feedbackKey migration, case-folded
+      Hub collision check)
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check -> exit 0
+
+      - Run: cargo test --workspace --locked --test native ui::settings_ -- --test-threads=1
+      -> 45 passed, 0 failed
+
+      - Run: cargo test --workspace --locked --test native ui::oidc_settlement --
+      --test-threads=1 -> 13 passed, 0 failed
+
+      - Run: cargo test --workspace --locked --test native ui::settlement:: -- --test-threads=1
+      -> 19 passed, 0 failed
+
+      - Headless AppKit probe confirmed Set Default stayed at 76pt with zero Move
+      Up/Down displacement during Applying… and rejected mixed-case Hub collision
+      before emit.
+
+
+      Spec link:
+
+      - plan.yaml#v73.migrate_settings_tabs_and_hub_collision (V73-M1-Sizing, V73-M4-Settings,
+      V73-M4-Presentation, V73-R1-Collision)'
+  - id: v73.delete_legacy_shims_and_bound_pills
+    name: Delete Legacy UI Shims, Align Swift normalizeHubName & Bound Pill Width
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V73-M1/M4-Shims] Complete `[DEFER_TO_CONSOLIDATE]` transitional adapter deletion
+      across `src/macos/{UIPrimitives.swift,Models.swift,Companion.swift,SettingsSurface.swift}`:
+      delete `MenuControl.toggleWidth`, `MenuControl.pendingWidth`, `MenuControl.FeedbackHandle`,
+      and `MenuControl.feedbackTimer` (`UIPrimitives.swift`); delete `Companion.pendingLabel`
+      (`SettingsSurface.swift`); migrate `Companion.swift` remaining feedback/pending
+      sites (`hubInvite.joinedUntil`, `hostPort.savedUntil`, `ui.pairCopiedUntil`,
+      `pendingLabel(save, ...)`) to `feedback` (`TransientFeedbackStore`) and `MenuControl.setPending`;
+      delete `Companion.settingsApps`, replace `SettingsChannelsState.editors`, `Companion.hostPort`,
+      and `Companion.hubInvite` computed projection shims with plain stored properties,
+      and delete `HostHubPortState.savedUntil`, `HubInviteState.joinedUntil`, `TransientFeedbackStore.checkedUntil`,
+      `ChannelUiState.pairCopiedUntil`, and `ChannelUiState.savedUntil` (`Companion.swift`,
+      `Models.swift`).
+
+      - [V73-R1-Swift] Align `Companion.normalizeHubName` (`src/macos/Companion.swift`)
+      with Rust `resolve_explicit_hub_name`: trim whitespace, preserve valid `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`
+      names verbatim (rejecting case-insensitive `"local"`), and fall back to separator-to-hyphen
+      normalization (collapsing non-alphanumeric runs to `-`, trimming `-`, capping
+      at 32 bytes) for unnormalized input.
+
+      - [V73-M1-PillBound] Bound per-pill `maximumWidth` in `SegmentedPillStrip` (`src/macos/UIPrimitives.swift`)
+      so no pill exceeds `frame.width - 2 * geometry.inset`, keeping `.byTruncatingTail`
+      and full `toolTip` when truncated so long admitted labels (e.g. 59-byte app
+      `displayName`) remain fully revealable inside `track.contentView.bounds`.
+
+
+      Implementation Notes (Non-Binding):
+
+      - `SettingsChannelsState.editors`, `Companion.hostPort`, and `Companion.hubInvite`
+      remain accessible as plain stored properties (without deadline fields or getter/setter
+      projection shims), keeping `HeadlessOracle.swift` compiling cleanly without
+      touching it in this step.
+
+      - Do NOT stage `bin/*` in this step; `v73.close_pill_oracle_tests_and_staging`
+      runs final oracle, tests, screenshots, and release binary staging.
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation in isolated worktree;
+      rollback: git revert.
+
+      - scope.allowed_paths: src/macos/UIPrimitives.swift, src/macos/Models.swift,
+      src/macos/Companion.swift, src/macos/SettingsSurface.swift.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, bin/**, plugins/*/bin/**,
+      secrets/credentials.
+
+
+      Admit:
+
+      - Zero occurrences of `toggleWidth`, `pendingWidth`, `FeedbackHandle`, `feedbackTimer`,
+      `pendingLabel`, `settingsApps`, `checkedUntil`, `pairCopiedUntil`, `savedUntil`,
+      or `joinedUntil` in `src/macos/`; `Companion.normalizeHubName` matches Rust
+      `resolve_explicit_hub_name`; `SegmentedPillStrip` bounds pill width to viewport
+      minus `2 * inset` with `.byTruncatingTail` + full `toolTip`.
+
+      - `/usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift` and targeted UI tests pass.
+
+
+      Recovery:
+
+      - Keep fixes within the 4 owned Swift files; stop and report if any unexpected
+      external caller references a deleted shim.'
+    verification: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift && cargo test --workspace --locked --test native ui::render_stability
+      -- --test-threads=1
+    evidence_template: Commands + exit codes (swiftc -warnings-as-errors -typecheck,
+      rg zero-residue check in src/macos/, cargo test --workspace --locked --test
+      native ui::render_stability -- --test-threads=1), summary of deleted shims,
+      normalizeHubName parity, and SegmentedPillStrip maximumWidth bounding, remaining
+      gaps (NONE or list).
+    refs:
+    - src/macos/UIPrimitives.swift
+    - src/macos/Models.swift
+    - src/macos/Companion.swift
+    - src/macos/SettingsSurface.swift
+    depends_on:
+    - v73.migrate_settings_tabs_and_hub_collision
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T12:00:17.510767Z'
+    done_at: '2026-11-27T12:11:44.415350+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 1852f6539dd92efb7740e4eb0f4f8f0fb50d47b0 (rebased & merged onto main,
+      worktree removed)
+
+      - Modified: src/macos/{UIPrimitives,Models,Companion,SettingsSurface}.swift
+      (deleted all [DEFER_TO_CONSOLIDATE] shims: MenuControl.toggleWidth/pendingWidth/FeedbackHandle/feedbackTimer,
+      Companion.pendingLabel/settingsApps/hostPort/hubInvite computed projections,
+      SettingsChannelsState.editors projection, TransientFeedbackStore.checkedUntil,
+      HostHubPortState.savedUntil, HubInviteState.joinedUntil, ChannelUiState.pairCopiedUntil/savedUntil;
+      aligned Companion.normalizeHubName with Rust resolve_explicit_hub_name; bounded
+      SegmentedPillStrip pill maximumWidth to strip width minus 2*inset with tail
+      truncation & toolTip)
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check -> exit 0
+
+      - Run: cargo test --workspace --locked --test native ui:: -- --test-threads=1
+      -> 168 passed, 0 failed
+
+      - AppKit probe: 10 explicit-name cases and 6 strip widths passed; selected pills
+      revealed in both scroll directions; zero shim matches in the 4 owned files.
+
+
+      Spec link:
+
+      - plan.yaml#v73.delete_legacy_shims_and_bound_pills (V73-M1/M4-Shims, V73-R1-Swift,
+      V73-M1-PillBound)'
+  - id: v73.close_pill_oracle_tests_and_staging
+    name: Close Pill Overflow & HeadlessOracle Checks, Add Regressions & Stage Signed
+      arm64 Binaries
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V73-M1/M4-PillOracle] Align `src/macos/DirectorySurface.swift` (and `UIPrimitives.swift`
+      if needed) so admitted long English app `displayName` pills (e.g. 59 bytes)
+      clamp cleanly within strip viewport minus `2 * inset` with `.byTruncatingTail`
+      + full `toolTip` and stay fully revealable inside `track.contentView.bounds`.
+      Tighten `src/macos/HeadlessOracle.swift`: remove the `if parentBounds.width
+      <= track.contentSize.width` bypass so right-edge closure (`pills.map(\.frame.maxX).max()
+      == parentBounds.width - 2`) is enforced in both fitted and overflowing regimes,
+      require `track.selected != nil` rather than skipping missing selections, and
+      recognize bounded truncated pill labels with `toolTip`.
+
+      - [Tests] Add discriminating UI/oracle regressions in `crates/cito-native/tests/support/ui/{oracle_e2e,directory,settings_hubs,settings_channels}.rs`
+      covering: (a) `Set Default` -> `Applying…` zero-shift pending/settled row geometry;
+      (b) 9-byte vs 59-byte admitted app `displayName` full selection reveal + both
+      `2pt` document insets + exact document right-edge closure; (c) `Work_Internal`
+      vs `Work-Internal` round-trip and case-folded collision in Settings Hubs UI.
+
+      - [Artifacts] Regenerate `site/assets/screenshots/*.png` if changed; run `cargo
+      fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D
+      warnings`, `/usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift`, `cargo test --workspace --locked --test native ui:: -- --test-threads=1`,
+      `env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs`,
+      and `cargo build --release --locked` (staging all 7 strict-codesigned `arm64`
+      binaries at `cito v0.23.0`).
+
+
+      Implementation Notes (Non-Binding):
+
+      - Keep all test fixtures and screenshots strictly English and vendor-neutral
+      (`Work_Internal`, `Work-Internal`, `Office-Mac`, `Acme-Cloud`).
+
+      - Verify `lipo -archs` (`arm64`), `codesign -v --strict`, and `./bin/cito-native-darwin-arm64
+      --version` (`cito v0.23.0`) on all 7 staged binaries.
+
+
+      Boundary:
+
+      - owner: frontend-engineer; authority: repo implementation + screenshot regeneration
+      + signed arm64 binary staging; rollback: git revert.
+
+      - scope.allowed_paths: src/macos/DirectorySurface.swift, src/macos/HeadlessOracle.swift,
+      src/macos/UIPrimitives.swift, crates/cito-native/tests/support/ui/oracle_e2e.rs,
+      crates/cito-native/tests/support/ui/directory.rs, crates/cito-native/tests/support/ui/settings_hubs.rs,
+      crates/cito-native/tests/support/ui/settings_channels.rs, site/assets/screenshots/*.png,
+      bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64, plugins/claude/bin/cito-claude-hook,
+      plugins/claude/bin/cito-plugin-claude, plugins/codex/bin/cito-plugin-codex,
+      plugins/pi/bin/cito-plugin-pi, plugins/telegram/bin/cito-plugin-telegram.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, secrets/credentials.
+
+
+      Admit:
+
+      - HeadlessOracle enforces right-edge closure in both fitted and overflowing
+      regimes, requires `track.selected != nil`, and validates bounded truncated pills
+      with `toolTip`.
+
+      - All 3 new discriminating regression groups and full `ui::` + `site-clipboard.mjs`
+      suites pass; `cargo fmt`, `cargo clippy -D warnings`, and `swiftc -warnings-as-errors`
+      pass; all 7 staged `arm64` binaries pass `lipo -archs`, `codesign -v --strict`,
+      and `--version` (`cito v0.23.0`).
+
+
+      Recovery:
+
+      - Keep fixes within owned files; stop and report if any pre-existing test exposes
+      a deeper contract mismatch.'
+    verification: 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && /usr/bin/swiftc -warnings-as-errors -typecheck -target
+      arm64-apple-macos13.0 src/macos/*.swift && cargo test --workspace --locked --test
+      native ui:: -- --test-threads=1 && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && cargo build --release --locked'
+    evidence_template: 'Commands + exit codes (cargo fmt --all -- --check, cargo clippy
+      --workspace --all-targets --locked -- -D warnings, swiftc -warnings-as-errors,
+      cargo test --workspace --locked --test native ui:: -- --test-threads=1, env
+      -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs,
+      cargo build --release --locked, lipo/codesign/--version on all 7 arm64 binaries),
+      summary of oracle closure and 3 new test groups, screenshot update status, remaining
+      gaps (NONE or list).'
+    refs:
+    - src/macos/DirectorySurface.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/UIPrimitives.swift
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - site/assets/screenshots/menu-dark.png
+    - site/assets/screenshots/directory-dark.png
+    - site/assets/screenshots/activity-dark.png
+    - site/assets/screenshots/settings-apps-dark.png
+    - site/assets/screenshots/settings-channels-dark.png
+    - site/assets/screenshots/settings-hubs-dark.png
+    - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
+    - plugins/claude/bin/cito-claude-hook
+    - plugins/claude/bin/cito-plugin-claude
+    - plugins/codex/bin/cito-plugin-codex
+    - plugins/pi/bin/cito-plugin-pi
+    - plugins/telegram/bin/cito-plugin-telegram
+    depends_on:
+    - v73.fix_hub_name_parity
+    - v73.delete_legacy_shims_and_bound_pills
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T12:11:56.533912Z'
+    done_at: '2026-11-27T12:27:29.385972+00:00'
+    evidence: 'Artifact:
+
+      - Commit: ded4ddc817f1cfdfa12d887232a9d13417633732 (rebased & merged onto main,
+      worktree removed)
+
+      - Modified: src/macos/{DirectorySurface,HeadlessOracle,UIPrimitives}.swift,
+      crates/cito-native/tests/support/ui/{oracle_e2e,directory,settings_hubs,settings_channels}.rs,
+      site/assets/screenshots/settings-{apps,channels,hubs}-dark.png, bin/*, plugins/*/bin/*
+
+
+      Verification:
+
+      - Run: /usr/bin/swiftc -warnings-as-errors -typecheck -target arm64-apple-macos13.0
+      src/macos/*.swift -> exit 0
+
+      - Run: cargo fmt --all -- --check -> exit 0
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> exit
+      0
+
+      - Run: cargo test --workspace --locked --test native ui:: -- --test-threads=1
+      -> 170 passed, 0 failed (incl. Set Default zero-shift, 9/59-byte Directory app
+      pill overflow reveal & right-edge closure, Work_Internal vs Work-Internal &
+      case-folded collision)
+
+      - Run: env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      -> 1 passed, 0 failed
+
+      - Run: cargo build --release --locked -> exit 0 (0 compiler warnings); all 7
+      binaries arm64 + codesign -v --strict passed; ./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0
+
+
+      Spec link:
+
+      - plan.yaml#v73.close_pill_oracle_tests_and_staging (V73-M1/M4-PillOracle, Tests,
+      Artifacts)'
+  - id: v73.fix_hub_invite_and_advertise_parity
+    name: Fix Standalone Hub Advertise & Clipboard Invite Name Parity
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V73-R1-AdvertiseAndInvite] Update `HubAuth::advertise_name` (`crates/cito-native/src/core/auth.rs:555-563`)
+      to use `super::identity::resolve_explicit_hub_name(raw)` (instead of `normalize_hub_name(raw)`),
+      preserving valid explicit Hub names like `Work_Internal` verbatim on `/health`
+      while retaining fallback normalization, `valid_advertised_name`, and `"local"`/`"Local"`/`"LOCAL"`
+      rejection.
+
+      - [V73-R1-AdvertiseAndInvite] Update `invite_hub_name` (`crates/cito-native/src/core/daemon/http_actions.rs:74-90`)
+      to use `resolve_explicit_hub_name` (instead of `normalize_hub_name`) when `invite["name"]`
+      is non-empty, preserving valid explicit invite names like `Invite_Internal`
+      verbatim and returning invalid or reserved (`"local"`/`"Local"`/`"LOCAL"`) explicit
+      names directly so `save_hub` rejects them rather than disambiguating or falling
+      back, while retaining `discovered_name` fallback and `available_hub_name` collision
+      handling.
+
+      - [Tests] Add discriminating Rust tests in `crates/cito-native/src/core/daemon/tests.rs`
+      (and/or `crates/cito-native/src/core/auth.rs` unit tests) proving: (1) standalone
+      `HubAuth::advertise_name(Some("Work_Internal"))` and `/health` emit exact `"Work_Internal"`
+      (failing if slug normalization rewrites `_` to `-`) while `"local"`/`"Local"`
+      fail; (2) `paste_hub_invite` `/action` with explicit `"name": "Invite_Internal"`
+      persists `"Invite_Internal"` across reopen (failing if `invite_hub_name` rewrites
+      `_` to `-`) while `"local"`/`"Local"` are rejected.
+
+      - [Staging] Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+      --locked -- -D warnings`, `cargo test --workspace --locked -- --test-threads=2`,
+      and `cargo build --release --locked` (restaging all 7 Darwin `arm64` binaries
+      verified with `lipo -archs` `arm64`, `codesign -v --strict`, and `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`).
+
+
+      Implementation Notes (Non-Binding):
+
+      - `resolve_explicit_hub_name("Local")` returns `None` while `resolve_explicit_hub_name("local")`
+      returns `Some("local")`. In `invite_hub_name`, when trimmed `string(invite,
+      "name")` is non-empty, handle both `None` and `Some(name)` failing `valid_advertised_name(name)`
+      by returning the raw/resolved spelling directly so `save_hub` rejects it instead
+      of falling back to `discovered_name` or disambiguating `"local"` to `"local-2"`
+      via `available_hub_name`.
+
+      - `available_hub_name` (`crates/cito-native/src/core/config.rs:454`) preserves
+      `base` verbatim.
+
+
+      Boundary:
+
+      - owner: software-engineer; authority: repo implementation + signed arm64 binary
+      staging in isolated worktree; rollback: git revert.
+
+      - scope.allowed_paths: crates/cito-native/src/core/auth.rs, crates/cito-native/src/core/daemon/http_actions.rs,
+      crates/cito-native/src/core/daemon/tests.rs, bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
+      plugins/claude/bin/cito-claude-hook, plugins/claude/bin/cito-plugin-claude,
+      plugins/codex/bin/cito-plugin-codex, plugins/pi/bin/cito-plugin-pi, plugins/telegram/bin/cito-plugin-telegram.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, secrets/credentials.
+
+
+      Admit:
+
+      - `HubAuth::advertise_name` and `invite_hub_name` use `resolve_explicit_hub_name`,
+      preserving `Work_Internal` and `Invite_Internal` verbatim and rejecting `"local"`/`"Local"`.
+
+      - Both discriminating tests, `cargo fmt`, `cargo clippy -D warnings`, `cargo
+      test --workspace --locked -- --test-threads=2`, and `cargo build --release --locked`
+      pass; all 7 staged Darwin `arm64` binaries pass `lipo -archs` (`arm64`), `codesign
+      -v --strict`, and `--version` (`cito v0.23.0`).
+
+
+      Recovery:
+
+      - Keep fixes within the owned Rust files and staged binaries; stop and report
+      if any unexpected caller conflicts with `resolve_explicit_hub_name` semantics.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=2
+      && cargo build --release --locked
+    refs:
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/config.rs
+    depends_on:
+    - v73.close_pill_oracle_tests_and_staging
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T12:43:30.663586Z'
+    done_at: '2026-11-27T13:02:03.107221+00:00'
+    evidence: 'Artifact:
+
+      - Commit: f29a124f6b6be06225e51938538865b22cce04f1 (rebased & merged onto main,
+      worktree removed)
+
+      - Modified: crates/cito-native/src/core/{auth,daemon/http_actions,daemon/tests}.rs
+      (HubAuth::advertise_name and invite_hub_name wired to resolve_explicit_hub_name;
+      added discriminating standalone /health and paste_hub_invite regressions), plus
+      7 restaged arm64 binaries
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> exit 0
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> exit
+      0
+
+      - Run: cargo test --workspace --locked -- --test-threads=2 -> 826 passed, 0
+      failed, 5 ignored
+
+      - Run: cargo build --release --locked -> exit 0 (0 compiler warnings); all 7
+      staged binaries reported arm64 via lipo -archs, passed codesign -v --strict,
+      and ./bin/cito-native-darwin-arm64 --version == cito v0.23.0
+
+
+      Spec link:
+
+      - plan.yaml#v73.fix_hub_invite_and_advertise_parity (V73-R1-AdvertiseAndInvite,
+      Tests, Staging)'
+  - id: v73.fix_reserved_invite_boundary
+    name: Harden Clipboard Invite Trust Boundary Against Reserved Edit Fields
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V73-R1-InviteTrustBoundary] Harden `parse_hub_invite` (`crates/cito-native/src/core/daemon/host_hub.rs:406-481`)
+      and/or `execute_action` `paste_hub_invite` (`crates/cito-native/src/core/daemon/http_actions.rs`)
+      so untrusted clipboard invites (including JSON invites on both `parse_only`
+      and save paths) CANNOT carry or forward `edit`, `original_name`, or `reset_name`
+      into `save_hub`, and explicitly reject reserved `"local"` / `"Local"` / `"LOCAL"`
+      invite names (including via `"hub"` alias) regardless of embedded edit fields
+      with HTTP 400 and unchanged config. Preserve direct `setup_save_hub` built-in
+      `local` edits, `"url": "local://"` with non-reserved name `"work"`, `Invite_Internal`
+      round-trip, standalone `/health` advertisement, `discovered_name` fallback,
+      and `available_hub_name` collision semantics.
+
+      - [Tests] Add a discriminating regression in `crates/cito-native/src/core/daemon/tests.rs`
+      proving `paste_hub_invite` with JSON `{"name":"local","url":"local://","edit":true,"original_name":"local","user":"eve"}`
+      (and case variants `"Local"` / `"LOCAL"`) returns HTTP 400 (`ok == false`) with
+      unchanged config file and reopened `local` profile, while direct `setup_save_hub`
+      built-in edit (`edit: true, original_name: "local", ...`), `"url": "local://"`
+      with non-reserved `"work"`, and `Invite_Internal` clipboard invite still succeed.
+
+      - [Staging] Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+      --locked -- -D warnings`, `cargo test --workspace --locked -- --test-threads=2`,
+      and `cargo build --release --locked` (restaging all 7 Darwin `arm64` binaries
+      verified with `lipo -archs` `arm64`, `codesign -v --strict`, and `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`).
+
+
+      Implementation Notes (Non-Binding):
+
+      - `parse_hub_invite` (`host_hub.rs:406-481`) currently returns the raw parsed
+      JSON object with arbitrary keys, letting untrusted `edit`, `original_name`,
+      and `reset_name` flow into `edited_hub` (`http_actions.rs:63`), `save_hub` (`http_actions.rs:983`),
+      and `paste_hub_invite` `parse_only` (`http_actions.rs:1897`).
+
+      - Check all legitimate invite keys consumed by `merge_hub_config`, `discover_hub_config`,
+      `paste_hub_invite` (`redirectPort`/`oidcRedirectPort`), and UI invite parsing
+      so allowlisting or stripping control keys (`edit`, `original_name`, `reset_name`,
+      `name_explicit`, `config`, `op`) preserves valid invites while sealing the trust
+      boundary.
+
+
+      Boundary:
+
+      - owner: software-engineer; authority: repo implementation + signed arm64 binary
+      staging in isolated worktree; rollback: git revert.
+
+      - scope.allowed_paths: crates/cito-native/src/core/daemon/host_hub.rs, crates/cito-native/src/core/daemon/http_actions.rs,
+      crates/cito-native/src/core/daemon/tests.rs, bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
+      plugins/claude/bin/cito-claude-hook, plugins/claude/bin/cito-plugin-claude,
+      plugins/codex/bin/cito-plugin-codex, plugins/pi/bin/cito-plugin-pi, plugins/telegram/bin/cito-plugin-telegram.
+
+      - scope.blocked_paths: plan.yaml, Cargo.toml, Cargo.lock, secrets/credentials.
+
+
+      Admit:
+
+      - `paste_hub_invite` cannot carry or forward `edit`, `original_name`, or `reset_name`
+      into `save_hub` and rejects reserved `"local"`/`"Local"`/`"LOCAL"` invites with
+      HTTP 400 and unchanged config; direct `setup_save_hub` built-in edits, non-reserved
+      `"local://"` invites, and `Invite_Internal` invites still succeed.
+
+      - Discriminating regression test, `cargo fmt`, `cargo clippy -D warnings`, `cargo
+      test --workspace --locked -- --test-threads=2`, and `cargo build --release --locked`
+      pass; all 7 staged Darwin `arm64` binaries pass `lipo -archs` (`arm64`), `codesign
+      -v --strict`, and `--version` (`cito v0.23.0`).
+
+
+      Recovery:
+
+      - Keep fixes within the owned Rust files and staged binaries; stop and report
+      if any unexpected invite key or caller conflicts with the hardened invite boundary.'
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=2
+      && cargo build --release --locked
+    refs:
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/identity.rs
+    depends_on:
+    - v73.fix_hub_invite_and_advertise_parity
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T13:14:41.818371Z'
+    done_at: '2026-11-27T13:40:09.566992+00:00'
+    evidence: 'Artifact:
+
+      - Commit: dc392f335fcc72e34a489f67670734b14e94c19a (rebased & merged onto main,
+      worktree removed)
+
+      - Modified: crates/cito-native/src/core/daemon/{host_hub,http_actions,tests}.rs
+      (hardened parse_hub_invite / paste_hub_invite against edit/original_name/reset_name
+      injection and explicit local/Local invites regardless of embedded edit fields,
+      preserving direct setup_save_hub local edits and Invite_Internal/work invites),
+      plus 7 restaged arm64 binaries
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> exit 0
+
+      - Run: cargo clippy --workspace --all-targets --locked -- -D warnings -> exit
+      0
+
+      - Run: cargo test --workspace --locked -- --test-threads=2 -> 827 passed, 0
+      failed, 5 ignored
+
+      - Run: cargo build --release --locked -> exit 0 (0 compiler warnings); all 7
+      binaries reported arm64, passed codesign -v --strict, and ./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0
+
+
+      Spec link:
+
+      - plan.yaml#v73.fix_reserved_invite_boundary (V73-R1-InviteTrustBoundary, Tests,
+      Staging)'

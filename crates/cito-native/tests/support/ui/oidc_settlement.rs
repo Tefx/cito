@@ -62,17 +62,15 @@ fn payload_free_save_errors_have_only_the_form_as_their_owner() {
     let s = inspect(&f, p);
     let error = s.settings("add_hub_error");
     assert_eq!(error["text"], "Save failed");
-    assert_eq!(
-        s.settings("add_hub_form")["height"].as_f64().unwrap(),
-        298.0 + error["height"].as_f64().unwrap() + 6.0
-    );
-    assert_eq!(s.settings("settings_hub_issuer")["text"], "");
-    assert!(
-        s.settings("settings_hubs_tab")["content_y"]
-            .as_f64()
-            .unwrap()
-            <= s.settings("add_hub_form")["y"].as_f64().unwrap()
-    );
+    assert_eq!(s.settings("add_hub_form")["height"], 252);
+    assert_eq!(s["field_editors"][0]["id"], "settings_hub_url");
+    assert_eq!(s["settings_rebuild_deferred"], true);
+    assert!(s.settings("settings_hub_issuer").is_null());
+    f.send(p, json!({"op":"test_end_editing"}));
+    let settled = inspect(&f, p);
+    assert_eq!(settled["settings_rebuild_deferred"], false);
+    assert_eq!(settled.settings("add_hub_error")["text"], "Save failed");
+    assert!(settled.settings("add_hub_form")["height"].as_f64().unwrap() > 252.0);
     assert!(s.settings("settings_error_banner").is_null());
     assert!(s.menu("menu_error_row").is_null());
 }
@@ -239,6 +237,42 @@ fn delayed_sibling_save_failures_keep_the_active_editor() {
 }
 
 #[test]
+fn successful_hub_save_collapses_the_form_and_transfers_editor_focus() {
+    let _lock = serial();
+    for pointer in [false, true] {
+        let (f, p) = ui_fixture();
+        let mut cfg = settings();
+        open(&f, p, &cfg, "hubs");
+        control(&f, p, "open_add_hub");
+        input(&f, p, "settings_hub_name", "Work Internal");
+        input(&f, p, "settings_hub_url", "https://hub.example.com");
+        focus(&f, p, "settings_hub_url");
+        let before = inspect(&f, p);
+        let submit = if pointer {
+            json!({"op":"test_control","id":"submit_add_hub","pointer":true})
+        } else {
+            json!({"op":"test_settings_key","key":"return","via":"field"})
+        };
+        f.send(p, submit);
+        let save = latest(&f, p, "setup_save_hub");
+        assert_eq!(save["name"], "Work-Internal");
+        assert_same_active_editor(
+            &before,
+            &inspect(&f, p),
+            "settings_hub_url",
+            "settings_hubs_tab",
+        );
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"Work-Internal","url":"https://hub.example.com","enabled":true,"is_default":false,"status":"connected","auth_mode":"none"}));
+        f.send(p, json!({"op":"settings","source_op":"setup_save_hub","request_id":save["request_id"],"ok":true,"settings":cfg}));
+        let settled = inspect(&f, p);
+        assert!(settled.settings("add_hub_form").is_null());
+        assert_eq!(settled["field_editors"], json!([]));
+        assert_eq!(settled["settings_rebuild_deferred"], false);
+        assert_eq!(settled.settings("edit_hub:Work-Internal")["focused"], true);
+    }
+}
+
+#[test]
 fn delayed_save_failures_keep_the_refocused_unchanged_editor() {
     let _lock = serial();
     for (tab, field, save, op, value, error_id, full) in [
@@ -285,13 +319,25 @@ fn delayed_save_failures_keep_the_refocused_unchanged_editor() {
         }
         input(&f, p, field, value);
         focus(&f, p, field);
-        control(&f, p, save);
-        let request = latest(&f, p, op);
-        if tab == "channels" {
-            f.send(p, json!({"op":"test_end_editing"}));
+        let focused = inspect(&f, p);
+        if tab == "hubs" && !full {
+            f.send(p, json!({"op":"test_control","id":save,"pointer":true}));
+        } else if tab == "hubs" {
+            f.send(
+                p,
+                json!({"op":"test_settings_key","key":"return","via":"field"}),
+            );
+        } else {
+            control(&f, p, save);
         }
-        assert_eq!(inspect(&f, p)["field_editors"], json!([]));
-        focus(&f, p, field);
+        let request = latest(&f, p, op);
+        if tab == "hubs" {
+            assert_same_active_editor(&focused, &inspect(&f, p), field, "settings_hubs_tab");
+        } else {
+            f.send(p, json!({"op":"test_end_editing"}));
+            assert_eq!(inspect(&f, p)["field_editors"], json!([]));
+            focus(&f, p, field);
+        }
         let offset = if tab == "hubs" { 12 } else { 10_000 };
         f.send(p, json!({"op":"test_settings_scroll","offset":offset}));
         let before = inspect(&f, p);
@@ -489,6 +535,15 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     assert!(
         s.settings("settings_hub_issuer")["y"].as_f64().unwrap() > client["y"].as_f64().unwrap()
     );
+    input(&f, p, "settings_hub_redirect_port", "4318");
+    assert_eq!(inspect(&f, p).settings("manual_hub_oidc")["enabled"], false);
+    control(&f, p, "manual_hub_oidc");
+    assert_eq!(
+        inspect(&f, p).settings("settings_hub_redirect_port")["text"],
+        "4318"
+    );
+    input(&f, p, "settings_hub_redirect_port", "4317");
+    assert_eq!(inspect(&f, p).settings("manual_hub_oidc")["enabled"], true);
     control(&f, p, "manual_hub_oidc");
     assert_eq!(inspect(&f, p).settings("add_hub_form")["height"], 252);
     control(&f, p, "submit_add_hub");
@@ -498,10 +553,9 @@ fn v49_oidc_two_rows_discovery_edit_clear_and_invite_aliases() {
     f.send(p,json!({"op":"settings","source_op":"setup_save_hub","request_id":saved["request_id"],"ok":false,"settings":cfg,"error":"Try again"}));
     let failed = inspect(&f, p);
     assert_eq!(failed.settings("add_hub_error")["text"], "Try again");
-    assert_eq!(
-        failed.settings("settings_hub_redirect_port")["text"],
-        "4317"
-    );
+    assert!(failed.settings("settings_hub_redirect_port").is_null());
+    assert_eq!(failed["settings_rebuild_deferred"], true);
+    f.send(p, json!({"op":"test_end_editing"}));
     for id in [
         "settings_hub_issuer",
         "settings_hub_client_id",
@@ -608,7 +662,7 @@ fn v49_passive_editor_refresh_preserves_undo_and_ime_until_end_editing() {
 }
 
 #[test]
-fn legacy_partial_hubs_preserve_complete_nested_attachments_and_update_scalars() {
+fn state_replaces_nested_attachments_and_updates_scalars() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut frame = state();
@@ -617,15 +671,13 @@ fn legacy_partial_hubs_preserve_complete_nested_attachments_and_update_scalars()
     assert_eq!(inspect(&f, p)["hub_attachment_counts"]["personal"], 129);
     frame["unread_count"] = json!(9);
     frame["hubs"][0]["status"] = json!("disconnected");
-    frame["hubs"].as_array_mut().unwrap().truncate(1);
     frame["hubs"][0]["attachments"]
         .as_array_mut()
         .unwrap()
         .pop();
-    frame["truncated_collections"] = json!(["hubs"]);
     f.send(p, frame);
     let s = inspect(&f, p);
-    assert_eq!(s["hub_attachment_counts"]["personal"], 129);
+    assert_eq!(s["hub_attachment_counts"]["personal"], 128);
     assert_eq!(s["unread_count"], 9);
     assert!(s["items"].to_string().contains("Offline"));
 }

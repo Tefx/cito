@@ -553,23 +553,24 @@ impl HubAuth {
         })
     }
     pub(super) fn advertise_name(&mut self, explicit: Option<&str>) -> Result<(), String> {
-        let normalize = |raw: &str| {
-            raw.bytes()
-                .any(|b| b.is_ascii_alphanumeric())
-                .then(|| super::identity::normalize_slug(raw))
-                .filter(|s| super::config::valid_advertised_name(s))
-        };
         self.name = match explicit {
-            Some(raw) => {
-                Some(normalize(raw).ok_or("INVALID_INPUT: Invalid Hub name (local is reserved)")?)
-            }
+            Some(raw) => Some(
+                super::identity::resolve_explicit_hub_name(raw)
+                    .filter(|s| super::config::valid_advertised_name(s))
+                    .ok_or("INVALID_INPUT: Invalid Hub name (local is reserved)")?,
+            ),
             None => self
                 .verifier
                 .as_ref()
                 .and_then(|v| url::Url::parse(&v.issuer).ok())
                 .and_then(|url| super::daemon::host_hub::domain_slug(url.domain()?))
                 .filter(|s| super::config::valid_advertised_name(s))
-                .or_else(|| normalize(&super::identity::local_host_name())),
+                .or_else(|| {
+                    let mut name =
+                        super::identity::normalize_hub_name(&super::identity::local_host_name())?;
+                    name.make_ascii_lowercase();
+                    super::config::valid_advertised_name(&name).then_some(name)
+                }),
         };
         Ok(())
     }

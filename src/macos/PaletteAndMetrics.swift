@@ -9,6 +9,9 @@ enum CitoMetrics {
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
     static let cardRadius: CGFloat = 10
+    static let hubSegments = PillTrackGeometry(pillHeight: 22, pillRadius: 11)
+    static let segmentSlideDuration: TimeInterval = 0.18
+    static let controlHoverDuration: TimeInterval = 0.09
 }
 
 func compactHomePath(_ path: String, home: String = NSHomeDirectory()) -> String {
@@ -81,6 +84,19 @@ enum CitoPalette {
     // Filled controls keep white titles, so their fill stays dark in either appearance.
     static let prominentFill = NSColor(srgbRed: 0, green: 87.0/255, blue: 191.0/255, alpha: 1)
     static let destructiveFill = NSColor(srgbRed: 189.0/255, green: 25.0/255, blue: 36.0/255, alpha: 1)
+    // Give small status indicators headroom over the track's stacked hover tint.
+    static func segmentInk(_ color: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            var ink = color
+            appearance.performAsCurrentDrawingAppearance {
+                ink = color.blended(withFraction: 0.22, of: dark ? .white : .black) ?? color
+            }
+            return ink
+        }
+    }
+    static let prominentPressedFill = NSColor(srgbRed: 0, green: 64.0/255, blue: 145.0/255, alpha: 1)
+    static let destructivePressedFill = NSColor(srgbRed: 151.0/255, green: 20.0/255, blue: 29.0/255, alpha: 1)
     // Opaque badge fills guarantee white-symbol contrast in both appearances.
     static func badgeFill(_ name: String) -> NSColor {
         switch name.lowercased() {
@@ -97,11 +113,15 @@ enum CitoPalette {
 }
 
 /// Compact only the chip presentation; callers retain the full address for copying.
-func compactAddressLabel(_ address: String, maxWidth: CGFloat, font: NSFont, paddingX: CGFloat) -> String {
-    if MenuControl.intrinsicWidth(address,font:font,leadingSymbol:"doc.on.doc",paddingX:paddingX) <= maxWidth { return address }
-    for count in stride(from:max(1,address.count-1),through:1,by:-1) {
+func compactAddressLabel(_ address: String, maxWidth: CGFloat, font: NSFont, paddingX: CGFloat,
+                         leadingSymbol: String? = "doc.on.doc") -> String {
+    func fits(_ title: String) -> Bool {
+        MenuControl.intrinsicWidth(title, font: font, leadingSymbol: leadingSymbol, paddingX: paddingX) <= maxWidth
+    }
+    if fits(address) { return address }
+    for count in stride(from: max(1, address.count - 1), through: 1, by: -1) {
         let text = String(address.prefix((count+1)/2)) + "…" + String(address.suffix(count/2))
-        if MenuControl.intrinsicWidth(text,font:font,leadingSymbol:"doc.on.doc",paddingX:paddingX) <= maxWidth { return text }
+        if fits(text) { return text }
     }
     return "…"
 }

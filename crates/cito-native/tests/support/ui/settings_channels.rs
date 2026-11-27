@@ -308,12 +308,9 @@ fn same_name_channel_authority_change_discards_edits_pairing_and_test_receipts()
         );
         cfg["hubs"][0][key] = json!(next);
         if key == "user" {
-            let mut partial = cfg.clone();
-            partial["channels"] = json!([]);
-            f.send(
-                p,
-                json!({"op":"settings","settings":partial,"truncated_collections":["channels"]}),
-            );
+            let mut empty_inventory = cfg.clone();
+            empty_inventory["channels"] = json!([]);
+            f.send(p, json!({"op":"settings","settings":empty_inventory}));
             let switched = inspect(&f, p);
             assert_eq!(
                 switched.settings("inbox_control_title")["text"],
@@ -355,7 +352,7 @@ fn personal_save_that_configures_channel_preserves_a_newer_draft() {
     f.send(p, json!({"op":"settings","settings":cfg,"source_op":"channel_save","request_id":request["request_id"],"ok":true}));
     assert_eq!(
         inspect(&f, p).settings("channel_summary:channel")["text"],
-        "✓ Saved"
+        "Paired · newer · ✓ Saved"
     );
 }
 

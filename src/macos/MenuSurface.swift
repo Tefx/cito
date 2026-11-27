@@ -8,7 +8,7 @@ extension Companion: NSMenuDelegate {
     var humanListening: Bool { hubs.first { $0.name == effectiveTargetHub }?.human_availability == "ACTIVE" }
 
     func statusColor(_ status: String) -> NSColor {
-        status == "connected" ? CitoPalette.successText : status == "connecting" ? CitoPalette.warningText : status == "auth_required" ? CitoPalette.dangerText : .systemGray
+        status == "connected" ? CitoPalette.successText : status == "connecting" ? CitoPalette.warningText : status == "auth_required" ? CitoPalette.dangerText : CitoPalette.secondaryText
     }
     var effectiveTargetHub: String {
         if !selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub }) {
@@ -67,9 +67,11 @@ extension Companion: NSMenuDelegate {
     var statusTooltip: String {
         let attention=hubs.contains { $0.status != "connected" || $0.error != nil }
         let count=uniqueSessionCount
-        var detail=count > 0 ? "\(count) session\(count == 1 ? "" : "s") listening" : (humanListening ? "Personal inbox active" : (hubs.first { $0.name == effectiveTargetHub }?.human_paused == true ? "Inbox paused" : "Not listening"))
+        var detail = attention ? "Hub connection needs attention"
+            : count > 0 ? "\(count) session\(count == 1 ? "" : "s") listening"
+            : humanListening ? "Personal inbox active"
+            : hubs.first { $0.name == effectiveTargetHub }?.human_paused == true ? "Inbox paused" : "Not listening"
         if unreadCount > 0 { detail += " · \(unreadCount) unread" }
-        if attention { detail="Hub connection needs attention" }
         return "Cito · " + detail
     }
 
@@ -102,6 +104,7 @@ extension Companion: NSMenuDelegate {
         let team = scope == "workspace"
         let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill", paddingX:9)
         control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
+        control.reservedTitles = [("Self", "lock.fill"), ("Team", "person.2.fill")]
         updateScopeControl(control, scope:scope, hub:hub, user:user)
         return control
     }
@@ -117,17 +120,20 @@ extension Companion: NSMenuDelegate {
             : "Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(hub)' can message this node. Click to share with Team."
     }
 
-    private func makeAddressCopyControl(_ address: String, id: String, height: CGFloat) -> MenuControl {
+    private func makeAddressCopyControl(_ address: String, id: String, authority: String, height: CGFloat) -> MenuControl {
         let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-        let title = compactAddressLabel(address,maxWidth:220,font:font,paddingX:3)
-        let width = min(220, max(MenuControl.intrinsicWidth("✓ Copied",font:font,leadingSymbol:"doc.on.doc",paddingX:3),
-                                MenuControl.intrinsicWidth(title,font:font,leadingSymbol:"doc.on.doc",paddingX:3)))
-        let copy = MenuControl(title,frame:NSRect(x:0,y:7,width:width,height:height),leadingSymbol:"doc.on.doc",paddingX:3)
+        let symbol = "doc.on.doc"
+        let title = compactAddressLabel(address, maxWidth: 220, font: font, paddingX: 3, leadingSymbol: symbol)
+        let copy = MenuControl(title, frame: NSRect(x: 0, y: 7, width: 0, height: height), leadingSymbol: symbol, paddingX: 3)
         copy.identifier = NSUserInterfaceItemIdentifier(id)
         copy.label.font = font; copy.label.alignment = .left
+        copy.maximumWidth = 220
+        copy.reservedTitles = [(title, symbol), ("✓ Copied", nil)]
+        copy.frame.size.width = copy.reservedWidth
         copy.toolTip = address; copy.setAccessibilityLabel(address)
-        copy.layoutContents()
-        copy.pressed = { [weak self, weak copy] in self?.copyText(address,control:copy) }
+        let key = TransientFeedbackStore.Key(.menuCopy, id, authority: authority)
+        copy.showFeedback(key: key)
+        copy.pressed = { [weak self, weak copy] in self?.copyText(address, control: copy, key: key) }
         return copy
     }
 
@@ -163,6 +169,7 @@ extension Companion: NSMenuDelegate {
                 }
             }
         }
+        let hubStripHandoff = menuHubStrip?.capture()
         menu.removeAllItems()
         func makeMenuScroll(height: CGFloat) -> NSScrollView {
             let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: height))
@@ -203,9 +210,13 @@ extension Companion: NSMenuDelegate {
         else if humanHub?.human_paused == true { subtitleText = "Inbox paused" }
         else if humanListening { subtitleText = "Personal inbox active" }
         else { subtitleText = "Not listening" }
-        let hubPillNaturalWidths = hubs.map { min(180, ceil(measureTextWidth($0.name, font: btnFont)) + 26) }
-        let totalHubPillsWidth = hubPillNaturalWidths.reduce(0, +) + CGFloat(max(0, hubs.count - 1)) * 4
-        let subtitleLimit: CGFloat = hubs.count > 1 ? min(246, 368 - 54 - min(144, totalHubPillsWidth)) : 246
+        let hubPillChrome: CGFloat = 24
+        let hubGap: CGFloat = 4
+        func hubPillWidth(_ title: String) -> CGFloat { min(180, measureTextWidth(title, font: btnFont) + hubPillChrome) }
+        let hubPillNaturalWidths = hubs.map { hubPillWidth($0.name) }
+        let totalHubPillsWidth = PillTrackGeometry.trailingWidth(widths: hubPillNaturalWidths, spacing: hubGap)
+        let pairWidth = PillTrackGeometry.trailingWidth(widths: Array(hubPillNaturalWidths.sorted(by: >).prefix(2)), spacing: hubGap)
+        let subtitleLimit: CGFloat = hubs.count > 1 ? min(246, max(84, 368 - 54 - pairWidth)) : 246
         let subWidth = min(subtitleLimit, ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8)
         let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: CitoPalette.secondaryText)
         subLabel.identifier = NSUserInterfaceItemIdentifier("header_subtitle")
@@ -281,13 +292,13 @@ extension Companion: NSMenuDelegate {
         }
         let stripX = max(138, 54 + subWidth)
         let stripWidth = max(44, 368 - stripX)
-        let compactChips = totalHubPillsWidth + 4 > stripWidth
-        let fullCap = stripWidth - 4
-        let pairBudget = stripWidth - 8 // Track insets and the gap between adjacent pills.
+        let compactChips = totalHubPillsWidth > stripWidth
+        let fullCap = stripWidth - 2 * PillTrackGeometry.inset
+        let pairBudget = fullCap - hubGap
         let halfBudget = floor(pairBudget / 2)
-        var hubPills: [NSView] = []
+        let geometry = CitoMetrics.hubSegments
+        var hubPills: [MenuControl] = []
         for (index, hub) in hubs.enumerated() where showHubControls {
-            let color = hub.name == effectiveTargetHub && hub.status == "connected" && hub.error == nil ? NSColor.white : statusColor(hub.status)
             let isSingleDefault = hubs.count == 1 && hub.is_builtin == true
             let title: String
             if isSingleDefault {
@@ -300,7 +311,7 @@ extension Companion: NSMenuDelegate {
             } else {
                 title = hub.name
             }
-            let natural = isSingleDefault ? min(180, ceil(measureTextWidth(title, font: btnFont)) + 26) : hubPillNaturalWidths[index]
+            let natural = isSingleDefault ? hubPillWidth(title) : hubPillNaturalWidths[index]
             let cap: CGFloat
             if hubs.count == 2 {
                 let siblingShare = index == 0 ? pairBudget - halfBudget : halfBudget
@@ -309,15 +320,15 @@ extension Companion: NSMenuDelegate {
                 cap = hubs.count > 2 && compactChips && stripWidth >= 92 ? halfBudget : fullCap
             }
             let width = min(natural, cap)
-            let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
+            let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: geometry.pillHeight), radius: geometry.pillRadius)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
-            pill.style = hub.name == effectiveTargetHub
-                ? (hub.status == "connected" && hub.error == nil ? .prominent : .neutral)
-                : .subtleHeader
+            if hubs.count == 1 { pill.style = hub.status == "connected" && hub.error == nil ? .prominent : .neutral }
             pill.label.font = btnFont
             pill.label.lineBreakMode = .byTruncatingMiddle
-            pill.label.frame.origin.x = 16; pill.label.frame.size.width = width - 20
-            pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
+            pill.segmentIndicatorColor = CitoPalette.segmentInk(statusColor(hub.status))
+            let dot = roundedView(.zero, radius: 3, color: pill.segmentIndicatorColor)
+            pill.addSubview(dot)
+            pill.segmentIndicator = dot
             pill.toolTip = isSingleDefault ? (hub.status == "connected" ? "Connected · \(hub.user ?? "local")" : title) : "\(hub.name) · \(["connected":"Connected", "auth_required":"Sign-in required", "disconnected":"Offline", "connecting":"Connecting…"][hub.status] ?? "Unavailable")"
             pill.setAccessibilityLabel(pill.toolTip ?? hub.name)
             pill.pressed = { [weak self, weak menu] in
@@ -340,12 +351,11 @@ extension Companion: NSMenuDelegate {
             }
             hubPills.append(pill)
         }
-        if showHubControls {
-            mountPillStrip(in: header, frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22),
-                           id: "header_hub_strip", alignment: .trailing, trackRadius: hubs.count > 1 ? 11 : nil, pills: hubPills) { view in
-                let id = view.identifier?.rawValue ?? ""
-                return id == "hub:\(effectiveTargetHub)"
-            }
+        if !hubPills.isEmpty {
+            menuHubStrip = SegmentedPillStrip.mount(in: header,
+                frame: NSRect(x: stripX, y: 7, width: stripWidth, height: geometry.trackHeight),
+                id: "header_hub_strip", alignment: .trailing, spacing: hubGap, geometry: geometry, pills: hubPills,
+                selected: hubPills.first { $0.identifier?.rawValue == "hub:\(effectiveTargetHub)" }, handoff: hubStripHandoff)
         }
         var activeRows: [(id: String, view: NSView)] = []
         let map = harnessMap
@@ -400,7 +410,7 @@ extension Companion: NSMenuDelegate {
                 aboutLabel.lineBreakMode = .byTruncatingMiddle
                 aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
             }
-            let copy = makeAddressCopyControl(listener.display_address,id:"copy:\(listener.scoped_id)",height:19)
+            let copy = makeAddressCopyControl(listener.display_address, id: "copy:\(listener.scoped_id)", authority: listener.hub, height: 19)
             let copyWidth = copy.frame.width
             copy.frame.origin.x = titleX
             copy.style = .subtleHeader
@@ -538,7 +548,7 @@ extension Companion: NSMenuDelegate {
                     hostIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Remote host")
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
-                    let copy = makeAddressCopyControl(peer.display_address,id:"copy_remote:\(peer.scoped_id)",height:20)
+                    let copy = makeAddressCopyControl(peer.display_address, id: "copy_remote:\(peer.scoped_id)", authority: peer.hub ?? targetHub, height: 20)
                     row.addSubview(copy)
                     let cleanHost = cleanHostDisplay(peer.host_name)
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
@@ -574,8 +584,10 @@ extension Companion: NSMenuDelegate {
                 size: 10, weight: .semibold, color: CitoPalette.secondaryText))
             let autoListen = hubs.first(where: { $0.name == targetHub })?.auto_listen ?? false
             let autoTitle = autoListen ? "Auto-Listen: On" : "Auto-Listen"
-            let autoWidth = MenuControl.toggleWidth("toggle_auto_listen",title:autoTitle)
-            let auto = MenuControl(autoTitle, frame: NSRect(x: 368 - autoWidth, y: 2, width: autoWidth, height: 18), radius: 9)
+            let auto = MenuControl(autoTitle, frame: NSRect(x: 0, y: 2, width: 0, height: 18), radius: 9)
+            auto.reservedTitles = [("Auto-Listen", nil), ("Auto-Listen: On", nil)]
+            auto.frame.size.width = auto.reservedWidth
+            auto.frame.origin.x = 368 - auto.frame.width
             auto.identifier = NSUserInterfaceItemIdentifier("toggle_auto_listen")
             auto.style = autoListen ? .prominent : .neutral
             auto.toolTip = "Automatically listen to eligible sessions on \(targetHub). Turning Auto-Listen off stops unpinned auto-listened sessions and keeps pinned sessions listening."
@@ -670,8 +682,12 @@ extension Companion: NSMenuDelegate {
                     var candidateRows: [(id: String, view: NSView)] = []
                     let candidateScroll = items.count > 4 ? makeMenuScroll(height: 176) : nil
                     let candidateWidth = candidateScroll?.contentSize.width ?? CitoMetrics.menuWidth
-                    let actionX = candidateWidth - CitoMetrics.menuInset - 70
-                    let textWidth = actionX - 54
+                    let actionPadding: CGFloat = 7.5
+                    let reloadFont = NSFont.systemFont(ofSize: 10)
+                    let reloadWidth = MenuControl.intrinsicWidth("/reload", font: reloadFont, leadingSymbol: "doc.on.doc", paddingX: actionPadding)
+                    let listenWidth = MenuControl.intrinsicWidth("Listen", leadingSymbol: "plus", paddingX: actionPadding)
+                    let actionRight = candidateWidth - CitoMetrics.menuInset
+                    let textWidth = actionRight - max(reloadWidth, listenWidth) - 54
                     for c in items {
                         let needsReload = c.needs_reload == true
                         let hintText = c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen"
@@ -700,19 +716,22 @@ extension Companion: NSMenuDelegate {
                             hint.toolTip=hint.stringValue
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
-                            let reload=MenuControl("/reload",frame:NSRect(x:actionX,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
-                            reload.label.font = .systemFont(ofSize:10)
-                            reload.identifier=NSUserInterfaceItemIdentifier("reload:\(c.harness):\(c.session_id)")
+                            let reload = MenuControl("/reload", frame: NSRect(x: actionRight - reloadWidth, y: floor((rowHeight-22)/2), width: reloadWidth, height: 22), leadingSymbol: "doc.on.doc", paddingX: actionPadding)
+                            reload.label.font = reloadFont; reload.layoutContents()
+                            let reloadID = "reload:\(c.harness):\(c.session_id)"
+                            let copyKey = TransientFeedbackStore.Key(.menuCopy, reloadID, authority: targetHub)
+                            reload.identifier = NSUserInterfaceItemIdentifier(reloadID)
                             reload.toolTip = "Copy /reload to paste in \(visual.name)"
-                            reload.pressed={ [weak self, weak reload] in
-                                guard let self=self else{return}
-                                self.copyText("/reload", control:reload)
+                            reload.showFeedback(key: copyKey)
+                            reload.pressed = { [weak self, weak reload] in
+                                guard let self else { return }
+                                self.copyText("/reload", control: reload, key: copyKey)
                                 self.emit(["op":"refresh_available"])
                             }
                             row.addSubview(reload)
                             candidateRows.append((id:rowId,view:row)); continue
                         }
-                        let listenBtn = MenuControl("Listen", frame: NSRect(x: actionX, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
+                        let listenBtn = MenuControl("Listen", frame: NSRect(x: actionRight - listenWidth, y: floor((rowHeight-22)/2), width: listenWidth, height: 22), leadingSymbol: "plus", paddingX: actionPadding)
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
                         listenBtn.isEnabled = !targetHub.isEmpty && targetHubObj?.status != "auth_required" && candidateIsOpen(c)
                         if targetHubObj?.status == "auth_required" {
@@ -722,15 +741,12 @@ extension Companion: NSMenuDelegate {
                         } else {
                             listenBtn.toolTip = "Start listening in \(candidateTitle)"
                         }
-                        pendingLabel(listenBtn,isPending("listen_session",hub:targetHub,target:"\(c.harness):\(c.session_id)"),"Listening…")
+                        if isPending("listen_session", hub: targetHub, target: "\(c.harness):\(c.session_id)") { listenBtn.setPending("Listening…") }
                         info.frame.size.width = min(textWidth, listenBtn.frame.minX - info.frame.minX - 8)
                         location.frame.size.width = info.frame.width
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
-                            listenBtn?.setLeadingSymbol(nil)
-                            listenBtn?.label.stringValue = "…"
-                            listenBtn?.isEnabled = false
-                            listenBtn?.setAccessibilityLabel("Listening…")
+                            listenBtn?.setPending("Listening…")
                             var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.custom_title == true ? c.title : candidateTitle]
                             if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
                             action["hub"] = targetHub
@@ -792,9 +808,10 @@ extension Companion: NSMenuDelegate {
         if !orderedListeners.isEmpty {
             let stopAll = MenuControl("Stop All", frame: NSRect(x: 12, y: 6, width: MenuControl.intrinsicWidth("Stop All",leadingSymbol:"stop.fill"), height: 24), leadingSymbol: "stop.fill")
             stopAll.identifier = NSUserInterfaceItemIdentifier("stop_all")
+            stopAll.reservedTitles = [("Stop All", "stop.fill"), ("Stopping…", nil)]
             stopAll.style = .subtleHeader
             stopAll.toolTip = "Stop all agent sessions on \(targetHub) and disable Auto-Listen"
-            pendingLabel(stopAll, isPending("unlisten_all", hub: targetHub), "Stopping…")
+            if isPending("unlisten_all", hub: targetHub) { stopAll.setPending("Stopping…") }
             stopAll.pressed = { self.emit(["op": "unlisten_all", "hub":targetHub]) }
             footer.addSubview(stopAll)
         }

@@ -47,7 +47,6 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
 }
 
 struct ChannelAttachment: Decodable, Equatable {
-    let channel_id: String?
     let location: String, display_name: String, availability: String
     let is_local: Bool
 }
@@ -295,7 +294,6 @@ struct HubInviteConfig: Decodable {
 }
 struct Frame: Decodable {
     let config: HubInviteConfig?
-    let truncated_collections: [String]?
     let op: String
     let hub: String?
     let ok: Bool?
@@ -336,9 +334,71 @@ struct Frame: Decodable {
     let activity_filter: String?
     let activity_query: String?
     let message: String?
+}
 
-    func preservesCollection(_ key: String) -> Bool {
-        truncated_collections?.contains(key) == true
+/// Main-run-loop authority for short-lived feedback, independent of mounted views.
+final class TransientFeedbackStore {
+    static let shared = TransientFeedbackStore()
+
+    enum Action { case control, menuCopy, directoryCopy, activityCopy, appCheck, hostPort, invite, channelPair, channelSave }
+    struct Key: Hashable {
+        let action: Action
+        let target: String
+        let authority: String
+
+        init(_ action: Action, _ target: String = "", authority: String = "") {
+            self.action = action; self.target = target; self.authority = authority
+        }
+    }
+    private struct Entry {
+        let until: Date
+        var restore: (() -> Void)?
+    }
+    private var entries: [Key: Entry] = [:]
+    private var timer: Timer?
+    var didExpire: ((Set<Action>) -> Void)?
+
+    func deadline(_ key: Key) -> Date? {
+        entries[key].map(\.until).flatMap { $0 > Date() ? $0 : nil }
+    }
+    // Mounted ink remains valid until the same expiry transaction restores its title.
+    func contains(_ key: Key) -> Bool { entries[key] != nil }
+    func set(_ key: Key, until: Date?) {
+        if let until, until > Date() { entries[key] = Entry(until: until, restore: entries[key]?.restore) }
+        else if let entry = entries.removeValue(forKey: key) { entry.restore?() }
+        schedule()
+    }
+    func observe(_ key: Key, restore: (() -> Void)?) {
+        entries[key]?.restore = restore
+    }
+    func expire(_ key: Key) {
+        if let entry = entries.removeValue(forKey: key) { entry.restore?() }
+        schedule()
+    }
+    func deadlines(for action: Action) -> [String: Date] {
+        let now = Date()
+        return entries.reduce(into: [:]) { result, pair in
+            if pair.key.action == action && pair.value.until > now { result[pair.key.target] = pair.value.until }
+        }
+    }
+    private func schedule() {
+        let next = entries.values.map(\.until).min()
+        if let timer, timer.isValid, timer.fireDate == next { return }
+        timer?.invalidate()
+        timer = nil
+        guard let next else { return }
+        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in self?.expireDue() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+    }
+    private func expireDue() {
+        let now = Date()
+        let expired = entries.filter { $0.value.until <= now }
+        for key in expired.keys { entries.removeValue(forKey: key) }
+        for entry in expired.values { entry.restore?() }
+        schedule()
+        if !expired.isEmpty { didExpire?(Set(expired.keys.map(\.action))) }
     }
 }
 
@@ -356,16 +416,14 @@ struct ChannelUiState: Equatable {
     var pairingInstruction = ""
     var pairingCommand: String?
     var pairingURL: String?
-    var pairCopiedUntil = Date.distantPast
-    var savedUntil: [String: Date] = [:]
     var testResult: (ok: Bool, detail: String)?
     var testResultIsLatest = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.editingGateway == rhs.editingGateway && lhs.editingPersonal == rhs.editingPersonal && lhs.manualEntry == rhs.manualEntry &&
         lhs.drafts == rhs.drafts && lhs.pairing == rhs.pairing && lhs.pairingInstruction == rhs.pairingInstruction &&
-        lhs.pairingCommand == rhs.pairingCommand && lhs.pairingURL == rhs.pairingURL && lhs.pairCopiedUntil == rhs.pairCopiedUntil &&
-        lhs.savedUntil == rhs.savedUntil && lhs.testResult?.ok == rhs.testResult?.ok && lhs.testResult?.detail == rhs.testResult?.detail &&
+        lhs.pairingCommand == rhs.pairingCommand && lhs.pairingURL == rhs.pairingURL &&
+        lhs.testResult?.ok == rhs.testResult?.ok && lhs.testResult?.detail == rhs.testResult?.detail &&
         lhs.testResultIsLatest == rhs.testResultIsLatest
     }
 
@@ -374,16 +432,14 @@ struct ChannelUiState: Equatable {
         manualEntry = false
         if !preservePendingPair { pairing = nil }
         clearPairingInstructions()
-        savedUntil.removeValue(forKey: "user")
     }
     mutating func clearPairingInstructions() {
         pairingInstruction = ""
         pairingCommand = nil
         pairingURL = nil
-        pairCopiedUntil = .distantPast
     }
     mutating func resetGateway() {
         editingGateway = false
-        savedUntil.removeValue(forKey: "hub")
+
     }
 }

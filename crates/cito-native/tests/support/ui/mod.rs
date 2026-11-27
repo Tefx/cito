@@ -89,7 +89,7 @@ fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
     }
 }
 fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: Option<&str>) {
-    inspect_as(f, p, appearance);
+    let snapshot = inspect_as(f, p, appearance);
     let Some(dir) = std::env::var_os("CITO_TEST_SNAPSHOT_DIR") else {
         return;
     };
@@ -100,6 +100,15 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
         surface,
         &std::path::Path::new(&dir).join(name),
         appearance,
+        (surface == "settings")
+            .then(|| snapshot["settings_items"].as_array().unwrap().get(1))
+            .flatten()
+            .map(|sheet| {
+                (
+                    (sheet["width"].as_f64().unwrap() * 2.0) as u32,
+                    (sheet["height"].as_f64().unwrap() * 2.0) as u32,
+                )
+            }),
     );
     inspect_as(f, p, appearance);
 }
@@ -109,6 +118,7 @@ fn capture_png(
     surface: &str,
     path: &std::path::Path,
     appearance: Option<&str>,
+    modal_size: Option<(u32, u32)>,
 ) {
     f.send(
         p,
@@ -123,18 +133,12 @@ fn capture_png(
     assert!(data.len() > 1000);
     let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
     let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
-    assert_eq!(
-        width,
-        if surface == "settings" {
-            1040
-        } else if surface == "directory" {
-            1120
-        } else {
-            760
-        }
-    );
-    if surface == "settings" {
-        assert_eq!(height, 920);
+    match (surface, modal_size) {
+        ("settings", Some(size)) => assert_eq!((width, height), size),
+        ("settings", None) => assert_eq!((width, height), (1040, 920)),
+        ("directory", _) => assert_eq!((width, height), (1120, 880)),
+        ("menu", _) => assert_eq!(width, 760),
+        _ => panic!("Unexpected screenshot surface: {surface}"),
     }
     assert!(height > 100);
 }
@@ -173,12 +177,15 @@ fn inspect_unchecked(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
     inspect_command(f, p, "test_inspect_menu", appearance)
 }
 fn inspect_command(f: &Fixture, p: usize, op: &str, appearance: Option<&str>) -> Value {
+    inspect_frame(f, p, json!({"op":op,"appearance":appearance}))
+}
+fn inspect_frame(f: &Fixture, p: usize, command: Value) -> Value {
     let count = f
         .output(p, true)
         .lines()
         .filter(|l| l.starts_with("cito-ui: menu "))
         .count();
-    f.send(p, json!({"op":op,"appearance":appearance}));
+    f.send(p, command);
     wait(|| {
         f.output(p, true)
             .lines()

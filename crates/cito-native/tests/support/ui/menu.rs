@@ -12,7 +12,7 @@ fn appearance_overrides_are_scoped_to_one_observation() {
     assert!(baseline["background"][0].as_f64().unwrap() < 0.1);
     let png = |name: &str, appearance| {
         let path = f.home.join(name);
-        capture_png(&f, p, "settings", &path, appearance);
+        capture_png(&f, p, "settings", &path, appearance, None);
         fs::read(path).unwrap()
     };
     let light = png("light.png", None);
@@ -956,7 +956,6 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(s.menu("header_subtitle")["text"], "Not listening");
     assert_eq!(s["available_count"], 5);
     assert_eq!(s.menu("hub:work")["text"], "work");
-    assert!(s.menu("targetStrip").is_null());
     assert_eq!(s.menu("toggle_auto_listen")["text"], "Auto-Listen");
     control(&f, p, "toggle_auto_listen");
     wait(|| {
@@ -970,7 +969,8 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
             v["op"] == "listen_session" && v["hub"] == "work" && v["session_id"] == "candidate-0"
         })
     });
-    assert_eq!(s.menu("header_hub_strip")["radius"], 11);
+    assert_eq!(s.menu("header_hub_strip")["radius"], 13);
+    assert_eq!(s.menu("hub:work")["radius"], 11);
     assert_eq!(s.menu("hub:personal")["border_width"], 0);
     // A semantic track fill must follow the view's appearance without rebuilding.
     for (appearance, dark) in [("dark", true), ("light", false), ("dark", true)] {
@@ -1190,8 +1190,21 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     second["listener_id"] = json!("c_workabcdefgh");
     second["display_address"] = json!("work:alice/fixture#abcd");
     next["listeners"] = json!([listener(), second]);
+    let first_copy = "copy:personal:repo-abcdefghijkl";
+    control(&f, p, first_copy);
+    let before_rebuild = inspect(&f, p);
     send_companion(&f, p, next.clone());
     let s = inspect(&f, p);
+    assert_ne!(
+        s.menu(first_copy)["instance"],
+        before_rebuild.menu(first_copy)["instance"]
+    );
+    assert_eq!(s.menu(first_copy)["text"], "✓ Copied");
+    f.send(p, json!({"op":"test_expire_copy_feedback","id":first_copy}));
+    assert_eq!(
+        inspect(&f, p).menu(first_copy)["text"],
+        "alice/fixture#abcd"
+    );
     assert_eq!(s["count"], 1);
     assert!(s.menu("session:work:repo-workabcdefgh").is_null());
     assert!(!s.menu("session:personal:repo-abcdefghijkl").is_null());
@@ -1474,7 +1487,7 @@ fn status_only_frame_uses_live_non_first_default_hub_without_refreshed_settings(
 }
 
 #[test]
-fn shed_hubs_status_frame_reconciles_default_from_root_hub() {
+fn state_frame_reconciles_default_from_root_hub() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut initial = state();
@@ -1486,21 +1499,17 @@ fn shed_hubs_status_frame_reconciles_default_from_root_hub() {
         .menu("session:personal:repo-abcdefghijkl")
         .is_null());
 
-    // Simulate collection shedding dropping the tail hub ("work", cached with is_default: false)
-    // while root frame["hub"] advances to "work".
     let mut work_listener = listener();
     work_listener["hub"] = json!("work");
     work_listener["scoped_id"] = json!("work:repo-abcdefghijkl");
     work_listener["display_address"] = json!("alice/fixture#abcd");
 
-    let mut shed = state();
-    shed["hub"] = json!("work");
-    shed["hubs"] = json!([shed["hubs"][0].clone()]);
-    shed["hubs"][0]["is_default"] = json!(false);
-    shed["truncated"] = json!(true);
-    shed["truncated_collections"] = json!(["hubs"]);
-    shed["listeners"] = json!([work_listener]);
-    f.send(p, shed);
+    let mut update = state();
+    update["hub"] = json!("work");
+    update["hubs"][0]["is_default"] = json!(true);
+    update["hubs"][1]["is_default"] = json!(false);
+    update["listeners"] = json!([work_listener]);
+    f.send(p, update);
 
     let updated = inspect(&f, p);
     assert!(!updated.menu("session:work:repo-abcdefghijkl").is_null());

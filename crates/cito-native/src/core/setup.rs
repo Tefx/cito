@@ -1688,11 +1688,21 @@ pub fn run_setup_cli(args: &[String]) {
 
         let mut validated_hub: Option<(String, Value)> = None;
         if let Some(url_raw) = &hub_url {
-            if let Some(name) = hub_name.as_deref().filter(|s| !validate_hub_name(s)) {
-                return Err(format!("Invalid hub name: {name}"));
+            let explicit_name = hub_name
+                .map(|name| {
+                    super::identity::resolve_explicit_hub_name(&name)
+                        .ok_or_else(|| format!("Invalid hub name: {name}"))
+                })
+                .transpose()?;
+            if explicit_name.as_ref().is_some_and(|name| {
+                existing_hubs
+                    .keys()
+                    .any(|other| other != name && other.eq_ignore_ascii_case(name))
+            }) {
+                return Err("INVALID_INPUT: Hub name already exists".into());
             }
             let url = validate_nats_url(url_raw)?;
-            if hub_name.as_deref() == Some("local") && url != "local://" {
+            if explicit_name.as_deref() == Some("local") && url != "local://" {
                 return Err("INVALID_INPUT: The local hub must use local://".into());
             }
             let def_scope = if url == "local://" {
@@ -1737,7 +1747,7 @@ pub fn run_setup_cli(args: &[String]) {
                 entry.insert("redirectPort".into(), port);
             }
             let health = super::config::probe_hub_health(&url, true);
-            let name = hub_name.clone().unwrap_or_else(|| {
+            let name = explicit_name.unwrap_or_else(|| {
                 super::config::available_hub_name(
                     super::config::advertised_name(&health).map(str::to_owned),
                     Some(&existing_hubs),
@@ -2632,12 +2642,15 @@ mod tests {
         let (root, _) = fixture();
         let engine = crate::core::hub::HubEngine::open(&root.join("hub")).unwrap();
         let mut auth = crate::core::auth::HubAuth::new("none", None, None, None).unwrap();
-        auth.advertise_name(Some("team")).unwrap();
+        auth.advertise_name(Some("Acme-Cloud")).unwrap();
         let server = engine.start_server("127.0.0.1", 0, auth).unwrap();
         let url = format!("http://{}", server.address);
         let path = root.join("config.json");
-        let initial = json!({"hubs":{"team":{"url":"local://"}}});
-        for (extra, name) in [(vec![], "team-2"), (vec!["--hub", "custom"], "custom")] {
+        let initial = json!({"hubs":{"acme-cloud":{"url":"local://"}}});
+        for (extra, name) in [
+            (vec![], "Acme-Cloud-2"),
+            (vec!["--hub", "Work Internal"], "Work-Internal"),
+        ] {
             fs::write(&path, initial.to_string()).unwrap();
             let mut args = vec!["--url", &url, "--auth", "none", "--default"];
             args.extend(extra);
@@ -2647,15 +2660,17 @@ mod tests {
             assert_eq!(saved["default_hub"], name);
             assert_eq!(saved["hubs"][name]["url"], url);
             assert!(saved["hubs"][name].get("discovered_name").is_none());
-            assert_eq!(saved["hubs"]["team"]["url"], "local://");
+            assert_eq!(saved["hubs"]["acme-cloud"]["url"], "local://");
         }
-        let before = json!({"hubs":{"team":{"url":url,"authMode":"token","token":"saved-token"}}});
+        let before =
+            json!({"hubs":{"acme-cloud":{"url":url,"authMode":"token","token":"saved-token"}}});
         fs::write(&path, before.to_string()).unwrap();
         let output = cli_child(&root, &root, &["--url", &url]);
         assert!(output.status.success(), "{output:?}");
         let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["hubs"]["team"]["authMode"], "token");
-        assert_eq!(saved["hubs"]["team"]["token"], "saved-token");
+        assert!(saved["hubs"].get("Acme-Cloud").is_none());
+        assert_eq!(saved["hubs"]["acme-cloud"]["authMode"], "token");
+        assert_eq!(saved["hubs"]["acme-cloud"]["token"], "saved-token");
         server.shutdown();
         engine.shutdown();
         fs::remove_dir_all(root).unwrap();

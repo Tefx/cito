@@ -208,7 +208,18 @@ pub fn validate_harness_id(id: &str) -> bool {
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-pub use validate_harness_id as validate_hub_name;
+pub fn validate_hub_name(name: &str) -> bool {
+    name == "local"
+        || (!name.eq_ignore_ascii_case("local")
+            && name.len() <= 32
+            && name
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')))
+}
 
 pub fn validate_nats_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();

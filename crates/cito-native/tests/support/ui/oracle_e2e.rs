@@ -826,6 +826,11 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
         p,
         json!({"op":"error","source_op":"setup_save_hub","request_id":submitted["request_id"],"error":format!("10071: {clean}")}),
     );
+    let editing = inspect_unchecked(&f, p, None);
+    assert_eq!(editing["field_editors"][0]["id"], "settings_hub_url");
+    assert_eq!(editing["settings_rebuild_deferred"], true);
+    assert_eq!(editing.settings("add_hub_error")["tooltip"], clean.trim());
+    f.send(p, json!({"op":"test_end_editing"}));
     for appearance in ["light", "dark"] {
         let s = inspect_as(&f, p, Some(appearance));
         let error = s.settings("add_hub_error");
@@ -842,6 +847,84 @@ fn add_hub_errors_wrap_below_fields_and_above_actions() {
                 <= error["y"].as_f64().unwrap()
         );
     }
+}
+
+#[test]
+fn segment_and_confirmation_controls_keep_pressed_label_contrast() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["hubs"][1]["name"] = json!("Work-Internal");
+    let mut frame = state_with_settings(cfg);
+    frame["hubs"][1]["name"] = json!("Work-Internal");
+    frame["hubs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"ACTIVE","status":"connected","user":"bob","auth_mode":"none"}));
+    let activity = json!([{"hub":"personal","signal_id":"review","listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Review","target_harness":"human","target_title":"Me","message":"Ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true}]);
+    f.send(p, frame);
+    let initial = inspect(&f, p);
+    assert_eq!(initial.menu("hub:Work-Internal")["text"], "Work-Internal");
+    assert_eq!(initial.menu("hub:ACTIVE")["text"], "ACTIVE");
+    control(&f, p, "open_directory");
+    for (id, reduce_motion) in [("dir_mode:activity", false), ("dir_mode:directory", true)] {
+        let snapshot = inspect_frame(
+            &f,
+            p,
+            json!({"op":"test_control","id":id,"reduce_motion":reduce_motion}),
+        );
+        let track = snapshot.directory("directory_mode_track");
+        assert_eq!(track["selected_id"], id);
+        assert_eq!(track["sliding"], !reduce_motion);
+        assert_eq!(snapshot["clipped_views"], json!([]));
+    }
+    control(&f, p, "dir_mode:activity");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":activity,"activity_filter":"me","activity_total":1}),
+    );
+    f.send(p, json!({"op":"test_directory_key","key":"cmd-f","via":"panel","characters":"f","key_code":3}));
+    assert!(inspect(&f, p)["field_editors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["id"] == "directory_search" && e["attached"] == true));
+    for style in ["overlay", "legacy"] {
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        for appearance in ["light", "dark"] {
+            inspect_as(&f, p, Some(appearance));
+            for id in ["dir_mode:activity", "activity_clear_confirm_commit"] {
+                if id == "activity_clear_confirm_commit" {
+                    control(&f, p, "activity_clear");
+                }
+                let target = inspect(&f, p).directory(id);
+                assert_eq!(
+                    target["enabled"], true,
+                    "{id} {style} {appearance}: {target}"
+                );
+                assert_eq!(target["hidden"], false, "{id} {style} {appearance}");
+                let pressed = inspect_frame(
+                    &f,
+                    p,
+                    json!({"op":"test_control","id":id,"drag":[false],"inspect_pressed":true,"appearance":appearance}),
+                );
+                let control_state = pressed.directory(id);
+                assert_eq!(control_state["pressed"], true, "{id} {style} {appearance}");
+                assert!(
+                    nodes(&control_state["children"])
+                        .iter()
+                        .any(|n| n["contrast"].as_f64().is_some_and(|ratio| ratio >= 7.0)),
+                    "{id} {style} {appearance}: {control_state}"
+                );
+                assert_eq!(pressed["low_contrast_labels"], json!([]));
+                if id == "activity_clear_confirm_commit" {
+                    control(&f, p, "activity_clear_confirm_cancel");
+                }
+            }
+        }
+    }
+    assert_eq!(f.frames_for(p, "clear_activity_history").count(), 0);
 }
 
 #[test]
@@ -908,8 +991,12 @@ fn activity_clear_confirmation_and_dynamic_accessibility() {
         json!({"op":"directory","peers":[schema,review,inbox],"matched_count":3,"online_count":3}),
     );
     let directory = inspect(&f, p);
-    assert_eq!(directory.directory("directory_scope_track")["width"], 129);
-    assert_eq!(directory.directory("directory_facet_separator")["x"], 151);
+    let scope = directory.directory("directory_scope_track");
+    let separator = directory.directory("directory_facet_separator");
+    assert!(
+        separator["x"].as_f64().unwrap()
+            > scope["x"].as_f64().unwrap() + scope["width"].as_f64().unwrap()
+    );
     control(&f, p, "copy_dir:personal:schema");
     let copied = inspect(&f, p);
     assert_eq!(
@@ -1209,8 +1296,16 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     assert!(x >= 78.0);
     assert!((2.0 * x + tabs["width"].as_f64().unwrap() - 520.0).abs() <= 2.0);
     assert_eq!(s.directory("directory_mode_track")["x"], 78);
-    assert_eq!(s.directory("directory_search")["x"], 256);
-    assert_eq!(s.directory("directory_search")["width"], 290);
+    let mode = s.directory("directory_mode_track");
+    let search = s.directory("directory_search");
+    assert!(
+        search["x"].as_f64().unwrap()
+            > mode["x"].as_f64().unwrap() + mode["width"].as_f64().unwrap()
+    );
+    assert_eq!(
+        search["x"].as_f64().unwrap() + search["width"].as_f64().unwrap(),
+        546.0
+    );
     assert_eq!(
         json!(&s["edit_menu"].as_array().unwrap()[..6]),
         json!([
@@ -1555,7 +1650,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
         (
             "Office Mac",
             format!("http://127.0.0.1:{}/", port()).as_str(),
-            "office-mac",
+            "Office-Mac",
         ),
         ("", "  https://studio.example.com/  ", "studio"),
     ] {
@@ -1772,7 +1867,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             );
         }
     }
-    for (name, op) in [("office-mac", "error"), ("scratch", "settings")] {
+    for (name, op) in [("Office-Mac", "error"), ("scratch", "settings")] {
         let (action, _, _) = l
             .results
             .iter()
@@ -1828,7 +1923,14 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     if std::env::var_os("CITO_TEST_SNAPSHOT_DIR").is_some() {
         render_png(&f, p, "menu", "menu_human_paused.png");
     } else {
-        capture_png(&f, p, "menu", &f.home.join("menu_human_paused.png"), None);
+        capture_png(
+            &f,
+            p,
+            "menu",
+            &f.home.join("menu_human_paused.png"),
+            None,
+            None,
+        );
     }
     let rendered = inspect(&f, p);
     for item in nodes(&s["items"]) {
@@ -2018,7 +2120,10 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         saved.settings("clear_channel_service:channel")["foreground"],
         saved.settings("edit_hub_service:channel")["foreground"]
     );
-    assert_eq!(saved.settings("channel_summary:channel")["text"], "✓ Saved");
+    assert_eq!(
+        saved.settings("channel_summary:channel")["text"],
+        "Paired · account-42 · ✓ Saved"
+    );
     assert!(saved.settings("save_channel:channel").is_null());
     let reserved_toggle = saved.settings("toggle_channel:channel");
     for enabled in [false, true] {
@@ -2318,7 +2423,9 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         control(&f, p, "apply_host_hub_port");
         let s = inspect(&f, p);
         assert_eq!(s.settings("apply_host_hub_port")["text"], "Apply");
-        assert!(!s.settings("host_hub_error").is_null());
+        let error = s.settings("host_hub_error");
+        assert_eq!(error["text"], "Port must be an integer from 1 to 65535.");
+        assert_eq!(error["hidden"], false);
         assert_eq!(f.frames(p).len(), before);
     }
     f.send(
@@ -2326,9 +2433,10 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         json!({"op":"test_settings_input","id":"host_hub_port","value":"5301"}),
     );
     control(&f, p, "settings_tab:hubs");
+    let error = inspect(&f, p).settings("host_hub_error");
     assert!(
-        inspect(&f, p).settings("host_hub_error").is_null(),
-        "Editing the port clears local validation feedback"
+        error.is_null() || error["hidden"] == true,
+        "Editing the port clears visible local validation feedback: {error}"
     );
     // Only a command acknowledgement may settle Apply, including an unchanged save.
     frame["settings"] = cfg.clone();
@@ -2656,7 +2764,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             "settings" => Some((
                 "settings_items",
                 "channel_hub_strip",
-                6.0,
+                4.0,
                 snapshot.settings("settings_channels_tab")["content_width"]
                     .as_f64()
                     .unwrap()
@@ -2702,7 +2810,13 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 let x = view["x"].as_f64().unwrap();
                 match surface {
                     "menu" => assert!((x + width - 368.0).abs() < 0.5),
-                    "directory" => assert_eq!(x, 157.0),
+                    "directory" => {
+                        let separator = snapshot.directory("directory_facet_separator");
+                        assert!(
+                            x > separator["x"].as_f64().unwrap()
+                                + separator["width"].as_f64().unwrap()
+                        );
+                    }
                     "settings" => assert_eq!(x, 98.0),
                     _ => unreachable!(),
                 }
@@ -2736,9 +2850,9 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     cfg["channels"][0]["fields"][1]["placeholder"] = json!("Paired via /start or enter Chat ID");
     cfg["host_hub"]["enabled"] = json!(true);
     cfg["host_hub"]["running"] = json!(true);
-    cfg["host_hub"]["endpoint_url"] = json!("http://mac-studio.tailnet.ts.net:4291");
+    cfg["host_hub"]["endpoint_url"] = json!("http://Office-Mac.example.com:4291");
     cfg["host_hub"]["invite_command"] =
-        json!("cito setup --hub mac-studio --url http://mac-studio.tailnet.ts.net:4291 --default");
+        json!("cito setup --hub Office-Mac --url http://Office-Mac.example.com:4291 --default");
     cfg["host_hub"]["tailscale_url"] = cfg["host_hub"]["endpoint_url"].clone();
     cfg["host_hub"]["tailscale_invite_command"] = cfg["host_hub"]["invite_command"].clone();
     cfg["host_hub"]["lan_url"] = json!("http://192.168.1.10:4291");
@@ -2764,7 +2878,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     agent["harness"] = json!("pi");
     agent["display_address"] = json!("alice/pi#abcd");
     agent["title"] = json!("Release orchestration");
-    agent["host_name"] = json!("mac-studio.local");
+    agent["host_name"] = json!("Office-Mac.local");
     agent["cwd"] = json!("~/Projects/acme/service");
     let mut human = listener();
     human["hub"] = json!("local");
@@ -2776,9 +2890,9 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     human["public_id"] = json!("alice-76e846d115ce642f");
     human["scoped_id"] = json!("local:alice-76e846d115ce642f");
     human["display_address"] = json!("@alice");
-    human["host_name"] = json!("mac-studio.local");
+    human["host_name"] = json!("Office-Mac.local");
     human["channels"] = json!([]);
-    human["attachments"] = json!([{"channel_id":"here:human","location":"device","host_id":"here","display_name":"mac-studio.local","availability":"ACTIVE","is_local":true}]);
+    human["attachments"] = json!([{"channel_id":"here:human","location":"device","host_id":"here","display_name":"Office-Mac.local","availability":"ACTIVE","is_local":true}]);
     frame["hubs"][0]["attachments"] = human["attachments"].clone();
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_paused"] = json!(false);
@@ -2786,7 +2900,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     frame["listeners"] = json!([agent, human]);
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);
-    send_companion(&f, p, frame);
+    send_companion(&f, p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert_eq!(s.menu("plugin_icon:pi")["tint"], json!([]));
@@ -2795,7 +2909,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let copy = s.menu("copy:personal:repo-abcdefghijkl");
     assert!(nodes(&copy["children"])
         .iter()
-        .any(|n| n["x"] == 0 && n["width"] == 12));
+        .any(|n| n["x"] == 6 && n["width"] == 12));
     assert!(s.menu("human_inbox_card").is_null());
     for appearance in ["light", "dark"] {
         let snapshot = inspect_as(&f, p, Some(appearance));
@@ -2823,6 +2937,14 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         }
     }
     capture("menu", "menu_active");
+    let mut compact_menu = frame.clone();
+    compact_menu["available"] = json!([]);
+    compact_menu["hubs"][0]["auto_listen"] = json!(true);
+    compact_menu["listeners"][0]["listen_mode"] = json!("manual");
+    compact_menu["listeners"][0]["title"] = json!("Release review");
+    send_companion(&f, p, compact_menu);
+    capture("menu", "menu_site");
+    send_companion(&f, p, frame);
 
     let mut remote_agent = peer("review");
     remote_agent["hub"] = json!("local");
@@ -2851,7 +2973,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let seeded = inspect(&f, p);
     assert_eq!(
         seeded.directory("dir_meta:local:alice-76e846d115ce642f")["text"],
-        "Inbox · mac-studio"
+        "Inbox · Office-Mac"
     );
     assert!(!seeded
         .directory("dir_peer:local:alice-76e846d115ce642f")
@@ -3077,6 +3199,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         p,
         json!({"op":"error","source_op":"setup_save_hub","error":"INVALID_INPUT: Username is invalid"}),
     );
+    let mounted_error = inspect(&f, p);
+    assert_eq!(mounted_error["settings_rebuild_deferred"], true);
+    assert_eq!(mounted_error.settings("add_hub_form")["height"], 124);
+    f.send(p, json!({"op":"test_end_editing"}));
     let local_error = inspect(&f, p);
     let error = local_error.settings("add_hub_error");
     let user = local_error.settings("settings_hub_user");

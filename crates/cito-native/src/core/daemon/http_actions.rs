@@ -10,9 +10,9 @@ use super::{
 use crate::core::{
     config::{
         apply_host_hub_patch, available_hub_name, hub_enabled, ordered_hub_names,
-        repair_default_hub,
+        repair_default_hub, valid_advertised_name,
     },
-    identity::{listener_id, normalize_slug, string},
+    identity::{listener_id, resolve_explicit_hub_name, string},
 };
 use crate::plugins::now_ms;
 use crate::setup::{
@@ -21,6 +21,7 @@ use crate::setup::{
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -67,29 +68,47 @@ fn edited_hub(action: &Value) -> Option<String> {
         .as_str()
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .or_else(|| {
-            let name = string(action, "name");
-            if crate::plugins::validate_hub_name(name) {
-                Some(name.to_owned())
-            } else {
-                name.bytes()
-                    .any(|b| b.is_ascii_alphanumeric())
-                    .then(|| normalize_slug(name))
-            }
-        })
+        .or_else(|| resolve_explicit_hub_name(string(action, "name")))
 }
 
 fn invite_hub_name(invite: &Value, discovered: Option<&Value>, raw: &Value) -> String {
     let requested = string(invite, "name");
-    let base = (!requested.is_empty())
-        .then(|| normalize_slug(requested))
-        .or_else(|| discovered?["discovered_name"].as_str().map(str::to_owned));
+    let base = if requested.is_empty() {
+        discovered.and_then(|config| config["discovered_name"].as_str().map(str::to_owned))
+    } else if let Some(name) =
+        resolve_explicit_hub_name(requested).filter(|name| valid_advertised_name(name))
+    {
+        Some(name)
+    } else {
+        // Let save_hub reject the explicit spelling without deriving or disambiguating it.
+        return requested.to_owned();
+    };
     available_hub_name(
         base,
         raw["hubs"].as_object(),
         &discovered.unwrap_or(invite)["url"],
         None,
     )
+}
+
+fn rename_hub_token(from: &Path, to: &Path, case_only: bool) -> Result<(), String> {
+    if !case_only {
+        return fs::rename(from, to).map_err(|e| e.to_string());
+    }
+    // On a case-insensitive filesystem both names may resolve to the same entry.
+    // Move through a distinct name so the final directory entry has the new spelling.
+    let temporary = from.with_extension(format!("{}.tmp", crate::plugins::try_random_hex(16)?));
+    fs::rename(from, &temporary).map_err(|e| e.to_string())?;
+    if let Err(error) = fs::rename(&temporary, to) {
+        fs::rename(&temporary, from).map_err(|recovery| {
+            format!(
+                "{error}; credential remains at {}: {recovery}",
+                temporary.display()
+            )
+        })?;
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 fn configured_hubs(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, String> {
@@ -557,25 +576,32 @@ fn execute_action<S: std::borrow::BorrowMut<DaemonService>>(
     if op == "setup_save_hub" || (op == "paste_hub_invite" && action["parse_only"] != true) {
         let before = s.raw_config()?;
         let mut resolved = None;
-        let mut submitted = if op == "paste_hub_invite" {
-            let mut parsed = parse_hub_invite(string(action, "invite"))?;
-            parsed["request_id"] = action["request_id"].clone();
-            parsed
+        let (mut submitted, merged) = if op == "paste_hub_invite" {
+            let invite = parse_hub_invite(string(action, "invite"))?;
+            // An invite supplies a profile, never an edit of an existing one.
+            let submitted = json!({
+                "op":"setup_save_hub",
+                "name":invite["name"],
+                "url":invite["url"],
+                "set_default":invite["set_default"],
+            });
+            (
+                submitted,
+                crate::core::config::merge_hub_config(&Value::Null, &invite),
+            )
         } else {
-            action.clone()
-        };
-        let patch = if op == "setup_save_hub" {
-            submitted
+            let patch = action
                 .get("config")
                 .filter(|v| v.is_object())
-                .unwrap_or(&submitted)
-        } else {
-            &submitted
+                .unwrap_or(action);
+            let base = edited_hub(action)
+                .and_then(|original| before["hubs"].get(original))
+                .unwrap_or(&Value::Null);
+            (
+                action.clone(),
+                crate::core::config::merge_hub_config(base, patch),
+            )
         };
-        let base = edited_hub(&submitted)
-            .and_then(|original| before["hubs"].get(original))
-            .unwrap_or(&Value::Null);
-        let merged = crate::core::config::merge_hub_config(base, patch);
         // Refuse a self-invite before contacting its discovery endpoint. The
         // locked save rechecks the entire profile with the then-current port.
         let own = hub_enabled(&merged)
@@ -980,10 +1006,11 @@ impl DaemonService {
         } else {
             ""
         };
-        if !requested_name.is_empty() && !requested_name.chars().any(|c| c.is_ascii_alphanumeric())
-        {
-            return Err("INVALID_INPUT: Invalid hub name".into());
-        }
+        let explicit_name = (!requested_name.is_empty())
+            .then(|| {
+                resolve_explicit_hub_name(requested_name).ok_or("INVALID_INPUT: Invalid hub name")
+            })
+            .transpose()?;
         let mut cfg = action["config"].clone();
         if editing && original.is_empty() {
             return Err("INVALID_INPUT: Unknown hub to edit".into());
@@ -1013,8 +1040,8 @@ impl DaemonService {
                 && (requested_name.is_empty() || requested_name == original)
             {
                 original.clone()
-            } else if !requested_name.is_empty() {
-                normalize_slug(requested_name)
+            } else if let Some(name) = explicit_name {
+                name
             } else {
                 available_hub_name(
                     cfg["discovered_name"].as_str().map(str::to_owned),
@@ -1033,11 +1060,15 @@ impl DaemonService {
             if editing && original == "local" && name != "local" {
                 return Err("INVALID_INPUT: Cannot rename the local hub".into());
             }
-            if !editing
-                && (name == "local"
-                    || v["hubs"]
-                        .get(&name)
-                        .is_some_and(|existing| existing["url"] != cfg["url"]))
+            if (!editing && name == "local")
+                || hubs.iter().any(|(other, existing)| {
+                    other.eq_ignore_ascii_case(&name)
+                        && if editing {
+                            other != &original
+                        } else {
+                            other != &name || existing["url"] != cfg["url"]
+                        }
+                })
             {
                 return Err("INVALID_INPUT: Hub name already exists".into());
             }
@@ -1082,16 +1113,22 @@ impl DaemonService {
                 }
             }
             if editing && original != name {
-                if self
-                    .config
-                    .state_dir
-                    .join(format!("oidc-token-{name}.json"))
-                    .exists()
-                {
-                    return Err("INVALID_INPUT: Destination Hub credentials already exist".into());
-                }
-                if !v["hubs"][&name].is_null() {
-                    return Err("INVALID_INPUT: Hub name already exists".into());
+                let token = |hub| self.config.state_dir.join(format!("oidc-token-{hub}.json"));
+                match fs::symlink_metadata(token(&name)) {
+                    Ok(destination) => {
+                        let same_token = original.eq_ignore_ascii_case(&name)
+                            && fs::symlink_metadata(token(&original)).is_ok_and(|source| {
+                                source.dev() == destination.dev()
+                                    && source.ino() == destination.ino()
+                            });
+                        if !same_token {
+                            return Err(
+                                "INVALID_INPUT: Destination Hub credentials already exist".into()
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.to_string()),
                 }
                 for table in HUB_TABLES {
                     if !self
@@ -1163,6 +1200,8 @@ impl DaemonService {
                 .config
                 .state_dir
                 .join(format!("oidc-token-{name}.json"));
+            let case_only = original.eq_ignore_ascii_case(name);
+            let mut token_moved = false;
             let migration = self.state.db.transaction(|db| {
                 for table in HUB_TABLES {
                     db.execute(
@@ -1170,18 +1209,23 @@ impl DaemonService {
                         &[json!(name), json!(original)],
                     )?;
                 }
-                if old_token.exists() {
-                    fs::rename(&old_token, &new_token).map_err(|e| e.to_string())?;
+                match old_token.symlink_metadata() {
+                    Ok(_) => {
+                        rename_hub_token(&old_token, &new_token, case_only)?;
+                        token_moved = true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.to_string()),
                 }
                 Ok(())
             });
-            if let Err(error) = migration {
-                if !old_token.exists() && new_token.exists() {
-                    fs::rename(&new_token, &old_token).map_err(|recovery| {
-                        format!(
+            if let Err(mut error) = migration {
+                if token_moved {
+                    if let Err(recovery) = rename_hub_token(&new_token, &old_token, case_only) {
+                        error = format!(
                             "Hub rename failed: {error}; credential rollback failed: {recovery}"
-                        )
-                    })?;
+                        );
+                    }
                 }
                 self.mutate_config(|v| {
                     if v["hubs"][name] != renamed_config {
@@ -1411,10 +1455,7 @@ impl DaemonService {
                     if let Some(hub) = resolved_hub {
                         hubs.push(hub.to_owned());
                     } else {
-                        let requested = string(action, "name").trim();
-                        if requested.chars().any(|c| c.is_ascii_alphanumeric()) {
-                            hubs.push(normalize_slug(requested));
-                        }
+                        hubs.extend(resolve_explicit_hub_name(string(action, "name")));
                     }
                 }
             } else {

@@ -1,6 +1,12 @@
 import AppKit
 
+extension RemotePeer {
+    var copyFeedbackKey: TransientFeedbackStore.Key { .init(.directoryCopy, scoped_id) }
+}
+
 extension ActivityItem {
+    var copyFeedbackKey: TransientFeedbackStore.Key { .init(.activityCopy, "\(hub)|\(signal_id)") }
+
     var replyTarget: String? {
         guard can_reply == true, let from_scoped_id, !from_scoped_id.isEmpty else { return nil }
         return from_scoped_id
@@ -142,7 +148,6 @@ final class DirectoryPeerCellView: NSTableCellView {
 
     func configure(with peer: RemotePeer, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onMessage: (() -> Void)? = nil) {
         let samePeer = inspectionId == "dir_peer:\(peer.scoped_id)"
-        let keepCopyFeedback = samePeer && copyControl.feedbackTimer?.isValid == true
         if !samePeer {
             copyControl.setHovered(false); msgControl.setHovered(false); deleteControl.setHovered(false)
             for control in [deleteControl, msgControl, copyControl] { control.invalidatePress() }
@@ -171,14 +176,12 @@ final class DirectoryPeerCellView: NSTableCellView {
         let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
         let shownAddress = compactAddressLabel(short,maxWidth:190,font:copyFont,paddingX:11)
         let copyWidth = min(190,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc")))
-        if !keepCopyFeedback { copyControl.clearFeedback(title: shownAddress, accessibilityLabel: copyAccessibilityLabel) }
+        copyControl.clearFeedback(title: shownAddress, accessibilityLabel: copyAccessibilityLabel)
         copyControl.isHidden = false
         copyControl.frame = NSRect(x: 0, y: 15, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
-        copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
-        copyControl.applyVisualState()
-        if keepCopyFeedback { copyControl.restingTitle = shownAddress; copyControl.restingAccessibilityLabel = copyAccessibilityLabel }
+        copyControl.showFeedback(key: peer.copyFeedbackKey)
         copyControl.toolTip = short
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
         if !samePeer || copyControl.pressed == nil {
@@ -249,7 +252,6 @@ final class DirectoryPeerCellView: NSTableCellView {
 
     func configureActivity(with item: ActivityItem, harnesses: [String: HarnessMeta], canDelete: Bool = true, onCopy: @escaping (MenuControl) -> Void, onDelete: @escaping () -> Void, onReply: @escaping () -> Void) {
         let sameItem = activityItem?.hub == item.hub && activityItem?.signal_id == item.signal_id
-        let keepCopyFeedback = sameItem && copyControl.feedbackTimer?.isValid == true
         if !sameItem {
             copyControl.setHovered(false); msgControl.setHovered(false); deleteControl.setHovered(false)
             for control in [deleteControl, msgControl, copyControl] { control.invalidatePress() }
@@ -288,13 +290,12 @@ final class DirectoryPeerCellView: NSTableCellView {
             msgControl.pressed = canReply ? { [weak self] in self?.messageAction?() } : nil
         }
         copyControl.isHidden = false
-        if !keepCopyFeedback { copyControl.clearFeedback(title: "Copy", accessibilityLabel: "Copy message") }
-        else { copyControl.restingTitle = "Copy"; copyControl.restingAccessibilityLabel = "Copy message" }
+        copyControl.clearFeedback(title: "Copy", accessibilityLabel: "Copy message")
         copyControl.style = .neutral
         copyControl.frame = NSRect(x:0,y:0,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
-        copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
         copyControl.label.font = copyFont
+        copyControl.showFeedback(key: item.copyFeedbackKey)
         copyControl.toolTip = "Copy message"
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_activity_msg:\(item.signal_id)")
         if !sameItem || copyControl.pressed == nil {
