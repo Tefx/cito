@@ -793,7 +793,7 @@ fn auto_listen_reenrollment_preserves_ui_scope_on_the_hub() {
     let host = Fixture::new(json!({}));
     let (_, port) = host.hub();
     let f = Fixture::new(
-        json!({"defaultHub":"work","hubs":{"work":{"url":format!("http://127.0.0.1:{port}"),"defaultScope":"workspace","autoListen":true}}}),
+        json!({"defaultHub":"work","hubs":{"work":{"url":format!("http://127.0.0.1:{port}"),"defaultScope":"self","autoListen":true}}}),
     );
     f.provider("delivered");
     f.daemon(&[]);

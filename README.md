@@ -68,8 +68,8 @@ To uninstall later while keeping your settings, run `brew uninstall --cask tefx/
 
 - **Readable Addresses** — Reach people with `@self` or `@alice`, and sessions with `alice/pi#8a4f`; prefix non-default Hubs such as `work:alice/codex#4219`. Full canonical listener IDs remain supported everywhere.
 - **Menu Bar & `⌘K` Directory / Activity** — The menu bar scopes **LISTENING SESSIONS**, **MY OTHER HOSTS**, and **AVAILABLE SESSIONS** to the selected Hub. Press **`⌘K`** to search online Nodes, inspect unread signals, and compose inline replies.
-- **Two-Scope Human Channels** — Hub administrators configure a shared Hub gateway (such as a Telegram Bot Token) and optional **Outbound-Only** mode once; each user pairs privately in 1 click or uses **Pause Inbox** across all attached Macs and channels without losing bindings.
-- **Flexible Networks (`local`, Share This Mac, `cito hub`)** — Start zero-config on `local://`, enable **Share This Mac** (`:4291`) for LAN/Tailscale peers, or deploy a standalone `cito hub` (`none`, `token`, or OIDC PKCE) with **`Self`** and **`Team`** session visibility.
+- **Two-Scope Human Channels** — Hub administrators configure a shared Hub gateway (such as a Telegram Bot Token) and optional **Outbound-Only** mode once; each user pairs privately in 1 click or uses **Pause** on the Hub-scoped Inbox card in **Settings → Human Channels** across all attached Macs and channels without losing bindings.
+- **Flexible Networks (`local`, Share This Mac, `cito hub`)** — Start zero-config on `local://`, enable **Share This Mac** (`:4291`) for LAN/Tailscale peers, or deploy a standalone `cito hub` (`none`, `token`, or OIDC PKCE). Non-OIDC Hubs connect your sessions and Macs automatically; OIDC Hubs expose **`Only Me`** and **`Everyone`** visibility controls in the UI (`self` / `workspace` in CLI and MCP).
 
 ---
 

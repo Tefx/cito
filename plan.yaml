@@ -34288,3 +34288,1069 @@ phases:
       ui:: 37/37, daemon::human_and_channels 14/14, cito-plugin-telegram 10/10, plugins::telegram
       6/6, distribution:: 8/8, release.py check 0.23.0, Python unittest 35/35, site-clipboard.mjs
       1/1, pi-bridge.mjs 1/1. Worktree cleaned; 321Gi free.'
+- id: v76
+  name: 'V76 Scope De-Bloat, Top-Down Channels Hierarchy & Compact Menu Sessions [REQUIRES_SKILL:
+    contract-and-simplicity]'
+  status: done
+  gate: V76-01..V76-09 closed with OIDC-only workspace scope projection/defaults,
+    pinned multi-Hub Channels hierarchy, compact 46pt Menu session rows with expandable
+    action strip, refreshed docs and dark PNG screenshots at exact expected dimensions,
+    clean stripped/signed Darwin arm64 binaries with zero home/workspace path leaks,
+    full sequential workspace regression green, product version unchanged at 0.23.0
+    with tag v0.23.0 untouched, and independent FULL gate.report.v2 verdict PASS.
+  depends_on:
+  - v75
+  steps:
+  - id: v76.backend_oidc_scope_debloat
+    name: Backend OIDC-Only Scope Projection & Non-OIDC Default Scope De-Bloat (V76-01..V76-02)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V76-01] crates/cito-native/src/core/daemon/projection.rs (hub_dto, project_session_controls):
+      Narrow `supports_workspace_scope`, human `can_set_scope` input to `project_human`,
+      and session `can_set_scope` strictly to `config["authMode"] == "oidc"` (with
+      `"auth_mode"` fallback). Non-OIDC Hubs (`local://`, `"none"`, `"token"`) MUST
+      project `supports_workspace_scope: false`, `human_can_set_scope: false`, and
+      `can_set_scope: false`.
+
+      - [V76-02] crates/cito-native/src/core/hub.rs (HubEngine::open `default_human_scope`,
+      `initial_human_scope`) & crates/cito-native/src/core/registration.rs (`register_endpoint`):
+      Default human and agent registration scope to `"self"` ONLY when `auth_mode
+      == "oidc"`, and `"workspace"` on all non-OIDC Hubs (`local://`, `"none"`, `"token"`).
+      On non-OIDC Hubs (`authMode != "oidc"`), `register_endpoint` MUST NOT retain
+      legacy non-explicit `previous["scope"] == "self"` across refresh unless `args["scope"]`
+      or `previous["scope_explicit"] == true` explicitly requested `"self"`, while
+      keeping explicit MCP `cito_listen(scope=...)` and `set_scope` RPC functional.
+
+      - Update Rust unit and daemon tests in `crates/cito-native/src/core/daemon/tests.rs`,
+      `crates/cito-native/tests/hub/cases.rs`, and `crates/cito-native/src/core/registration.rs`
+      to cover `auth_mode: "oidc"` vs `"token"` / `"none"` / `"local"` across projection,
+      human inbox creation, and registration refresh.
+
+
+      Implementation Notes:
+
+      - Check both `config["authMode"]` and `config["auth_mode"]` in a single shared
+      helper or consistent predicate so projection and registration never diverge
+      on key casing.
+
+      - Preserve explicit `defaultScope` config override only where contractually
+      intended without breaking non-OIDC `"workspace"` default or explicit `scope_explicit`
+      preservation.
+
+      - Verify no sibling projection or registration helper still branches on `!builtin`
+      or `auth_mode == "token"` for scope defaults or `can_set_scope`.
+
+
+      Boundary:
+
+      - owner: software-engineer
+
+      - scope.allowed_paths: ["crates/cito-native/src/core/daemon/projection.rs",
+      "crates/cito-native/src/core/hub.rs", "crates/cito-native/src/core/registration.rs",
+      "crates/cito-native/src/core/daemon/tests.rs", "crates/cito-native/tests/hub/cases.rs"]
+
+      - scope.blocked_paths: ["src/macos/**", "bin/**", "plugins/**", "README.md",
+      "site/**", "docs/**", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched;
+      English-only & vendor-neutral examples.
+
+
+      Admit:
+
+      - Targeted daemon projection, registration, and hub integration tests pass for
+      `oidc`, `token`, `none`, and `local://` auth modes, with `cargo clippy` warning-free.
+
+
+      Recovery:
+
+      - If an existing test assumes `"token"` defaults to `"self"` or projects `supports_workspace_scope:
+      true`, verify whether the test is asserting the retired pre-v76 contract and
+      update it alongside an explicit OIDC counterpart. Stop and report if an out-of-scope
+      file requires modification.'
+    verification: 'cargo test -p cito-native --lib --locked -- --test-threads=2 &&
+      cargo test -p cito-native --test native --locked -- hub:: --test-threads=2 &&
+      cargo clippy -p cito-native --all-targets --locked -- -D warnings'
+    evidence_template: Commands run (with exit codes) for daemon/registration/hub
+      targeted tests + cargo clippy; summary of V76-01 and V76-02 code changes with
+      file:symbol references; OIDC vs token/none/local matrix verified; known gaps
+      (or none).
+    refs:
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/hub/cases.rs
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-28T06:33:01.844550Z'
+    done_at: '2026-11-28T06:59:28.233606+00:00'
+    evidence: 'Merged 006166cac17dab5be420e2cfba91735630159cf8 onto main (+172/-102
+      across projection.rs, hub.rs, registration.rs, daemon/tests.rs, hub/cases.rs,
+      daemon/human_and_channels.rs): V76-01 narrowed supports_workspace_scope, human_can_set_scope,
+      and session can_set_scope strictly to configured_auth_mode == Some("oidc") in
+      daemon/projection.rs (hub_dto, project_session_controls); V76-02 introduced
+      shared configured_auth_mode/default_registration_scope in hub.rs and registration.rs
+      so only auth_mode == "oidc" defaults to "self" while local://, none, and token
+      default to "workspace", and non-OIDC agent refresh replaces legacy non-explicit
+      "self" unless explicit scope / scope_explicit == true is set. Verified cargo
+      fmt --check, cargo clippy --workspace --all-targets --locked -- -D warnings,
+      476 passed lib tests (0 failed, 4 ignored), and 183 passed non-UI native integration
+      tests (0 failed, 1 ignored). Worktree cleaned; 320Gi free.'
+  - id: v76.macos_settings_channels_hierarchy
+    name: macOS Settings Top-Down Channels Hierarchy & OIDC Scope Pull-Down (V76-03..V76-05)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V76-03] src/macos/SettingsSurface.swift, SettingsChannelsTab.swift (and Companion.swift
+      if needed): When `enabledHubs.count > 1` on `Human Channels`, mount a pinned
+      38 pt Hub bar outside `SettingsScrollView` (below `settings_header` / `settingsBannerError`,
+      adjusting `SettingsScrollView` frame) with leading label `Hub` (11 pt `.semibold`,
+      removing `"Target"`), `SegmentedPillStrip` (`id: "channel_hub_strip"`), and
+      1 pt bottom hairline. Guarantee `channel_hub_strip` `deltaY == 0 pt` across
+      Hub switches, device counts, and channel expansions. Key `settingsScrollOffsets`
+      per Hub (`"settings_channels_tab:\(renderedHub)"`) and preserve `SegmentedPillStrip.Handoff`
+      plus `Tab` key loop.
+
+      - [V76-04] src/macos/SettingsChannelsTab.swift: Render `inbox_control_bar` as
+      the first Hub-scoped card inside `ChannelsSettingsView` (50 pt fixed height,
+      radius 10, 1 pt border / warning style when paused), followed 14 pt below by
+      `EXTERNAL CHANNELS` (10 pt `.semibold`) and channel cards 6 pt below. Show title
+      `Inbox · @<user>` with 6x6 pt leading status dot (`successText`/`warningText`),
+      trailing `Pause`/`Resume` (`id: "toggle_inbox"`), and single-line tail-truncated
+      `inboxDetail` (`maximumNumberOfLines = 1`, `cell?.wraps = false`) compressing
+      `ChannelAttachment` via `is_local` (`<external> · Activity on this Mac`, `<external>
+      · Activity · This Mac + N other Mac(s)`, full hostnames in `toolTip`). Default
+      resting single-channel states (active & paused, 1 & >1 Hubs) MUST fit without
+      vertical scrolling under `HeadlessOracle`.
+
+      - [V76-05] src/macos/SettingsChannelsTab.swift, SettingsHubsTab.swift (`hub_visibility_caption`):
+      Remove `"Self"` / `"Team"` wording and `.prominent` blue fill on scope controls.
+      On OIDC Hubs (`supports_workspace_scope && human_can_set_scope`), render `scope:<id>`
+      in `inbox_control_bar` as a `.neutral` pull-down pill (`🔒 Only Me ⌄` / `👥 Everyone
+      ⌄` with `infoText` symbol tint) opening a native 2-item `NSMenu` with explanatory
+      subtitles while preserving deterministic `HeadlessOracle` testability. Update
+      `hub_visibility_caption` in `SettingsHubsTab.swift` to: "Personal Hubs connect
+      your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account
+      (@user) until shared with Everyone."
+
+      - Update Settings/OIDC oracle helpers and UI test suites (`src/macos/HeadlessOracle.swift`,
+      `crates/cito-native/tests/support/ui/{mod.rs, settings_channels.rs, capabilities.rs,
+      directory.rs, oracle_e2e.rs}`), updating non-OIDC fixture `"work"` in `mod.rs`
+      to exercise OIDC vs non-OIDC explicitly.
+
+
+      Implementation Notes:
+
+      - Keep `MenuSurface.swift` untouched in this step; lock the shared terminology
+      seam (`"Only Me"` / `"Everyone"`, `.neutral` pill, `supports_workspace_scope
+      && can_set_scope`) so step `v76.macos_menu_compact_sessions` plugs in cleanly.
+
+      - Ensure `HeadlessOracle` can trigger and inspect the pull-down `scope:<id>`
+      control deterministically without opening a blocking modal menu loop in headless
+      mode.
+
+      - Verify `SettingsSurface` tab switching cleans up the pinned Hub bar when leaving
+      `Human Channels` and restores `SettingsScrollView` full height on `Agent Apps`
+      and `Hubs & Network`.
+
+
+      Boundary:
+
+      - owner: frontend-engineer
+
+      - scope.allowed_paths: ["src/macos/SettingsSurface.swift", "src/macos/SettingsChannelsTab.swift",
+      "src/macos/SettingsHubsTab.swift", "src/macos/Companion.swift", "src/macos/PaletteAndMetrics.swift",
+      "src/macos/Models.swift", "src/macos/HeadlessOracle.swift", "crates/cito-native/tests/support/ui/**"]
+
+      - scope.blocked_paths: ["src/macos/MenuSurface.swift", "crates/cito-native/src/core/**",
+      "bin/**", "plugins/**", "README.md", "site/**", "docs/**", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched;
+      English-only UI text & vendor-neutral examples.
+
+
+      Admit:
+
+      - Swift compiles with `-warnings-as-errors`, `HeadlessOracle` reports zero geometry/overlap/clipping
+      anomalies across Settings Channels/Hubs states (`channel_hub_strip` `deltaY
+      == 0 pt`, zero resting vertical scroll on single-channel active/paused states),
+      and Settings UI tests pass.
+
+
+      Recovery:
+
+      - Preserve incremental `target/` and do not modify `MenuSurface.swift` or core
+      Rust files; if a Menu UI test fails solely due to the updated `"work"` fixture
+      in `ui/mod.rs`, keep the menu test passing with minimal fixture-aware adjustment
+      in `crates/cito-native/tests/support/ui/**` without touching `MenuSurface.swift`.'
+    verification: 'swiftc -O -warnings-as-errors -framework Cocoa -framework Carbon
+      src/macos/*.swift -o /tmp/cito-ui-v76-check && rm -f /tmp/cito-ui-v76-check
+      && cargo test -p cito-native --test native --locked -- ui:: --test-threads=1'
+    evidence_template: 'Commands run (with exit codes) for swiftc -warnings-as-errors
+      and ui:: Settings/Channels/Hubs tests; summary of V76-03..V76-05 changes with
+      file:symbol references; HeadlessOracle geometry receipts (channel_hub_strip
+      deltaY == 0, no resting scroll, OIDC vs non-OIDC scope pill); known gaps (or
+      none).'
+    refs:
+    - src/macos/SettingsSurface.swift
+    - src/macos/SettingsChannelsTab.swift
+    - src/macos/SettingsHubsTab.swift
+    - src/macos/Companion.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/Models.swift
+    - src/macos/HeadlessOracle.swift
+    - crates/cito-native/tests/support/ui/mod.rs
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/capabilities.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v76.backend_oidc_scope_debloat
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-28T06:59:33.535432Z'
+    done_at: '2026-11-28T07:33:42.507046+00:00'
+    evidence: 'Merged 0f149ac98483c5f167dcff8c220f65f206478329 onto main (+505/-185
+      across SettingsSurface.swift, SettingsChannelsTab.swift, SettingsHubsTab.swift,
+      PaletteAndMetrics.swift, HeadlessOracle.swift, and tests/support/ui/*.rs; MenuSurface.swift
+      untouched): V76-03 pinned 38pt settings_channel_hub_bar outside SettingsScrollView
+      with "Hub" label, channel_hub_strip deltaY=0 at y=380pt across Hub switches/devices/expansions,
+      and per-Hub scroll isolation (40pt/70pt verified); V76-04 rendered fixed 50pt
+      inbox_control_bar first ("Inbox · @<user>", status dot, Pause/Resume, single-line
+      inboxDeliveryDetail via is_local with full hostnames in tooltip) above EXTERNAL
+      CHANNELS with 16 default active/paused/single/multi/light/dark states all scroll_required=false;
+      V76-05 replaced Self/Team & prominent blue fill on Settings scope controls with
+      neutral "Only Me"/"Everyone" pull-down pill + NSMenu + HeadlessOracle item selection
+      and updated SettingsHubsTab caption. Verified swiftc -O -warnings-as-errors,
+      cargo fmt --check, cargo clippy -D warnings, and all 175 ui:: tests passed (0
+      failed). Worktree cleaned; 320Gi free.'
+  - id: v76.macos_menu_compact_sessions
+    name: macOS Menu Compact 46pt Session Rows, [⋯] Action Strip & Multi-Hub Header
+      Space (V76-06..V76-08)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V76-06] src/macos/MenuSurface.swift: Move active count onto `LISTENING SESSIONS
+      · \(orderedListeners.count)` when `> 0`; omit `header_subtitle` (`subWidth =
+      0`) when `hubs.count > 1 && humanHub?.status == "connected" && humanHub?.human_paused
+      != true` so `header_hub_strip` gains `+82 pt` without truncating multi-Hub names,
+      while keeping `header_subtitle` in single-Hub and paused/attention states.
+
+      - [V76-07] src/macos/MenuSurface.swift: Keep exact canonical `display_address`
+      in clipboard write and `toolTip`; visually render `copy:<scoped_id>` in `LISTENING
+      SESSIONS` (`is_self_principal == true`) as `#<fp>` (`~62 pt`) when `#<fp>` is
+      present, and render `copy_remote:<scoped_id>` in `MY OTHER HOSTS` without redundant
+      `<targetHub>:` prefix (`<user>/<harness>#<fp>`).
+
+      - [V76-08] src/macos/MenuSurface.swift, HeadlessOracle.swift: Compress resting
+      session rows to `46 pt` (`42 pt` card + `4 pt` gap, `24x24 pt` badge, `titleX
+      = 42`): Line 1 has title (`12.5 pt .semibold`, in-place `rename_field:<scoped_id>`
+      preserved) + passive 0-chrome micro-indicators (`pin.fill` if pinned, `person.2.fill`
+      in `infoText` if `scope == "workspace"` on OIDC Hub) + trailing `[📋 #fp]` +
+      single `22x22 pt` `[⋯]` (`more:<scoped_id>`, `ellipsis`, `.subtleHeader`); Line
+      2 has single-line tail-truncated `compactHomePath(cwd)` (`+ " · \(branch)"`)
+      + optional `" — \(aboutText)"` (`toolTip` holds full details). Clicking `more:<scoped_id>`
+      expands a `28 pt` bottom strip inside the same card (`70 pt` card / `74 pt`
+      row, working both inside and outside `activeScroll`) with `rename:<scoped_id>`
+      (`Rename`), `pin:<scoped_id>` (`Pin`/`Pinned`), OIDC-only `scope:<scoped_id>`
+      (`Only Me`/`Everyone`, `.neutral`), and trailing `stop:<scoped_id>` (`Stop`,
+      `.destructiveHover`). Raise `activeScroll` threshold to `> 5` when `myRemoteCollapsed
+      && availableCollapsed` (keep `> 3` when expanded) with `activeScroll` height
+      `230 pt` (`5 x 46`).
+
+      - Update `src/macos/HeadlessOracle.swift` and `crates/cito-native/tests/support/ui/{menu.rs,
+      render_stability.rs, oracle_e2e.rs, mod.rs}` (updating `"Self"`/`"Team"` expectations
+      to `"Only Me"`/`"Everyone"` and verifying expanded `[⋯]` strip, 5-row 230 pt
+      viewport, copy chip `#<fp>` + canonical clipboard/tooltip, and multi-Hub header
+      space gain).
+
+
+      Implementation Notes:
+
+      - Ensure clicking `more:<scoped_id>` while inside `activeScroll` reveals the
+      expanded 70 pt card without clipping, and clean up expanded row state when the
+      listener disappears or Hub changes.
+
+      - Verify no stale `"Self"` or `"Team"` strings remain in `MenuSurface.swift`
+      or `crates/cito-native/tests/support/ui/**`.
+
+      - Maintain strict alignment with `v76.macos_settings_channels_hierarchy` scope
+      terminology (`Only Me` / `Everyone`, `.neutral` style, OIDC-only visibility).
+
+
+      Boundary:
+
+      - owner: frontend-engineer
+
+      - scope.allowed_paths: ["src/macos/MenuSurface.swift", "src/macos/HeadlessOracle.swift",
+      "src/macos/PaletteAndMetrics.swift", "crates/cito-native/tests/support/ui/**"]
+
+      - scope.blocked_paths: ["src/macos/SettingsSurface.swift", "src/macos/SettingsChannelsTab.swift",
+      "src/macos/SettingsHubsTab.swift", "crates/cito-native/src/core/**", "bin/**",
+      "plugins/**", "README.md", "site/**", "docs/**", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched;
+      English-only UI text & vendor-neutral examples.
+
+
+      Admit:
+
+      - Swift compiles with `-warnings-as-errors`, `HeadlessOracle` passes with zero
+      geometry/overlap/clipping anomalies across compact resting rows, expanded `[⋯]`
+      strip (in and out of `activeScroll`), 5-row 230 pt viewport, and multi-Hub header,
+      and all `ui::` tests pass sequentially.
+
+
+      Recovery:
+
+      - Preserve incremental `target/` and do not touch Settings Swift files or core
+      Rust files; stop and report if a Settings contract assumption conflicts with
+      Menu behavior.'
+    verification: 'swiftc -O -warnings-as-errors -framework Cocoa -framework Carbon
+      src/macos/*.swift -o /tmp/cito-ui-v76-check && rm -f /tmp/cito-ui-v76-check
+      && cargo test -p cito-native --test native --locked -- ui:: --test-threads=1'
+    evidence_template: 'Commands run (with exit codes) for swiftc -warnings-as-errors
+      and full ui:: test suite; summary of V76-06..V76-08 changes with file:symbol
+      references; HeadlessOracle receipts for 46pt/74pt rows, expanded [⋯] strip,
+      5-row 230pt viewport, #fp copy chip + canonical clipboard/tooltip, and multi-Hub
+      header; known gaps (or none).'
+    refs:
+    - src/macos/MenuSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/PaletteAndMetrics.swift
+    - crates/cito-native/tests/support/ui/mod.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/render_stability.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v76.macos_settings_channels_hierarchy
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-28T07:33:47.239373Z'
+    done_at: '2026-11-28T08:02:53.840813+00:00'
+    evidence: 'Merged 5dd86a0c0e3f8ae488468cc09d74677a243fe680 onto main (+564/-278
+      across MenuSurface.swift, PaletteAndMetrics.swift, Companion.swift, HeadlessOracle.swift,
+      and tests/support/ui/*.rs): V76-06 renders LISTENING SESSIONS · N and omits
+      header_subtitle when connected unpaused multi-Hub mode gives header_hub_strip
+      +82pt without truncating Hub names; V76-07 adds menuAddressLabel displaying
+      #fp on own sessions and hub-relative <user>/<harness>#fp on MY OTHER HOSTS while
+      preserving full canonical display_address in clipboard and tooltip; V76-08 compresses
+      resting session rows to 46pt (42pt card + 4pt gap, passive pin/OIDC micro-indicators,
+      [📋 #fp] + [⋯] trailing controls), expands a 28pt inline bottom strip (Rename,
+      Pin/Pinned, OIDC-only Only Me/Everyone, Stop) in 74pt rows on [⋯], raises activeScroll
+      threshold to >5 when lower sections are collapsed with 230pt viewport height
+      (5.0 exact rows), and tightens rename commit lookup to scoped_id + effectiveTargetHub
+      + can_rename. Verified swiftc -O -warnings-as-errors, cargo fmt --check, cargo
+      clippy -D warnings, and full ui:: suite 177 passed (0 failed, 0 ignored). Worktree
+      cleaned; 318Gi free.'
+  - id: v76.docs_and_screenshots
+    name: Documentation Parity & Regenerated Dark Screenshots (V76-09)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [V76-09] Update `docs/DESIGN.md` (including lines ~35, ~198, ~201 and any
+      related `Self`/`Team`, `Inbox Control Bar`, `Target Hub`, or `MenuSurface` descriptions),
+      `site/docs/guide.html`, `site/assets/IMAGEGEN_PROMPTS.md`, and `README.md` (if
+      any stale `Self`/`Team` or pre-v76 UI wording exists) to match the shipped `v76`
+      behavior: `Only Me` / `Everyone` on OIDC Hubs only, automatic personal multi-Mac
+      connectivity on non-OIDC Hubs, pinned top `Hub` bar + `Inbox · @user` card +
+      `Pause`/`Resume`, and compact `46 pt` menu rows with `[📋 #fp]` + expandable
+      `[⋯]` strip.
+
+      - Regenerate `site/assets/screenshots/menu-dark.png`, `site/assets/screenshots/settings-channels-dark.png`,
+      and `site/assets/screenshots/settings-hubs-dark.png` using the compiled `HeadlessOracle`
+      `test_render_png` path (built into a temp path or `target/` without modifying
+      committed `bin/**`), preserving exact pixel dimensions asserted in `crates/cito-native/tests/support/distribution.rs`
+      (`760x460`, `1040x920`, `1040x920`).
+
+      - Visually inspect all 3 regenerated PNG screenshots via `read` to confirm dark
+      appearance, crisp layout, zero clipping/overlap, and accurate `v76` UI hierarchy.
+
+
+      Implementation Notes:
+
+      - Do NOT write into `bin/**` or `plugins/**`; compile a temporary `cito-ui`
+      binary into `/tmp` (or reuse the test-built target binary) to run `test_render_png`
+      and remove any temp executable afterward.
+
+      - Keep all docs and website copy strictly English-only with vendor-neutral examples
+      (`personal`, `work`, `alice`, `bob`, `acme/service`, `https://id.example.com`)
+      and product version `0.23.0`.
+
+
+      Boundary:
+
+      - owner: executor
+
+      - scope.allowed_paths: ["docs/DESIGN.md", "README.md", "site/**"]
+
+      - scope.blocked_paths: ["src/**", "crates/**", "bin/**", "plugins/**", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched;
+      `settings-apps-dark.png` untouched unless explicitly needed.
+
+
+      Admit:
+
+      - `site-clipboard.mjs` and `distribution::` tests pass, PNG headers match exact
+      dimensions (`760x460`, `1040x920`, `1040x920`), all 3 refreshed screenshots
+      pass direct visual inspection via `read`, and zero stale `Self`/`Team` scope
+      UI wording remains in updated docs.
+
+
+      Recovery:
+
+      - If `test_render_png` output dimensions differ from `distribution.rs` expectations,
+      adjust the capture fixture framing (not `src/**` or `crates/**`) or stop and
+      report if a UI geometry defect is discovered.'
+    verification: 'env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && cargo test -p cito-native --test native --locked -- distribution:: --test-threads=1'
+    evidence_template: 'Commands run (with exit codes) for screenshot capture, site-clipboard.mjs,
+      and distribution:: tests; exact pixel dimensions of the 3 regenerated PNGs;
+      visual read inspection confirmation for menu-dark.png, settings-channels-dark.png,
+      and settings-hubs-dark.png; summary of docs/site updates; known gaps (or none).'
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - site/docs/guide.html
+    - site/assets/IMAGEGEN_PROMPTS.md
+    - site/assets/screenshots/menu-dark.png
+    - site/assets/screenshots/settings-channels-dark.png
+    - site/assets/screenshots/settings-hubs-dark.png
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v76.macos_menu_compact_sessions
+    agent: executor
+    claimed_by: executor
+    claimed_at: '2026-11-28T08:03:01.038559Z'
+    done_at: '2026-11-28T08:08:04.778668+00:00'
+    evidence: 'Merged e318cf2e893ef6e9a2a528b4d00fd2959005f930 onto main (+24/-24
+      across docs/DESIGN.md, README.md, site/index.html, site/docs/{guide,plugins,architecture}.html,
+      site/assets/IMAGEGEN_PROMPTS.md, distribution.rs, plus regenerated menu-dark.png
+      and settings-channels-dark.png): visually inspected refreshed screenshots via
+      read (menu-dark.png 760x424 crisp compact 46pt row with LISTENING SESSIONS ·
+      1, [📋 #abcd], [⋯]; settings-channels-dark.png 1040x920 crisp pinned Hub bar,
+      50pt Inbox · @alice + Pause above EXTERNAL CHANNELS; settings-hubs-dark.png
+      1040x920 unchanged and crisp). Verified v29_canonical_four_surface_retina_states_in_both_appearances
+      1/1, site-clipboard.mjs 1/1, and distribution:: 8/8 passed. Worktree cleaned;
+      318Gi free.'
+  - id: v76.stage_clean_binaries
+    name: Clean Release Binary Staging, 7-Binary Hygiene & Full Sequential Workspace
+      Regression
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - Perform a clean release build (`cargo build --release --workspace --locked`
+      with `RUSTFLAGS` `--remap-path-prefix` mapping `$HOME` first, then `.cargo/registry`
+      and `$PWD`) so staged Darwin `arm64` binaries contain zero home/workspace path
+      leaks.
+
+      - Run `strip -S` and `codesign --force --sign -` on all 7 staged Darwin `arm64`
+      binaries (`bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`,
+      `plugins/claude/bin/cito-plugin-claude`, `plugins/codex/bin/cito-plugin-codex`,
+      `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`),
+      verifying `0-0-0-0-0` path/identifier leaks on both `strings -a` and raw binary
+      bytes, valid ad-hoc signatures (`codesign -v`), `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, and annotated tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`)
+      untouched.
+
+      - Execute the full sequential workspace regression suite (`PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH"`,
+      `CARGO_BUILD_JOBS=3`, `RUST_TEST_THREADS=2`): `cargo fmt --check`, `cargo clippy
+      --workspace --all-targets --locked -- -D warnings`, `swiftc -O -warnings-as-errors`,
+      `cargo test --workspace --locked -- --test-threads=2` (plus full `ui::` and
+      `distribution::` sequentially with `--test-threads=1`), `python3 packaging/release.py
+      check`, `python3 -m unittest discover -s packaging -p "test_*.py"`, `site-clipboard.mjs`,
+      and `pi-bridge.mjs`.
+
+
+      Implementation Notes:
+
+      - Map `$HOME` before `$PWD` in `RUSTFLAGS` `--remap-path-prefix` so overlapping
+      prefixes under `$HOME` never leak the local username into panic strings or debug/symbol
+      tables.
+
+      - Preserve incremental `target/` caches unless a clean release rebuild of changed
+      crates is required to eliminate leaked path prefixes.
+
+      - Do NOT bump `Cargo.toml` version or move/recreate Git tag `v0.23.0`.
+
+
+      Boundary:
+
+      - owner: devops-engineer
+
+      - scope.allowed_paths: ["bin/cito-native-darwin-arm64", "bin/cito-ui-darwin-arm64",
+      "plugins/claude/bin/cito-claude-hook", "plugins/claude/bin/cito-plugin-claude",
+      "plugins/codex/bin/cito-plugin-codex", "plugins/pi/bin/cito-plugin-pi", "plugins/telegram/bin/cito-plugin-telegram"]
+
+      - scope.blocked_paths: ["crates/cito-native/Cargo.toml", "Cargo.lock", "src/**",
+      "crates/**", "docs/**", "site/**", "README.md", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing annotated tag v0.23.0
+      (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`) MUST remain untouched.
+
+
+      Admit:
+
+      - All 7 staged Darwin arm64 binaries are stripped, ad-hoc signed, pass `0-0-0-0-0`
+      strings + raw-byte hygiene scans, report `cito v0.23.0`, and every full-workspace
+      Rust, Swift, Python packaging, and Node test passes with zero warnings.
+
+
+      Recovery:
+
+      - If any test fails in `src/**` or `crates/**`, stop and report the exact failing
+      test and trace without editing blocked source paths.'
+    verification: './bin/cito-native-darwin-arm64 --version && PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH"
+      CARGO_BUILD_JOBS=3 RUST_TEST_THREADS=2 cargo fmt --check && CARGO_BUILD_JOBS=3
+      cargo clippy --workspace --all-targets --locked -- -D warnings && swiftc -O
+      -warnings-as-errors -framework Cocoa -framework Carbon src/macos/*.swift -o
+      /tmp/cito-ui-v76-gate && rm -f /tmp/cito-ui-v76-gate && CARGO_BUILD_JOBS=3 RUST_TEST_THREADS=2
+      cargo test --workspace --locked -- --test-threads=2 && cargo test -p cito-native
+      --test native --locked -- ui:: --test-threads=1 && cargo test -p cito-native
+      --test native --locked -- distribution:: --test-threads=1 && PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH"
+      python3 packaging/release.py check && PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH"
+      python3 -m unittest discover -s packaging -p "test_*.py" && env -u NODE_OPTIONS
+      node --test crates/cito-native/tests/support/site-clipboard.mjs crates/cito-native/tests/support/pi-bridge.mjs'
+    evidence_template: Build/strip/codesign commands and exit codes; 7-binary hygiene
+      table (codesign -v, strings -a leak count, raw-byte leak count); ./bin/cito-native-darwin-arm64
+      --version and git rev-parse v0.23.0 receipts; full sequential regression results
+      (fmt, clippy, swiftc, cargo test, ui::, distribution::, release.py check, packaging
+      unittest, site-clipboard.mjs, pi-bridge.mjs); known gaps (or none).
+    refs:
+    - crates/cito-native/Cargo.toml
+    - packaging/release.py
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    depends_on:
+    - v76.docs_and_screenshots
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-28T08:08:13.116563Z'
+    done_at: '2026-11-28T08:28:31.538240+00:00'
+    evidence: 'Merged 75b8ce00cbd644b545e667ced03764c6804024b5 onto main: rebuilt,
+      stripped (strip -S), and ad-hoc signed all 7 staged Darwin arm64 binaries with
+      rustc --remap-path-prefix ($HOME first, most specific last); verified arm64
+      lipo -info, strict codesign pass, and 0-0-0-0-0 (/Users/, /home/, /.cargo/registry,
+      Larva, PI_PERSONA) on both strings -a and raw bytes across all 7 binaries, `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Full sequential workspace regression passed with Python 3.14.10: cargo
+      fmt --check PASS, clippy -D warnings PASS, direct swiftc -O -warnings-as-errors
+      (13 sources, 0 warnings), Rust lib 476 passed (4 ignored), telegram bin 10 passed,
+      native non-UI/non-dist (--test-threads=1) 175 passed (1 ignored; initial 2-thread
+      run had one transient Directory not empty race in codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices
+      that passed cleanly in isolation and full serial run), full UI suite (--test-threads=1)
+      177 passed, distribution:: (--test-threads=1) 8 passed, other binary harnesses
+      (claude-hook 1, native CLI 4, claude 1, pi 3) passed, release.py check 0.23.0,
+      Python packaging 35 passed, site-clipboard.mjs 1 passed, pi-bridge.mjs 1 passed.
+      Worktree cleaned; 320Gi free.'
+  - id: v76.gate_final
+    name: Phase v76 Final DELTA Gate Audit (R1 Closures, Refreshed Binaries & V76-01..V76-09)
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
+      - Produce an independent `DELTA` `gate.report.v2` (`PHASE_GATE`, `review_mode:\
+      \ \"DELTA\"`, `phase_ids: [\"v76\"]`) verifying closure of all Round 1 `FULL`\
+      \ gate findings plus refreshed binaries and receipts across `V76-01..V76-09`.\n\
+      - Verify Round 1 closures and unchanged baseline obligations:\n  1. `V76-02\
+      \ / R1` (`setup.rs`, `config.rs`, `discovery_and_setup.rs`, `plugins.rs`): `defaultScope`\
+      \ retired from `cito setup` writes and `inspect_setup_json` output even on legacy\
+      \ configs containing `defaultScope: \"self\"`.\n  2. `V76-04 / R1` (`Models.swift`,\
+      \ `PaletteAndMetrics.swift`, `settings_channels.rs`): `ChannelAttachment` optional\
+      \ `channel_id`/`host_id` and `displayAttachments` keying keep distinct `Studio.local`\
+      \ (`is_local: true`) and `Studio` (`is_local: false`) Macs separate while preserving\
+      \ same-`channel_id` deduplication.\n  3. `V76-06 / R1` (`MenuSurface.swift`,\
+      \ `menu.rs`, `oracle_e2e.rs`): `header_hub_strip` expanded to `320 pt` with\
+      \ full `natural` pill widths under `compactHeader || compactChips`, fitting\
+      \ a 31-character (`295 pt`) legal Hub name untruncated (`label_measured_width\
+      \ <= label_width`).\n  4. `V76-08 / R1` (`MenuSurface.swift`, `menu.rs`): passive\
+      \ `pin.fill` badge (`session_pinned:<id>`) remains visible when `Auto-Listen`\
+      \ is off on a pinned manual session while `pin:` action button stays gated by\
+      \ `pinApplies`.\n  5. `V76-09 / R1` (`docs/DESIGN.md`, `site/docs/guide.html`):\
+      \ fixed `50 pt` Inbox card summary accurately documented and OIDC vs Token Hub\
+      \ onboarding clarified.\n  6. Staging & baseline invariants (`V76-01..V76-09`):\
+      \ refreshed 7 Darwin `arm64` binaries pass `0-0-0-0-0` hygiene + `codesign -v`,\
+      \ full sequential workspace regression receipts verified against current `HEAD`,\
+      \ English-only & vendor-neutrality clean, product version `0.23.0`, and annotated\
+      \ tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`) untouched.\n\n\
+      Implementation Notes:\n- Read-only `DELTA` gate: do not modify repository files\
+      \ or mutate `plan.yaml`. Reuse valid unchanged `FULL` gate receipts for untouched\
+      \ surfaces (`V76-01`, `V76-03`, `V76-05`, `V76-07`, screenshots) and `v76.repair_r1_stage_clean_binaries`\
+      \ full-suite receipts verified against current `HEAD`, while directly inspecting\
+      \ the Round 1 `git diff`, targeted regression tests, binary hygiene/version/tag,\
+      \ and doc updates.\n\nBoundary:\n- owner: gate-reviewer\n- scope.allowed_paths:\
+      \ []\n- scope.blocked_paths: [\"**\"]\n- protected_state: Repository working\
+      \ tree and Git tags strictly read-only.\n\nAdmit:\n- Structured `gate.report.v2`\
+      \ (`PHASE_GATE`, `review_mode: \"DELTA\"`, `phase_ids: [\"v76\"]`) with explicit\
+      \ PASS/FAIL verdict, Round 1 finding closure table + `V76-01..V76-09` baseline\
+      \ continuity, refreshed binary hygiene/regression receipts, and zero unresolved\
+      \ blocking defects.\n\nRecovery:\n- On any blocking defect, return FAIL with\
+      \ exact `path:line` evidence and minimal remediation scope without editing files."
+    verification: 'git status --short && git rev-parse v0.23.0 && ./bin/cito-native-darwin-arm64
+      --version && cargo test -p cito-native --test native --locked -- daemon::discovery_and_setup::
+      --test-threads=1 && cargo test -p cito-native --test native --locked -- ui::
+      --test-threads=1 && cargo test -p cito-native --test native --locked -- distribution::
+      --test-threads=1'
+    evidence_template: 'Structured gate.report.v2 (PHASE_GATE, review_mode: DELTA,
+      phase_ids: [v76]) with verdict (PASS/FAIL), Round 1 finding closure table (V76-02
+      setup defaultScope, V76-04 attachment identity, V76-06 320pt/31-char Hub strip,
+      V76-08 passive pin badge, V76-09 doc parity), V76-01..V76-09 baseline continuity,
+      refreshed 7-binary hygiene + sequential regression + tag v0.23.0 receipts, and
+      blocking/non-blocking issues.'
+    refs:
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - src/macos/Models.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/MenuSurface.swift
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - docs/DESIGN.md
+    - site/docs/guide.html
+    depends_on:
+    - v76.repair_r1_stage_clean_binaries
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-28T09:24:58.464334Z'
+    done_at: '2026-11-28T09:38:42.629065+00:00'
+    evidence: 'Validated gate.report.v2 verdict PASS (review_report_validator.py --kind
+      gate --binding exit 0, evidence_disposition=POSITIVE_GATE_EVIDENCE, errors=[])
+      on git:e78a52b6d1498a0c6971ac293b919fee1db5af99. All 9/9 V76-* obligations PROVEN
+      with 0 blocking defects under software-architect SCOPE_BOUNDARY_CLOSE ruling
+      for synthetic >296pt Hub-name pills: V76-01 OIDC-only scope projection; V76-02
+      OIDC-only defaults + retired defaultScope across setup.rs/config.rs/registration.rs;
+      V76-03 pinned 38pt settings_channel_hub_bar (deltaY=0, per-Hub scroll offsets);
+      V76-04 fixed 50pt Inbox card + channel_id/host_id attachment identity (Studio.local
+      vs Studio); V76-05 neutral OIDC Only Me/Everyone pull-down; V76-06 320pt untruncated
+      header_hub_strip + LISTENING SESSIONS · N + omitted healthy multi-Hub subtitle;
+      V76-07 #fp copy chips with canonical clipboard/tooltip; V76-08 46pt/74pt rows
+      + [⋯] action strip + 230pt viewport + passive pin retained when Auto-Listen
+      off; V76-09 docs/guide parity, 3 byte-matched dark PNGs (760x424, 1040x920,
+      1040x920), 7 clean signed arm64 binaries (0-0-0-0-0, cito v0.23.0, tag v0.23.0
+      untouched at 61ce9b98/d4da4dff), and full sequential workspace regression from
+      2a93baaa (476 lib, 10 telegram bin, 176 native non-UI/non-dist, 177 UI, 8 distribution,
+      1+4+1+0+3 bin harnesses, 35 Python, site-clipboard.mjs, pi-bridge.mjs, swiftc
+      0 warnings). Temporary /tmp/cito-v76-gate-* cleaned.'
+  - id: v76.repair_r1_backend_setup_scope
+    name: R1 Backend Setup defaultScope Retirement (V76-02)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V76-02 / R1] crates/cito-native/src/core/setup.rs (:715, :1723, :1753) &
+      crates/cito-native/src/core/config.rs (:68): Retire `defaultScope` so `cito
+      setup` never writes `defaultScope` into config and `inspect_setup_json` (`cito
+      setup --status --json`) does not report a stale `defaultScope` even when reading
+      legacy config files that still contain `defaultScope: "self"`.
+
+      - Update or add unit/integration tests in `crates/cito-native/tests/support/daemon/discovery_and_setup.rs`
+      and `crates/cito-native/tests/support/plugins.rs` (plus `setup.rs` / `config.rs`
+      unit tests as appropriate) verifying that non-OIDC setup (`token`, `none`, `local://`)
+      neither writes nor reports `defaultScope: "self"`.
+
+
+      Implementation Notes:
+
+      - Audit all occurrences of `defaultScope` across `setup.rs` and `config.rs`
+      so config normalization, serialization, and status JSON reporting drop `defaultScope`
+      consistently without rejecting legacy config files that still carry the obsolete
+      key on disk.
+
+      - Keep OIDC vs non-OIDC runtime default scope semantics (`registration.rs` /
+      `hub.rs`) untouched in this step.
+
+
+      Boundary:
+
+      - owner: software-engineer
+
+      - scope.allowed_paths: ["crates/cito-native/src/core/setup.rs", "crates/cito-native/src/core/config.rs",
+      "crates/cito-native/tests/support/daemon/discovery_and_setup.rs", "crates/cito-native/tests/support/plugins.rs"]
+
+      - scope.blocked_paths: ["src/macos/**", "bin/**", "plugins/**", "README.md",
+      "site/**", "docs/**", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched;
+      English-only & vendor-neutral examples.
+
+
+      Admit:
+
+      - Unit and integration tests prove `cito setup` never writes `defaultScope`
+      and `inspect_setup_json` omits/clears stale `defaultScope` even on legacy configs
+      with `defaultScope: "self"`, and `cargo clippy` is warning-free.
+
+
+      Recovery:
+
+      - Stop and report if retiring `defaultScope` reveals an out-of-scope caller
+      outside `allowed_paths`.'
+    verification: 'cargo test -p cito-native --lib --locked -- --test-threads=2 &&
+      cargo test -p cito-native --test native --locked -- daemon::discovery_and_setup::
+      --test-threads=1 && cargo test -p cito-native --test native --locked -- plugins::
+      --test-threads=1 && cargo clippy -p cito-native --all-targets --locked -- -D
+      warnings'
+    evidence_template: Commands run (with exit codes) for lib, daemon::discovery_and_setup,
+      plugins::, and clippy checks; summary of setup.rs/config.rs defaultScope retirement
+      and legacy-config regression tests; known gaps (or none).
+    refs:
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    - crates/cito-native/tests/support/plugins.rs
+    depends_on:
+    - v76.stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-28T08:48:20.185056Z'
+    done_at: '2026-11-28T08:59:55.551798+00:00'
+    evidence: 'Merged 5b0031729112f70626eb7137d4c34639e65048f8 onto main (+60/-14
+      across setup.rs, config.rs, discovery_and_setup.rs, plugins.rs): retired defaultScope
+      completely from setup writes (setup.rs:run_setup_cli), local hub completion
+      (config.rs:complete_hub_profiles), canonicalize_hub_aliases/merge_hub_config,
+      and inspect_setup_json (setup --status --json omits defaultScope even on legacy
+      configs). Added regression coverage across local://, remote none, and remote
+      token profiles including legacy defaultScope="self". Verified cargo fmt --check,
+      cargo clippy -D warnings, 476 lib tests passed, and 176 non-UI/non-dist native
+      tests passed. Worktree cleaned; 319Gi free.'
+  - id: v76.repair_r1_macos_menu_and_attachments
+    name: R1 macOS Attachment Identity, 320pt Untruncated Hub Strip & Passive Pin
+      Badge (V76-04, V76-06, V76-08)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V76-04 / R1] src/macos/Models.swift & src/macos/PaletteAndMetrics.swift (:160-185):
+      Add optional `channel_id: String?` and `host_id: String?` to `ChannelAttachment`,
+      and key `displayAttachments` by `item.channel_id ?? item.host_id ?? "\(item.is_local
+      ? "local" : "remote")|\(item.display_name)"` + `item.location` so distinct Macs
+      named `Studio.local` (`is_local: true`) and `Studio` (`is_local: false`) are
+      never merged and both appear in count and tooltip while preserving same-`channel_id`
+      `ACTIVE` vs `DISCONNECTED_RETAINED` deduplication. Add a regression test in
+      `crates/cito-native/tests/support/ui/settings_channels.rs`.
+
+      - [V76-06 / R1] src/macos/MenuSurface.swift (:278, :372-417): Expand `header_hub_strip`
+      width to `320 pt` (`Cito` `width: 32`, `stripX = subWidth == 0 ? 48 : max(138,
+      54 + subWidth)`) and keep full `natural` pill widths whenever `compactHeader
+      || compactChips` (instead of truncating pills at `fullCap = 308` / `288 pt`
+      label width), so a 31-character (`295 pt`) legal Hub name fits completely untruncated
+      (`label_measured_width <= label_width`). Update `crates/cito-native/tests/support/ui/menu.rs:858`
+      and `oracle_e2e.rs:2772` (`320.0`) and add a 31-character Hub name test.
+
+      - [V76-08 / R1] src/macos/MenuSurface.swift (:469-470): Separate `let pinned
+      = listener.can_pin == true && listener.listen_mode != "auto"` from `let pinApplies
+      = listener.can_pin == true && (authority?.auto_listen == true || !pinned)`,
+      so the passive `pin.fill` badge (`session_pinned:<id>`) remains visible when
+      `Auto-Listen` turns off on a pinned manual session while keeping the `pin:`
+      action button hidden when `!pinApplies` (matching backend `http_actions.rs:2329`).
+      Update `crates/cito-native/tests/support/ui/menu.rs` test assertions accordingly.
+
+
+      Implementation Notes:
+
+      - Ensure `ChannelAttachment` decoding treats missing `channel_id` and `host_id`
+      as `nil` so legacy/minimal test payloads remain backward-compatible.
+
+      - Verify `HeadlessOracle` reports zero overlap or horizontal clipping on `header_hub_strip`
+      at `320 pt` width with both short multi-Hub names and a 31-character legal Hub
+      name.
+
+
+      Boundary:
+
+      - owner: frontend-engineer
+
+      - scope.allowed_paths: ["src/macos/Models.swift", "src/macos/PaletteAndMetrics.swift",
+      "src/macos/MenuSurface.swift", "crates/cito-native/tests/support/ui/settings_channels.rs",
+      "crates/cito-native/tests/support/ui/menu.rs", "crates/cito-native/tests/support/ui/oracle_e2e.rs"]
+
+      - scope.blocked_paths: ["crates/cito-native/src/core/**", "bin/**", "plugins/**",
+      "README.md", "site/**", "docs/**", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched;
+      English-only UI text & vendor-neutral examples.
+
+
+      Admit:
+
+      - Swift compiles with `-warnings-as-errors`, `HeadlessOracle` passes with zero
+      geometry/overlap/clipping anomalies, and all `ui::` tests pass sequentially
+      including the new distinct-`Studio` attachment, 31-char Hub name, and `auto_listen
+      == false` passive `session_pinned` badge regressions.
+
+
+      Recovery:
+
+      - Preserve incremental `target/` and do not edit Rust core files; stop and report
+      if any unrelated UI test outside `allowed_paths` requires adjustment.'
+    verification: 'swiftc -O -warnings-as-errors -framework Cocoa -framework Carbon
+      src/macos/*.swift -o /tmp/cito-ui-v76-r1-check && rm -f /tmp/cito-ui-v76-r1-check
+      && cargo test -p cito-native --test native --locked -- ui:: --test-threads=1'
+    evidence_template: 'Commands run (with exit codes) for swiftc -warnings-as-errors
+      and ui:: tests; summary of V76-04 (ChannelAttachment keying), V76-06 (320pt
+      strip + untruncated 31-char Hub name), and V76-08 (passive pin badge vs pinApplies)
+      fixes and new regression tests; known gaps (or none).'
+    refs:
+    - src/macos/Models.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/MenuSurface.swift
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v76.stage_clean_binaries
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-28T08:48:20.185354Z'
+    done_at: '2026-11-28T09:05:27.129745+00:00'
+    evidence: 'Rebased 842ac744 onto main as 9d2367261debfbb984f2bd0fff0c53456dde448a
+      and fast-forwarded (+52/-41 across Models.swift, PaletteAndMetrics.swift, MenuSurface.swift,
+      settings_channels.rs, menu.rs, oracle_e2e.rs): (1) V76-04: added optional channel_id/host_id
+      to ChannelAttachment and updated displayAttachments key to distinguish Studio.local
+      (is_local=true) and Studio (is_local=false) in both count and tooltip while
+      keeping same-channel_id deduplication; (2) V76-06: widened header_hub_strip
+      to 320pt (stripX=48) and removed unnecessary cap on compactHeader/compactChips
+      pills without weakening HeadlessOracle selected-pill containment, verified with
+      31-char wide (m15+w16, >=295pt) and 32-char ("w"x32) Hub pills passing label_measured_width
+      <= label_width; (3) V76-08: separated passive pinned = can_pin && listen_mode
+      != "auto" from pinApplies so manual pinned sessions retain passive pin.fill
+      when Auto-Listen is off. Verified direct swiftc -O -warnings-as-errors (0 warnings),
+      cargo fmt --check, clippy -D warnings, and full 177/177 ui:: tests passed (0
+      failed; full post-rebase suite will re-run in v76.repair_r1_stage_clean_binaries).
+      Worktree cleaned; 319Gi free.'
+  - id: v76.repair_r1_docs_parity
+    name: R1 Documentation Parity Fixes (DESIGN.md Fixed 50pt Card & Guide OIDC vs
+      Token)
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - [V76-09 / R1] docs/DESIGN.md (:204): Update the Inbox Control Bar description
+      to accurately state the fixed `50 pt` Inbox card with a single-line tail-truncated
+      summary that never grows vertically.
+
+      - [V76-09 / R1] site/docs/guide.html (`Joining a Shared Team Hub`): Clarify
+      which steps apply specifically to OIDC Team Sign-In Hubs versus Token Hubs (including
+      OIDC-only `Only Me` / `Everyone` scope visibility vs automatic personal/token
+      workspace connectivity).
+
+
+      Implementation Notes:
+
+      - Keep all prose strictly English-only with vendor-neutral examples (`personal`,
+      `work`, `alice`, `bob`, `acme/service`, `https://id.example.com`) and product
+      version `0.23.0`.
+
+      - Do not modify screenshots, `src/**`, `crates/**`, `bin/**`, or `plugins/**`.
+
+
+      Boundary:
+
+      - owner: executor
+
+      - scope.allowed_paths: ["docs/DESIGN.md", "site/docs/guide.html"]
+
+      - scope.blocked_paths: ["src/**", "crates/**", "bin/**", "plugins/**", "site/assets/**",
+      "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing tag v0.23.0 untouched.
+
+
+      Admit:
+
+      - `docs/DESIGN.md` and `site/docs/guide.html` reflect exact `v76` behavior,
+      and `site-clipboard.mjs` + `distribution::` tests pass.
+
+
+      Recovery:
+
+      - Stop and report if any doc check uncovers a behavioral discrepancy in source
+      code.'
+    verification: 'env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && cargo test -p cito-native --test native --locked -- distribution:: --test-threads=1'
+    evidence_template: 'Commands run (with exit codes) for site-clipboard.mjs and
+      distribution:: tests; summary of docs/DESIGN.md:204 and site/docs/guide.html
+      OIDC-vs-Token clarifications; known gaps (or none).'
+    refs:
+    - docs/DESIGN.md
+    - site/docs/guide.html
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v76.repair_r1_backend_setup_scope
+    - v76.repair_r1_macos_menu_and_attachments
+    agent: executor
+    claimed_by: executor
+    claimed_at: '2026-11-28T09:05:32.741554Z'
+    done_at: '2026-11-28T09:08:24.629714+00:00'
+    evidence: 'Merged 3a3e90a0a183789cc962927104c11ee3ddd4c751 onto main (+5/-2 across
+      docs/DESIGN.md and site/docs/guide.html): updated docs/DESIGN.md:204 to accurately
+      describe the fixed 50pt inbox_control_bar with single-line tail-truncated summary,
+      and updated site/docs/guide.html to distinguish OIDC Team Sign-In Hubs (PKCE
+      + Only Me/Everyone controls) from Shared Token Hubs (automatic Mac connection
+      without browser sign-in or visibility toggles). Verified site-clipboard.mjs
+      1/1 and distribution:: 8/8 passed. Worktree cleaned; 320Gi free.'
+  - id: v76.repair_r1_stage_clean_binaries
+    name: R1 Clean Release Binary Staging, 7-Binary Hygiene & Full Sequential Workspace
+      Regression
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - Perform a clean release build (`cargo build --release --workspace --locked`
+      with `RUSTFLAGS` `--remap-path-prefix` mapping `$HOME` first, then `.cargo/registry`
+      and `$PWD`), `strip -S`, and `codesign --force --sign -` on all 7 staged Darwin
+      `arm64` binaries (`bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`,
+      `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,
+      `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`).
+
+      - Verify `0-0-0-0-0` path/identifier leaks on both `strings -a` and raw binary
+      bytes, valid ad-hoc signatures (`codesign -v`), `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, and annotated tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`)
+      untouched.
+
+      - Run the full sequential workspace regression suite (`PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH"`,
+      `CARGO_BUILD_JOBS=3`): `cargo fmt --check`, `cargo clippy --workspace --all-targets
+      --locked -- -D warnings`, `swiftc -O -warnings-as-errors`, `cargo test --workspace
+      --lib --locked -- --test-threads=2`, `cargo test -p cito-native --test native
+      --locked -- --test-threads=1` (covering `native`, `ui::`, `distribution::` sequentially),
+      `python3 packaging/release.py check`, `python3 -m unittest discover -s packaging
+      -p "test_*.py"`, `site-clipboard.mjs`, and `pi-bridge.mjs`.
+
+
+      Implementation Notes:
+
+      - Map `$HOME` before `$PWD` in `RUSTFLAGS` `--remap-path-prefix` so overlapping
+      prefixes under `$HOME` never leak local user paths into panic strings or symbol
+      tables.
+
+      - Do NOT bump `Cargo.toml` version or move/recreate Git tag `v0.23.0`.
+
+
+      Boundary:
+
+      - owner: devops-engineer
+
+      - scope.allowed_paths: ["bin/cito-native-darwin-arm64", "bin/cito-ui-darwin-arm64",
+      "plugins/claude/bin/cito-claude-hook", "plugins/claude/bin/cito-plugin-claude",
+      "plugins/codex/bin/cito-plugin-codex", "plugins/pi/bin/cito-plugin-pi", "plugins/telegram/bin/cito-plugin-telegram"]
+
+      - scope.blocked_paths: ["crates/cito-native/Cargo.toml", "Cargo.lock", "src/**",
+      "crates/**", "docs/**", "site/**", "README.md", "plan.yaml"]
+
+      - protected_state: Product version stays 0.23.0; existing annotated tag v0.23.0
+      (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`) MUST remain untouched.
+
+
+      Admit:
+
+      - All 7 staged Darwin arm64 binaries are stripped, ad-hoc signed, pass `0-0-0-0-0`
+      strings + raw-byte hygiene scans, report `cito v0.23.0`, and full sequential
+      workspace regression (`--lib`, `native`/`ui::`/`distribution::` with `--test-threads=1`,
+      `fmt`, `clippy`, `swiftc`, Python, Node) passes with zero warnings.
+
+
+      Recovery:
+
+      - If any test fails in `src/**` or `crates/**`, stop and report the exact failing
+      test and trace without editing blocked source paths.'
+    verification: ./bin/cito-native-darwin-arm64 --version && git rev-parse v0.23.0
+      && PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH" CARGO_BUILD_JOBS=3
+      cargo fmt --check && CARGO_BUILD_JOBS=3 cargo clippy --workspace --all-targets
+      --locked -- -D warnings && swiftc -O -warnings-as-errors -framework Cocoa -framework
+      Carbon src/macos/*.swift -o /tmp/cito-ui-v76-r1-gate && rm -f /tmp/cito-ui-v76-r1-gate
+      && CARGO_BUILD_JOBS=3 cargo test --workspace --lib --locked -- --test-threads=2
+      && CARGO_BUILD_JOBS=3 cargo test -p cito-native --test native --locked -- --test-threads=1
+      && PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH" python3 packaging/release.py
+      check && PATH="/opt/homebrew/opt/python@3.14/libexec/bin:$PATH" python3 -m unittest
+      discover -s packaging -p "test_*.py" && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      crates/cito-native/tests/support/pi-bridge.mjs
+    evidence_template: 'Build/strip/codesign commands and exit codes; 7-binary hygiene
+      table (codesign -v, strings -a leak count, raw-byte leak count); ./bin/cito-native-darwin-arm64
+      --version and git rev-parse v0.23.0 receipts; full sequential regression results
+      (fmt, clippy, swiftc, --lib, native/ui::/distribution:: --test-threads=1, release.py
+      check, packaging unittest, site-clipboard.mjs, pi-bridge.mjs); known gaps (or
+      none).'
+    refs:
+    - crates/cito-native/Cargo.toml
+    - packaging/release.py
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    depends_on:
+    - v76.repair_r1_docs_parity
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-28T09:08:30.358042Z'
+    done_at: '2026-11-28T09:24:52.017855+00:00'
+    evidence: 'Merged 2a93baaa9f7dc71d8c683c91a95b4f8f0f7e3fd0 onto main: rebuilt,
+      stripped (strip -S), and ad-hoc signed all 7 staged Darwin arm64 binaries with
+      rustc --remap-path-prefix ($HOME first, most specific last); verified arm64
+      lipo -info, strict codesign pass, and 0-0-0-0-0 (/Users/, /home/, /.cargo/registry,
+      Larva, PI_PERSONA) on both strings -a and raw bytes across all 7 binaries, `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Full sequential workspace regression passed with Python 3.14.10 and --test-threads=1
+      across all native partitions: cargo fmt --check PASS, clippy -D warnings PASS,
+      direct swiftc -O -warnings-as-errors (13 sources, 0 warnings), Rust lib 476
+      passed (4 ignored), telegram bin 10 passed, native non-UI/non-dist 176 passed
+      (1 ignored, 0 failures), native UI 177 passed (0 failures), native distribution
+      8 passed, other binary harnesses (claude-hook 1, native CLI 4, claude 1, pi
+      3) passed, release.py check 0.23.0, Python packaging 35 passed, site-clipboard.mjs
+      1 passed, pi-bridge.mjs 1 passed. Worktree cleaned; 318Gi free.'

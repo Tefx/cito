@@ -4679,6 +4679,7 @@ fn session_and_activity_projections_do_not_expose_ownership_secrets() -> Result<
             .unwrap();
         assert_eq!(hub["is_builtin"], true);
         assert_eq!(hub["supports_workspace_scope"], false);
+        assert_eq!(hub["human_can_set_scope"], false);
         assert_eq!(hub["can_login"], false);
     }
     let row = &active[0];
@@ -5019,6 +5020,22 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
 }
 #[test]
 fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> Result<(), String> {
+    for (mode_fields, auth_mode) in [
+        (json!({"authMode":"none"}), "none"),
+        (
+            json!({"authMode":"token","auth_mode":"oidc","token":"test-only"}),
+            "token",
+        ),
+        (json!({"authMode":"oidc","token":"test-only"}), "oidc"),
+        (json!({"auth_mode":"oidc"}), "oidc"),
+    ] {
+        check_remote_scope_projection(mode_fields, auth_mode)?;
+    }
+    Ok(())
+}
+
+fn check_remote_scope_projection(mut mode_fields: Value, auth_mode: &str) -> Result<(), String> {
+    let oidc = auth_mode == "oidc";
     let dir = TestDirectory(std::env::temp_dir().join(format!(
         "cito-projection-{}",
         crate::plugins::random_uuid_v4()
@@ -5043,12 +5060,8 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
             (401, json!({})),
         ],
     );
-    let client = HubClient::new(
-        "work".into(),
-        json!({"url":url,"authMode":"none"}),
-        "alice",
-        None,
-    );
+    mode_fields["url"] = json!(url);
+    let client = HubClient::new("work".into(), mode_fields, "alice", None);
     client.human_request("human_device_attach", &json!({}))?;
     fs::write(
         &config.config_path,
@@ -5068,7 +5081,18 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         .ok_or("Missing remote Human")?;
     assert_eq!(hub["human_availability"], "ACTIVE");
     assert_eq!(hub["human_state_status"], "current");
-    assert_eq!(hub["human_can_set_scope"], true);
+    assert_eq!(hub["auth_mode"], auth_mode);
+    assert_eq!(hub["supports_workspace_scope"], oidc, "{auth_mode}");
+    assert_eq!(hub["human_can_set_scope"], oidc, "{auth_mode}");
+    assert_eq!(peer["can_set_scope"], oidc, "{auth_mode}");
+    let samples = service.hub_samples();
+    let agent = service.peer_dto(
+        "work",
+        &json!({"listener_id":"c_agent","harness":"fixture","principal_id":client.identity["principal_id"],"scope":"workspace"}),
+        "alice/fixture",
+        &samples["work"],
+    );
+    assert_eq!(agent["can_set_scope"], oidc, "{auth_mode}");
     assert!(snapshot["listeners"]
         .as_array()
         .unwrap()
@@ -5100,7 +5124,11 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
                 projected["human_state_status"],
                 if current { "current" } else { "stale" }
             );
-            assert_eq!(projected["human_can_set_scope"], current);
+            assert_eq!(
+                projected["human_can_set_scope"],
+                current && oidc,
+                "{auth_mode}"
+            );
         }
     }
     assert!(client.rpc("human_channels_list", &json!({})).is_err());

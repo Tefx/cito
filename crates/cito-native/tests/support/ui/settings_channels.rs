@@ -65,6 +65,107 @@ fn deferred_channel_editor_keeps_its_rendered_hub_across_passive_reselection() {
 }
 
 #[test]
+fn pinned_hub_strip_keeps_its_window_y_and_isolates_each_hubs_scroll_offset() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut cfg = settings();
+    cfg["hubs"][0]["human_state_status"] = json!("current");
+    cfg["hubs"][1]["human_state_status"] = json!("current");
+    let channel = cfg["channels"][0].clone();
+    cfg["channels"] = json!([channel.clone(), channel.clone(), channel]);
+    cfg["channels"][1]["id"] = json!("alerts");
+    cfg["channels"][2]["id"] = json!("updates");
+    open_settings(&f, p, &cfg, "channels");
+    let before = inspect(&f, p);
+    let track = before.settings("channel_hub_strip");
+    let bar = before.settings("settings_channel_hub_bar");
+    assert_eq!(bar["height"], 38);
+    assert_eq!(before.settings("settings_channel_hub_label")["text"], "Hub");
+    let y = track["window_y"].as_f64().unwrap();
+    assert_eq!(y, 380.0);
+    let number = |node: &Value, key: &str| node[key].as_f64().unwrap();
+    let assert_pinned = |snapshot: &Value| {
+        let bar = snapshot.settings("settings_channel_hub_bar");
+        let strip = snapshot.settings("channel_hub_strip");
+        let scroll = snapshot.settings("settings_channels_tab");
+        assert!(nodes(&bar["children"])
+            .iter()
+            .any(|n| n["id"] == "channel_hub_strip"));
+        assert!(!nodes(&scroll["children"])
+            .iter()
+            .any(|n| n["id"] == "channel_hub_strip"));
+        assert_eq!(number(&strip, "window_y") - y, 0.0);
+        assert_eq!(
+            number(&scroll, "y") + number(&scroll, "height"),
+            number(&bar, "y")
+        );
+    };
+    let offset = |snapshot: &Value| {
+        let scroll = snapshot.settings("settings_channels_tab");
+        number(&scroll, "document_height")
+            - number(&scroll, "content_height")
+            - number(&scroll, "content_y")
+    };
+    let scroll_from_top = |distance: f64| {
+        let snapshot = inspect(&f, p);
+        let scroll = snapshot.settings("settings_channels_tab");
+        let top = number(&scroll, "document_height") - number(&scroll, "content_height");
+        assert!(top >= distance);
+        f.send(
+            p,
+            json!({"op":"test_settings_scroll","offset":top - distance}),
+        );
+    };
+    assert_pinned(&before);
+    let inbox = before.settings("inbox_control_bar");
+    let heading = before.settings("external_channels_heading");
+    let card = before.settings("settings_channel:channel");
+    assert_eq!(
+        number(&inbox, "y") - number(&heading, "y") - number(&heading, "height"),
+        14.0
+    );
+    assert_eq!(
+        number(&heading, "y") - number(&card, "y") - number(&card, "height"),
+        6.0
+    );
+    control(&f, p, "edit_hub_service:channel");
+    assert!(inspect(&f, p)
+        .settings("save_hub_service:channel")
+        .is_object());
+    assert_pinned(&inspect(&f, p));
+    scroll_from_top(40.0);
+    assert_eq!(offset(&inspect(&f, p)), 40.0);
+    control(&f, p, "channel_hub_selector:work");
+    f.send(p, json!({"op":"settings","hub":"work","settings":cfg}));
+    let work = inspect(&f, p);
+    assert_eq!(work["settings_channel_hub"], "work");
+    assert_eq!(offset(&work), 0.0);
+    assert_pinned(&work);
+    scroll_from_top(70.0);
+    assert_eq!(offset(&inspect(&f, p)), 70.0);
+    control(&f, p, "channel_hub_selector:personal");
+    let personal = inspect(&f, p);
+    assert_eq!(offset(&personal), 40.0);
+    assert_pinned(&personal);
+    control(&f, p, "channel_hub_selector:work");
+    let work = inspect(&f, p);
+    assert_eq!(offset(&work), 70.0);
+    assert_pinned(&work);
+
+    scroll_from_top(0.0);
+    let pill = "channel_hub_selector:work";
+    f.send(p, json!({"op":"test_control","id":pill,"pointer":true}));
+    assert_eq!(inspect(&f, p).settings(pill)["focused"], true);
+    f.send(p, json!({"op":"test_tab","surface":"settings"}));
+    assert_eq!(inspect(&f, p).settings("toggle_inbox")["focused"], true);
+    f.send(
+        p,
+        json!({"op":"test_tab","surface":"settings","backward":true}),
+    );
+    assert_eq!(inspect(&f, p).settings(pill)["focused"], true);
+}
+
+#[test]
 fn real_daemon_failed_channel_test_projects_settings_without_a_duplicate_banner() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -314,7 +415,7 @@ fn same_name_channel_authority_change_discards_edits_pairing_and_test_receipts()
             let switched = inspect(&f, p);
             assert_eq!(
                 switched.settings("inbox_control_title")["text"],
-                "You (@bob)"
+                "Inbox · @bob"
             );
             assert!(switched.settings("settings_channel:channel").is_null());
         }
@@ -417,12 +518,30 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     cfg["hubs"][0]["human_can_set_scope"] = json!(true);
     cfg["hubs"][0]["supports_workspace_scope"] = json!(true);
     cfg["hubs"][0]["human_control_revision"] = json!(4);
-    let device = json!({"channel_id":"here:human","location":"device","display_name":"MacBook Pro.local","availability":"ACTIVE","is_local":true});
-    let external = json!({"channel_id":"hub:telegram","location":"hub","display_name":"Telegram","availability":"ACTIVE","is_local":false});
-    for remote_only in [false, true] {
+    cfg["hubs"][0]["auth_mode"] = json!("oidc");
+    let device = json!({"channel_id":"here:human","location":"device","display_name":"Studio.local","availability":"ACTIVE","is_local":true});
+    let external = json!({"channel_id":"hub:channel","location":"hub","display_name":"Messenger","availability":"ACTIVE","is_local":false});
+    for (local, remotes, multi_hub, expected) in [
+        (true, 0, false, "Messenger · Activity on this Mac"),
+        (
+            true,
+            1,
+            true,
+            "Messenger · Activity · This Mac + 1 other Mac",
+        ),
+        (
+            true,
+            2,
+            true,
+            "Messenger · Activity · This Mac + 2 other Macs",
+        ),
+        (false, 2, false, "Messenger · Activity · 2 Macs"),
+    ] {
+        cfg["hubs"][1]["enabled"] = json!(multi_hub);
         for paused in [false, true] {
             let mut retained = device.clone();
             retained["availability"] = json!("DISCONNECTED_RETAINED");
+            retained["display_name"] = json!("Former Studio");
             retained["is_local"] = json!(false);
             let mut expired = device.clone();
             expired["display_name"] = json!("Old Mac");
@@ -430,17 +549,20 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
             let mut detached = external.clone();
             detached["display_name"] = json!("Retired Channel");
             detached["availability"] = json!("UNLISTENED");
-            frame["hubs"][0]["attachments"] = if remote_only {
-                json!([external.clone(), expired, detached])
-            } else {
-                json!([
-                    device.clone(),
-                    retained,
-                    external.clone(),
-                    expired,
-                    detached
-                ])
-            };
+            let mut attachments = vec![external.clone(), expired, detached];
+            if local {
+                attachments.extend([device.clone(), retained.clone()]);
+            }
+            for i in 0..remotes {
+                retained["channel_id"] = json!(format!("remote-{i}:human"));
+                retained["display_name"] = if i == 0 {
+                    json!("Studio")
+                } else {
+                    json!(format!("Remote Mac {i}.local"))
+                };
+                attachments.push(retained.clone());
+            }
+            frame["hubs"][0]["attachments"] = json!(attachments);
             frame["hubs"][0]["human_paused"] = json!(paused);
             cfg["hubs"][0]["human_paused"] = json!(paused);
             cfg["hubs"][0]["attachments"] = frame["hubs"][0]["attachments"].clone();
@@ -456,30 +578,51 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                 assert_eq!(s.menu("inbox_paused_notice").is_null(), !paused);
                 let bar = s.settings("inbox_control_bar");
                 let bar_height = bar["height"].as_f64().unwrap();
-                assert!(bar_height >= 48.0);
+                assert_eq!(bar_height, 50.0);
+                assert_eq!(bar["border_width"], 1);
+                assert_eq!(s.settings("inbox_control_dot")["width"], 6);
+                assert_eq!(s.settings("inbox_control_dot")["height"], 6);
                 let toggle = s.settings("toggle_inbox");
                 assert_eq!(
                     toggle["y"].as_f64().unwrap() + toggle["height"].as_f64().unwrap() / 2.0,
                     bar_height / 2.0
                 );
                 let scroll = s.settings("settings_channels_tab");
-                assert_eq!(scroll["height"], 368);
-                let summary = s.settings("inbox_control_summary");
+                assert_eq!(scroll["height"], if multi_hub { 330 } else { 368 });
                 assert_eq!(
-                    summary["text"],
-                    if paused {
-                        "Inbox paused · Activity & Telegram paused"
-                    } else if remote_only {
-                        "Telegram · Activity"
-                    } else {
-                        "Telegram · Activity · MacBook Pro"
-                    }
+                    scroll["scroll_required"], false,
+                    "{local}/{remotes}/{paused}"
                 );
+                let track = s.settings("channel_hub_strip");
+                if multi_hub {
+                    assert_eq!(track["window_y"], 380.0);
+                } else {
+                    assert!(track.is_null());
+                }
+                let summary = s.settings("inbox_control_summary");
+                assert_eq!(summary["text"], expected);
+                assert_eq!(summary["wraps"], false);
+                assert_eq!(summary["maximum_lines"], 1);
+                assert_eq!(summary["truncates_tail"], true);
                 let tip = summary["tooltip"].as_str().unwrap();
                 assert!(
                     tip.contains("External channels deliver alerts even when this Mac is offline.")
                 );
+                let (devices, _) = tip.split_once('\n').unwrap();
+                let devices: Vec<_> = devices.split(" · ").skip(2).collect();
+                let mut expected_devices = Vec::new();
+                if local {
+                    expected_devices.push("Studio.local".to_owned());
+                }
+                for i in 1..remotes {
+                    expected_devices.push(format!("Remote Mac {i}.local"));
+                }
+                if remotes > 0 {
+                    expected_devices.push("Studio".to_owned());
+                }
+                assert_eq!(devices, expected_devices);
                 for excluded in [
+                    "Former Studio",
                     "ACTIVE",
                     "UNLISTENED",
                     "EXPIRED",
@@ -490,18 +633,14 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                 }
                 assert_eq!(
                     s.settings("toggle_inbox")["text"],
-                    if paused {
-                        "Resume Inbox"
-                    } else {
-                        "Pause Inbox"
-                    }
+                    if paused { "Resume" } else { "Pause" }
                 );
-                assert_eq!(s.settings("scope:inbox")["text"], "Self");
+                assert_eq!(s.settings("scope:inbox")["text"], "Only Me");
                 render_png_as(
                     &f,
                     p,
                     "settings",
-                    &format!("v41_inbox_{}_{}_{appearance}.png", remote_only, paused),
+                    &format!("inbox_{local}_{remotes}_{paused}_{appearance}.png"),
                     Some(appearance),
                 );
             }
@@ -795,16 +934,16 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     let external = json!({"channel_id":"hub:channel","location":"hub","plugin_id":"channel","display_name":"Messenger","availability":"ACTIVE","is_local":false});
     for (attachments, summary) in [
         (json!([]), "Activity"),
-        (json!([local.clone()]), "Activity · laptop"),
+        (json!([local.clone()]), "Activity on this Mac"),
         (
             json!([local.clone(), other.clone()]),
-            "Activity · desktop · laptop",
+            "Activity · This Mac + 1 other Mac",
         ),
         (
             json!([external.clone(), other.clone()]),
-            "Messenger · Activity · desktop",
+            "Messenger · Activity · 1 Mac",
         ),
-        (json!([external, local]), "Messenger · Activity · laptop"),
+        (json!([external, local]), "Messenger · Activity on this Mac"),
     ] {
         frame["hubs"][0]["attachments"] = attachments.clone();
         cfg["hubs"][0]["attachments"] = attachments;
@@ -1195,7 +1334,7 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
         .frames(p)
         .iter()
         .any(|a| a["op"] == "open_settings" && a["hub"] == "work"));
-    assert_eq!(selected.settings("toggle_inbox")["text"], "Resume Inbox");
+    assert_eq!(selected.settings("toggle_inbox")["text"], "Resume");
     frame["hubs"][1]["status"] = json!("disconnected");
     frame["settings"]["hubs"][1]["status"] = json!("disconnected");
     send_companion(&f, p, frame.clone());

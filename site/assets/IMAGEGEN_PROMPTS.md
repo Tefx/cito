@@ -17,11 +17,11 @@ Cito uses a clean cobalt identity and real AppKit screenshots. Assets must descr
 
 Capture real headless AppKit views at 2× Retina resolution with the integration test `v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility` and `CITO_TEST_SNAPSHOT_DIR`. Inspect every image before copying it into `site/assets/screenshots/`:
 
-- `menu-dark.png`: Slim menu starting with LISTENING SESSIONS, Stop actions, Pin, Auto-Listen, AVAILABLE SESSIONS, unread navigation, and Stop All. No dedicated inbox card; paused inboxes show one compact notice opening Human Channels.
+- `menu-dark.png`: Slim menu starting with `LISTENING SESSIONS · N` (omitting the subtitle in connected unpaused multi-Hub headers), compact `46 pt` rows with `[📋 #fp]` copy chips and a `[⋯]` control expanding a `28 pt` inline action strip (`Rename`, `Pin`/`Pinned`, OIDC-only `Only Me`/`Everyone`, `Stop`), a 5-row `230 pt` scroll viewport, `Auto-Listen`, `AVAILABLE SESSIONS`, unread navigation, and `Stop All`. No dedicated inbox card; paused inboxes show one compact notice opening Human Channels.
 - `directory-dark.png`: Unified Nodes, readable addresses, All Nodes/Mine filters, and Message actions.
 - `activity-dark.png`: Unread messages and an inline one-line reply composer.
 - `settings-apps-dark.png`: App setup states, status dots, and Check & Repair.
-- `settings-channels-dark.png`: Compact Inbox Control Bar (identity, active delivery paths, Pause/Resume Inbox, and Self/Team on multi-user Hubs), shared gateway, and personal account pairing. Default active and paused single-channel states fit without scrolling.
+- `settings-channels-dark.png`: Pinned top `Hub` selector bar (when `> 1` enabled Hub is configured), Hub-scoped `50 pt` `Inbox · @<user>` card (`Pause` / `Resume`, single-line device summary, and OIDC-only `Only Me` / `Everyone` pull-down) directly above `EXTERNAL CHANNELS`, shared gateway, and personal account pairing. Default active and paused single-channel states fit without scrolling.
 - `settings-hubs-dark.png`: Sharing controls, connected Hubs, and the Default badge.
 
 Do not generate mock UI artwork or modify labels in an image editor. Screenshot geometry, tooltips, accessibility, and contrast are checked against the rendered native view tree.

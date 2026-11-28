@@ -1,6 +1,7 @@
 //! Shared registration serializes background enrollment with explicit local intent.
 use super::{
     auth::{principal_ids_equal, principal_matches},
+    hub::{configured_auth_mode, default_registration_scope},
     identity::{listener_id, listener_id_candidates, local_host_name, public_listener_id, string},
     state::LocalState,
     transport::HubClient,
@@ -432,6 +433,8 @@ fn register_locked(
     let public = public_listener_id(string(&client.identity, "owner_user"), &id);
     let channel = format!("{host_id}:{harness}");
     let host_name = local_host_name();
+    let default_scope =
+        default_registration_scope(configured_auth_mode(&client.config).unwrap_or_default());
     for attempt in 0..3 {
         if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("HUB_UNAVAILABLE: Hub disconnected during registration".into());
@@ -471,22 +474,10 @@ fn register_locked(
         } else {
             None
         };
+        // Old non-OIDC defaults (including local-only state) are not an explicit choice.
         let scope = explicit_scope
-            .or(retained_scope)
-            .or_else(|| {
-                client.config["defaultScope"]
-                    .as_str()
-                    .filter(|s| matches!(*s, "self" | "workspace"))
-            })
-            .unwrap_or_else(|| {
-                match client.config["authMode"]
-                    .as_str()
-                    .or_else(|| client.config["auth_mode"].as_str())
-                {
-                    None | Some("none") => "workspace",
-                    _ => "self",
-                }
-            });
+            .or(retained_scope.filter(|scope| *scope != "self" || default_scope == "self"))
+            .unwrap_or(default_scope);
         if !matches!(scope, "self" | "workspace") {
             return Err("INVALID_INPUT: Invalid scope".into());
         }
@@ -938,46 +929,76 @@ mod tests {
     }
 
     #[test]
-    fn automatic_agent_scope_tracks_profile_but_preserves_explicit_and_manual_intent(
-    ) -> Result<(), String> {
+    fn agent_registration_uses_hub_scope_default_and_preserves_explicit_scope() -> Result<(), String>
+    {
         let root = crate::core::hub::TestDirectory(std::env::temp_dir().join(random_uuid_v4()));
-        let engine = Arc::new(HubEngine::open(&root.join("hub"))?);
-        let state = LocalState::open(&root.join("state"))?;
-        let caller = json!({"harness":"fixture", "session_id":"s"});
-        let enroll = |auth, default: Value, args: Value| {
-            let client = HubClient::new(
-                "work".into(),
-                json!({"url":"local://", "authMode":auth,"defaultScope":default}),
-                "alice",
-                Some(engine.clone()),
-            );
-            register_endpoint(&state, &client, "host", &args, &caller)
-                .map(|row| row["scope"].clone())
-        };
-        let auto = json!({"about":"Review", "_auto":true});
-        let restore = json!({"about":"Review", "_auto":true, "_restore":true});
-        assert_eq!(enroll("none", Value::Null, auto.clone())?, "workspace");
-        assert_eq!(enroll("token", Value::Null, restore.clone())?, "self");
-        assert_eq!(
-            enroll("token", json!("workspace"), auto.clone())?,
-            "workspace"
-        );
-        assert_eq!(enroll("none", json!("self"), auto.clone())?, "self");
-        assert_eq!(
-            enroll("none", Value::Null, json!({"about":"Manual"}))?,
-            "self"
-        );
-        assert_eq!(enroll("none", Value::Null, restore)?, "self");
-        assert_eq!(
-            enroll(
+        for (name, mode, config, default_scope) in [
+            (
+                "local",
                 "none",
-                Value::Null,
-                json!({"about":"Manual", "scope":"self"})
-            )?,
-            "self"
-        );
-        assert_eq!(enroll("none", Value::Null, auto)?, "self");
-        engine.shutdown();
+                json!({"url":"local://","defaultScope":"self"}),
+                "workspace",
+            ),
+            (
+                "token",
+                "token",
+                json!({"url":"https://work.example.com","authMode":"token","auth_mode":"oidc","defaultScope":"self"}),
+                "workspace",
+            ),
+            (
+                "none",
+                "none",
+                json!({"url":"https://work.example.com","authMode":"none","defaultScope":"self"}),
+                "workspace",
+            ),
+            (
+                "oidc",
+                "oidc",
+                json!({"url":"https://work.example.com","auth_mode":"oidc","defaultScope":"workspace"}),
+                "self",
+            ),
+        ] {
+            let engine = Arc::new(HubEngine::open_with_auth_mode(
+                &root.join(name).join("hub"),
+                mode,
+            )?);
+            let state = LocalState::open(&root.join(name).join("state"))?;
+            let client = HubClient::new(name.into(), config, "alice", Some(engine.clone()));
+            for (session, refresh) in [
+                ("manual", json!({"about":"Review"})),
+                (
+                    "restore",
+                    json!({"about":"Review","_auto":true,"_restore":true}),
+                ),
+                ("auto", json!({"about":"Review","_auto":true})),
+            ] {
+                let caller = json!({"harness":"fixture","session_id":session});
+                let enroll = |args: &Value, expected, explicit| -> Result<String, String> {
+                    let result = register_endpoint(&state, &client, "host", args, &caller)?;
+                    let id = string(&result, "canonical_listener_id");
+                    let local = state.listener(name, id)?.ok_or("Missing local binding")?;
+                    let (remote, _) = client.kv_get(id)?.ok_or("Missing Hub registration")?;
+                    for row in [&result, &local, &remote] {
+                        assert_eq!(row["scope"], expected, "{name}/{session}");
+                    }
+                    assert_eq!(remote.get("scope_explicit"), explicit, "{name}/{session}");
+                    Ok(id.into())
+                };
+                enroll(&refresh, default_scope, None)?;
+                let explicit_self = json!({"about":"Review","scope":"self"});
+                let explicit = json!(true);
+                let id = enroll(&explicit_self, "self", Some(&explicit))?;
+                enroll(&refresh, "self", Some(&explicit))?;
+
+                // Emulate a pre-upgrade Hub row and local binding that both defaulted to self.
+                let (mut legacy, revision) =
+                    client.kv_get(&id)?.ok_or("Missing Hub registration")?;
+                legacy.as_object_mut().unwrap().remove("scope_explicit");
+                client.kv_save(&id, &legacy, Some(revision))?;
+                enroll(&refresh, default_scope, None)?;
+            }
+            engine.shutdown();
+        }
         Ok(())
     }
 

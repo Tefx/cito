@@ -848,7 +848,11 @@ fn fresh_device_adopts_retained_human_identity_and_verified_alias() {
 
 #[test]
 fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
-    for (mode, expected) in [("none", "workspace"), ("token", "self"), ("oidc", "self")] {
+    for (mode, expected) in [
+        ("none", "workspace"),
+        ("token", "workspace"),
+        ("oidc", "self"),
+    ] {
         for device_first in [true, false] {
             let dir = temp();
             let e = TestEngine(HubEngine::open_with_auth_mode(&dir, mode).unwrap());
@@ -884,7 +888,7 @@ fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
 }
 
 #[test]
-fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairing_restart() {
+fn token_access_to_embedded_hub_uses_workspace_scope_and_preserves_explicit_pairing_scope() {
     use super::super::transport::HubClient;
     let dir = temp();
     let root = fixture(&dir);
@@ -916,7 +920,7 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
         device_first
             .human_request("human_device_attach", &device)
             .unwrap()["record"]["scope"],
-        "self"
+        "workspace"
     );
     let manual_first = client("manual");
     manual_first.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"},"user_config":{"address":"room"}})).unwrap();
@@ -926,7 +930,7 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
             .unwrap()
             .unwrap()
             .0["scope"],
-        "self"
+        "workspace"
     );
     let pairing_first = client("paired");
     let pair = pairing_first
@@ -949,10 +953,10 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
         .db
         .transaction(|c| Ok(parse(&kv_row(c, &id)?.unwrap(), "value")))
         .unwrap();
-    assert_eq!(record["scope"], "self");
+    assert_eq!(record["scope"], "workspace");
     e.rpc(
         "human_inbox_update",
-        &json!({"node_id":id,"expected_control_revision":1,"scope":"workspace"}),
+        &json!({"node_id":id,"expected_control_revision":1,"scope":"self"}),
         Some(&owner),
     )
     .unwrap();
@@ -970,9 +974,9 @@ fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairi
     e.set_plugin_roots(&[root]).unwrap();
     e.restore_attachments().unwrap();
     for (user, scope) in [
-        ("device", "self"),
-        ("manual", "self"),
-        ("paired", "workspace"),
+        ("device", "workspace"),
+        ("manual", "workspace"),
+        ("paired", "self"),
         ("local", "workspace"),
     ] {
         let record = e
@@ -3908,6 +3912,9 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
             .unwrap()[0]["code"],
         code
     );
+    e.shutdown();
+    let e = TestEngine(HubEngine::open_with_auth_mode(&dir, "oidc").unwrap());
+    e.set_plugin_roots(&[fixture(&dir)]).unwrap();
     let user = json!({"principal_id":"oidc:https://id.example.com|ordinary-test-user","owner_user":"ordinary-test-user","sub":"ordinary-test-user","oidc":true});
     for op in [
         "human_channels_configure",

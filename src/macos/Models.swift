@@ -49,6 +49,8 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
 struct ChannelAttachment: Decodable, Equatable {
     let location: String, display_name: String, availability: String
     let is_local: Bool
+    var channel_id: String? = nil
+    var host_id: String? = nil
 }
 
 struct DiscoveryState: Decodable, Equatable {

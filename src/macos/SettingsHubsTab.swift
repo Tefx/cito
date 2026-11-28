@@ -530,7 +530,7 @@ extension Companion {
             if !editingBuiltinHub {
                 let captionHeight: CGFloat = oidcExpanded ? 32 : 48
                 for control in form.subviews { control.frame.origin.y += captionHeight }
-                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.", NSRect(x: 14, y: oidcExpanded ? 40 : 60, width: fieldWidth, height: captionHeight), size: 11, color: CitoPalette.secondaryText)
+                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Everyone.", NSRect(x: 14, y: oidcExpanded ? 40 : 60, width: fieldWidth, height: captionHeight), size: 11, color: CitoPalette.secondaryText)
                 visibility.identifier = NSUserInterfaceItemIdentifier("hub_visibility_caption")
                 visibility.maximumNumberOfLines = 3
                 visibility.cell?.wraps = true

@@ -51,13 +51,12 @@ extension Companion: NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) {
         menuOpen = false
         MenuControl.menuTracking = false
-        let hadRename = renamingSessionKey != nil
-        renamingSessionKey = nil
-        if hadRename {
-            renameField?.window?.makeFirstResponder(nil)
-            renameField?.removeFromSuperview()
-            renameField = nil
-            menuRebuildDeferred = false
+        if !expandedSessionActions.isEmpty {
+            expandedSessionActions.removeAll()
+            menuDirty = true
+        }
+        if renamingSessionKey != nil {
+            cancelSessionRename()
             menuDirty = true
         }
         emit(["op": "close_menu"], userInitiated: false)
@@ -90,44 +89,24 @@ extension Companion: NSMenuDelegate {
         lastStatusPresentation = (icon, unreadCount, tooltip)
         statusUpdateCount += 1
     }
-    func scopeToggle(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl? {
-        guard let authority = hubs.first(where: { $0.name == hub }),
-              authority.supports_workspace_scope == true else { return nil }
-        let allowed = authority.human_listener_id == id
-            ? authority.human_can_set_scope == true
-            : listeners.first(where: { $0.hub == hub && ($0.scoped_id == id || $0.listener_id == id) })?.can_set_scope == true
-        guard allowed else { return nil }
-        return makeScopeControl(hub:hub,user:user,scope:scope,id:id,y:y)
+    private func cancelSessionRename() {
+        renamingSessionKey = nil
+        renameField?.window?.makeFirstResponder(nil)
+        renameField?.removeFromSuperview()
+        renameField = nil
+        menuRebuildDeferred = false
     }
 
-    func makeScopeControl(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl {
-        let team = scope == "workspace"
-        let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill", paddingX:9)
-        control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
-        control.reservedTitles = [("Self", "lock.fill"), ("Team", "person.2.fill")]
-        updateScopeControl(control, scope:scope, hub:hub, user:user)
-        return control
-    }
-
-    func updateScopeControl(_ control: MenuControl, scope: String, hub: String, user: String) {
-        let team = scope == "workspace"
-        control.label.stringValue = team ? "Team" : "Self"
-        control.setLeadingSymbol(team ? "person.2.fill" : "lock.fill")
-        control.setAccessibilityLabel(control.label.stringValue)
-        control.style = team ? .prominent : .neutral
-        control.toolTip = team
-            ? "Visibility: Team — anyone connected to '\(hub)' can discover and message this node. Click to restrict to Only Me."
-            : "Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(hub)' can message this node. Click to share with Team."
-    }
-
-    private func makeAddressCopyControl(_ address: String, id: String, authority: String, height: CGFloat) -> MenuControl {
-        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+    private func makeAddressCopyControl(_ address: String, id: String, authority: String,
+                                        fingerprintOnly: Bool = false, maxWidth: CGFloat = 220) -> MenuControl {
+        let font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
         let symbol = "doc.on.doc"
-        let title = compactAddressLabel(address, maxWidth: 220, font: font, paddingX: 3, leadingSymbol: symbol)
-        let copy = MenuControl(title, frame: NSRect(x: 0, y: 7, width: 0, height: height), leadingSymbol: symbol, paddingX: 3)
+        let relative = menuAddressLabel(address, hub: authority, fingerprintOnly: fingerprintOnly)
+        let title = compactAddressLabel(relative, maxWidth: maxWidth, font: font, paddingX: 3, leadingSymbol: symbol)
+        let copy = MenuControl(title, frame: NSRect(x: 0, y: 0, width: 0, height: 20), leadingSymbol: symbol, paddingX: 3)
         copy.identifier = NSUserInterfaceItemIdentifier(id)
         copy.label.font = font; copy.label.alignment = .left
-        copy.maximumWidth = 220
+        copy.maximumWidth = maxWidth
         copy.reservedTitles = [(title, symbol), ("✓ Copied", nil)]
         copy.frame.size.width = copy.reservedWidth
         copy.toolTip = address; copy.setAccessibilityLabel(address)
@@ -135,6 +114,74 @@ extension Companion: NSMenuDelegate {
         copy.showFeedback(key: key)
         copy.pressed = { [weak self, weak copy] in self?.copyText(address, control: copy, key: key) }
         return copy
+    }
+
+    private func mountSessionActions(in card: NSView, listener: Listener, pinApplies: Bool, pinned: Bool,
+                                     workspaceSupported: Bool, activityTimed: Bool) {
+        let id = listener.scoped_id
+        let height = CitoMetrics.sessionActionsHeight
+        let hairline = roundedView(NSRect(x: 0, y: height - 1, width: card.bounds.width, height: 1),
+                                   radius: 0, color: CitoPalette.channelCardBorder)
+        hairline.identifier = NSUserInterfaceItemIdentifier("session_actions_divider:\(id)")
+        card.addSubview(hairline)
+        func action(_ title: String, _ name: String, symbol: String? = nil) -> MenuControl {
+            let control = MenuControl(title, frame: NSRect(x: 0, y: 0, width: 0, height: 16), leadingSymbol: symbol)
+            control.identifier = NSUserInterfaceItemIdentifier("\(name):\(id)")
+            card.addSubview(control)
+            return control
+        }
+        var leading: [NSView] = []
+        var trailing: [NSView] = []
+        if listener.can_rename == true {
+            let rename = action("Rename", "rename")
+            rename.toolTip = "Rename this session"
+            rename.isEnabled = renamingSessionKey != id
+            rename.pressed = { [weak self] in
+                guard let self else { return }
+                self.cancelSessionRename()
+                self.renamingSessionKey = id
+                self.rebuild(revealSession: id)
+            }
+            leading.append(rename)
+        }
+        if pinApplies {
+            let pin = action(pinned ? "Pinned" : "Pin", "pin", symbol: pinned ? "pin.fill" : "pin")
+            let lifetime = activityTimed ? "Unpinned sessions auto-retire after the idle timeout." : "Unpinned sessions stay listening while their endpoint is available; no idle timeout applies."
+            pin.toolTip = (pinned ? "Pinned. Unpin to follow Auto-Listen. " : "Pin this session. ") + lifetime + " Pinned sessions stay listening when Auto-Listen is turned off."
+            pin.setAccessibilityLabel(pinned ? "Unpin session" : "Pin session")
+            pin.pressed = { [weak self] in self?.emit(["op":"set_listen_mode","hub":listener.hub,"listener_id":listener.listener_id,"listen_mode":pinned ? "auto" : "manual"]) }
+            leading.append(pin)
+        }
+        if workspaceSupported && listener.can_set_scope == true {
+            var scope = listener.scope
+            let control = action("Only Me", "scope", symbol: "lock.fill")
+            control.reservedTitles = [("Only Me", "lock.fill"), ("Everyone", "person.2.fill")]
+            func update(_ control: MenuControl) {
+                let shared = scope == "workspace"
+                control.label.stringValue = shared ? "Everyone" : "Only Me"
+                control.setLeadingSymbol(shared ? "person.2.fill" : "lock.fill")
+                control.setAccessibilityLabel(control.label.stringValue)
+                control.toolTip = shared
+                    ? "Visibility: Everyone — anyone connected to '\(listener.hub)' can discover and message this session. Click to restrict to Only Me."
+                    : "Visibility: Only Me — only your own sessions and devices on '\(listener.hub)' can message this session. Click to share with everyone."
+            }
+            update(control)
+            control.pressed = { [weak self, weak control] in
+                guard let self, let control else { return }
+                scope = scope == "workspace" ? "self" : "workspace"
+                update(control)
+                self.emit(["op":"set_scope","hub":listener.hub,"listener_id":listener.listener_id,"scope":scope])
+            }
+            leading.append(control)
+        }
+        if listener.can_stop == true {
+            let stop = action("Stop", "stop")
+            stop.style = .destructiveHover
+            stop.toolTip = "Stop only this session and keep it stopped. Auto-Listen on \(listener.hub) stays unchanged."
+            stop.pressed = { [weak self] in self?.emit(["op":"unlisten_session","hub":listener.hub,"harness":listener.harness,"session_id":listener.session_id]) }
+            trailing.append(stop)
+        }
+        layoutBar(in: card, y: 0, height: height, leading: leading, trailing: trailing)
     }
 
     private func captureScrollOffsets() {
@@ -153,11 +200,17 @@ extension Companion: NSMenuDelegate {
         }
     }
 
-    func rebuild(preservingEditor: Bool = false, scrollerStyle: NSScroller.Style? = nil) {
+    func rebuild(preservingEditor: Bool = false, scrollerStyle: NSScroller.Style? = nil, revealSession: String? = nil) {
         updateStatusItem()
         menuDirty = true
+        let targetHub = effectiveTargetHub
+        let orderedListeners = listeners.filter { $0.harness != "human" && (targetHub.isEmpty || $0.hub == targetHub) }
+        if targetHub != renderedScrollHub { expandedSessionActions.removeAll() }
+        if !expandedSessionActions.isEmpty { expandedSessionActions.formIntersection(orderedListeners.map(\.scoped_id)) }
+        if let key = renamingSessionKey, !orderedListeners.contains(where: { $0.scoped_id == key && $0.can_rename == true }) {
+            cancelSessionRename()
+        }
         guard menuOpen || renderingForInspection else { return }
-        let count = uniqueSessionCount
         if preservingEditor, renamingSessionKey != nil, renameField?.currentEditor() != nil {
             updateMenuErrorRow()
             menuRebuildDeferred = true
@@ -172,7 +225,6 @@ extension Companion: NSMenuDelegate {
         let renameEditor = existingRenameField?.currentEditor() as? NSTextView
         let renameSelection = renameEditor?.selectedRange()
         let renameDraft = renameEditor?.string ?? existingRenameField?.stringValue
-        let targetHub = effectiveTargetHub
         captureScrollOffsets()
         let hubStripHandoff = menuHubStrip?.capture()
         menu.removeAllItems()
@@ -222,28 +274,34 @@ extension Companion: NSMenuDelegate {
         }
         let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         let header = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 40))
-        header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 36, height: 18), size: 13, weight: .bold))
-        let subtitleText: String
+        header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 32, height: 18), size: 13, weight: .bold))
         let humanHub = hubs.first { $0.name == targetHub }
-        if humanHub?.status == "auth_required" { subtitleText = "Sign in required" }
-        else if ["unreachable","error","disconnected"].contains(humanHub?.status ?? "") { subtitleText = "Hub unavailable" }
-        else if humanHub?.status != "connected" { subtitleText = "Connecting…" }
-        else if count > 0 { subtitleText = "\(count) session\(count == 1 ? "" : "s") listening" }
-        else if humanHub?.human_paused == true { subtitleText = "Inbox paused" }
-        else if humanListening { subtitleText = "Personal inbox active" }
-        else { subtitleText = "Not listening" }
-        let hubPillChrome: CGFloat = 24
+        let compactHeader = hubs.count > 1 && humanHub?.status == "connected" && humanHub?.human_paused != true && humanHub?.error == nil
         let hubGap: CGFloat = 4
-        func hubPillWidth(_ title: String) -> CGFloat { min(180, measureTextWidth(title, font: btnFont) + hubPillChrome) }
+        func hubPillWidth(_ title: String) -> CGFloat { measureTextWidth(title, font: btnFont) + 24 }
         let hubPillNaturalWidths = hubs.map { hubPillWidth($0.name) }
         let totalHubPillsWidth = PillTrackGeometry.trailingWidth(widths: hubPillNaturalWidths, spacing: hubGap)
         let pairWidth = PillTrackGeometry.trailingWidth(widths: Array(hubPillNaturalWidths.sorted(by: >).prefix(2)), spacing: hubGap)
-        let subtitleLimit: CGFloat = hubs.count > 1 ? min(246, max(84, 368 - 54 - pairWidth)) : 246
-        let subWidth = min(subtitleLimit, ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8)
-        let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: CitoPalette.secondaryText)
-        subLabel.identifier = NSUserInterfaceItemIdentifier("header_subtitle")
-        subLabel.lineBreakMode = .byTruncatingMiddle; subLabel.toolTip = subtitleText
-        header.addSubview(subLabel)
+        let subWidth: CGFloat
+        if compactHeader {
+            subWidth = 0
+        } else {
+            let subtitleText: String
+            if humanHub?.status == "auth_required" { subtitleText = "Sign in required" }
+            else if ["unreachable","error","disconnected"].contains(humanHub?.status ?? "") { subtitleText = "Hub unavailable" }
+            else if humanHub?.status != "connected" { subtitleText = "Connecting…" }
+            else if humanHub?.human_paused == true { subtitleText = "Inbox paused" }
+            else if humanHub?.error != nil { subtitleText = "Hub needs attention" }
+            else if !orderedListeners.isEmpty { subtitleText = "Sessions listening" }
+            else if humanListening { subtitleText = "Personal inbox active" }
+            else { subtitleText = "Not listening" }
+            let limit: CGFloat = hubs.count > 1 ? min(246, max(84, 368 - 54 - pairWidth)) : 246
+            subWidth = min(limit, measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5)) + 8)
+            let label = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: CitoPalette.secondaryText)
+            label.identifier = NSUserInterfaceItemIdentifier("header_subtitle")
+            label.lineBreakMode = .byTruncatingMiddle; label.toolTip = subtitleText
+            header.addSubview(label)
+        }
         _ = host(header, id: "header")
         updateMenuErrorRow()
         var drawerItems: [String: NSMenuItem] = [:]
@@ -312,12 +370,10 @@ extension Companion: NSMenuDelegate {
             item.isHidden = !(hubDrawerVisibility[hub.name] ?? autoExpand)
             drawerItems[hub.name] = item
         }
-        let stripX = max(138, 54 + subWidth)
+        let stripX = subWidth == 0 ? 48 : max(138, 54 + subWidth)
         let stripWidth = max(44, 368 - stripX)
         let compactChips = totalHubPillsWidth > stripWidth
         let fullCap = stripWidth - 2 * PillTrackGeometry.inset
-        let pairBudget = fullCap - hubGap
-        let halfBudget = floor(pairBudget / 2)
         let geometry = CitoMetrics.hubSegments
         var hubPills: [MenuControl] = []
         for (index, hub) in hubs.enumerated() where showHubControls {
@@ -334,14 +390,7 @@ extension Companion: NSMenuDelegate {
                 title = hub.name
             }
             let natural = isSingleDefault ? hubPillWidth(title) : hubPillNaturalWidths[index]
-            let cap: CGFloat
-            if hubs.count == 2 {
-                let siblingShare = index == 0 ? pairBudget - halfBudget : halfBudget
-                cap = pairBudget - min(siblingShare, hubPillNaturalWidths[1 - index])
-            } else {
-                cap = hubs.count > 2 && compactChips && stripWidth >= 92 ? halfBudget : fullCap
-            }
-            let width = min(natural, cap)
+            let width = compactHeader || compactChips ? natural : min(natural, fullCap)
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: geometry.pillHeight), radius: geometry.pillRadius)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
             if hubs.count == 1 { pill.style = hub.status == "connected" && hub.error == nil ? .prominent : .neutral }
@@ -381,9 +430,8 @@ extension Companion: NSMenuDelegate {
         }
         var activeRows: [(id: String, view: NSView)] = []
         let map = harnessMap
-        let listeners = self.listeners.filter { targetHub.isEmpty || $0.hub == targetHub }
         let myRemote = self.myRemote.filter { targetHub.isEmpty || $0.hub == nil || $0.hub == targetHub }
-        let targetHubObj = hubs.first { $0.name == targetHub }
+        let targetHubObj = humanHub
         if targetHubObj?.human_paused == true {
             let notice = MenuControl("Inbox paused · Resume in Settings…", frame:NSRect(x:12,y:3,width:356,height:24), leadingSymbol:"pause.circle", radius:6)
             notice.identifier = NSUserInterfaceItemIdentifier("inbox_paused_notice")
@@ -398,114 +446,118 @@ extension Companion: NSMenuDelegate {
             _ = host(row,id:"inbox_notice_row")
         }
         let agentHeader=NSView(frame:NSRect(x:0,y:0,width:380,height:22))
-        agentHeader.addSubview(textLabel("LISTENING SESSIONS",NSRect(x:16,y:3,width:344,height:16),size:10,weight:.semibold,color:CitoPalette.secondaryText))
+        let sectionTitle = orderedListeners.isEmpty ? "LISTENING SESSIONS" : "LISTENING SESSIONS · \(orderedListeners.count)"
+        agentHeader.addSubview(textLabel(sectionTitle,NSRect(x:16,y:3,width:344,height:16),size:10,weight:.semibold,color:CitoPalette.secondaryText))
         _ = host(agentHeader,id:"listening_sessions_header")
-        let orderedListeners = listeners.filter { $0.harness != "human" }
-        let activeScroll = orderedListeners.count > 3 ? makeMenuScroll(height: 220) : nil
+        let scrollThreshold = myRemoteCollapsed && availableCollapsed ? 5 : 3
+        let activeScroll = orderedListeners.count > scrollThreshold ? makeMenuScroll(height: CitoMetrics.sessionViewportHeight) : nil
         let activeWidth = activeScroll?.contentSize.width ?? CitoMetrics.menuWidth
         for listener in orderedListeners {
-            let sessionKey = "\(listener.harness):\(listener.session_id)"
-            let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
-                .compactMap { $0 }.first { !$0.isEmpty } ?? targetHubObj?.user ?? "local"
-            let displayTitle = listener.use_app_title == true ? map[listener.harness]?.display_name ?? listener.harness : listener.display_title ?? listener.title
-            let aboutText = listener.display_about
-            let rowHeight: CGFloat = aboutText != nil ? 78 : 64
-            let cardHeight: CGFloat = aboutText != nil ? 72 : 58
-            let row = NSView(frame: NSRect(x: 0, y: 0, width: activeWidth, height: rowHeight))
-            let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: activeWidth - 2 * CitoMetrics.menuInset, height: cardHeight), radius: 10,
-                color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
+            let id = listener.scoped_id
+            let authority = targetHub.isEmpty ? hubs.first { $0.name == listener.hub } : targetHubObj
+            let pinned = listener.can_pin == true && listener.listen_mode != "auto"
+            let pinApplies = listener.can_pin == true && (authority?.auto_listen == true || !pinned)
+            let workspaceSupported = authority?.auth_mode == "oidc" && authority?.supports_workspace_scope == true
+            let workspace = workspaceSupported && listener.scope == "workspace"
+            let expanded = expandedSessionActions.contains(id)
+            let stripHeight = expanded ? CitoMetrics.sessionActionsHeight : 0
+            let cardHeight = CitoMetrics.sessionCardHeight + stripHeight
+            let row = NSView(frame: NSRect(x: 0, y: 0, width: activeWidth, height: cardHeight + CitoMetrics.sessionRowGap))
+            let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: CitoMetrics.sessionRowGap / 2,
+                width: activeWidth - 2 * CitoMetrics.menuInset, height: cardHeight), radius: CitoMetrics.cardRadius,
+                color: CitoPalette.channelCardFill, border: CitoPalette.channelCardBorder)
+            card.identifier = NSUserInterfaceItemIdentifier("session_card:\(id)")
             row.addSubview(card)
-            activeRows.append((id: "session:\(listener.scoped_id)", view: row))
-            let titleX: CGFloat = 48
-            let badge = makeHarnessBadge(NSRect(x: 12, y: cardHeight - 43, width: 28, height: 28),
-                radius: 7, iconInset: 6, harness: listener.harness, harnesses: map)
+            activeRows.append((id: "session:\(id)", view: row))
+            let titleX: CGFloat = 42
+            let badge = makeHarnessBadge(NSRect(x: 10, y: stripHeight + 9, width: 24, height: 24),
+                radius: 6, iconInset: 5, harness: listener.harness, harnesses: map)
+            badge.identifier = NSUserInterfaceItemIdentifier("session_badge:\(id)")
             card.addSubview(badge)
-            var sessionActions: [NSView] = []
-            let title = textLabel(displayTitle,
-                NSRect(x: titleX, y: cardHeight - 26, width: 40, height: 18), size: 13, weight: .semibold)
-            title.lineBreakMode = .byTruncatingMiddle
-            title.toolTip = displayTitle; card.addSubview(title)
-            if let aboutText {
-                let aboutLabel = textLabel(aboutText, NSRect(x: titleX, y: 28, width: card.bounds.width - CitoMetrics.cardInset - titleX, height: 16), size: 11.5, color: CitoPalette.secondaryText)
-                aboutLabel.lineBreakMode = .byTruncatingMiddle
-                aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
+
+            let moreTitle = expanded ? "Hide session actions" : "Show session actions"
+            let more = MenuControl(moreTitle, frame: NSRect(x: 0, y: 0, width: 22, height: 22), symbol: "ellipsis")
+            more.identifier = NSUserInterfaceItemIdentifier("more:\(id)")
+            more.style = .subtleHeader
+            more.pressed = { [weak self] in
+                guard let self else { return }
+                if self.expandedSessionActions.remove(id) == nil { self.expandedSessionActions.insert(id) }
+                self.rebuild(revealSession: id)
             }
-            let copy = makeAddressCopyControl(listener.display_address, id: "copy:\(listener.scoped_id)", authority: listener.hub, height: 19)
-            let copyWidth = copy.frame.width
-            copy.frame.origin.x = titleX
+            let copy = makeAddressCopyControl(listener.display_address, id: "copy:\(id)", authority: listener.hub,
+                fingerprintOnly: listener.is_self_principal == true, maxWidth: 136)
             copy.style = .subtleHeader
             card.addSubview(copy)
+            card.addSubview(more)
+            layoutBar(in: card, y: stripHeight + 14, height: 22, spacing: 4, trailing: [copy, more])
+            let textWidth = copy.frame.minX - 4 - titleX
+
+            let title = listener.use_app_title == true ? map[listener.harness]?.display_name ?? listener.harness : listener.display_title ?? listener.title
             let cwd = compactHomePath(listener.cwd)
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let pathText: String
-            pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
-            let path = textLabel(pathText,
-                NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
-            path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
-            if listener.can_pin == true && (hubs.first(where: { $0.name == listener.hub })?.auto_listen == true || listener.listen_mode == "auto") {
-                let pinned = listener.listen_mode != "auto"
-                let activityTimed = map[listener.harness]?.idle_timeout_ms != nil
-                let pin = MenuControl("Pin", frame:NSRect(x:0,y:cardHeight-28,width:22,height:22), symbol:pinned ? "pin.fill" : "pin")
-                pin.identifier = NSUserInterfaceItemIdentifier("pin:\(listener.scoped_id)")
-                pin.style = pinned ? .neutral : .subtleHeader
-                pin.normalColor = pinned ? CitoPalette.infoText : CitoPalette.secondaryText
-                let lifetime = activityTimed ? "Unpinned sessions auto-retire after the idle timeout." : "Unpinned sessions stay listening while their endpoint is available; no idle timeout applies."
-                pin.toolTip = (pinned ? "Pinned. Unpin to follow Auto-Listen. " : "Pin this session. ") + lifetime + " Pinned sessions stay listening when Auto-Listen is turned off."
-                pin.setAccessibilityLabel(pinned ? "Unpin session" : "Pin session")
-                pin.pressed = { [weak self] in self?.emit(["op":"set_listen_mode","hub":listener.hub,"listener_id":listener.listener_id,"listen_mode":pinned ? "auto" : "manual"]) }
-                card.addSubview(pin); sessionActions.append(pin)
-            }
-            if let scopeBtn = scopeToggle(hub:listener.hub,user:user,scope:listener.scope,id:listener.scoped_id,y:cardHeight-28) {
-                var scope = listener.scope
-                scopeBtn.pressed = { [weak self, weak scopeBtn] in
-                    guard let self = self, let scopeBtn = scopeBtn else { return }
-                    scope = scope == "self" ? "workspace" : "self"
-                    self.updateScopeControl(scopeBtn, scope:scope, hub:listener.hub, user:user)
-                    self.emit(["op":"set_scope","hub":listener.hub,"listener_id":listener.listener_id,"scope":scope])
-                }
-                card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
-            }
-            let stop = MenuControl("Stop", frame: NSRect(x: 0, y: cardHeight - 28, width: 48, height: 22))
-            stop.toolTip = "Stop only this session and keep it stopped. Auto-Listen on \(listener.hub) stays unchanged."
-            stop.style = .neutral; stop.maximumWidth = 48
-            stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
-            let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
-            stop.isHidden = listener.can_stop != true
-            stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
-            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: 4, trailing: sessionActions)
-            let rightEdge = sessionActions.filter { !$0.isHidden }.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
-            if renamingSessionKey == sessionKey {
-                title.isHidden = true
+            let branchSuffix = branch.isEmpty || branch == "HEAD" ? "" : " · \(branch)"
+            let about = listener.display_about.flatMap { $0.isEmpty ? nil : $0 }
+            let detail = cwd + branchSuffix + (about.map { " — \($0)" } ?? "")
+            let tooltip = ([title, listener.cwd, listener.branch, about, listener.display_address] as [String?])
+                .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+            let path = textLabel(detail, NSRect(x: titleX, y: stripHeight + 6, width: textWidth, height: 14),
+                size: 10.5, color: CitoPalette.secondaryText)
+            path.identifier = NSUserInterfaceItemIdentifier("session_detail:\(id)")
+            path.maximumNumberOfLines = 1; path.lineBreakMode = .byTruncatingTail; path.toolTip = tooltip
+            card.addSubview(path)
+
+            if renamingSessionKey == id {
                 let field = existingRenameField ?? NSTextField(string: renameDraft ?? listener.title)
-                field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
-                field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(listener.scoped_id)")
+                field.frame = NSRect(x: titleX, y: stripHeight + 20, width: textWidth, height: 16)
+                field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(id)")
                 field.setAccessibilityLabel("Conversation title")
-                field.delegate = self; field.font = .systemFont(ofSize: 13)
+                field.delegate = self; field.font = .systemFont(ofSize: 12.5)
                 if let draft = renameDraft, field.stringValue != draft { field.stringValue = draft }
                 card.addSubview(field); renameField = field
                 if existingRenameField == nil || renameSelection != nil {
                     RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self, weak field] in
-                        guard let self = self, let field = field, self.renameField === field, field.currentEditor() == nil else { return }
+                        guard let self, let field, self.renameField === field, field.currentEditor() == nil else { return }
                         field.window?.makeFirstResponder(field)
                         if let selection = renameSelection { (field.currentEditor() as? NSTextView)?.setSelectedRange(selection) }
                         else { field.selectText(nil) }
                     }
                 }
             } else {
-                let maxTitleW = max(0, rightEdge - titleX - 28)
-                let measuredW = measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))
-                let titleW = min(maxTitleW, max(44, ceil(measuredW) + 4))
-                title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
-                let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 6, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
-                renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")
-                renameBtn.style = .subtleHeader; renameBtn.toolTip = "Rename session"
-                renameBtn.pressed = { [weak self] in self?.renameField = nil; self?.renamingSessionKey = sessionKey; self?.rebuild() }
-                renameBtn.isHidden = listener.can_rename != true
-                card.addSubview(renameBtn)
+                let indicators: [(kind: String, symbol: String, label: String, tint: NSColor)] =
+                    (pinned ? [("pinned", "pin.fill", "Pinned", CitoPalette.secondaryText)] : []) +
+                    (workspace ? [("workspace", "person.2.fill", "Visible to everyone", CitoPalette.infoText)] : [])
+                let titleFont = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+                let titleWidth = min(textWidth - CGFloat(indicators.count) * 14, measureTextWidth(title, font: titleFont) + 4)
+                let label = textLabel(title, NSRect(x: titleX, y: stripHeight + 20, width: titleWidth, height: 16),
+                    size: 12.5, weight: .semibold)
+                label.identifier = NSUserInterfaceItemIdentifier("session_title:\(id)")
+                label.maximumNumberOfLines = 1; label.lineBreakMode = .byTruncatingTail; label.toolTip = tooltip
+                card.addSubview(label)
+                for (index, indicator) in indicators.enumerated() {
+                    let icon = NSImageView(frame: NSRect(x: label.frame.maxX + 4 + CGFloat(index) * 14,
+                        y: stripHeight + 23, width: 10, height: 10))
+                    icon.identifier = NSUserInterfaceItemIdentifier("session_\(indicator.kind):\(id)")
+                    icon.image = NSImage(systemSymbolName: indicator.symbol, accessibilityDescription: indicator.label)
+                    icon.contentTintColor = indicator.tint
+                    icon.toolTip = indicator.label
+                    card.addSubview(icon)
+                }
             }
-            layoutBar(in: card, insetLeft: titleX, insetRight: CitoMetrics.cardInset, y: 7, height: 19, leading: [copy], flexible: path)
+            if expanded {
+                mountSessionActions(in: card, listener: listener, pinApplies: pinApplies, pinned: pinned,
+                    workspaceSupported: workspaceSupported, activityTimed: map[listener.harness]?.idle_timeout_ms != nil)
+            }
         }
         hostRows(activeRows, in: activeScroll, id: "active_scroll")
+        if let revealSession, let activeScroll,
+           let row = activeRows.first(where: { $0.id == "session:\(revealSession)" })?.view {
+            // Restore the existing anchor first, then expose the entire changed row.
+            let clip = activeScroll.contentView
+            let viewport = clip.bounds
+            let y = min(max(viewport.minY, row.frame.maxY - viewport.height), row.frame.minY)
+            clip.scroll(to: NSPoint(x: viewport.minX, y: y))
+            activeScroll.reflectScrolledClipView(clip)
+        }
         if orderedListeners.isEmpty {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 92))
                 let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 86), radius: 10, color: .labelColor.withAppearanceAlpha(0.045))
@@ -556,7 +608,7 @@ extension Companion: NSMenuDelegate {
                     hostIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Remote host")
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
-                    let copy = makeAddressCopyControl(peer.display_address, id: "copy_remote:\(peer.scoped_id)", authority: peer.hub ?? targetHub, height: 20)
+                    let copy = makeAddressCopyControl(peer.display_address, id: "copy_remote:\(peer.scoped_id)", authority: targetHub)
                     row.addSubview(copy)
                     let cleanHost = cleanHostDisplay(peer.host_name)
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::core::{
     config::ordered_hub_names,
-    hub::{channel_display_label, HubServer},
+    hub::{channel_display_label, configured_auth_mode, HubServer},
     identity::{hash, iso, string},
     state::LocalState,
     transport::HubClient,
@@ -217,11 +217,13 @@ impl DaemonService {
         });
         let enabled = config["enabled"].as_bool().unwrap_or(true);
         let builtin = config["url"] == "local://";
-        let mut hub = json!({"name":name,"url":config["url"],"auth_mode":config["authMode"],"enabled":enabled,
+        let auth_mode = configured_auth_mode(config);
+        let oidc = auth_mode == Some("oidc");
+        let mut hub = json!({"name":name,"url":config["url"],"auth_mode":auth_mode,"enabled":enabled,
             "redirect_port":config["redirectPort"],"issuer":config["issuer"],"client_id":config["clientId"],
             "auto_listen":config["autoListen"].as_bool().unwrap_or(false),"status":status,"connected":enabled && status == "connected",
-            "is_default":name==self.config.default_hub,"is_builtin":builtin,"supports_workspace_scope":!builtin,
-            "can_login":enabled && config["authMode"] == "oidc" && status != "connected",
+            "is_default":name==self.config.default_hub,"is_builtin":builtin,"supports_workspace_scope":oidc,
+            "can_login":enabled && oidc && status != "connected",
             "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
         let projection = if let Some((slot, sample)) = live {
             hub["user"] = slot.identity["owner_user"].clone();
@@ -239,7 +241,7 @@ impl DaemonService {
             self.project_human(
                 record,
                 sample.human_current,
-                sample.capabilities["auth_valid"] == true && !builtin,
+                sample.capabilities["auth_valid"] == true && oidc,
             )
         } else {
             hub["user"] = json!(self.config.effective_user(name).ok());
@@ -861,8 +863,9 @@ impl super::HubAccess {
         let agent = row["harness"] != "human";
         let mutable = own && capabilities["auth_valid"] == true;
         row["is_self_principal"] = json!(own);
-        row["can_set_scope"] =
-            json!(mutable && slot.is_some_and(|slot| slot.config["url"] != "local://"));
+        row["can_set_scope"] = json!(
+            mutable && slot.is_some_and(|slot| configured_auth_mode(&slot.config) == Some("oidc"))
+        );
         row["can_pin"] = json!(mutable && local && agent);
         row["can_rename"] = json!(mutable && local && agent);
         row["can_stop"] = json!(mutable && local && agent);

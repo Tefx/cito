@@ -53,19 +53,35 @@ fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() 
                     frame["harnesses"][0]["idle_timeout_ms"] =
                         if timed { json!(3_600_000) } else { Value::Null };
                     f.send(p, frame);
+                    let resting = inspect_as(&f, p, Some(appearance));
+                    assert_eq!(resting.menu(&format!("session:{id}"))["height"], 46);
+                    for action in ["rename", "pin", "scope", "stop"] {
+                        assert!(resting.menu(&format!("{action}:{id}")).is_null());
+                    }
+                    let marker = resting.menu(&format!("session_pinned:{id}"));
+                    assert_eq!(marker.is_null(), mode != "manual");
+                    if !marker.is_null() {
+                        assert_eq!(marker["width"], 10);
+                        assert_eq!(marker["height"], 10);
+                    }
+                    control(&f, p, &format!("more:{id}"));
                     let s = inspect_as(&f, p, Some(appearance));
+                    assert_eq!(s.menu(&format!("session:{id}"))["height"], 74);
+                    assert_eq!(s.menu(&format!("session_card:{id}"))["height"], 70);
+                    assert_eq!(s.menu(&format!("session_actions_divider:{id}"))["y"], 27);
                     let pin = s.menu(&format!("pin:{id}"));
                     if !hub_auto && mode == "manual" {
                         assert!(pin.is_null());
+                        control(&f, p, &format!("more:{id}"));
                         continue;
                     }
-                    assert_eq!(pin["width"], 22);
-                    assert_eq!(pin["height"], 22);
+                    assert_eq!(pin["text"], if mode == "auto" { "Pin" } else { "Pinned" });
+                    assert_eq!(pin["height"], 16);
                     assert_eq!(
                         pin["symbol"],
                         if mode == "auto" { "pin" } else { "pin.fill" }
                     );
-                    assert_eq!(pin["border_width"], if mode == "auto" { 0 } else { 1 });
+                    assert_eq!(pin["border_width"], 1);
                     assert_eq!(
                         pin["accessibility_label"],
                         if mode == "auto" {
@@ -83,36 +99,18 @@ fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() 
                     } else {
                         "endpoint is available; no idle timeout applies"
                     }));
-                    let card = s.menu(&format!("session:{id}"));
-                    let title = nodes(&card["children"])
-                        .into_iter()
-                        .find(|n| n["text"] == title_text)
-                        .unwrap();
-                    let rename = s.menu(&format!("rename:{id}"));
-                    let title_end = title["x"].as_f64().unwrap() + title["width"].as_f64().unwrap();
-                    let rename_x = rename["x"].as_f64().unwrap();
-                    assert_eq!(rename_x - title_end, 6.0);
-                    assert!(
-                        rename_x + rename["width"].as_f64().unwrap() <= pin["x"].as_f64().unwrap(),
-                        "title={title}; rename={rename}; pin={pin}; mode={mode}, auto={hub_auto}"
-                    );
-                    let scope = s.menu(&format!("scope:{id}"));
-                    assert_eq!(scope["width"], 68);
-                    assert!(s.menu(&format!("stop:{id}"))["width"].as_f64().unwrap() >= 44.0);
-                    if mode == "manual" {
-                        let tint = pin["children"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .find_map(|n| n["tint"].as_array())
-                            .unwrap();
-                        assert!(
-                            tint[2].as_f64().unwrap() > tint[0].as_f64().unwrap(),
-                            "Pinned icon uses the blue info tint"
-                        );
+                    let title = s.menu(&format!("session_title:{id}"));
+                    assert!(title["width"].as_f64().unwrap() >= 195.0, "{title}");
+                    for (action, text) in
+                        [("rename", "Rename"), ("scope", "Only Me"), ("stop", "Stop")]
+                    {
+                        let button = s.menu(&format!("{action}:{id}"));
+                        assert_eq!(button["text"], text);
+                        assert_eq!(button["y"], pin["y"]);
                     }
                     control(&f, p, &format!("pin:{id}"));
-                    inspect(&f, p);
+                    control(&f, p, &format!("more:{id}"));
+                    assert_eq!(inspect(&f, p).menu(&format!("session:{id}"))["height"], 46);
                     let action = f.frames_for(p, "set_listen_mode").next_back().unwrap();
                     assert_eq!(action["hub"], "personal");
                     assert_eq!(action["listener_id"], "c_abcdefghijkl");
@@ -127,24 +125,68 @@ fn pin_states_follow_hub_mode_and_idle_capability_without_squeezing_the_title() 
 }
 
 #[test]
-fn pencil_stays_next_to_a_short_title() {
+fn compact_session_shows_passive_indicators_and_full_detail_tooltip() {
     let _lock = serial();
     let (f, p) = ui_fixture();
+    let id = "personal:repo-abcdefghijkl";
     let mut frame = state();
     frame["hubs"][0]["auto_listen"] = json!(true);
+    frame["listeners"][0]["listen_mode"] = json!("manual");
+    frame["listeners"][0]["scope"] = json!("workspace");
     frame["listeners"][0]["title"] = json!("Fix");
-    f.send(p, frame);
+    frame["listeners"][0]["branch"] = json!("main");
+    frame["listeners"][0]["display_about"] = json!("Schema work");
+    f.send(p, frame.clone());
     let s = inspect(&f, p);
-    let card = s.menu("session:personal:repo-abcdefghijkl");
-    let title = nodes(&card["children"])
-        .into_iter()
-        .find(|n| n["text"] == "Fix")
-        .unwrap();
-    let rename = s.menu("rename:personal:repo-abcdefghijkl");
-    assert_eq!(title["width"], 44);
+    let title = s.menu(&format!("session_title:{id}"));
+    let badge = s.menu(&format!("session_badge:{id}"));
     assert_eq!(
-        rename["x"].as_f64().unwrap(),
-        title["x"].as_f64().unwrap() + 50.0
+        [&badge["x"], &badge["y"], &badge["width"], &badge["height"]],
+        [&json!(10), &json!(9), &json!(24), &json!(24)]
+    );
+    assert_eq!(title["x"], 42);
+    let pin = s.menu(&format!("session_pinned:{id}"));
+    let workspace = s.menu(&format!("session_workspace:{id}"));
+    assert_eq!(
+        pin["x"].as_f64().unwrap(),
+        46.0 + title["width"].as_f64().unwrap()
+    );
+    assert_eq!(
+        workspace["x"].as_f64().unwrap(),
+        pin["x"].as_f64().unwrap() + 14.0
+    );
+    for marker in [pin, workspace] {
+        assert_eq!(
+            [&marker["width"], &marker["height"]],
+            [&json!(10), &json!(10)]
+        );
+        assert!(
+            marker["accessibility_role"] != "AXButton" && marker["can_become_key_view"] != true,
+            "The indicator must not act like a button: {marker}"
+        );
+    }
+    let detail = s.menu(&format!("session_detail:{id}"));
+    assert_eq!(detail["text"], "/tmp · main — Schema work");
+    assert_eq!(
+        detail["tooltip"],
+        "Fix\n/tmp\nmain\nSchema work\nalice/fixture#abcd"
+    );
+    assert_eq!(detail["maximum_lines"], 1);
+    assert_eq!(detail["truncates_tail"], true);
+    let more = s.menu(&format!("more:{id}"));
+    assert_eq!(more["symbol"], "ellipsis");
+    assert_eq!([&more["width"], &more["height"]], [&json!(22), &json!(22)]);
+
+    frame["hubs"][0]["auth_mode"] = json!("token");
+    frame["listeners"][0]["branch"] = json!("HEAD");
+    f.send(p, frame);
+    control(&f, p, &format!("more:{id}"));
+    let token = inspect(&f, p);
+    assert!(token.menu(&format!("session_workspace:{id}")).is_null());
+    assert!(token.menu(&format!("scope:{id}")).is_null());
+    assert_eq!(
+        token.menu(&format!("session_detail:{id}"))["text"],
+        "/tmp — Schema work"
     );
 }
 
@@ -359,7 +401,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     assert!(resting_height >= 48.0);
     let ready = l.until(|s| s.settings("toggle_inbox")["enabled"] == true);
     let pause = ready.settings("toggle_inbox");
-    assert_eq!(pause["text"], "Pause Inbox");
+    assert_eq!(pause["text"], "Pause");
     assert_eq!(
         pause["tooltip"],
         "Pause inbox alerts on local across all devices and external channels"
@@ -368,11 +410,11 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("toggle_inbox");
     l.until(|s| s.settings("toggle_inbox")["enabled"] == true);
     l.control("toggle_inbox");
-    let s = l.until(|s| s.settings("toggle_inbox")["text"] == "Pause Inbox");
+    let s = l.until(|s| s.settings("toggle_inbox")["text"] == "Pause");
     assert_eq!(s.settings(row_id)["height"], resting_height);
     assert!(nodes(&s["settings_items"])
         .iter()
-        .any(|n| n["text"] == "You (@alice)"));
+        .any(|n| n["text"] == "Inbox · @alice"));
     assert_eq!(
         f.rows("SELECT title FROM local_listeners WHERE harness='human'")[0]["title"],
         "Human"
@@ -439,7 +481,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("open_settings");
     l.control("settings_tab:channels");
     l.control("toggle_inbox");
-    let paused = l.until(|s| s.settings("toggle_inbox")["text"] == "Resume Inbox");
+    let paused = l.until(|s| s.settings("toggle_inbox")["text"] == "Resume");
     assert_eq!(
         paused.menu("inbox_paused_notice")["text"],
         "Inbox paused · Resume in Settings…"
@@ -454,7 +496,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("toggle_inbox");
     let resumed = l.until(|s| {
         let toggle = s.settings("toggle_inbox");
-        toggle["text"] == "Pause Inbox" && toggle["enabled"] == true
+        toggle["text"] == "Pause" && toggle["enabled"] == true
     });
     assert_eq!(resumed.settings(row_id)["height"], resting_height);
     l.control("close_settings");
@@ -478,7 +520,8 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     f.send(p, frame.clone());
     let idle = inspect(&f, p);
     assert_eq!(idle["button_title"], "");
-    assert_eq!(idle.menu("header_subtitle")["text"], "Not listening");
+    assert!(idle.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&idle), "LISTENING SESSIONS");
     for user in ["alice", "bob"] {
         human["user"] = json!(user);
         human["display_address"] = json!(format!("@{user}"));
@@ -501,7 +544,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         assert!(row["height"].as_f64().unwrap() >= 48.0);
         let title = nodes(&row["children"])
             .into_iter()
-            .find(|n| n["text"] == format!("You (@{user})"))
+            .find(|n| n["text"] == format!("Inbox · @{user}"))
             .unwrap();
         assert_eq!(title["hidden"], false);
     }
@@ -517,7 +560,8 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert_eq!(s["button_title"], " 3");
-    assert_eq!(s.menu("header_subtitle")["text"], "1 session listening");
+    assert!(s.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&s), "LISTENING SESSIONS · 1");
     let strip = s.menu("header_hub_strip");
     for hub in ["personal", "work"] {
         let pill = s.menu(&format!("hub:{hub}"));
@@ -734,7 +778,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         assert_eq!(app_status["text"], format!("Connected · {clean_error}"));
         control(&f, p, "settings_tab:channels");
         let s = stress_inspect();
-        tooltip(&s, "settings_items", &format!("You (@{handle})"));
+        tooltip(&s, "settings_items", &format!("Inbox · @{handle}"));
         tooltip(&s, "settings_items", &display_name);
         assert_eq!(
             s.settings("channel_summary:channel")["text"],
@@ -790,18 +834,17 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
 }
 
 #[test]
-fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
+fn long_hub_pills_reveal_the_full_selected_name_and_pairing_warning_wraps() {
     let _lock = serial();
     let (f, p) = ui_fixture();
-    let names = [
-        "personal-engineering-and-research-working-group",
-        "workspace-engineering-and-research-working-group",
-    ];
+    let wide = format!("{}{}", "m".repeat(15), "w".repeat(16));
+    let max_length = "w".repeat(32);
+    let names = [wide.as_str(), max_length.as_str()];
     let mut frame = state();
     let mut cfg = settings();
     for (index, name) in names.iter().enumerate() {
         frame["hubs"][index]["name"] = json!(name);
-        cfg["hubs"][index]["name"] = json!(name);
+        cfg["hubs"][index]["name"] = json!(format!("{name}-working-group"));
     }
     frame["listeners"] = json!([]);
     frame["settings"] = cfg;
@@ -810,22 +853,28 @@ fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
         control(&f, p, &format!("hub:{name}"));
         let snapshot = inspect(&f, p);
         let strip = snapshot.menu("header_hub_strip");
-        assert_eq!(strip["content_x"], 0);
+        assert!(snapshot.menu("header_subtitle").is_null());
+        assert_eq!(strip["width"], 320);
+        assert_eq!(strip["selected_id"], format!("hub:{name}"));
+        let offset = strip["content_x"].as_f64().unwrap();
+        let selected = snapshot.menu(&format!("hub:{name}"));
+        let x = selected["x"].as_f64().unwrap();
+        let right = x + selected["width"].as_f64().unwrap();
+        assert!(x >= offset && right <= offset + 320.0, "{selected}");
         for name in names {
             let pill = snapshot.menu(&format!("hub:{name}"));
-            assert!(pill["x"].as_f64().unwrap() >= 2.0);
-            assert!(
-                pill["x"].as_f64().unwrap() + pill["width"].as_f64().unwrap()
-                    <= strip["width"].as_f64().unwrap() - 2.0
-            );
             assert!(pill["accessibility_label"].as_str().unwrap().contains(name));
-            assert!(pill["label_measured_width"].as_f64() > pill["label_width"].as_f64());
+            let measured = pill["label_measured_width"].as_f64().unwrap();
+            if name == wide {
+                assert!(measured >= 295.0, "{pill}");
+            }
+            assert!(measured <= pill["label_width"].as_f64().unwrap(), "{pill}");
         }
     }
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:hubs");
     let settings_snapshot = inspect(&f, p);
-    for name in names {
+    for name in names.map(|name| format!("{name}-working-group")) {
         let label = settings_snapshot.settings(&format!("settings_hub_name:{name}"));
         assert_eq!(label["tooltip"], name);
         assert!(label["label_measured_width"].as_f64() > label["label_width"].as_f64());
@@ -858,8 +907,8 @@ fn two_long_hub_pills_fit_and_pairing_warning_wraps_in_the_menu() {
 fn two_hub_pills_share_unused_width_in_either_order() {
     let _lock = serial();
     let (f, p) = ui_fixture();
-    let long = "engineering-and-research-working-group";
-    for names in [["a", long], [long, "a"]] {
+    let long = "engineering-and-research-group";
+    for names in [["work", long], [long, "work"]] {
         let mut frame = state();
         frame["listeners"] = json!([]);
         for (index, name) in names.iter().enumerate() {
@@ -870,11 +919,14 @@ fn two_hub_pills_share_unused_width_in_either_order() {
         let strip = s.menu("header_hub_strip");
         assert_eq!(strip["content_x"], 0);
         let wide = s.menu(&format!("hub:{long}"))["width"].as_f64().unwrap();
-        let narrow = s.menu("hub:a")["width"].as_f64().unwrap();
+        let narrow = s.menu("hub:work")["width"].as_f64().unwrap();
         let budget = strip["width"].as_f64().unwrap() - 8.0;
         assert!(wide > budget / 2.0);
         assert!(wide + narrow <= budget);
-        assert!(wide <= 180.0);
+        assert!(
+            s.menu(&format!("hub:{long}"))["label_measured_width"].as_f64()
+                <= s.menu(&format!("hub:{long}"))["label_width"].as_f64()
+        );
     }
 }
 
@@ -1037,7 +1089,8 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         "/…/project-directory-with-long-name · main"
     );
     assert_eq!(s["count"], 0);
-    assert_eq!(s.menu("header_subtitle")["text"], "Not listening");
+    assert!(s.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&s), "LISTENING SESSIONS");
     assert_eq!(s["available_count"], 5);
     assert_eq!(s.menu("hub:work")["text"], "work");
     assert_eq!(s.menu("toggle_auto_listen")["text"], "Auto-Listen");
@@ -1331,10 +1384,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     );
     assert_eq!(s.menu(first_copy)["text"], "✓ Copied");
     f.send(p, json!({"op":"test_expire_copy_feedback","id":first_copy}));
-    assert_eq!(
-        inspect(&f, p).menu(first_copy)["text"],
-        "alice/fixture#abcd"
-    );
+    assert_eq!(inspect(&f, p).menu(first_copy)["text"], "#abcd");
     assert_eq!(s["count"], 1);
     assert!(s.menu("session:work:repo-workabcdefgh").is_null());
     assert!(!s.menu("session:personal:repo-abcdefghijkl").is_null());
@@ -1364,6 +1414,10 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
             .is_null(),
         "Personal networks hide redundant visibility controls"
     );
+    control(&f, p, "more:work:repo-workabcdefgh");
+    assert!(inspect(&f, p)
+        .menu("scope:work:repo-workabcdefgh")
+        .is_null());
     let pause = inspect(&f, p).menu("stop:work:repo-workabcdefgh");
     assert_eq!(pause["text"], "Stop");
     assert_eq!(
@@ -1394,18 +1448,26 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     next["hubs"][1]["supports_workspace_scope"] = json!(true);
     send_companion(&f, p, next.clone());
     let scope_before = inspect(&f, p).menu("scope:work:repo-workabcdefgh");
-    assert_eq!(scope_before["width"], 68);
-    assert_eq!(scope_before["tooltip"], "Visibility: Only Me (@alice) — only your own sessions and devices on 'work' can message this node. Click to share with Team.");
+    assert_eq!(scope_before["text"], "Only Me");
+    assert!(scope_before["tooltip"]
+        .as_str()
+        .unwrap()
+        .contains("Click to share with everyone."));
     control(&f, p, "scope:work:repo-workabcdefgh");
     wait(|| f.frames_for(p, "set_scope").count() == 1);
     let scope_after = inspect(&f, p).menu("scope:work:repo-workabcdefgh");
     assert_eq!(scope_after["width"], scope_before["width"]);
     assert_eq!(scope_after["x"], scope_before["x"]);
     let scope_team = scope_after;
-    assert_eq!(scope_team["tooltip"], "Visibility: Team — anyone connected to 'work' can discover and message this node. Click to restrict to Only Me.");
+    assert_eq!(scope_team["text"], "Everyone");
+    assert_eq!(scope_team["background"], scope_before["background"]);
+    assert!(scope_team["tooltip"]
+        .as_str()
+        .unwrap()
+        .contains("Click to restrict to Only Me."));
     control(&f, p, "scope:work:repo-workabcdefgh");
     let scope_self = inspect(&f, p).menu("scope:work:repo-workabcdefgh");
-    assert_eq!(scope_self["text"], "Self");
+    assert_eq!(scope_self["text"], "Only Me");
     assert_eq!(scope_self["width"], scope_team["width"]);
     assert_eq!(scope_self["x"], scope_team["x"]);
     let scopes: Vec<_> = f.frames_for(p, "set_scope").collect();
@@ -1518,9 +1580,14 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     for id in ["copy:work:long", "copy_remote:work:long-remote"] {
         let chip = inspect(&f, p).menu(id);
         let shown = chip["text"].as_str().unwrap();
-        assert!(shown.contains('…') && shown.starts_with("work:") && shown.ends_with("#abcd"));
+        if id == "copy:work:long" {
+            assert_eq!(shown, "#abcd");
+            assert!(chip["width"].as_f64().unwrap() <= 64.0, "{chip}");
+        } else {
+            assert!(shown.contains('…') && shown.starts_with('a') && shown.ends_with("#abcd"));
+            assert!(chip["width"].as_f64().unwrap() <= 220.0);
+        }
         assert_eq!(chip["tooltip"], full);
-        assert!(chip["width"].as_f64().unwrap() <= 220.0);
         control(&f, p, id);
         assert_eq!(inspect(&f, p)["clipboard"], full);
     }
@@ -1543,32 +1610,138 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     }
     control(&f, p, "copy_dir:work:long-remote");
     assert_eq!(inspect(&f, p)["clipboard"], full);
-    let mut many = state();
-    many["listeners"] = json!((0..3)
+}
+
+#[test]
+fn menu_copy_labels_strip_only_context_but_keep_canonical_clipboard_values() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    let mut other = listener();
+    other["scoped_id"] = json!("personal:other");
+    other["display_address"] = json!("personal:bob/pi#954c");
+    other["is_self_principal"] = json!(false);
+    let mut no_fingerprint = listener();
+    no_fingerprint["scoped_id"] = json!("personal:address-without-fingerprint");
+    no_fingerprint["display_address"] = json!("personal:alice/pi");
+    let mut remote = peer("remote");
+    remote["display_address"] = json!("personal:alice/pi#954c");
+    let mut qualified_remote = peer("qualified");
+    qualified_remote["display_address"] = json!("work:alice/pi#954c");
+    frame["listeners"] = json!([listener(), other, no_fingerprint]);
+    frame["my_remote_listeners"] = json!([remote, qualified_remote]);
+    f.send(p, frame);
+    control(&f, p, "toggle_my_remote");
+    let before = inspect(&f, p);
+    for (id, label, canonical) in [
+        (
+            "copy:personal:repo-abcdefghijkl",
+            "#abcd",
+            "alice/fixture#abcd",
+        ),
+        ("copy:personal:other", "bob/pi#954c", "personal:bob/pi#954c"),
+        (
+            "copy:personal:address-without-fingerprint",
+            "alice/pi",
+            "personal:alice/pi",
+        ),
+        (
+            "copy_remote:personal:remote",
+            "alice/pi#954c",
+            "personal:alice/pi#954c",
+        ),
+        (
+            "copy_remote:personal:qualified",
+            "work:alice/pi#954c",
+            "work:alice/pi#954c",
+        ),
+    ] {
+        let chip = before.menu(id);
+        assert_eq!(chip["text"], label, "{id}");
+        assert_eq!(chip["tooltip"], canonical, "{id}");
+        control(&f, p, id);
+        let copied = inspect(&f, p);
+        assert_eq!(copied["clipboard"], canonical, "{id}");
+        assert_eq!(copied.menu(id)["width"], chip["width"], "{id}");
+    }
+}
+
+#[test]
+fn listening_viewport_fits_five_resting_rows_and_reveals_the_expanded_row() {
+    let _lock = serial();
+    let (f, p) = ui_fixture();
+    let mut frame = state();
+    let rows: Vec<_> = (0..6)
         .map(|i| {
             let mut row = listener();
             row["session_id"] = json!(format!("session-{i}"));
             row["scoped_id"] = json!(format!("personal:session-{i}"));
             row
         })
-        .collect::<Vec<_>>());
-    send_companion(&f, p, many.clone());
-    control(&f, p, "hub:personal");
+        .collect();
+    frame["listeners"] = json!(rows[..5]);
+    frame["my_remote_listeners"] = json!([peer("remote")]);
+    f.send(p, frame.clone());
     let inline = inspect(&f, p);
-    assert_eq!(inline["count"], 3);
+    assert_eq!(listening_header(&inline), "LISTENING SESSIONS · 5");
     assert!(inline.menu("active_scroll").is_null());
-    let mut fourth = listener();
-    fourth["session_id"] = json!("session-3");
-    fourth["scoped_id"] = json!("personal:session-3");
-    many["listeners"].as_array_mut().unwrap().push(fourth);
-    send_companion(&f, p, many);
-    let scrolled = inspect(&f, p);
-    assert_eq!(scrolled.menu("active_scroll")["height"], 220);
-    for i in 0..4 {
-        assert_eq!(
-            scrolled.menu(&format!("session:personal:session-{i}"))["height"],
-            64
-        );
+    for lower in ["toggle_my_remote", "toggle_available"] {
+        control(&f, p, lower);
+        assert_eq!(inspect(&f, p).menu("active_scroll")["height"], 230);
+        control(&f, p, lower);
+        assert!(inspect(&f, p).menu("active_scroll").is_null());
+    }
+
+    frame["listeners"] = json!(rows);
+    f.send(p, frame.clone());
+    f.send(p, json!({"op":"test_menu_open"}));
+    let resting = inspect(&f, p);
+    assert_eq!(listening_header(&resting), "LISTENING SESSIONS · 6");
+    let scroll = resting.menu("active_scroll");
+    assert_eq!(scroll["height"], 230);
+    assert_eq!(scroll["content_height"], 230);
+    assert_eq!(scroll["document_height"], 276);
+    assert_eq!(
+        scroll["fully_visible_rows"],
+        json!((0..5)
+            .map(|i| format!("session:personal:session-{i}"))
+            .collect::<Vec<_>>())
+    );
+    let id = "personal:session-4";
+    let more = format!("more:{id}");
+    let row = format!("session:{id}");
+    control(&f, p, &more);
+    let expanded = inspect(&f, p);
+    assert_eq!(expanded.menu(&row)["height"], 74);
+    let scroll = expanded.menu("active_scroll");
+    assert_eq!(scroll["height"], 230);
+    assert!(
+        scroll["fully_visible_rows"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(row)),
+        "The expanded row must be visible; offset {}, visible rows {}",
+        scroll["content_y"],
+        scroll["fully_visible_rows"]
+    );
+    assert_eq!(scroll["document_height"], 304);
+
+    let mut removed = frame.clone();
+    removed["listeners"].as_array_mut().unwrap().remove(4);
+    f.send(p, removed);
+    f.send(p, frame);
+    assert_eq!(inspect(&f, p).menu(&row)["height"], 46);
+    for reset in ["hub", "close"] {
+        control(&f, p, &more);
+        assert_eq!(inspect(&f, p).menu(&row)["height"], 74);
+        if reset == "hub" {
+            control(&f, p, "hub:work");
+            control(&f, p, "hub:personal");
+        } else {
+            f.send(p, json!({"op":"test_menu_close"}));
+            f.send(p, json!({"op":"test_menu_open"}));
+        }
+        assert_eq!(inspect(&f, p).menu(&row)["height"], 46);
     }
 }
 
@@ -1589,7 +1762,8 @@ fn status_only_frame_uses_live_non_first_default_hub_without_refreshed_settings(
 
     let s = inspect(&f, p);
     assert!(!s.menu("session:work:repo-abcdefghijkl").is_null());
-    assert_eq!(s.menu("header_subtitle")["text"], "1 session listening");
+    assert!(s.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&s), "LISTENING SESSIONS · 1");
 
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:hubs");
@@ -1611,17 +1785,16 @@ fn status_only_frame_uses_live_non_first_default_hub_without_refreshed_settings(
     f.send(p, frame.clone());
     let updated = inspect(&f, p);
     assert!(!updated.menu("session:work:repo-abcdefghijkl").is_null());
-    assert_eq!(
-        updated.menu("header_subtitle")["text"],
-        "1 session listening"
-    );
+    assert!(updated.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&updated), "LISTENING SESSIONS · 1");
 
     // Explicit user selection must still be preserved across status-only updates.
     control(&f, p, "target_hub:personal");
     f.send(p, frame);
     let selected = inspect(&f, p);
     assert!(selected.menu("session:work:repo-abcdefghijkl").is_null());
-    assert_eq!(selected.menu("header_subtitle")["text"], "Not listening");
+    assert!(selected.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&selected), "LISTENING SESSIONS");
 }
 
 #[test]
@@ -1651,8 +1824,6 @@ fn state_frame_reconciles_default_from_root_hub() {
 
     let updated = inspect(&f, p);
     assert!(!updated.menu("session:work:repo-abcdefghijkl").is_null());
-    assert_eq!(
-        updated.menu("header_subtitle")["text"],
-        "1 session listening"
-    );
+    assert!(updated.menu("header_subtitle").is_null());
+    assert_eq!(listening_header(&updated), "LISTENING SESSIONS · 1");
 }

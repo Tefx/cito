@@ -686,17 +686,21 @@ fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
         meta.clone(),
     );
     let s = cycle.until(|s| !s.menu("stop_all").is_null());
-    let stop_id = nodes(&s["items"])
+    let more_id = nodes(&s["items"])
         .into_iter()
         .find_map(|n| {
             n["id"]
                 .as_str()
-                .filter(|id| id.starts_with("stop:"))
+                .filter(|id| id.starts_with("more:"))
                 .map(str::to_owned)
         })
         .unwrap();
-    let pin_id = stop_id.replacen("stop:", "pin:", 1);
-    let session_id = stop_id.replacen("stop:", "session:", 1);
+    let stop_id = more_id.replacen("more:", "stop:", 1);
+    let pin_id = more_id.replacen("more:", "pin:", 1);
+    let session_id = more_id.replacen("more:", "session:", 1);
+    assert!(s.menu(&stop_id).is_null());
+    cycle.control(&more_id);
+    let s = inspect(&f, cycle.ui);
     assert!(
         s.menu(&pin_id).is_null(),
         "Manual listening without Auto-Listen needs no pin control"
@@ -736,7 +740,12 @@ fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
     });
 
     f.tool("cito_listen", json!({"about":"Stop only me"}), meta.clone());
-    cycle.until(|s| !s.menu(&session_id).is_null());
+    let s = cycle.until(|s| !s.menu(&session_id).is_null());
+    assert!(
+        s.menu(&stop_id).is_null(),
+        "Re-listening does not restore the action strip"
+    );
+    cycle.control(&more_id);
     cycle.control("toggle_auto_listen");
     cycle.until(|s| s.menu(&pin_id)["symbol"] == "pin.fill");
     cycle.control(&stop_id);
@@ -759,7 +768,7 @@ fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
 }
 
 #[test]
-fn inbox_and_channel_diagnostics_wrap_without_displacing_or_clipping_controls() {
+fn inbox_summary_truncates_while_channel_diagnostics_wrap_without_displacing_controls() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     let mut cfg = settings();
@@ -774,11 +783,10 @@ fn inbox_and_channel_diagnostics_wrap_without_displacing_or_clipping_controls() 
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     let ready = inspect(&f, p);
-    assert!(
-        ready.settings("inbox_control_bar")["height"]
-            .as_f64()
-            .unwrap()
-            > 48.0
+    assert_eq!(ready.settings("inbox_control_bar")["height"], 50);
+    assert_eq!(
+        ready.settings("settings_channels_tab")["scroll_required"],
+        false
     );
     cfg["channels"][0]["warning"] = json!(true);
     cfg["channels"][0]["detail"] = json!(detail.trim());
@@ -789,15 +797,14 @@ fn inbox_and_channel_diagnostics_wrap_without_displacing_or_clipping_controls() 
         let height = bar["height"].as_f64().unwrap();
         let action = s.settings("toggle_inbox");
         let summary = s.settings("inbox_control_summary");
-        assert!(height > 48.0);
+        assert_eq!(height, 50.0);
         assert_eq!(action["y"].as_f64().unwrap(), (height - 22.0) / 2.0);
-        assert_eq!(summary["wraps"], true);
-        assert!(summary["height"].as_f64().unwrap() > 24.0);
-        assert!(summary["text"].as_str().unwrap().contains("workgroup 7"));
-        let selector = s.settings("channel_hub_strip");
-        assert!(
-            selector["y"].as_f64().unwrap() + selector["height"].as_f64().unwrap()
-                < bar["y"].as_f64().unwrap()
+        assert_eq!(summary["wraps"], false);
+        assert_eq!(summary["maximum_lines"], 1);
+        assert!(summary["tooltip"].as_str().unwrap().contains("workgroup 7"));
+        assert_eq!(
+            s.settings("channel_hub_strip")["window_y"],
+            ready.settings("channel_hub_strip")["window_y"]
         );
         let diagnostic = s.settings("settings_channel_detail:channel");
         assert_eq!(diagnostic["wraps"], true);
@@ -1920,7 +1927,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     control(&f, p, "inbox_paused_notice");
     let s = inspect(&f, p);
     assert!(s.settings("inbox_control_bar")["height"].as_f64().unwrap() >= 48.0);
-    assert_eq!(s.settings("toggle_inbox")["text"], "Resume Inbox");
+    assert_eq!(s.settings("toggle_inbox")["text"], "Resume");
     assert_eq!(s.settings("toggle_inbox")["enabled"], true);
     if std::env::var_os("CITO_TEST_SNAPSHOT_DIR").is_some() {
         render_png(&f, p, "menu", "menu_human_paused.png");
@@ -2011,7 +2018,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         control(&f, p, &format!("settings_tab:{tab}"));
         let s = inspect(&f, p);
         assert!(s.settings("onboarding_banner").is_null());
-        assert_eq!(s.settings(&format!("settings_{tab}_tab"))["height"], 368);
+        let height = if s.settings("channel_hub_strip").is_object() {
+            330
+        } else {
+            368
+        };
+        assert_eq!(s.settings(&format!("settings_{tab}_tab"))["height"], height);
     }
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
@@ -2754,24 +2766,16 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         let snapshot = inspect(&f, p);
         let strip = match surface {
             "menu" => {
-                let subtitle_width = snapshot.menu("header_subtitle")["width"].as_f64().unwrap();
-                Some((
-                    "items",
-                    "header_hub_strip",
-                    4.0,
-                    (368.0 - (54.0 + subtitle_width).max(138.0)).max(44.0),
-                ))
+                let subtitle = snapshot.menu("header_subtitle");
+                let allocated = subtitle["width"]
+                    .as_f64()
+                    .map_or(320.0, |width| (368.0 - (54.0 + width).max(138.0)).max(44.0));
+                Some(("items", "header_hub_strip", 4.0, allocated))
             }
             "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 387.0)),
-            "settings" => Some((
-                "settings_items",
-                "channel_hub_strip",
-                4.0,
-                snapshot.settings("settings_channels_tab")["content_width"]
-                    .as_f64()
-                    .unwrap()
-                    - 114.0,
-            )),
+            "settings" => snapshot.settings("settings_channel_hub_bar")["width"]
+                .as_f64()
+                .map(|width| ("settings_items", "channel_hub_strip", 4.0, width - 66.0)),
             _ => None,
         };
         if let Some((tree, id, spacing, allocated)) = strip {
@@ -2819,7 +2823,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                                 + separator["width"].as_f64().unwrap()
                         );
                     }
-                    "settings" => assert_eq!(x, 98.0),
+                    "settings" => assert_eq!(x, 50.0),
                     _ => unreachable!(),
                 }
             }
@@ -2907,7 +2911,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(s["count"], 1);
     assert_eq!(s.menu("plugin_icon:pi")["tint"], json!([]));
     assert_eq!(s.menu("plugin_icon:pi")["x"], 0);
-    assert_eq!(s.menu("plugin_icon:pi")["width"], 28);
+    assert_eq!(s.menu("plugin_icon:pi")["width"], 24);
     let copy = s.menu("copy:personal:repo-abcdefghijkl");
     assert!(nodes(&copy["children"])
         .iter()
@@ -2923,20 +2927,24 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         assert!(
             title["label_measured_width"].as_f64().unwrap()
                 <= title["label_width"].as_f64().unwrap(),
-            "Hero title must fit beside the rename pencil in {appearance}: {title}"
+            "The resting title must fit beside the copy chip and More button in {appearance}: {title}"
         );
         let pauses: Vec<_> = nodes(&snapshot["items"])
             .into_iter()
             .filter(|n| n["id"].as_str().is_some_and(|id| id.starts_with("stop:")))
             .collect();
-        assert_eq!(pauses.len(), 1);
-        for pause in &pauses {
-            assert_eq!(pause["text"], "Stop");
-            assert!(pause["symbol"].is_null());
-            assert_eq!(pause["border_width"], 1);
-            assert_eq!(pause["width"], pauses[0]["width"]);
-            assert_eq!(pause["height"], 22);
-        }
+        assert!(pauses.is_empty());
+        control(&f, p, "more:personal:repo-abcdefghijkl");
+        let expanded = inspect_as(&f, p, Some(appearance));
+        let stop = expanded.menu("stop:personal:repo-abcdefghijkl");
+        assert_eq!(stop["text"], "Stop");
+        assert!(stop["symbol"].is_null());
+        assert_eq!(stop["border_width"], 1);
+        assert_eq!(
+            stop["y"],
+            expanded.menu("rename:personal:repo-abcdefghijkl")["y"]
+        );
+        control(&f, p, "more:personal:repo-abcdefghijkl");
     }
     capture("menu", "menu_active");
     let mut compact_menu = frame.clone();
@@ -3099,10 +3107,8 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             for appearance in ["light", "dark"] {
                 let snapshot = inspect_as(&f, p, Some(appearance));
                 let track = snapshot.settings("channel_hub_strip");
-                let viewport = snapshot.settings("settings_channels_tab")["content_width"]
-                    .as_f64()
-                    .unwrap();
-                assert!(track["width"].as_f64().unwrap() <= viewport - 114.0);
+                let bar = snapshot.settings("settings_channel_hub_bar");
+                assert!(track["width"].as_f64().unwrap() <= bar["width"].as_f64().unwrap() - 66.0);
                 let mut right = 0.0;
                 for hub in ["local", "work"] {
                     let pill = snapshot.settings(&format!("channel_hub_selector:{hub}"));
@@ -3144,7 +3150,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(s.settings("add_hub_form")["height"], 252);
     assert_eq!(
         s.settings("hub_visibility_caption")["text"],
-        "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team."
+        "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Everyone."
     );
     assert!(s.settings("host_hub_guidance").is_null());
     capture("settings", "settings_add_hub");

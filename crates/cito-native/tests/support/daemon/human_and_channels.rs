@@ -1647,8 +1647,9 @@ fn remote_human_scope_updates_admit_cross_principal_activity() {
         f.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human' AND status='ACTIVE'").into_iter().next()
     };
     wait(|| human().is_some());
-    let id = human().unwrap()["listener_id"].clone();
-    assert_eq!(human().unwrap()["scope"], "self");
+    let initial = human().unwrap();
+    let id = &initial["listener_id"];
+    assert_eq!(initial["scope"], "workspace");
     let rpc = |user: &str, op: &str, params: Value| {
         let response: Value = ureq::post(&format!("{url}/v1/rpc"))
             .set("Authorization", "Bearer test-only")
@@ -1691,8 +1692,15 @@ fn remote_human_scope_updates_admit_cross_principal_activity() {
             "{activity}"
         );
     };
+    let revision = |result: &Value| result["record"]["human_control_revision"].as_u64().unwrap();
+    let cli_private = run(&[
+        "inbox", "resume", "--hub", "work", "--scope", "self", "--json",
+    ]);
+    assert_eq!(cli_private["record"]["scope"], "self");
+    assert_eq!(human().unwrap()["scope"], "self");
     let resumed = run(&["inbox", "resume", "--hub", "work", "--team", "--json"]);
     assert_eq!(resumed["record"]["scope"], "workspace");
+    assert_eq!(revision(&resumed), revision(&cli_private) + 1);
     assert_eq!(human().unwrap()["scope"], "workspace");
     send_bob("cli-scope");
     // A separate client changes policy without touching the daemon's directory cache.
@@ -1701,12 +1709,16 @@ fn remote_human_scope_updates_admit_cross_principal_activity() {
         "human_inbox_update",
         json!({"node_id":id,"expected_control_revision":resumed["record"]["human_control_revision"],"scope":"self"}),
     );
+    assert_eq!(private["record"]["scope"], "self");
+    assert_eq!(revision(&private), revision(&resumed) + 1);
     wait(|| human().unwrap()["scope"] == "self");
-    rpc(
+    let shared = rpc(
         "alice",
         "human_inbox_update",
         json!({"node_id":id,"expected_control_revision":private["record"]["human_control_revision"],"scope":"workspace"}),
     );
+    assert_eq!(shared["record"]["scope"], "workspace");
+    assert_eq!(revision(&shared), revision(&private) + 1);
     send_bob("other-mac-scope");
     assert_eq!(human().unwrap()["scope"], "workspace");
 }

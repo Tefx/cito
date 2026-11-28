@@ -268,6 +268,23 @@ fn kv_row(c: &Connection, key: &str) -> Result<Option<Value>, String> {
 fn principal_id(p: Option<&Value>) -> &str {
     p.map(|p| s(p, "principal_id")).unwrap_or("")
 }
+pub(super) fn configured_auth_mode(config: &Value) -> Option<&str> {
+    if config["url"] == "local://" {
+        return Some("none");
+    }
+    config["authMode"]
+        .as_str()
+        .or_else(|| config["auth_mode"].as_str())
+}
+
+pub(super) fn default_registration_scope(auth_mode: &str) -> &'static str {
+    if auth_mode == "oidc" {
+        "self"
+    } else {
+        "workspace"
+    }
+}
+
 fn oidc(p: Option<&Value>) -> bool {
     p.is_some_and(|p| {
         p["oidc"] == true
@@ -567,11 +584,7 @@ impl HubEngine {
                 worker_ticks: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(test)]
                 before_worker_wait: Mutex::new(None),
-                default_human_scope: if auth_mode == "none" {
-                    "workspace"
-                } else {
-                    "self"
-                },
+                default_human_scope: default_registration_scope(auth_mode),
             }),
         };
         engine.seed_environment()?;
@@ -1601,13 +1614,7 @@ impl HubEngine {
                 let active = n(&b, "enabled") == 1
                     && ready(&plugin, cfg, "hub")
                     && ready(&plugin, &parse(&b, "user_config_json"), "user");
-                attach(
-                    c,
-                    &b,
-                    active,
-                    initial_human_scope(caller, self.inner.default_human_scope),
-                    Some(&plugin),
-                )?;
+                attach(c, &b, active, self.inner.default_human_scope, Some(&plugin))?;
             }
             Ok(())
         };
@@ -1918,7 +1925,7 @@ impl HubEngine {
             persist_service_label(c, id, &result)?;
             cancel_pair(c,id,pid)?;
             c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username,initial_human_scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(initial_human_scope(caller, self.inner.default_human_scope))])?;
+                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(self.inner.default_human_scope)])?;
             Ok(())
         })?;
         self.emit(json!({"type":"kv"}));
@@ -4064,14 +4071,6 @@ fn reconcile_human_row(
     Ok(row)
 }
 
-fn initial_human_scope(principal: &Value, default_scope: &'static str) -> &'static str {
-    if oidc(Some(principal)) || principal["auth_mode"] == "token" {
-        "self"
-    } else {
-        default_scope
-    }
-}
-
 /// Each operation owns one explicit write set under the Hub database transaction.
 fn human_operation(
     c: &Connection,
@@ -4093,7 +4092,7 @@ fn human_operation(
         if !matches!(op, "human_device_attach" | "human_inbox_update") {
             return Err("LISTENER_NOT_FOUND: Human inbox not found".into());
         }
-        json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(caller,"owner_user"),&id),"principal_id":pid,"owner_user":caller["owner_user"],"harness":"human","session_id":"default","title":"Human","about":"Human","scope":initial_human_scope(caller, default_scope),"human_paused":false,"human_control_revision":1,"binding_generation":1,"channels":{}})
+        json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(caller,"owner_user"),&id),"principal_id":pid,"owner_user":caller["owner_user"],"harness":"human","session_id":"default","title":"Human","about":"Human","scope":default_scope,"human_paused":false,"human_control_revision":1,"binding_generation":1,"channels":{}})
     };
     if reg["human_control_revision"].is_null() {
         reg["human_control_revision"] = json!(1);

@@ -4520,6 +4520,53 @@ fn setup_rejects_padded_inline_issuer_and_exits_on_remove_conflicts() {
 }
 
 #[test]
+fn setup_retires_legacy_hub_default_scope() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (_, port) = host.hub();
+    let remote = format!("http://127.0.0.1:{port}");
+    for (name, url, auth) in [
+        ("local", "local://", "none"),
+        ("work", remote.as_str(), "none"),
+        ("work", remote.as_str(), "token"),
+    ] {
+        let f = Fixture::new(json!({}));
+        let mut args = vec!["setup", "--hub", name, "--url", url, "--auth", auth];
+        if auth == "token" {
+            args.extend(["--token", "example-token"]);
+        }
+        let check_hubs = |config: &Value| {
+            assert_eq!(config["hubs"][name]["url"], url);
+            assert_eq!(config["hubs"][name]["authMode"], auth);
+            for (hub, entry) in config["hubs"].as_object().unwrap() {
+                assert!(entry.get("defaultScope").is_none(), "{hub} ({auth})");
+            }
+        };
+        let check_status = || {
+            let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
+            assert!(ok, "{out} {err}");
+            check_hubs(&serde_json::from_str(&out).unwrap());
+        };
+        for legacy in [false, true] {
+            if legacy {
+                let mut config: Value = read_json(&f.config);
+                for entry in config["hubs"].as_object_mut().unwrap().values_mut() {
+                    entry["defaultScope"] = json!("self");
+                }
+                let before = config.to_string();
+                fs::write(&f.config, &before).unwrap();
+                check_status();
+                assert_eq!(fs::read_to_string(&f.config).unwrap(), before);
+            }
+            let (ok, out, err) = f.command(NATIVE, &args, "");
+            assert!(ok, "{out} {err}");
+            check_hubs(&read_json(&f.config));
+            check_status();
+        }
+    }
+}
+
+#[test]
 fn setup_status_exposes_top_level_inspection_failure_in_both_formats() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":[]}));
@@ -4548,7 +4595,7 @@ fn setup_status_exposes_top_level_inspection_failure_in_both_formats() {
 fn setup_reports_only_committed_config_on_disconnect_apply_and_login_failure() {
     let _lock = serial();
     let before = br#"{"host_hub":{"enabled":true,"port":4291}}"#;
-    let saved = format!("{}\n", serde_json::to_string_pretty(&json!({"default_hub":"local", "hubs":{"local":{"url":"local://","natsUrl":"local://","authMode":"none","enabled":true,"defaultScope":"workspace"}}, "host_hub":{"enabled":false,"port":4291,"bind":"0.0.0.0"}})).unwrap());
+    let saved = format!("{}\n", serde_json::to_string_pretty(&json!({"default_hub":"local", "hubs":{"local":{"url":"local://","natsUrl":"local://","authMode":"none","enabled":true}}, "host_hub":{"enabled":false,"port":4291,"bind":"0.0.0.0"}})).unwrap());
     for (operation, state, failure) in [
         ("--disable", "created", "Invalid host-id UUID"),
         ("--enable", "updated", "Sample setup refused"),

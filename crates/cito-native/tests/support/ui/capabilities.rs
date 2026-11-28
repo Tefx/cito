@@ -166,7 +166,10 @@ fn v48_team_controls_use_authoritative_capabilities_and_seed_identity() {
         "@bob"
     );
     frame["hubs"][0]["status"] = json!("connected");
+    frame["hubs"][0]["auth_mode"] = json!("oidc");
     frame["listeners"][0] = listener();
+    f.send(ui, frame.clone());
+    control(&f, ui, "more:personal:repo-abcdefghijkl");
     for allowed in [false, true] {
         for key in ["can_set_scope", "can_pin", "can_rename", "can_stop"] {
             frame["listeners"][0][key] = json!(allowed);
@@ -323,6 +326,7 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
     cfg["channels"][0]["fields"][1]["value"] = json!("room");
     cfg["hubs"][0]["human_state_status"] = json!("current");
     cfg["hubs"][0]["human_listener_id"] = json!("inbox");
+    cfg["hubs"][0]["auth_mode"] = json!("oidc");
     cfg["hubs"][0]["human_can_set_scope"] = json!(true);
     cfg["hubs"][0]["supports_workspace_scope"] = json!(true);
     cfg["hubs"][0]["attachments"] = frame["hubs"][0]["attachments"].clone();
@@ -336,8 +340,8 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
         let s = inspect(&f, ui);
         let bar = s.settings("inbox_control_bar");
         let height = bar["height"].as_f64().unwrap();
-        assert!(height >= 48.0);
-        assert_eq!(bar["border_width"], 0);
+        assert_eq!(height, 50.0);
+        assert_eq!(bar["border_width"], 1);
         assert_eq!(bar["radius"], 10);
         let mid_y = |n: &Value| n["y"].as_f64().unwrap() + n["height"].as_f64().unwrap() / 2.0;
         let trailing: Vec<_> = ["toggle_inbox", "scope:inbox"]
@@ -352,8 +356,8 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
             assert!((mid_y(&action) - height / 2.0).abs() <= 1.5);
         }
         let inbox_summary = s.settings("inbox_control_summary");
-        assert_eq!(inbox_summary["wraps"], true);
-        assert_eq!(inbox_summary["maximum_lines"], 0);
+        assert_eq!(inbox_summary["wraps"], false);
+        assert_eq!(inbox_summary["maximum_lines"], 1);
         for id in ["inbox_control_title", "inbox_control_summary"] {
             let label = s.settings(id);
             assert!(
@@ -399,20 +403,43 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
     let refreshed = inspect(&f, ui);
     assert_eq!(
         refreshed.settings("inbox_control_title")["text"],
-        "You (@bob)"
+        "Inbox · @bob"
     );
     assert_eq!(
         refreshed.settings("inbox_control_summary")["text"],
         "Alerts · Activity"
     );
-    assert_eq!(refreshed.settings("scope:new-inbox")["text"], "Team");
+    let scope = refreshed.settings("scope:new-inbox");
+    assert_eq!(scope["text"], "Everyone");
+    assert_eq!(scope["symbol"], "person.2");
+    assert_eq!(scope["border_width"], 1);
+    assert!(scope["tooltip"]
+        .as_str()
+        .unwrap()
+        .contains("Any signed-in member"));
+    assert_eq!(
+        scope["choices"],
+        json!([
+            {"value":"self","title":"Only Me","detail":"Your own sessions and Macs on 'personal'","selected":false},
+            {"value":"workspace","title":"Everyone","detail":"Any signed-in member on this Hub can find and message you","selected":true}
+        ])
+    );
     assert!(refreshed.settings("scope:inbox").is_null());
-    control(&f, ui, "scope:new-inbox");
+    let select = |value| {
+        f.send(
+            ui,
+            json!({"op":"test_select_inbox_scope","id":"scope:new-inbox","value":value}),
+        )
+    };
+    select("workspace");
+    inspect(&f, ui);
+    assert_eq!(f.frames_for(ui, "human_inbox_update").count(), 0);
+    select("self");
     let pending = inspect(&f, ui);
     let scope = pending.settings("scope:new-inbox");
     assert_eq!(scope["text"], "Updating…");
     assert_eq!(scope["enabled"], false);
-    assert_eq!(pending.settings("toggle_inbox")["text"], "Pause Inbox");
+    assert_eq!(pending.settings("toggle_inbox")["text"], "Pause");
     let action = f.frames_for(ui, "human_inbox_update").next_back().unwrap();
     assert_eq!(action["hub"], "personal");
     assert_eq!(action["scope"], "self");
@@ -421,8 +448,14 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
     cfg["hubs"][0]["human_scope"] = json!("self");
     f.send(ui, json!({"op":"settings","source_op":"human_inbox_update","request_id":action["request_id"],"ok":true,"settings":cfg}));
     let settled = inspect(&f, ui);
-    assert_eq!(settled.settings("scope:new-inbox")["text"], "Self");
+    assert_eq!(settled.settings("scope:new-inbox")["text"], "Only Me");
+    assert_eq!(settled.settings("scope:new-inbox")["symbol"], "lock");
     assert_eq!(settled.settings("scope:new-inbox")["enabled"], true);
+    assert_eq!(settled.settings("scope:new-inbox")["width"], scope["width"]);
+    select("workspace");
+    inspect(&f, ui);
+    let action = f.frames_for(ui, "human_inbox_update").next_back().unwrap();
+    assert_eq!(action["scope"], "workspace");
     control(&f, ui, "edit_user_channel:channel");
     let s = inspect(&f, ui);
     let band = s.settings("stratum_user:channel");

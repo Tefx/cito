@@ -10,6 +10,7 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
     state_frame["hubs"][0]["supports_workspace_scope"] = json!(false);
     state_frame["listeners"][0]["user"] = json!("alice");
     f.send(p, state_frame);
+    control(&f, p, "more:personal:repo-abcdefghijkl");
     control(&f, p, "open_directory");
     let mut remote = peer("stable");
     remote["user"] = json!("alice");
@@ -514,6 +515,7 @@ fn invalid_rename_shows_banner_without_replacing_the_focused_editor() {
     let _lock = serial();
     let (f, p) = ui_fixture();
     f.send(p, state());
+    control(&f, p, "more:personal:repo-abcdefghijkl");
     control(&f, p, "rename:personal:repo-abcdefghijkl");
     f.send(p, json!({"op":"test_settings_input","id":"rename_field:personal:repo-abcdefghijkl","value":"   "}));
     f.send(
@@ -631,10 +633,7 @@ fn app_receipt_updates_only_its_tab_while_a_channel_editor_is_composing() {
         hub_row["instance"]
     );
     f.send(p, json!({"op":"test_end_editing"}));
-    assert_eq!(
-        inspect(&f, p).settings("inbox_control_summary")["text"],
-        "Inbox alerts paused"
-    );
+    assert_eq!(inspect(&f, p).settings("toggle_inbox")["text"], "Resume");
 }
 
 #[test]
@@ -719,6 +718,7 @@ fn v45_menu_candidate_timestamp_empty_drawer_and_active_rename_stability() {
     frame["listeners"] = json!([listener()]);
     f.send(p, frame.clone());
     control(&f, p, "toggle_my_remote");
+    control(&f, p, "more:personal:repo-abcdefghijkl");
     control(&f, p, "rename:personal:repo-abcdefghijkl");
     f.send(
         p,

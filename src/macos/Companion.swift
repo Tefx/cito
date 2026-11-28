@@ -35,6 +35,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
     var harnesses: [HarnessMeta] = []
     var harnessMap: [String: HarnessMeta] { Dictionary(uniqueKeysWithValues: harnesses.map { ($0.id, $0) }) }
     var selectedTargetHub: String = ""
+    var expandedSessionActions = Set<String>()
     var renamingSessionKey: String?
     weak var renameField: NSTextField?
     var myRemoteCollapsed = true
@@ -1387,7 +1388,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate, NSW
                 renamingSessionKey = nil; rebuild(); return true
             }
             if commandSelector == #selector(NSResponder.insertNewline(_:)), let key = renamingSessionKey,
-               let listener = listeners.first(where: { "\($0.harness):\($0.session_id)" == key }) {
+               let listener = listeners.first(where: { $0.scoped_id == key && $0.hub == effectiveTargetHub && $0.can_rename == true }) {
                 let newTitle = textView.string
                 guard !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, newTitle.unicodeScalars.count <= 128 else {
                     menuBannerError = "Title must contain 1 to 128 characters."

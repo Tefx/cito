@@ -181,8 +181,6 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     frame["settings"]["hubs"][0]["human_scope"] = json!("workspace");
     frame["settings"]["hubs"][0]["human_state_status"] = json!("current");
     frame["settings"]["hubs"][0]["human_listener_id"] = json!("inbox");
-    frame["settings"]["hubs"][0]["human_can_set_scope"] = json!(true);
-    frame["settings"]["hubs"][0]["supports_workspace_scope"] = json!(true);
     let mut human = listener();
     human["harness"] = json!("human");
     human["listener_id"] = json!("inbox");
@@ -200,7 +198,8 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     f.send(p, frame.clone());
     let copy_id = format!("copy:{agent_id}");
     let compact = inspect(&f, p).menu(&copy_id)["text"].clone();
-    assert_ne!(compact, full_address);
+    assert_eq!(compact, "#abcd");
+    control(&f, p, &format!("more:{agent_id}"));
     control(&f, p, &copy_id);
     inspect(&f, p);
     f.send(p, json!({"op":"test_expire_copy_feedback","id":copy_id}));
@@ -209,6 +208,10 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     assert_eq!(restored.menu(&copy_id)["accessibility_label"], full_address);
     for mode in ["oidc", "token"] {
         frame["hubs"][0]["auth_mode"] = json!(mode);
+        frame["hubs"][0]["supports_workspace_scope"] = json!(mode == "oidc");
+        frame["settings"]["hubs"][0]["auth_mode"] = json!(mode);
+        frame["settings"]["hubs"][0]["human_can_set_scope"] = json!(mode == "oidc");
+        frame["settings"]["hubs"][0]["supports_workspace_scope"] = json!(mode == "oidc");
         f.send(p, frame.clone());
         control(&f, p, "open_directory");
         send_fixture(
@@ -221,13 +224,20 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
         let s = inspect(&f, p);
         let inbox = s.settings("scope:inbox");
         let agent = s.menu(&format!("scope:{agent_id}"));
-        assert_eq!(inbox["text"], "Team", "{mode}");
-        assert_eq!(inbox["symbol"], "person.2.fill");
-        assert_eq!(inbox["background"], agent["background"]);
-        assert!(inbox["tooltip"]
-            .as_str()
-            .unwrap()
-            .contains("Visibility: Team"));
+        if mode == "oidc" {
+            assert_eq!(inbox["text"], "Everyone");
+            assert_eq!(inbox["symbol"], "person.2");
+            assert!(inbox["tooltip"]
+                .as_str()
+                .unwrap()
+                .contains("Any signed-in member"));
+            assert_eq!(agent["text"], "Everyone");
+            assert_eq!(agent["symbol"], "person.2.fill");
+            assert_eq!(agent["border_width"], 1);
+        } else {
+            assert!(inbox.is_null());
+            assert!(agent.is_null());
+        }
     }
     // A confirmed empty reply owns the result even when state still contains seeds.
     send_fixture(
@@ -1904,7 +1914,8 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         .into_iter()
         .find(|n| n["id"].as_str().is_some_and(|id| id.starts_with("copy:")))
         .unwrap();
-    let expected = address["text"].clone();
+    let expected = address["tooltip"].clone();
+    assert_ne!(address["text"], expected);
     l.control(address["id"].as_str().unwrap());
     l.pump();
     assert_eq!(

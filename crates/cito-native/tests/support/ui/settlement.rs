@@ -163,7 +163,7 @@ fn settings_refresh_scalars_and_channels_and_state_banners_redraw() {
         unavailable.settings("channel_inventory_error")["text"],
         "Service unavailable."
     );
-    assert_eq!(unavailable.settings("toggle_inbox")["text"], "Resume Inbox");
+    assert_eq!(unavailable.settings("toggle_inbox")["text"], "Resume");
     assert!(unavailable.settings("settings_channel:channel").is_null());
     assert_eq!(unavailable["settings_launch_at_login"], true);
 
@@ -175,7 +175,7 @@ fn settings_refresh_scalars_and_channels_and_state_banners_redraw() {
     f.send(p, base);
     let fresh = inspect(&f, p);
     assert!(fresh.settings("channel_inventory_error").is_null());
-    assert_eq!(fresh.settings("toggle_inbox")["text"], "Pause Inbox");
+    assert_eq!(fresh.settings("toggle_inbox")["text"], "Pause");
     assert!(!fresh.settings("settings_channel:channel").is_null());
 }
 
@@ -434,6 +434,7 @@ fn menu_close_removes_inline_rename_without_a_background_frame() {
     let (f, p) = ui_fixture();
     f.send(p, state());
     f.send(p, json!({"op":"test_menu_open"}));
+    control(&f, p, "more:personal:repo-abcdefghijkl");
     control(&f, p, "rename:personal:repo-abcdefghijkl");
     f.send(
         p,
@@ -451,7 +452,11 @@ fn menu_close_removes_inline_rename_without_a_background_frame() {
     assert!(reopened
         .menu("rename_field:personal:repo-abcdefghijkl")
         .is_null());
-    assert!(!reopened.menu("rename:personal:repo-abcdefghijkl").is_null());
+    assert!(reopened.menu("rename:personal:repo-abcdefghijkl").is_null());
+    assert_eq!(
+        reopened.menu("more:personal:repo-abcdefghijkl")["symbol"],
+        "ellipsis"
+    );
     assert!(f.frames_for(p, "rename_session").next().is_none());
 }
 

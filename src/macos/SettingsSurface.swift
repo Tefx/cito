@@ -25,8 +25,10 @@ private final class SettingsScrollView: NSScrollView {
     override func tile() {
         super.tile()
         // Resize the existing document, including while its field editor is mounted.
-        if let document = documentView, document.frame.width != contentSize.width {
-            document.setFrameSize(NSSize(width: contentSize.width, height: document.frame.height))
+        if let document = documentView {
+            let height = (document as? ChannelsSettingsView)?.documentHeight(for: contentSize.height) ?? document.frame.height
+            let size = NSSize(width: contentSize.width, height: height)
+            if document.frame.size != size { document.setFrameSize(size) }
         }
     }
 }
@@ -211,8 +213,10 @@ extension Companion {
         return field
     }
 
+    private var settingsContentTop: CGFloat { settingsBannerError == nil ? 412 : 364 }
+
     private func makeSettingsScroll(in root: NSView) -> NSScrollView {
-        let scroll = SettingsScrollView(frame: NSRect(x: 0, y: 44, width: root.bounds.width, height: 368 - (settingsBannerError == nil ? 0 : 48)))
+        let scroll = SettingsScrollView(frame: NSRect(x: 0, y: 44, width: root.bounds.width, height: settingsContentTop - 44))
         scroll.autoresizingMask = [.width]
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
@@ -220,18 +224,29 @@ extension Companion {
         return scroll
     }
 
+    private func settingsScrollKey(for content: NSView?) -> String {
+        let id = content?.identifier?.rawValue ?? ""
+        if let channels = content as? ChannelsSettingsView { return "\(id):\(channels.hub)" }
+        return id
+    }
+
     func mountSettingsCards(_ content: NSView, on scroll: NSScrollView) {
         let id = content.identifier?.rawValue ?? ""
-        let minY = content.subviews.map { $0.frame.minY }.min() ?? 8
-        let extra = max(0, 8 - minY)
-        for child in content.subviews { child.frame.origin.y += extra }
-        content.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: content.frame.height + extra)
+        if let channels = content as? ChannelsSettingsView {
+            for child in channels.subviews { child.autoresizingMask.insert(.minYMargin) }
+            channels.setFrameSize(NSSize(width: scroll.contentSize.width, height: channels.documentHeight(for: scroll.contentSize.height)))
+        } else {
+            let minY = content.subviews.map { $0.frame.minY }.min() ?? 8
+            let extra = max(0, 8 - minY)
+            for child in content.subviews { child.frame.origin.y += extra }
+            content.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: content.frame.height + extra)
+        }
         scroll.identifier = NSUserInterfaceItemIdentifier(id)
         scroll.isHidden = content.isHidden
         content.isHidden = false
         scroll.documentView = content
         let top = max(0, content.frame.height - scroll.contentSize.height)
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: top - min(top, settingsScrollOffsets[id] ?? 0)))
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: top - min(top, settingsScrollOffsets[settingsScrollKey(for: content)] ?? 0)))
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
@@ -292,7 +307,7 @@ extension Companion {
         if syncFields && targets.contains(.hubs) { syncAddHubFieldsFromControls() }
         for case let scroll as SettingsScrollView in root.subviews {
             guard let tab = SettingsTab.allCases.first(where: { $0.scrollId == scroll.identifier?.rawValue }), targets.contains(tab) else { continue }
-            settingsScrollOffsets[tab.scrollId] = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentSize.height - scroll.contentView.bounds.origin.y)
+            settingsScrollOffsets[settingsScrollKey(for: scroll.documentView)] = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentSize.height - scroll.contentView.bounds.origin.y)
             MenuControl.clearHoverWhere { $0.isDescendant(of: scroll) }
             settingsFieldControls = settingsFieldControls.filter { !$0.value.isDescendant(of: scroll) }
         }
@@ -308,6 +323,18 @@ extension Companion {
         let chromeChanged = updateSettingsChrome(in: root)
         if !targets.isEmpty || chromeChanged { settingsRebuildCount += 1 }
         let renderedHub = effectiveChannelHub
+        if targets.contains(.channels) {
+            if let oldBar: NSView = findView(in: root, id: "settings_channel_hub_bar") {
+                MenuControl.clearHoverWhere { $0.isDescendant(of: oldBar) }
+                oldBar.removeFromSuperview()
+            }
+            if active == .channels {
+                mountChannelHubBar(in: root, top: settingsContentTop, renderedHub: renderedHub, handoff: handoffs["channel_hub_strip"])
+            }
+        }
+        let hubBar: NSView? = findView(in: root, id: "settings_channel_hub_bar")
+        hubBar?.frame.origin.y = settingsContentTop - CitoMetrics.settingsHubBarHeight
+        let channelTop = hubBar?.frame.minY ?? settingsContentTop
         for tab in SettingsTab.allCases where targets.contains(tab) {
             let scroll: NSScrollView
             if let existing = root.subviews.compactMap({ $0 as? SettingsScrollView }).first(where: { $0.identifier?.rawValue == tab.scrollId }) {
@@ -315,13 +342,19 @@ extension Companion {
             } else {
                 scroll = makeSettingsScroll(in: root)
             }
+            layoutSettingsScroll(scroll, top: tab == .channels ? channelTop : settingsContentTop)
             switch tab {
             case .apps: buildAppsTab(in: scroll)
-            case .channels: buildChannelsTab(in: scroll, renderedHub: renderedHub, handoff: handoffs["channel_hub_strip"])
+            case .channels: buildChannelsTab(in: scroll, renderedHub: renderedHub)
             case .hubs: buildHubsTab(in: scroll, handoffs: handoffs)
             }
         }
-
+        if chromeChanged {
+            for case let scroll as SettingsScrollView in root.subviews {
+                layoutSettingsScroll(scroll, top: scroll.identifier?.rawValue == SettingsTab.channels.scrollId ? channelTop : settingsContentTop)
+            }
+        }
+        if !targets.isEmpty || chromeChanged { window.recalculateKeyViewLoop() }
         window.invalidateShadow()
         if let settlementFocus {
             for id in settlementFocus {
@@ -389,6 +422,18 @@ extension Companion {
     }
 
 
+    private func layoutSettingsScroll(_ scroll: NSScrollView, top: CGFloat) {
+        let height = top - scroll.frame.minY
+        guard scroll.frame.height != height else { return }
+        // Showing or dismissing a banner changes the viewport's top edge. Keep
+        // the same document origin (and mounted editor position) where possible.
+        let origin = scroll.contentView.bounds.origin
+        scroll.setFrameSize(NSSize(width: scroll.frame.width, height: height))
+        let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentSize.height)
+        scroll.contentView.scroll(to: NSPoint(x: origin.x, y: min(maxY, max(0, origin.y))))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
     private func mountSettingsChrome(in root: NSView, handoff: SegmentedPillStrip.Handoff?) {
         // Header & Segmented Tab Bar (520 × 48 pt, y: 412)
         let header = NSView(frame: NSRect(x: 0, y: 412, width: 520, height: 48))
@@ -450,9 +495,6 @@ extension Companion {
         let message = settingsBannerError
         guard label?.stringValue != message else { return loginChanged }
         existing?.removeFromSuperview()
-        for case let scroll as SettingsScrollView in root.subviews {
-            scroll.setFrameSize(NSSize(width: root.bounds.width, height: message == nil ? 368 : 320))
-        }
         if let message {
             let banner=roundedView(NSRect(x:CitoMetrics.settingsInset,y:368,width:480,height:40),radius:6,color:CitoPalette.dangerText.withAppearanceAlpha(0.10))
             banner.identifier=NSUserInterfaceItemIdentifier("settings_error_banner")

@@ -65,7 +65,10 @@ fn complete_hub_profiles(hubs: &mut Map<String, Value>, requested: Option<&str>)
                 .values()
                 .any(|hub| configured_hub_url(hub) != "local://"))
     {
-        hubs.insert("local".into(), json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true, "defaultScope":"workspace"}));
+        hubs.insert(
+            "local".into(),
+            json!({"url":"local://", "natsUrl":"local://", "authMode":"none", "enabled":true}),
+        );
         if requested == Some("local") || !hub_enabled(&hubs[&default]) {
             return "local".into();
         }
@@ -252,11 +255,12 @@ pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
     }
 }
 
-/// Collapse supported Hub/OIDC aliases with canonical-key precedence.
+/// Collapse supported Hub/OIDC aliases with canonical-key precedence and drop retired scope overrides.
 pub fn canonicalize_hub_aliases(config: &mut Value) {
     let Some(map) = config.as_object_mut() else {
         return;
     };
+    map.remove("defaultScope");
     for (canonical, aliases) in [
         ("authMode", &["auth_mode", "auth"][..]),
         ("issuer", &["oidcIssuer"][..]),
@@ -752,8 +756,12 @@ mod tests {
         for alias in ["auth_mode", "client_id", "redirect_port", "oidcScopes"] {
             assert!(base.get(alias).is_none());
         }
-        let base = json!({"url":"https://old.example.com","authMode":"oidc","issuer":"https://id.example.com","clientId":"old","redirectPort":4280,"scopes":["openid"],"autoListen":true});
+        let base = json!({"url":"https://old.example.com","authMode":"oidc","issuer":"https://id.example.com","clientId":"old","redirectPort":4280,"scopes":["openid"],"autoListen":true,"defaultScope":"workspace"});
         let same = merge_hub_config(&base, &json!({"url":base["url"],"enabled":false}));
+        assert!(same.get("defaultScope").is_none());
+        assert!(merge_hub_config(&same, &json!({"defaultScope":"self"}))
+            .get("defaultScope")
+            .is_none());
         assert_eq!(same["redirectPort"], 4280);
         assert_eq!(same["scopes"], base["scopes"]);
         assert_eq!(same["autoListen"], true);

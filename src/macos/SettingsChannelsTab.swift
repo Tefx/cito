@@ -4,6 +4,12 @@ private func channelTestResult(_ channel: ChannelSetupItem, ui: ChannelUiState?)
     channel.warning == true && ui?.testResultIsLatest != true ? nil : ui?.testResult
 }
 
+private final class InboxScopeItem: NSMenuItem {
+    var selected: (() -> Void)?
+
+    @objc func choose(_ sender: NSMenuItem) { selected?() }
+}
+
 // The mounted document owns its editor routing until AppKit releases it.
 final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
     let hub: String
@@ -17,10 +23,15 @@ final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
         self.principal = principal
         self.channels = channels
         self.companion = companion
-        super.init(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
+        super.init(frame: NSRect(x: 0, y: 0, width: 520, height: 368))
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func documentHeight(for viewportHeight: CGFloat) -> CGFloat {
+        let bottomCard = subviews.map { $0.frame.minY }.min() ?? bounds.height
+        return max(viewportHeight, bounds.height - bottomCard + 8)
+    }
 
     func channelField(_ id: String) -> (ChannelSetupItem, ChannelFieldItem)? {
         for channel in channels {
@@ -442,12 +453,95 @@ extension Companion {
         emit(action)
     }
 
-    func buildChannelsTab(in scroll: NSScrollView, renderedHub: String, handoff: SegmentedPillStrip.Handoff?) {
+    func mountChannelHubBar(in root: NSView, top: CGFloat, renderedHub: String, handoff: SegmentedPillStrip.Handoff?) {
+        let hubs = enabledChannelHubs
+        guard hubs.count > 1 else { return }
+        let height = CitoMetrics.settingsHubBarHeight
+        let bar = NSView(frame: NSRect(x: 0, y: top - height, width: root.bounds.width, height: height))
+        bar.identifier = NSUserInterfaceItemIdentifier("settings_channel_hub_bar")
+        let label = textLabel("Hub", NSRect(x: 16, y: (height - 14) / 2, width: 30, height: 14),
+                              size: 11, weight: .semibold, color: CitoPalette.secondaryText)
+        label.identifier = NSUserInterfaceItemIdentifier("settings_channel_hub_label")
+        bar.addSubview(label)
+        bar.addSubview(roundedView(NSRect(x: 0, y: 0, width: bar.bounds.width, height: 1), radius: 0,
+                                   color: .labelColor.withAppearanceAlpha(0.08)))
+        let stripWidth = bar.bounds.width - 66
+        let pills = hubs.map { name in
+            let shown = compactAddressLabel(name, maxWidth: stripWidth - 4, font: .systemFont(ofSize: 11, weight: .medium), paddingX: 11, leadingSymbol: nil)
+            let pill = MenuControl(shown, frame: NSRect(x: 0, y: 0, width: max(64, MenuControl.intrinsicWidth(shown)), height: 22), radius: 11)
+            pill.toolTip = name; pill.setAccessibilityLabel(name)
+            pill.identifier = NSUserInterfaceItemIdentifier("channel_hub_selector:\(name)")
+            pill.pressed = { [weak self] in
+                guard let self else { return }
+                settingsChannels.selectedHub = name
+                emit(["op": "open_settings", "hub": name])
+                rebuildSettingsPanel(preservingEditor: false, tabs: [.channels])
+            }
+            return pill
+        }
+        root.addSubview(bar)
+        mountSettingsPills(in: bar, frame: NSRect(x: 50, y: (height - 26) / 2, width: stripWidth, height: 26),
+            id: "channel_hub_strip", geometry: CitoMetrics.hubSegments, pills: pills,
+            selected: pills.first { $0.identifier?.rawValue == "channel_hub_selector:\(renderedHub)" }, handoff: handoff)
+    }
+
+    private func makeInboxScopeControl(id: String, inbox: ChannelsPresentation, enabled: Bool, pending: Bool) -> MenuControl {
+        let workspace = inbox.scope == "workspace"
+        let choices = [("self", "Only Me", "lock", "Your own sessions and Macs on '\(inbox.hub)'"),
+                       ("workspace", "Everyone", "person.2", "Any signed-in member on this Hub can find and message you")]
+        let (_, title, symbol, detail) = choices[workspace ? 1 : 0]
+        let scope = MenuControl(title, frame: NSRect(x: 0, y: 0, width: 0, height: 22), leadingSymbol: symbol, radius: 11, paddingX: 18)
+        let hub = inbox.hub, revision = inbox.revision, selected = inbox.scope, user = inbox.user
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (value, title, _, subtitle) in choices {
+            let item = InboxScopeItem(title: title, action: #selector(InboxScopeItem.choose(_:)), keyEquivalent: "")
+            item.target = item
+            item.representedObject = value
+            item.state = value == inbox.scope ? .on : .off
+            item.isEnabled = enabled
+            item.toolTip = subtitle
+            if #available(macOS 14.4, *) { item.subtitle = subtitle }
+            item.selected = { [weak self, weak scope] in
+                guard let self, let scope, scope.window != nil, scope.isEnabled, !scope.isHiddenOrHasHiddenAncestor,
+                      settingsVisible, effectiveChannelHub == hub, value != selected else { return }
+                // Menu tracking may receive a Settings refresh before selection.
+                let current = channelsPresentation(hub: hub)
+                guard current.current, current.user == user, current.scopeListener == id, current.revision == revision else { return }
+                updateInbox(scope: value, hub: hub, revision: revision)
+            }
+            menu.addItem(item)
+        }
+        scope.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
+        scope.isEnabled = enabled
+        scope.toolTip = "\(title) — \(detail). Choose who can find and message your inbox."
+        scope.menu = menu
+        scope.reservedTitles = choices.map { ($0.1, $0.2) } + [("Updating…", nil)]
+        scope.frame.size.width = scope.reservedWidth
+        if pending { scope.setPending("Updating…") }
+        let chevron = NSImageView(frame: NSRect(x: scope.bounds.width - 17, y: 7, width: 9, height: 8))
+        chevron.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)
+        chevron.isHidden = pending
+        scope.addSubview(chevron)
+        scope.accessorySymbolView = chevron
+        scope.label.alignment = .left
+        scope.layoutContents()
+        if workspace && !pending, let icon = scope.leadingSymbolView {
+            icon.symbolConfiguration = NSImage.SymbolConfiguration(paletteColors: [CitoPalette.infoText])
+        }
+        scope.pressed = { [weak self, weak scope] in
+            guard self?.headless == false, let scope else { return }
+            menu.popUp(positioning: nil, at: .zero, in: scope)
+        }
+        return scope
+    }
+
+    func buildChannelsTab(in scroll: NSScrollView, renderedHub: String) {
         let cardWidth = scroll.contentSize.width - 32
         let stratumWidth = cardWidth - 24
         let stratumTextWidth = stratumWidth - 24
         let allowance = settingsScrollerAllowance(scroll)
-        let inbox = channelsPresentation()
+        let inbox = channelsPresentation(hub: renderedHub)
         let resolvedChannels = inbox.inventory
         let inventoryStale = !(inbox.error ?? "").isEmpty
         let visibleChannels = resolvedChannels.filter { $0.can_configure_hub == true || $0.hub_ready == true || canUnpair($0) }
@@ -458,27 +552,36 @@ extension Companion {
         let inboxHub = renderedHub
         let inboxPaused = inbox.paused
         let inboxUser = inbox.user
-        let inboxAttachments = displayAttachments(inbox.attachments)
-        let scopeValue = inbox.scope
         let revision = inbox.revision
         let pausePending = isPending("human_inbox_update",hub:inboxHub,target:"paused")
         let scopePending = isPending("human_inbox_update",hub:inboxHub,target:"scope")
         // Both actions share a revision; only the submitted action shows progress.
         let inboxEnabled = inbox.current && !pausePending && !scopePending
-        let externalNames = inboxAttachments.filter { $0.location == "hub" }.map { cleanHostDisplay($0.display_name) }
-        let deliveryNames = externalNames + ["Activity"] + inboxAttachments.filter { $0.location == "device" }.map { cleanHostDisplay($0.display_name) }
-        let inboxSummary = inboxPaused ? (externalNames.isEmpty ? "Inbox alerts paused" : "Inbox paused · Activity & " + externalNames.joined(separator:" · ") + " paused") : deliveryNames.joined(separator:" · ")
-        let inboxBar = roundedView(NSRect(x:16,y:308,width:cardWidth,height:48),radius:CitoMetrics.cardRadius,color:inboxPaused ? CitoPalette.warningSurface : .labelColor.withAppearanceAlpha(0.045))
+        let delivery = inboxDeliveryDetail(inbox.attachments)
+        let inboxHeight = CitoMetrics.inboxCardHeight
+        let inboxBar = roundedView(NSRect(x: 16, y: channelsView.bounds.height - 12 - inboxHeight, width: cardWidth, height: inboxHeight),
+            radius: CitoMetrics.cardRadius, color: inboxPaused ? CitoPalette.warningSurface : CitoPalette.channelCardFill,
+            border: inboxPaused ? CitoPalette.warningBorder : CitoPalette.channelCardBorder)
         inboxBar.autoresizingMask = [.width]
         inboxBar.identifier = NSUserInterfaceItemIdentifier("inbox_control_bar")
-        let inboxTitle = textLabel("You (@\(inboxUser))",NSRect(x:12,y:30,width:220,height:12),size:11,weight:.semibold)
-        inboxTitle.identifier = NSUserInterfaceItemIdentifier("inbox_control_title"); inboxTitle.toolTip = inboxTitle.stringValue
-        let inboxDetail = textLabel(inboxSummary,NSRect(x:12,y:5,width:stratumWidth,height:24),size:10,color:inboxPaused ? CitoPalette.warningText : CitoPalette.secondaryText)
+        let dot = roundedView(NSRect(x: 12, y: 30, width: 6, height: 6), radius: 3,
+            color: inboxPaused ? CitoPalette.warningText : CitoPalette.successText)
+        dot.identifier = NSUserInterfaceItemIdentifier("inbox_control_dot")
+        inboxBar.addSubview(dot)
+        let inboxTitle = textLabel("Inbox · @\(inboxUser)", .zero, size: 11, weight: .semibold)
+        inboxTitle.identifier = NSUserInterfaceItemIdentifier("inbox_control_title")
+        inboxTitle.toolTip = inboxTitle.stringValue
+        inboxTitle.setAccessibilityLabel(inboxPaused ? inboxTitle.stringValue + " (Paused)" : inboxTitle.stringValue)
+        inboxTitle.lineBreakMode = .byTruncatingMiddle
+        let inboxDetail = textLabel(delivery.summary, .zero, size: 10, color: inboxPaused ? CitoPalette.warningText : CitoPalette.secondaryText)
         inboxDetail.identifier = NSUserInterfaceItemIdentifier("inbox_control_summary")
-        inboxDetail.toolTip = inboxSummary + "\nExternal channels deliver alerts even when this Mac is offline."
-        inboxDetail.setAccessibilityLabel(inboxSummary)
+        inboxDetail.toolTip = delivery.tooltip
+        inboxDetail.setAccessibilityLabel(delivery.summary)
+        inboxDetail.maximumNumberOfLines = 1
+        inboxDetail.lineBreakMode = .byTruncatingTail
+        inboxDetail.cell?.wraps = false
         inboxBar.addSubview(inboxTitle); inboxBar.addSubview(inboxDetail)
-        let resumeInboxTitle = "Resume Inbox", pauseInboxTitle = "Pause Inbox"
+        let resumeInboxTitle = "Resume", pauseInboxTitle = "Pause"
         let resumingInboxTitle = "Resuming…", pausingInboxTitle = "Pausing…"
         let inboxToggle = MenuControl(inboxPaused ? resumeInboxTitle : pauseInboxTitle,frame:NSRect(x:0,y:22,width:0,height:22))
         inboxToggle.reservedTitles = [resumeInboxTitle, pauseInboxTitle, resumingInboxTitle, pausingInboxTitle].map { ($0, nil) }
@@ -490,56 +593,24 @@ extension Companion {
         inboxBar.addSubview(inboxToggle)
         var inboxActions: [NSView] = []
         if let id = inbox.scopeListener {
-            let scope = makeScopeControl(hub:inboxHub,user:inboxUser,scope:scopeValue,id:id,y:22)
-            scope.isEnabled = inboxEnabled
-            let updatingScopeTitle = "Updating…"
-            scope.reservedTitles.append((updatingScopeTitle, nil))
-            scope.frame.size.width = scope.reservedWidth
-            if scopePending { scope.setPending(updatingScopeTitle) }
-            scope.pressed = { [weak self] in self?.updateInbox(scope:scopeValue == "workspace" ? "self" : "workspace",hub:inboxHub,revision:revision) }
+            let scope = makeInboxScopeControl(id: id, inbox: inbox, enabled: inboxEnabled, pending: scopePending)
             inboxBar.addSubview(scope); inboxActions.append(scope)
         }
         inboxActions.append(inboxToggle)
-        layoutBar(in:inboxBar,y:13,height:22,trailing:inboxActions)
-        let textWidth = max(0,(inboxActions.map { $0.frame.minX }.min() ?? cardWidth - 12) - 10 - 12)
-        let summaryHeight = max(12, measureWrappedHeight(inboxSummary, width: textWidth - allowance, font: .systemFont(ofSize: 10)))
-        let titleHeight: CGFloat = summaryHeight > 14 ? 12 : 14
-        let stackGap: CGFloat = summaryHeight > 14 ? 0 : 1
-        let inboxBarHeight = max(48, 20 + titleHeight + stackGap + summaryHeight)
-        inboxBar.frame = NSRect(x: 16, y: 356 - inboxBarHeight, width: cardWidth, height: inboxBarHeight)
-        for action in inboxActions { action.frame.origin.y = (inboxBarHeight - action.frame.height) / 2 }
-        let stackY = (inboxBarHeight-titleHeight-summaryHeight-stackGap)/2
-        inboxTitle.frame = NSRect(x:12,y:stackY+summaryHeight+stackGap,width:textWidth,height:titleHeight)
-        inboxTitle.lineBreakMode = .byTruncatingMiddle
+        layoutBar(in: inboxBar, y: (inboxHeight - 22) / 2, height: 22, trailing: inboxActions)
+        let textRight = inboxActions[0].frame.minX - 10
+        inboxTitle.frame = NSRect(x: 24, y: 26, width: textRight - 24, height: 14)
         inboxTitle.autoresizingMask = [.width]
+        inboxDetail.frame = NSRect(x: 12, y: 10, width: textRight - 12, height: 13)
         inboxDetail.autoresizingMask = [.width]
-        inboxDetail.frame = NSRect(x:12,y:stackY,width:textWidth,height:summaryHeight)
-        inboxDetail.maximumNumberOfLines = 0; inboxDetail.lineBreakMode = .byWordWrapping; inboxDetail.cell?.wraps = true
         channelsView.addSubview(inboxBar)
-        var cursorY = inboxBar.frame.minY - 8
-        let channelHubs = inbox.enabledHubs
-        if channelHubs.count > 1 { channelsView.addSubview(textLabel("Target Hub", NSRect(x: 16, y: cursorY-22, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText)) }
-        var channelPills: [MenuControl] = []
-        for name in channelHubs {
-            let shown = compactAddressLabel(name, maxWidth:cardWidth-86-allowance, font:.systemFont(ofSize:11,weight:.medium), paddingX:11)
-            let width = max(64, MenuControl.intrinsicWidth(shown))
-            let pill = MenuControl(shown, frame: NSRect(x: 0, y: 3, width: width, height: 22), radius: 11)
-            pill.toolTip = name; pill.setAccessibilityLabel(name)
-            pill.identifier = NSUserInterfaceItemIdentifier("channel_hub_selector:\(name)")
-            pill.pressed = { [weak self] in
-                guard let self else { return }
-                self.settingsChannels.selectedHub = name
-                self.emit(["op": "open_settings", "hub": name])
-                self.rebuildSettingsPanel()
-            }
-            channelPills.append(pill)
-        }
-        if channelHubs.count > 1 {
-            mountSettingsPills(in: channelsView, frame: NSRect(x: 98, y: cursorY-26, width: cardWidth - 82 - allowance, height: 26),
-                id: "channel_hub_strip", geometry: CitoMetrics.hubSegments, pills: channelPills,
-                selected: channelPills.first { $0.identifier?.rawValue == "channel_hub_selector:\(renderedHub)" }, handoff: handoff)
-            cursorY -= 36
-        }
+
+        let section = textLabel("EXTERNAL CHANNELS", NSRect(x: 16, y: inboxBar.frame.minY - 26, width: cardWidth, height: 12),
+                                size: 10, weight: .semibold, color: CitoPalette.secondaryText)
+        section.identifier = NSUserInterfaceItemIdentifier("external_channels_heading")
+        section.autoresizingMask = [.width]
+        channelsView.addSubview(section)
+        var cursorY = section.frame.minY - 6
 
         if let message = inbox.error, !message.isEmpty {
             let height = max(16, measureWrappedHeight(message, width: cardWidth - allowance, font: .systemFont(ofSize: 11)))
@@ -625,7 +696,7 @@ extension Companion {
             let cardHeight: CGFloat = headerHeight + hubStratumH + extraTitleH + (showHubStratum && showUserStratum ? CitoMetrics.gap : 0) + userStratumH + 8
             chCursorY -= cardHeight
             let chCard = roundedView(NSRect(x: 16, y: chCursorY, width: cardWidth, height: cardHeight), radius: 10,
-                color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
+                color: CitoPalette.channelCardFill, border: CitoPalette.channelCardBorder)
             chCard.autoresizingMask = [.width]
             chCard.identifier = NSUserInterfaceItemIdentifier("settings_channel:\(ch.id)")
 

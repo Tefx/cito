@@ -166,6 +166,7 @@ fn closing_inline_rename_dirties_the_cached_menu_without_a_hidden_rebuild() {
     let (f, p) = ui_fixture();
     f.send(p, state());
     f.send(p, json!({"op":"test_menu_open"}));
+    control(&f, p, "more:personal:repo-abcdefghijkl");
     control(&f, p, "rename:personal:repo-abcdefghijkl");
     assert!(!inspect(&f, p)
         .menu("rename_field:personal:repo-abcdefghijkl")
@@ -180,7 +181,11 @@ fn closing_inline_rename_dirties_the_cached_menu_without_a_hidden_rebuild() {
     assert!(reopened
         .menu("rename_field:personal:repo-abcdefghijkl")
         .is_null());
-    assert!(!reopened.menu("rename:personal:repo-abcdefghijkl").is_null());
+    assert!(reopened.menu("rename:personal:repo-abcdefghijkl").is_null());
+    assert_eq!(
+        reopened.menu("more:personal:repo-abcdefghijkl")["symbol"],
+        "ellipsis"
+    );
 }
 
 #[test]

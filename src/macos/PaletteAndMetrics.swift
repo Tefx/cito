@@ -5,8 +5,14 @@ enum CitoMetrics {
     static let menuWidth: CGFloat = 380
     static let menuInset: CGFloat = 12
     static let menuRailWidth = menuWidth - 2 * menuInset
+    static let sessionCardHeight: CGFloat = 42
+    static let sessionRowGap: CGFloat = 4
+    static let sessionActionsHeight: CGFloat = 28
+    static let sessionViewportHeight = 5 * (sessionCardHeight + sessionRowGap)
     static let settingsWidth: CGFloat = 520
     static let settingsInset: CGFloat = 20
+    static let settingsHubBarHeight: CGFloat = 38
+    static let inboxCardHeight: CGFloat = 50
     static let cardInset: CGFloat = 12
     static let cardRadius: CGFloat = 10
     static let hubSegments = PillTrackGeometry(pillHeight: 22, pillRadius: 11)
@@ -81,6 +87,8 @@ enum CitoPalette {
     static let surfaceBackground = adaptive(
         NSColor(srgbRed: 236/255, green: 239/255, blue: 243/255, alpha: 1),
         NSColor(srgbRed: 30/255, green: 32/255, blue: 36/255, alpha: 1))
+    static let channelCardFill = NSColor.labelColor.withAppearanceAlpha(0.045)
+    static let channelCardBorder = NSColor.labelColor.withAppearanceAlpha(0.08)
     // Filled controls keep white titles, so their fill stays dark in either appearance.
     static let prominentFill = NSColor(srgbRed: 0, green: 87.0/255, blue: 191.0/255, alpha: 1)
     static let destructiveFill = NSColor(srgbRed: 189.0/255, green: 25.0/255, blue: 36.0/255, alpha: 1)
@@ -110,6 +118,16 @@ enum CitoPalette {
         default: return prominentFill
         }
     }
+}
+
+/// Project a menu chip relative to its Hub, without changing the clipboard address.
+func menuAddressLabel(_ address: String, hub: String, fingerprintOnly: Bool = false) -> String {
+    let prefix = hub + ":"
+    let relative = !hub.isEmpty && address.hasPrefix(prefix) ? address.dropFirst(prefix.count) : address[...]
+    if fingerprintOnly, let hash = relative.lastIndex(of: "#"), relative.index(after: hash) < relative.endIndex {
+        return String(relative[hash...])
+    }
+    return String(relative)
 }
 
 /// Compact only the chip presentation; callers retain the full address for copying.
@@ -157,11 +175,30 @@ func diagnostic(_ message: String) {
 func displayAttachments(_ attachments: [ChannelAttachment]) -> [ChannelAttachment] {
     var unique: [String: ChannelAttachment] = [:]
     for item in attachments where ["ACTIVE", "DISCONNECTED_RETAINED"].contains(item.availability) {
-        let key = item.location + "|" + cleanHostDisplay(item.display_name)
+        let key = item.location + "|" + (item.channel_id ?? item.host_id ?? "\(item.is_local ? "local" : "remote")|\(item.display_name)")
         if let old = unique[key], (old.is_local ? 2 : 0) + (old.availability == "ACTIVE" ? 1 : 0) >= (item.is_local ? 2 : 0) + (item.availability == "ACTIVE" ? 1 : 0) { continue }
         unique[key] = item
     }
     return unique.values.sorted { ($0.location, $0.display_name) < ($1.location, $1.display_name) }
+}
+
+func inboxDeliveryDetail(_ attachments: [ChannelAttachment]) -> (summary: String, tooltip: String) {
+    let displayed = displayAttachments(attachments)
+    let external = displayed.filter { $0.location == "hub" }.map { cleanHostDisplay($0.display_name) }
+    let devices = displayed.filter { $0.location == "device" }
+    let local = devices.filter(\.is_local)
+    let remote = devices.filter { !$0.is_local }
+    let activity: String
+    if remote.isEmpty {
+        activity = local.isEmpty ? "Activity" : "Activity on this Mac"
+    } else if !local.isEmpty {
+        activity = "Activity · This Mac + \(remote.count) other \(remote.count == 1 ? "Mac" : "Macs")"
+    } else {
+        activity = "Activity · \(remote.count) \(remote.count == 1 ? "Mac" : "Macs")"
+    }
+    let full = external + ["Activity"] + (local + remote).map(\.display_name)
+    return ((external + [activity]).joined(separator: " · "),
+            full.joined(separator: " · ") + "\nExternal channels deliver alerts even when this Mac is offline.")
 }
 
 private enum ActivityDateFormatters {

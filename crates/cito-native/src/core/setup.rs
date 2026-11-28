@@ -712,9 +712,6 @@ pub fn inspect_setup_json(
             h.insert("natsUrl".to_string(), json!(url));
             h.insert("authMode".to_string(), json!(auth));
             h.insert("enabled".to_string(), json!(enabled));
-            if let Some(ds) = m.get("defaultScope").and_then(|x| x.as_str()) {
-                h.insert("defaultScope".to_string(), json!(ds));
-            }
             hubs_out.insert(k.clone(), Value::Object(h));
         }
     }
@@ -1713,11 +1710,6 @@ pub fn run_setup_cli(args: &[String]) {
             if explicit_name.as_deref() == Some("local") && url != "local://" {
                 return Err("INVALID_INPUT: The local hub must use local://".into());
             }
-            let def_scope = if url == "local://" {
-                "workspace"
-            } else {
-                "self"
-            };
             let mut entry = Map::new();
             entry.insert("url".to_string(), json!(url));
             if let Some(ref user) = hub_user {
@@ -1750,7 +1742,6 @@ pub fn run_setup_cli(args: &[String]) {
                 );
             }
             entry.insert("enabled".to_string(), json!(true));
-            entry.insert("defaultScope".to_string(), json!(def_scope));
             if let Some(port) = hub_redirect_port {
                 entry.insert("redirectPort".into(), port);
             }

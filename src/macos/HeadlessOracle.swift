@@ -509,6 +509,16 @@ extension Companion {
                 }
                 return true
             }
+            if op == "test_select_inbox_scope", let id = object["id"] as? String, id.hasPrefix("scope:"),
+               let value = object["value"] as? String {
+                if let root = settingsInteractionWindow?.contentView,
+                   let pill: MenuControl = findView(in: root, id: id), pill.isEnabled, !pill.isHiddenOrHasHiddenAncestor,
+                   let item = pill.menu?.items.first(where: { $0.representedObject as? String == value }),
+                   item.isEnabled, let action = item.action {
+                    NSApp.sendAction(action, to: item.target, from: item)
+                }
+                return true
+            }
             if op == "test_control", let requestedId = object["id"] as? String {
                 if requestedId == "close_settings" {
                     if settingsVisible && activeUninstallAlert == nil { settingsPanel?.performClose(nil) }
@@ -715,8 +725,8 @@ extension Companion {
                   label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail else { return false }
             let id = name(label)
             if label.maximumNumberOfLines == 1, label.lineBreakMode == .byTruncatingTail,
-               id.hasPrefix("settings_channel_detail:") || id == "host_hub_error" { return hasTooltip }
-            if isDataRow(label) || id == "hub_oidc_discovery_summary" { return hasTooltip }
+               id.hasPrefix("settings_channel_detail:") || id == "host_hub_error" || id == "inbox_control_summary" { return hasTooltip }
+            if id == "inbox_control_title" || isDataRow(label) || id == "hub_oidc_discovery_summary" { return hasTooltip }
             let title = label.stringValue
             if let pill = label.superview as? MenuControl,
                let track = pill.enclosingScrollView as? SegmentedPillStrip,
@@ -859,6 +869,8 @@ extension Companion {
                     // A data label's repeated payload follows the same provenance as its visible text.
                     if let label = view as? NSTextField, !label.isEditable {
                         if value == label.stringValue { continue }
+                        // These tooltips contain only the session's projected data, not UI copy.
+                        if source == "tooltip", ["session_title:", "session_detail:"].contains(where: { name(label).hasPrefix($0) }) { continue }
                         if name(label).hasPrefix("act_msg:"),
                            value == (label.superview as? DirectoryPeerCellView)?.activityItem?.message { continue }
                     }
@@ -870,17 +882,20 @@ extension Companion {
                 let scope = ["copy:","copy_remote:","copy_dir:"].first { id.hasPrefix($0) }
                 if let prefix = scope {
                     let scoped = String(id.dropFirst(prefix.count))
-                    let address = listeners.first { $0.scoped_id == scoped }?.display_address ?? (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }?.display_address
+                    let listener = prefix == "copy:" ? listeners.first { $0.scoped_id == scoped } : nil
+                    let peer = (prefix == "copy_remote:" ? myRemote : directoryAllPeers).first { $0.scoped_id == scoped }
+                    let address = listener?.display_address ?? peer?.display_address
                     let showingFeedback = control.feedbackKey.map(feedback.contains) == true
                     let label = showingFeedback ? (control.restingTitle ?? "") : control.label.stringValue
                     if showingFeedback && control.accessibilityLabel() != control.label.stringValue { addressMismatches.append(id + ": stale accessibility label") }
-                    let listener = listeners.first { $0.scoped_id == scoped }
-                    let peer = (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }
                     let hub = listener?.hub ?? peer?.hub ?? ""
                     let harness = listener?.harness ?? peer?.harness ?? ""
                     let defaultHub = resolvedDefaultHub() ?? hubs.first?.name ?? ""
                     let addressMatches = address.map { expected in
-                        label == expected || (control.toolTip == expected && label == compactAddressLabel(expected,maxWidth:control.frame.width,font:control.label.font ?? .systemFont(ofSize:11),paddingX:prefix == "copy_dir:" ? 11 : 3))
+                        let presentation = prefix == "copy_dir:" ? expected : menuAddressLabel(expected,
+                            hub: listener?.hub ?? effectiveTargetHub, fingerprintOnly: listener?.is_self_principal == true)
+                        return control.toolTip == expected && (label == presentation || label == compactAddressLabel(presentation,
+                            maxWidth: control.frame.width, font: control.label.font ?? .systemFont(ofSize:11), paddingX: control.paddingX))
                     } ?? false
                     let full = address ?? ""
                     if label.isEmpty || !addressMatches || (harness == "human" && !full.contains("@")) || (!hub.isEmpty && hub != defaultHub && !full.hasPrefix("\(hub):")) { addressMismatches.append(id) }
@@ -897,18 +912,15 @@ extension Companion {
                     defaultLayout = settingsChannels.errors[hub] == nil && channels.count == 1 && channels.allSatisfy { channel in
                         let ui = settingsChannels.editors[channelEditorKey(hub: hub, channel: channel.id)] ?? ChannelUiState()
                         return !ui.editingGateway && !ui.editingPersonal && !ui.manualEntry && ui.pairingInstruction.isEmpty &&
-                            channel.status != "error" && channel.warning != true && ui.testResult == nil && channel.fields.count <= 2
+                            channel.status != "error" && channel.warning != true && ui.testResult == nil && channel.fields.count <= 2 &&
+                            (channel.configured || channel.reusable_binding == nil)
                     }
                 case "settings_hubs_tab": defaultLayout = !hubForm.isOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0,
-                   let doc = scroll.documentView {
-                    let inboxHeight = name(scroll) == "settings_channels_tab"
-                        ? findView(in:doc,id:"inbox_control_bar",as:NSView.self)?.frame.height ?? 48 : 48
-                    if doc.frame.height - max(0,inboxHeight-48) > scroll.contentSize.height + 0.75 {
-                        clippedViews.append(name(scroll)+": default viewport needs scrolling")
-                    }
+                   let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 {
+                    clippedViews.append(name(scroll)+": default viewport needs scrolling")
                 }
                 if scroll.hasHorizontalScroller && scroll.frame.height < 34 { overlappingSiblings.append(name(scroll)+": scroller geometry") }
                 if let doc = scroll.documentView {
@@ -967,6 +979,18 @@ extension Companion {
                         }
                     } else {
                         clippedViews.append(id + ": missing segmented track")
+                    }
+                }
+                if id == "settings_channel_hub_bar" {
+                    let scroll: NSScrollView? = view.superview.flatMap { findView(in: $0, id: "settings_channels_tab") }
+                    if parentBounds.height != 38 || scroll?.frame.maxY != view.frame.minY {
+                        clippedViews.append(id + ": bar must be pinned above the channel viewport")
+                    }
+                }
+                if id == "inbox_control_bar", let detail: NSTextField = findView(in: view, id: "inbox_control_summary") {
+                    if parentBounds.height != 50 || detail.maximumNumberOfLines != 1 ||
+                       detail.cell?.wraps != false || detail.lineBreakMode != .byTruncatingTail {
+                        clippedViews.append(id + ": expected a 50pt card with a single-line summary")
                     }
                 }
                 if id == "directory_warning" {
@@ -1116,13 +1140,19 @@ extension Companion {
                 result["content_height"] = scroll.contentSize.height
                 result["document_width"] = scroll.documentView?.frame.width
                 result["document_height"] = scroll.documentView?.frame.height
+                result["scroll_required"] = (scroll.documentView?.frame.height ?? 0) > scroll.contentSize.height + 0.75
                 result["draws_background"] = scroll.drawsBackground
                 result["content_x"] = scroll.contentView.bounds.origin.x
                 result["content_y"] = scroll.contentView.bounds.origin.y
+                if name(scroll) == "active_scroll", let doc = scroll.documentView {
+                    let viewport = scroll.documentVisibleRect
+                    result["fully_visible_rows"] = doc.subviews.filter { viewport.contains($0.frame) }.map(name)
+                }
             }
             if let track = view as? SegmentedPillStrip {
                 result["selected_id"] = track.selected?.identifier?.rawValue
                 result["sliding"] = track.isSliding
+                result["window_y"] = track.convert(track.bounds, to: nil).minY
             }
             if let table = view as? NSTableView, table === directoryTableView {
                 result["column_width"] = table.tableColumns.first?.width
@@ -1173,6 +1203,15 @@ extension Companion {
                 result["pressed"] = control.isPressed
                 control.effectiveAppearance.performAsCurrentDrawingAppearance { result["foreground"] = components(control.label.textColor) }
                 if let symbol = control.symbolName { result["symbol"] = symbol }
+                if let menu = control.menu, control.identifier?.rawValue.hasPrefix("scope:") == true {
+                    result["choices"] = menu.items.map { item -> [String: Any] in
+                        let detail: String?
+                        if #available(macOS 14.4, *) { detail = item.subtitle }
+                        else { detail = item.toolTip }
+                        return ["value": item.representedObject as? String ?? "", "title": item.title,
+                                "detail": detail ?? "", "selected": item.state == .on] as [String: Any]
+                    }
+                }
             }
             return result
         }
