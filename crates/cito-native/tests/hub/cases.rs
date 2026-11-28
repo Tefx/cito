@@ -1315,6 +1315,7 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
     manifest["pairing"]["privateIdentityField"] = json!("address");
     std::fs::write(path, manifest.to_string()).unwrap();
     let e = test_engine(&dir);
+    e.pause_worker();
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let configure = |patch: Value| {
@@ -1346,6 +1347,12 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
         .unwrap()
         .is_empty());
     send(&e, &node, "new-destination");
+    e.rpc(
+        "human_channel_poll",
+        &json!({"plugin_id":"fixture"}),
+        Some(&owner),
+    )
+    .unwrap();
     wait_for(|| {
         !e.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='new-destination' AND status='delivered'", &[]).unwrap().is_empty()
     });
@@ -1376,18 +1383,39 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
     assert_eq!(warned["channels"][0]["status"], "ready");
     assert!(s(&warned["channels"][0], "detail").contains("409"));
     e.plugin_frame("fixture", &json!({"op":"health","error":null}));
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Response lost' WHERE signal_id='new-destination'", &[]).unwrap();
+    let plugin = e.plugin("fixture").unwrap();
+    send(&e, &node, "lost-response");
+    let reservations = e.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(reservations.len(), 1);
+    e.delivery_result("fixture", &json!({"delivery_id":reservations[0]["delivery_id"],"effect_unknown":true,"error":"Response lost"})).unwrap();
     let unknown = e
         .rpc("human_channels_list", &json!({}), Some(&owner))
         .unwrap();
     assert_eq!(unknown["channels"][0]["warning"], true);
     assert!(s(&unknown["channels"][0], "detail").contains("outcome unknown"));
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='new-destination'", &[]).unwrap();
+    send(&e, &node, "confirmed-destination");
+    let reservations = e.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(reservations.len(), 1);
+    assert_eq!(
+        reservations[0]["signal"]["signal_id"],
+        "confirmed-destination"
+    );
+    e.delivery_result(
+        "fixture",
+        &json!({"delivery_id":reservations[0]["delivery_id"],"ok":true}),
+    )
+    .unwrap();
     assert_eq!(
         e.rpc("human_channels_list", &json!({}), Some(&owner))
             .unwrap()["channels"][0]["warning"],
         false
     );
+    send(&e, &node, "replaced-destination");
+    assert_eq!(e.reserve_deliveries(&plugin).unwrap().len(), 1);
+    let replaced = configure(json!({"user_config":{"address":"43"}}));
+    assert!(s(&replaced["channels"][0], "detail")
+        .contains("Destination replaced while delivery was in flight"));
+    assert!(e.reserve_deliveries(&plugin).unwrap().is_empty());
     for empty in [json!(""), Value::Null] {
         configure(json!({"user_config":{"address":"42"}}));
         let cleared = configure(json!({"user_config":{"address":empty}}));
@@ -1396,6 +1424,967 @@ fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labe
         assert!(config.get("_external_chat_id").is_none());
         assert!(config.get("_external_user_id").is_none());
     }
+}
+
+#[test]
+fn delivery_warnings_follow_latest_outcome_and_saved_watermarks() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[root]).unwrap();
+    let admin = principal("bob");
+    let legacy =
+        json!({"principal_id":"https://id.example.com#alice","owner_user":"alice","oidc":true});
+    let caller = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice","oidc":true});
+    let rpc = |op, mut params: Value, who: &Value| {
+        params["plugin_id"] = json!("fixture");
+        hub.rpc(op, &params, Some(who)).unwrap()
+    };
+    let save_hub = |credential| {
+        rpc(
+            "human_channels_configure",
+            json!({"hub_config":{"credential":credential}}),
+            &admin,
+        )
+    };
+    let save_user = |who| {
+        rpc(
+            "human_channels_configure",
+            json!({"user_config":{"address":"saved-room"}}),
+            who,
+        )
+    };
+    let test = |params| rpc("human_channels_test", params, &caller);
+    let list = || rpc("human_channels_list", json!({}), &caller)["channels"][0].clone();
+    let record = |signal, ms, status, error: Value| {
+        hub.inner.db.execute(
+            "INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,last_error,delivered_ms) VALUES('fixture',?,?,1,?,?,?)",
+            &[legacy["principal_id"].clone(), json!(signal), json!(status), error, json!(ms)],
+        ).unwrap();
+    };
+    // Legacy outcomes can appear newer than a Save or Test after wall-clock skew.
+    let legacy_ms = now_ms() + 60_000;
+    let unknown = |signal, ms| {
+        record(signal, ms, "effect_unknown", json!("Response lost"));
+        let channel = list();
+        assert_eq!(channel["warning"], true);
+        assert_eq!(
+            s(&channel, "detail"),
+            "Delivery outcome unknown; automatic replay stopped to avoid duplicates. Response lost"
+        );
+    };
+
+    save_hub("saved");
+    save_user(&legacy);
+    unknown("unknown-before-delivery", legacy_ms);
+    let plugin = hub.plugin("fixture").unwrap();
+    let pid = s(&legacy, "principal_id");
+    let node = listener_id(pid, "human", "default");
+    send_from(&hub, &node, "late-outcome", pid, "sender");
+    send_from(&hub, &node, "newer-delivery", pid, "sender");
+    let pending = hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0]["signal"]["signal_id"], "late-outcome");
+    assert_eq!(pending[1]["signal"]["signal_id"], "newer-delivery");
+    // The earlier signal is retrying with a retained warning when the newer delivery settles.
+    hub.inner.db.execute("UPDATE hub_channel_deliveries SET attempts=1,last_error='Previous attempt failed' WHERE signal_id='late-outcome'", &[]).unwrap();
+    // Force the outcome clock to use the persisted watermark, not elapsed time.
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET updated_ms=?",
+            &[json!(legacy_ms)],
+        )
+        .unwrap();
+    hub.delivery_result(
+        "fixture",
+        &json!({"delivery_id":pending[1]["delivery_id"],"ok":true,"error":"Must not persist"}),
+    )
+    .unwrap();
+    assert_eq!(list()["warning"], false);
+    assert_eq!(hub.inner.db.query("SELECT delivered_ms, last_error FROM hub_channel_deliveries WHERE signal_id='newer-delivery'", &[]).unwrap(), [json!({"delivered_ms":legacy_ms,"last_error":null})]);
+    assert_eq!(hub.inner.db.query("SELECT status, attempts, last_error FROM hub_channel_deliveries WHERE signal_id='late-outcome'", &[]).unwrap(), [json!({"status":"in_flight","attempts":1,"last_error":null})]);
+    // Now only the successful delivery's verification watermark is ahead of wall time.
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET updated_ms=?",
+            &[json!(now_ms())],
+        )
+        .unwrap();
+    hub.delivery_result("fixture", &json!({"delivery_id":pending[0]["delivery_id"],"effect_unknown":true,"error":"Late outcome"})).unwrap();
+    assert!(s(&list(), "detail").contains("Late outcome"));
+    let late_ms = n(
+        &hub.inner
+            .db
+            .query(
+                "SELECT delivered_ms FROM hub_channel_deliveries WHERE signal_id='late-outcome'",
+                &[],
+            )
+            .unwrap()[0],
+        "delivered_ms",
+    );
+    assert_eq!(late_ms, legacy_ms);
+
+    unknown("unknown-before-test", late_ms + 1);
+    assert_eq!(
+        test(json!({"user_config":{"address":"draft-room"}}))["ok"],
+        true
+    );
+    assert_eq!(list()["warning"], true);
+    // The draft set the service label; only the binding watermark changes now.
+    let label = list()["service_label"].clone();
+    let events = hub.subscribe(None).unwrap();
+    assert_eq!(test(json!({}))["ok"], true);
+    assert_eq!(list()["service_label"], label);
+    assert_eq!(events.try_recv().unwrap(), json!({"type":"kv"}));
+    assert_eq!(list()["warning"], false);
+
+    unknown("unknown-before-personal-save", late_ms + 2);
+    assert_eq!(save_user(&caller)["channels"][0]["warning"], false);
+    unknown("unknown-before-hub-save", late_ms + 3);
+    save_hub("rotated");
+    assert_eq!(list()["warning"], false);
+    let fenced = hub
+        .inner
+        .db
+        .query(
+            "SELECT status,last_error FROM hub_channel_deliveries WHERE signal_id LIKE 'unknown-%' OR signal_id='late-outcome'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        fenced,
+        vec![json!({"status":"effect_unknown","last_error":null}); 5]
+    );
+}
+
+#[test]
+fn equal_timestamp_completions_order_by_completion_not_reservation() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let owner = principal("alice");
+    let configure = |mut params: Value| {
+        params["plugin_id"] = json!("fixture");
+        hub.rpc("human_channels_configure", &params, Some(&owner))
+            .unwrap()
+    };
+    configure(json!({"hub_config":{"credential":"saved"},"user_config":{"address":"room"}}));
+    let pid = s(&owner, "principal_id");
+    let node = listener_id(pid, "human", "default");
+    send(&hub, &node, "signal-a");
+    send(&hub, &node, "signal-b");
+    let plugin = hub.plugin("fixture").unwrap();
+    let pending = hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0]["signal"]["signal_id"], "signal-a");
+    assert_eq!(pending[1]["signal"]["signal_id"], "signal-b");
+    let deliveries = || {
+        hub.inner.db.query(
+            "SELECT signal_id,status,delivered_ms,last_error FROM hub_channel_deliveries WHERE plugin_id='fixture' AND principal_id=? AND signal_id IN ('signal-a','signal-b') ORDER BY signal_id",
+            &[json!(pid)],
+        ).unwrap()
+    };
+    let reserved = deliveries();
+    assert_eq!(reserved[0]["signal_id"], "signal-a");
+    assert_eq!(reserved[1]["signal_id"], "signal-b");
+    assert!(reserved.iter().all(|row| row["status"] == "in_flight"));
+    // Simulate wall-clock rollback after Save without deriving time from a delivery row.
+    let watermark = now_ms() + 60_000;
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET updated_ms=? WHERE plugin_id='fixture' AND principal_id=?",
+            &[json!(watermark), json!(pid)],
+        )
+        .unwrap();
+    for (reservation, error) in [(&pending[1], "Error B"), (&pending[0], "Error A")] {
+        hub.delivery_result(
+            "fixture",
+            &json!({"delivery_id":reservation["delivery_id"],"effect_unknown":true,"error":error}),
+        )
+        .unwrap();
+    }
+    assert!(now_ms() < watermark);
+    let settled = deliveries();
+    assert!(settled.iter().all(|row| row["delivered_ms"] == watermark));
+    assert!(settled.iter().all(|row| row["status"] == "effect_unknown"));
+    assert_eq!(settled[0]["last_error"], "Error A");
+    assert!(settled[1]["last_error"].is_null());
+    let list = hub
+        .rpc("human_channels_list", &json!({}), Some(&owner))
+        .unwrap();
+    assert_eq!(list["channels"][0]["warning"], true);
+    assert_eq!(
+        list["channels"][0]["detail"],
+        "Delivery outcome unknown; automatic replay stopped to avoid duplicates. Error A"
+    );
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+}
+
+#[test]
+fn retry_reservation_does_not_outrank_newer_outcome_before_completion() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let owner = principal("alice");
+    hub.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"},"user_config":{"address":"room"}}), Some(&owner)).unwrap();
+    let node = listener_id(s(&owner, "principal_id"), "human", "default");
+    let plugin = hub.plugin("fixture").unwrap();
+    let reserve = |signal| {
+        let mut pending = hub.reserve_deliveries(&plugin).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["signal"]["signal_id"], signal);
+        pending.remove(0)["delivery_id"].clone()
+    };
+    let result = |token, mut frame: Value| {
+        frame["delivery_id"] = token;
+        hub.delivery_result("fixture", &frame).unwrap();
+    };
+    let detail = || {
+        let list = hub
+            .rpc("human_channels_list", &json!({}), Some(&owner))
+            .unwrap();
+        assert_eq!(list["channels"][0]["warning"], true);
+        list["channels"][0]["detail"].clone()
+    };
+    let delivery = |signal| {
+        hub.inner.db.query("SELECT status,attempts,next_retry_ms,delivered_ms,last_error FROM hub_channel_deliveries WHERE signal_id=?", &[json!(signal)]).unwrap().remove(0)
+    };
+    let expire_retry = || {
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_channel_deliveries SET next_retry_ms=0 WHERE signal_id='signal-a'",
+                &[],
+            )
+            .unwrap();
+    };
+    let retryable = json!({"ok":false,"retryable":true,"error":"Err A"});
+    send(&hub, &node, "signal-a");
+    result(reserve("signal-a"), retryable.clone());
+    assert_eq!(delivery("signal-a")["attempts"], 1);
+    expire_retry();
+    let retry = reserve("signal-a");
+    assert_eq!(delivery("signal-a")["status"], "in_flight");
+    assert_eq!(detail(), "Err A");
+    result(retry, retryable);
+
+    send(&hub, &node, "signal-b");
+    result(
+        reserve("signal-b"),
+        json!({"effect_unknown":true,"error":"Err B"}),
+    );
+    assert!(delivery("signal-a")["last_error"].is_null());
+    let unknown = "Delivery outcome unknown; automatic replay stopped to avoid duplicates. Err B";
+    assert_eq!(detail(), unknown);
+
+    expire_retry();
+    let retry = reserve("signal-a");
+    let reserved = delivery("signal-a");
+    assert_eq!(reserved["status"], "in_flight");
+    assert_eq!(reserved["next_retry_ms"], 0);
+    assert!(n(&reserved, "delivered_ms") >= n(&delivery("signal-b"), "delivered_ms"));
+    assert_eq!(detail(), unknown);
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET delivered_ms=? WHERE signal_id='signal-a'",
+            &[json!(now_ms() - 61_000)],
+        )
+        .unwrap();
+    let progress_started = now_ms();
+    result(retry.clone(), json!({"progress":true}));
+    let renewed = delivery("signal-a");
+    assert_eq!(renewed["next_retry_ms"], 0);
+    assert!((progress_started..=now_ms()).contains(&n(&renewed, "delivered_ms")));
+    assert_eq!(detail(), unknown);
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+
+    result(
+        retry,
+        json!({"ok":false,"retryable":false,"error":"Err A final"}),
+    );
+    assert_eq!(delivery("signal-a")["status"], "failed_permanent");
+    assert!(delivery("signal-b")["last_error"].is_null());
+    assert_eq!(detail(), "Err A final");
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+
+    // Local queue rejection becomes the active warning without spending an attempt.
+    send(&hub, &node, "signal-c");
+    result(
+        reserve("signal-c"),
+        json!({"ok":false,"retryable":true,"error":"Outbound queue is full"}),
+    );
+    assert!(delivery("signal-a")["last_error"].is_null());
+    assert_eq!(delivery("signal-c")["attempts"], 0);
+    assert_eq!(detail(), "Outbound queue is full");
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET next_retry_ms=0 WHERE signal_id='signal-c'",
+            &[],
+        )
+        .unwrap();
+    let retry = reserve("signal-c");
+    assert_eq!(delivery("signal-c")["status"], "in_flight");
+    assert_eq!(delivery("signal-c")["attempts"], 0);
+    assert_eq!(detail(), "Outbound queue is full");
+    result(retry, json!({"progress":true}));
+    assert_eq!(delivery("signal-c")["status"], "in_flight");
+    assert_eq!(delivery("signal-c")["attempts"], 0);
+    assert_eq!(detail(), "Outbound queue is full");
+    let saved = hub
+        .rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","display_label":"Saved room"}),
+            Some(&owner),
+        )
+        .unwrap();
+    assert_eq!(saved["channels"][0]["warning"], false);
+    assert!(delivery("signal-c")["last_error"].is_null());
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+}
+
+#[test]
+fn sole_retry_warning_survives_clock_rollback_until_save() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let owner = principal("alice");
+    hub.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"},"user_config":{"address":"room"}}), Some(&owner)).unwrap();
+    let watermark = now_ms() + 60_000;
+    hub.inner.db.execute("UPDATE hub_human_channels SET updated_ms=? WHERE plugin_id='fixture' AND principal_id=?", &[json!(watermark), owner["principal_id"].clone()]).unwrap();
+    let plugin = hub.plugin("fixture").unwrap();
+    let node = listener_id(s(&owner, "principal_id"), "human", "default");
+    send(&hub, &node, "signal-a");
+    let reserve = || {
+        let pending = hub.reserve_deliveries(&plugin).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["signal"]["signal_id"], "signal-a");
+        pending[0]["delivery_id"].clone()
+    };
+    let result = |token, mut frame: Value| {
+        frame["delivery_id"] = token;
+        hub.delivery_result("fixture", &frame).unwrap();
+    };
+    let expire_retry = || {
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_channel_deliveries SET next_retry_ms=0 WHERE signal_id='signal-a'",
+                &[],
+            )
+            .unwrap();
+    };
+    let warning = "Outbound queue is full";
+    let assert_warning = |status, next_retry_expired| {
+        let rows = hub.inner.db.query("SELECT status,attempts,next_retry_ms,delivered_ms,last_error FROM hub_channel_deliveries WHERE signal_id='signal-a'", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["status"], status);
+        assert_eq!(rows[0]["attempts"], 1);
+        assert_eq!(rows[0]["delivered_ms"], watermark);
+        assert_eq!(rows[0]["last_error"], warning);
+        assert_eq!(rows[0]["next_retry_ms"] == 0, next_retry_expired);
+        let list = hub
+            .rpc("human_channels_list", &json!({}), Some(&owner))
+            .unwrap();
+        assert_eq!(list["channels"][0]["warning"], true);
+        assert_eq!(list["channels"][0]["detail"], warning);
+    };
+
+    // A delivery attempt was spent before the retry hit local backpressure.
+    result(
+        reserve(),
+        json!({"ok":false,"retryable":true,"error":"Destination temporarily unavailable"}),
+    );
+    expire_retry();
+    result(
+        reserve(),
+        json!({"ok":false,"retryable":true,"error":warning}),
+    );
+    assert_warning("failed", false);
+    expire_retry();
+    let retry = reserve();
+    assert_warning("in_flight", true);
+    result(retry, json!({"progress":true}));
+    assert_warning("in_flight", true);
+
+    let saved = hub
+        .rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","display_label":"Saved room"}),
+            Some(&owner),
+        )
+        .unwrap();
+    assert_eq!(saved["channels"][0]["warning"], false);
+    let rows = hub
+        .inner
+        .db
+        .query(
+            "SELECT last_error FROM hub_channel_deliveries WHERE signal_id='signal-a'",
+            &[],
+        )
+        .unwrap();
+    assert!(rows[0]["last_error"].is_null());
+}
+
+#[test]
+fn sole_retry_warning_uses_canonical_oidc_binding_watermark() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let owner = json!({"principal_id":"oidc:https://id.example.com|subject","sub":"subject","owner_user":"alice","oidc":true});
+    let pid = s(&owner, "principal_id");
+    hub.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"}}),
+        Some(&principal("alice")),
+    )
+    .unwrap();
+    hub.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","user_config":{"address":"room"}}),
+        Some(&owner),
+    )
+    .unwrap();
+    let watermark = now_ms() + 60_000;
+    hub.inner.db.execute("UPDATE hub_human_channels SET updated_ms=? WHERE plugin_id='fixture' AND principal_id=?", &[json!(watermark), json!(pid)]).unwrap();
+    let plugin = hub.plugin("fixture").unwrap();
+    let node = listener_id(pid, "human", "default");
+    send_from(&hub, &node, "signal-a", pid, "sender");
+    let reserve = || {
+        let pending = hub.reserve_deliveries(&plugin).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["principal_id"], pid);
+        assert_eq!(pending[0]["signal"]["signal_id"], "signal-a");
+        pending[0]["delivery_id"].clone()
+    };
+    let result = |token, mut frame: Value| {
+        frame["delivery_id"] = token;
+        hub.delivery_result("fixture", &frame).unwrap();
+    };
+    let delivery = || {
+        let rows = hub.inner.db.query("SELECT status,delivered_ms,last_error FROM hub_channel_deliveries WHERE signal_id='signal-a'", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        rows.into_iter().next().unwrap()
+    };
+    let warning = "Destination temporarily unavailable";
+    let assert_warning = || {
+        let list = hub
+            .rpc("human_channels_list", &json!({}), Some(&owner))
+            .unwrap();
+        assert_eq!(list["channels"][0]["enabled"], true);
+        assert_eq!(list["channels"][0]["warning"], true);
+        assert_eq!(list["channels"][0]["detail"], warning);
+    };
+    let failure = json!({"ok":false,"retryable":true,"error":warning});
+    result(reserve(), failure.clone());
+    hub.inner.db.transaction(|c| {
+        c.execute("UPDATE hub_channel_deliveries SET delivered_ms=?,next_retry_ms=0 WHERE signal_id='signal-a'", &[json!(watermark + 500)])?;
+        c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,updated_ms) VALUES('https://id.example.com#subject','fixture','alice',0,?)", &[json!(watermark + 2_000)])?;
+        Ok(())
+    }).unwrap();
+    assert_warning();
+    let retry = reserve();
+    assert_eq!(delivery()["status"], "in_flight");
+    assert_eq!(delivery()["last_error"], warning);
+    assert_warning();
+    result(retry.clone(), json!({"progress":true}));
+    assert_eq!(delivery()["last_error"], warning);
+    assert_warning();
+
+    // Settling another outcome must not inherit the disabled alias's watermark.
+    result(retry, failure);
+    let settled = delivery();
+    assert_eq!(settled["status"], "failed");
+    assert_eq!(settled["delivered_ms"], watermark);
+    assert_warning();
+}
+
+#[test]
+fn predecessor_delivery_warnings_survive_upgrade_and_restart_without_replay() {
+    delivery_warnings_survive_upgrade_and_restart(false);
+}
+
+#[test]
+fn intermediate_delivery_warnings_survive_upgrade_and_restart_without_replay() {
+    delivery_warnings_survive_upgrade_and_restart(true);
+}
+
+fn delivery_warnings_survive_upgrade_and_restart(intermediate_schema: bool) {
+    let dir = temp();
+    let root = fixture(&dir);
+    let alice = principal("alice");
+    let bob =
+        json!({"principal_id":"oidc:https://id.example.com|bob","owner_user":"bob","oidc":true});
+    let carol = principal("carol");
+    let orphan = principal("dave");
+    let erin = principal("erin");
+    let frank = json!({"principal_id":"oidc:https://id.example.com|frank","owner_user":"frank","oidc":true});
+    let bob_legacy = "https://id.example.com#bob";
+    let frank_legacy = "https://id.example.com#frank";
+    let updated = now_ms() - 3_000;
+    let verified = updated + 2_000;
+    {
+        let db = Database::open(&dir.join("hub.sqlite")).unwrap();
+        db.transaction(|c| {
+            c.execute("CREATE TABLE hub_human_channels(principal_id TEXT NOT NULL,plugin_id TEXT NOT NULL,owner_user TEXT NOT NULL DEFAULT 'local',enabled INTEGER NOT NULL DEFAULT 1,user_config_json TEXT NOT NULL DEFAULT '{}',display_label TEXT,last_delivered_seq INTEGER NOT NULL DEFAULT 0,updated_ms INTEGER NOT NULL DEFAULT 0,delivery_verified_ms INTEGER,PRIMARY KEY(principal_id,plugin_id))", &[])?;
+            c.execute("CREATE TABLE hub_channel_deliveries(plugin_id TEXT NOT NULL,principal_id TEXT NOT NULL,signal_id TEXT NOT NULL,seq INTEGER NOT NULL,status TEXT NOT NULL,external_msg_id TEXT,from_listener_id TEXT,delivered_ms INTEGER NOT NULL,reservation_id TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_retry_ms INTEGER NOT NULL DEFAULT 0,last_error TEXT,PRIMARY KEY(plugin_id,principal_id,signal_id))", &[])?;
+            for (caller, verification) in [(&alice, json!(verified)), (&bob, Value::Null), (&carol, json!(verified)), (&erin, json!(verified)), (&frank, Value::Null)] {
+                c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json,updated_ms,delivery_verified_ms) VALUES(?,'fixture',?,?,?,?)", &[caller["principal_id"].clone(), caller["owner_user"].clone(), json!(json!({"address":caller["owner_user"]}).to_string()), json!(updated), verification])?;
+            }
+            // The older alias loses to the canonical binding even though its timestamps are newer.
+            c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,updated_ms,delivery_verified_ms) VALUES(?,'fixture','bob',0,?,?)", &[json!(bob_legacy), json!(verified), json!(verified)])?;
+            for (id, pid, ms, status, error) in [
+                ("alice-cleared", s(&alice, "principal_id"), updated + 1_000, "effect_unknown", Some("Response lost")),
+                ("alice-retry", s(&alice, "principal_id"), updated + 1_000, "failed", Some("Cleared by Send Test")),
+                // At the verification watermark, invalidation does not retire this warning.
+                ("erin-unknown", s(&erin, "principal_id"), verified, "effect_unknown", Some("Response lost")),
+                ("erin-success", s(&erin, "principal_id"), verified + 31, "delivered", None),
+                ("frank-retry", s(&frank, "principal_id"), updated + 1_000, "failed", Some("Err A")),
+                ("frank-unknown", frank_legacy, updated + 1_031, "effect_unknown", Some("Err B")),
+                ("bob-cleared", bob_legacy, updated - 1, "effect_unknown", Some("Earlier response lost")),
+                ("bob-active", bob_legacy, updated, "effect_unknown", Some("Bob's response lost")),
+                ("orphan-active", s(&orphan, "principal_id"), updated - 1, "effect_unknown", Some("Orphan response lost")),
+                ("carol-before-success", s(&carol, "principal_id"), verified, "effect_unknown", Some("Before success")),
+                ("carol-success", s(&carol, "principal_id"), verified, "delivered", None),
+                ("carol-after-success", s(&carol, "principal_id"), verified, "effect_unknown", Some("After success")),
+                ("carol-in-flight", s(&carol, "principal_id"), updated + 1_000, "in_flight", None),
+                ("carol-retrying", s(&carol, "principal_id"), updated + 1_000, "in_flight", Some("Previous attempt failed")),
+            ] {
+                c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms,last_error) VALUES('fixture',?,?,1,?,?,?)", &[json!(pid), json!(id), json!(status), json!(ms), json!(error)])?;
+            }
+            c.execute("UPDATE hub_channel_deliveries SET attempts=1 WHERE signal_id IN ('carol-retrying','alice-retry','frank-retry')", &[])?;
+            if intermediate_schema {
+                // Retain the intermediate schema and stale counters to exercise timestamp authority.
+                c.execute("ALTER TABLE hub_human_channels ADD COLUMN warning_cleared_seq INTEGER NOT NULL DEFAULT 0", &[])?;
+                c.execute("ALTER TABLE hub_channel_deliveries ADD COLUMN outcome_seq INTEGER NOT NULL DEFAULT 0", &[])?;
+                c.execute("CREATE TABLE hub_meta(key TEXT PRIMARY KEY,int_val INTEGER NOT NULL DEFAULT 0,json_val TEXT)", &[])?;
+                c.execute("INSERT INTO hub_meta(key,int_val) VALUES('channel_event_seq',4)", &[])?;
+                c.execute("UPDATE hub_human_channels SET warning_cleared_seq=4", &[])?;
+                c.execute("UPDATE hub_channel_deliveries SET outcome_seq=1 WHERE signal_id IN ('bob-active','carol-after-success')", &[])?;
+            }
+            c.execute("CREATE TABLE hub_plugin_services(plugin_id TEXT PRIMARY KEY,config_json TEXT NOT NULL DEFAULT '{}',service_state_json TEXT NOT NULL DEFAULT '{}',updated_ms INTEGER NOT NULL DEFAULT 0)", &[])?;
+            c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json) VALUES('fixture',?)", &[json!(r#"{"credential":"saved"}"#)])?;
+            Ok(())
+        }).unwrap();
+    }
+
+    let reopen = || {
+        let hub = test_engine(&dir);
+        // Restore attachments with the fixture available, without letting the worker replay.
+        hub.pause_worker();
+        hub.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+        hub.restore_attachments().unwrap();
+        hub
+    };
+    let list = |hub: &HubEngine, who: &Value| {
+        hub.rpc("human_channels_list", &json!({}), Some(who))
+            .unwrap()["channels"][0]
+            .clone()
+    };
+    let hub = reopen();
+    assert_eq!(list(&hub, &alice)["warning"], false);
+    let bob_warning = list(&hub, &bob);
+    assert_eq!(bob_warning["warning"], true);
+    assert!(s(&bob_warning, "detail").contains("outcome unknown"));
+    assert!(s(&bob_warning, "detail").contains("Bob's response lost"));
+
+    let delivery = |id| {
+        hub.inner
+            .db
+            .query(
+                "SELECT status,delivered_ms,last_error FROM hub_channel_deliveries WHERE signal_id=?",
+                &[json!(id)],
+            )
+            .unwrap()
+            .remove(0)
+    };
+    let binding = |who: &Value| {
+        hub.inner.db.query("SELECT updated_ms,delivery_verified_ms FROM hub_human_channels WHERE principal_id=?", &[who["principal_id"].clone()]).unwrap().remove(0)
+    };
+    let alice_binding = binding(&alice);
+    assert_eq!(alice_binding["updated_ms"], updated);
+    assert_eq!(alice_binding["delivery_verified_ms"], verified);
+    assert_eq!(delivery("alice-cleared")["last_error"], "Response lost");
+    assert_eq!(delivery("bob-active")["delivered_ms"], updated);
+    assert_eq!(list(&hub, &orphan)["warning"], true);
+    // Read all three tied rows in descending row order, then check the success masks the earlier error.
+    assert!(s(&list(&hub, &carol), "detail").contains("After success"));
+    hub.inner.db.execute("UPDATE hub_channel_deliveries SET last_error=NULL WHERE signal_id='carol-after-success'", &[]).unwrap();
+    assert_eq!(list(&hub, &carol)["warning"], false);
+    assert_eq!(delivery("carol-retrying")["status"], "in_flight");
+    assert_eq!(delivery("carol-in-flight")["status"], "in_flight");
+
+    // A fresh signal for each existing delivery reaches the reservation fence.
+    for (who, signal) in [(&alice, "alice-cleared"), (&bob, "bob-active")] {
+        let pid = s(who, "principal_id");
+        send_from(
+            &hub,
+            &listener_id(pid, "human", "default"),
+            signal,
+            pid,
+            "sender",
+        );
+    }
+    let plugin = hub.plugin("fixture").unwrap();
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+
+    let current_warning =
+        "Delivery outcome unknown; automatic replay stopped to avoid duplicates. Err B";
+    assert_eq!(list(&hub, &frank)["detail"], current_warning);
+    for (who, signal, error) in [
+        (&alice, "alice-retry", "Cleared by Send Test"),
+        (&frank, "frank-retry", "Err A"),
+    ] {
+        assert_eq!(delivery(signal)["status"], "failed");
+        assert_eq!(delivery(signal)["last_error"], error);
+        let pid = s(who, "principal_id");
+        send_from(
+            &hub,
+            &listener_id(pid, "human", "default"),
+            signal,
+            pid,
+            "sender",
+        );
+        let pending = hub.reserve_deliveries(&plugin).unwrap();
+        assert_eq!(pending.len(), 1, "Expected retry for {signal}");
+        assert_eq!(pending[0]["signal"]["signal_id"], signal);
+        assert_eq!(delivery(signal)["status"], "in_flight");
+        assert!(delivery(signal)["last_error"].is_null(), "{signal}");
+    }
+    assert_eq!(list(&hub, &alice)["warning"], false);
+    let frank_channel = list(&hub, &frank);
+    assert_eq!(frank_channel["warning"], true);
+    assert_eq!(frank_channel["detail"], current_warning);
+
+    let test_saved = |who| {
+        assert_eq!(
+            hub.rpc(
+                "human_channels_test",
+                &json!({"plugin_id":"fixture"}),
+                Some(who)
+            )
+            .unwrap()["ok"],
+            true
+        );
+        assert_eq!(list(&hub, who)["warning"], false);
+    };
+    // Starting the child recovers Carol's unsettled predecessor reservation.
+    hub.ensure_process(&plugin).unwrap();
+    let carol_outcome = delivery("carol-in-flight");
+    assert_eq!(carol_outcome["status"], "effect_unknown");
+    assert!(n(&carol_outcome, "delivered_ms") >= verified);
+
+    hub.plugin_frame(
+        "fixture",
+        &json!({"op":"health","service_label":"Replacement account","delivery_unverified":true}),
+    );
+    assert!(binding(&erin)["delivery_verified_ms"].is_null());
+    assert_eq!(delivery("erin-unknown")["last_error"], "Response lost");
+    let erin_channel = list(&hub, &erin);
+    assert_eq!(erin_channel["warning"], true);
+    assert_eq!(erin_channel["delivery_unverified"], true);
+    assert_eq!(
+        s(&erin_channel, "detail").trim_end(),
+        "Delivery unverified for Replacement account."
+    );
+    let unverified = list(&hub, &alice);
+    assert_eq!(unverified["delivery_unverified"], true);
+    assert!(!s(&unverified, "detail").contains("Response lost"));
+    assert_eq!(delivery("alice-cleared")["status"], "effect_unknown");
+    assert!(delivery("alice-cleared")["last_error"].is_null());
+    assert!(s(&list(&hub, &bob), "detail").contains("Bob's response lost"));
+    test_saved(&alice);
+    test_saved(&bob);
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+    drop(hub);
+
+    let restarted = reopen();
+    assert!(restarted.reserve_deliveries(&plugin).unwrap().is_empty());
+    assert_eq!(list(&restarted, &alice)["warning"], false);
+    assert_eq!(list(&restarted, &bob)["warning"], false);
+    assert_eq!(list(&restarted, &carol)["warning"], true);
+}
+
+#[test]
+fn ack_between_reservation_and_handoff_does_not_mask_unknown_delivery() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let alice = principal("alice");
+    hub.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"},"user_config":{"address":"room"}}), Some(&alice)).unwrap();
+    let plugin = hub.plugin("fixture").unwrap();
+    let process = hub.ensure_process(&plugin).unwrap();
+    let node = listener_id(s(&alice, "principal_id"), "human", "default");
+    send(&hub, &node, "unknown");
+    let pending = hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(pending.len(), 1);
+    hub.delivery_result("fixture", &json!({"delivery_id":pending[0]["delivery_id"],"effect_unknown":true,"error":"Response lost"})).unwrap();
+    send(&hub, &node, "acked");
+    // Schedule the persisted ack after selection, before replay's final eligibility check.
+    hub.inner.db.execute("CREATE TRIGGER ack_on_reservation AFTER INSERT ON hub_channel_deliveries WHEN NEW.signal_id='acked' BEGIN UPDATE hub_signals SET acked_at_ms=NEW.delivered_ms WHERE signal_id=NEW.signal_id; END", &[]).unwrap();
+    hub.replay(&plugin, &process).unwrap();
+    assert_eq!(hub.inner.db.query("SELECT status,reservation_id,next_retry_ms,last_error FROM hub_channel_deliveries WHERE signal_id='acked'", &[]).unwrap(), [json!({"status":"failed","reservation_id":null,"next_retry_ms":0,"last_error":null})]);
+    let list = hub
+        .rpc("human_channels_list", &json!({}), Some(&alice))
+        .unwrap();
+    assert_eq!(list["channels"][0]["warning"], true);
+    assert!(s(&list["channels"][0], "detail").contains("outcome unknown"));
+}
+
+#[test]
+fn malformed_delivery_after_save_stays_fenced_and_health_does_not_restore_its_warning() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let owner = principal("alice");
+    let rpc = |op, mut params: Value| {
+        params["plugin_id"] = json!("fixture");
+        hub.rpc(op, &params, Some(&owner)).unwrap()
+    };
+    let list = || rpc("human_channels_list", json!({}))["channels"][0].clone();
+    rpc(
+        "human_channels_configure",
+        json!({"hub_config":{"credential":"saved"},"user_config":{"address":"room"}}),
+    );
+    let plugin = hub.plugin("fixture").unwrap();
+    let node = listener_id("none#alice", "human", "default");
+    let prior_ms = now_ms();
+    let future_ms = prior_ms + 60_000;
+    hub.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms) VALUES('fixture','none#alice','prior-delivery',1,'delivered',?)", &[json!(prior_ms)]).unwrap();
+    for (signal, key, value) in [
+        ("bad-id", "external_msg_id", json!(17)),
+        ("bad-ids", "external_msg_ids", json!(["valid", 17])),
+    ] {
+        send(&hub, &node, signal);
+        let reservations = hub.reserve_deliveries(&plugin).unwrap();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(reservations[0]["signal"]["signal_id"], signal);
+        // Model a reservation from an earlier tick without expiring the claim or sleeping.
+        let reserved_ms = now_ms() - 1_000;
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_channel_deliveries SET delivered_ms=? WHERE signal_id=?",
+                &[json!(reserved_ms), json!(signal)],
+            )
+            .unwrap();
+        let save_started = now_ms();
+        let saved = rpc(
+            "human_channels_configure",
+            json!({"display_label":"Saved room"}),
+        );
+        assert_eq!(saved["channels"][0]["warning"], false);
+        let binding = &hub
+            .inner
+            .db
+            .query("SELECT updated_ms FROM hub_human_channels", &[])
+            .unwrap()[0];
+        assert!((save_started..=now_ms()).contains(&n(binding, "updated_ms")));
+        let watermark = future_ms - 1;
+        let set_prior_delivery_ms = |ms| {
+            hub.inner.db.execute("UPDATE hub_channel_deliveries SET delivered_ms=? WHERE signal_id='prior-delivery'", &[json!(ms)]).unwrap();
+        };
+        set_prior_delivery_ms(future_ms);
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_human_channels SET updated_ms=?",
+                &[json!(watermark)],
+            )
+            .unwrap();
+        let mut result =
+            json!({"op":"delivered","delivery_id":reservations[0]["delivery_id"],"ok":true});
+        result[key] = value;
+        hub.plugin_frame("fixture", &result);
+        let row = &hub.inner.db.query("SELECT status,delivered_ms,(SELECT updated_ms FROM hub_human_channels) AS updated_ms FROM hub_channel_deliveries WHERE signal_id=?", &[json!(signal)]).unwrap()[0];
+        assert_eq!(row["status"], "effect_unknown");
+        assert_eq!(row["delivered_ms"], watermark);
+        // The injected future success masks this warning, but must not inflate its timestamp.
+        assert_eq!(list()["warning"], false);
+        set_prior_delivery_ms(prior_ms);
+        // Restore the Save watermark before checking the warning and continuing the lifecycle.
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_human_channels SET updated_ms=?",
+                &[binding["updated_ms"].clone()],
+            )
+            .unwrap();
+        let channel = list();
+        assert_eq!(channel["warning"], true);
+        assert!(s(&channel, "detail").contains("Channel returned invalid delivery message IDs"));
+        assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+    }
+
+    let test_started = now_ms();
+    assert_eq!(rpc("human_channels_test", json!({}))["ok"], true);
+    // Force the persisted timestamps to tie, independent of subprocess latency.
+    hub.inner.db.execute("UPDATE hub_channel_deliveries SET delivered_ms=(SELECT delivery_verified_ms FROM hub_human_channels)", &[]).unwrap();
+    assert_eq!(list()["warning"], false);
+    let binding = || {
+        hub.inner
+            .db
+            .query("SELECT delivery_verified_ms FROM hub_human_channels", &[])
+            .unwrap()
+            .remove(0)
+    };
+    assert!((test_started..=now_ms()).contains(&n(&binding(), "delivery_verified_ms")));
+    hub.plugin_frame(
+        "fixture",
+        &json!({"op":"health","service_label":"Replacement account","delivery_unverified":true}),
+    );
+    let unverified = binding();
+    assert!(unverified["delivery_verified_ms"].is_null());
+
+    let channel = list();
+    assert_eq!(channel["delivery_unverified"], true);
+    assert_eq!(channel["warning"], true);
+    assert!(s(&channel, "detail").starts_with("Delivery unverified for Replacement account."));
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+}
+
+#[test]
+fn process_exit_recovery_warns_about_a_delivery_reserved_before_personal_save() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let path = root.join("fixture/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["command"] = json!(["python3", "-c", "import json, sys\nfor line in sys.stdin:\n    if json.loads(line)['op'] == 'deliver':\n        sys.exit(1)"]);
+    std::fs::write(path, manifest.to_string()).unwrap();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[root]).unwrap();
+    let owner = principal("alice");
+    let configure = |mut params: Value| {
+        params["plugin_id"] = json!("fixture");
+        hub.rpc("human_channels_configure", &params, Some(&owner))
+            .unwrap()
+    };
+    configure(json!({"hub_config":{"credential":"saved"},"user_config":{"address":"room"}}));
+    let plugin = hub.plugin("fixture").unwrap();
+    let process = hub.ensure_process(&plugin).unwrap();
+    let node = listener_id("none#alice", "human", "default");
+    send(&hub, &node, "other-delivery");
+    send(&hub, &node, "crashed-delivery");
+    let reservations = hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(reservations.len(), 2);
+    assert_eq!(reservations[1]["signal"]["signal_id"], "crashed-delivery");
+    let reserved_ms = now_ms() - 1_000;
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET delivered_ms=? WHERE signal_id='crashed-delivery'",
+            &[json!(reserved_ms)],
+        )
+        .unwrap();
+    assert_eq!(
+        configure(json!({"display_label":"Saved room"}))["channels"][0]["warning"],
+        false
+    );
+    let watermark = now_ms() + 60_000;
+    hub.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET updated_ms=?",
+            &[json!(watermark)],
+        )
+        .unwrap();
+    process.send(&reservations[1]).unwrap();
+    wait_for(|| !process.alive());
+    hub.ensure_process(&plugin).unwrap();
+
+    let row = &hub.inner.db.query("SELECT status,delivered_ms,(SELECT updated_ms FROM hub_human_channels) AS updated_ms FROM hub_channel_deliveries WHERE signal_id='crashed-delivery'", &[]).unwrap()[0];
+    assert_eq!(row["status"], "effect_unknown");
+    assert_eq!(row["delivered_ms"], row["updated_ms"]);
+    assert_eq!(row["delivered_ms"], watermark);
+    assert!(n(row, "delivered_ms") > reserved_ms);
+    assert_eq!(hub.inner.db.query("SELECT status,last_error FROM hub_channel_deliveries WHERE signal_id='other-delivery'", &[]).unwrap(), [json!({"status":"effect_unknown","last_error":null})]);
+    let inventory = hub
+        .rpc("human_channels_list", &json!({}), Some(&owner))
+        .unwrap();
+    let channel = &inventory["channels"][0];
+    assert_eq!(channel["warning"], true);
+    assert!(s(channel, "detail").contains("Channel process exited before confirming delivery"));
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
+}
+
+#[test]
+fn non_admin_reset_or_empty_hub_config_cannot_clear_other_users_warning() {
+    let dir = temp();
+    let hub = test_engine(&dir);
+    hub.pause_worker();
+    hub.set_plugin_roots(&[fixture(&dir)]).unwrap();
+    let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice","oidc":true});
+    let bob =
+        json!({"principal_id":"oidc:https://id.example.com|bob","owner_user":"bob","oidc":true});
+    let configure = |caller: &Value, mut patch: Value| {
+        patch["plugin_id"] = json!("fixture");
+        hub.rpc("human_channels_configure", &patch, Some(caller))
+    };
+    configure(
+        &principal("admin"),
+        json!({"hub_config":{"credential":"saved"}}),
+    )
+    .unwrap();
+    configure(&alice, json!({"user_config":{"address":"alice-room"}})).unwrap();
+    configure(&bob, json!({"user_config":{"address":"bob-room"}})).unwrap();
+    let pid = s(&bob, "principal_id");
+    send_from(
+        &hub,
+        &listener_id(pid, "human", "default"),
+        "bob-unknown",
+        pid,
+        "sender",
+    );
+    let plugin = hub.plugin("fixture").unwrap();
+    let pending = hub.reserve_deliveries(&plugin).unwrap();
+    assert_eq!(pending.len(), 1);
+    hub.delivery_result("fixture", &json!({"delivery_id":pending[0]["delivery_id"],"effect_unknown":true,"error":"Bob's response lost"})).unwrap();
+    let updated_ms = || {
+        hub.inner
+            .db
+            .query(
+                "SELECT updated_ms FROM hub_human_channels WHERE principal_id=?",
+                &[bob["principal_id"].clone()],
+            )
+            .unwrap()[0]["updated_ms"]
+            .clone()
+    };
+    let before = updated_ms();
+    let assert_bob_unchanged = || {
+        let listed = hub
+            .rpc("human_channels_list", &json!({}), Some(&bob))
+            .unwrap();
+        assert!(s(&listed["channels"][0], "detail").contains("Bob's response lost"));
+        assert_eq!(updated_ms(), before);
+    };
+    assert_bob_unchanged();
+    for patch in [
+        json!({"clear_hub_config":true}),
+        json!({"reset_hub":true}),
+        json!({"inbound_mode":"primary"}),
+    ] {
+        assert!(configure(&alice, patch)
+            .unwrap_err()
+            .starts_with("FORBIDDEN:"));
+        assert_bob_unchanged();
+    }
+    for patch in [json!({"reset":true}), json!({"hub_config":{}})] {
+        assert_eq!(configure(&alice, patch).unwrap()["committed"], true);
+        assert_bob_unchanged();
+    }
+    assert!(hub.reserve_deliveries(&plugin).unwrap().is_empty());
 }
 
 #[test]
@@ -1951,6 +2940,7 @@ fn bot_switch_marks_delivery_unverified_until_current_destination_settles() {
     manifest["serviceIdentity"] = json!({"field":"credential","separator":":"});
     manifest["pairing"]["deliveryVerificationHelpText"] =
         json!("Send /start to the bot or re-pair your account to verify delivery.");
+    manifest["supportsOutboundOnly"] = json!(true);
     std::fs::write(path, manifest.to_string()).unwrap();
     let e = test_engine(&dir);
     e.pause_worker();
@@ -1966,7 +2956,13 @@ fn bot_switch_marks_delivery_unverified_until_current_destination_settles() {
     };
     save("1:first");
     assert_eq!(inventory()["delivery_unverified"], false);
+    let node = listener_id("none#alice", "human", "default");
+    let plugin = e.plugin("fixture").unwrap();
+    send(&e, &node, "replaced-service");
+    assert_eq!(e.reserve_deliveries(&plugin).unwrap().len(), 1);
     save("2:other");
+    assert!(s(&inventory(), "detail").contains("Service identity replaced during delivery"));
+    assert!(e.reserve_deliveries(&plugin).unwrap().is_empty());
     e.plugin_frame(
         "fixture",
         &json!({"op":"health","service_label":"@new_bot"}),
@@ -1977,11 +2973,30 @@ fn bot_switch_marks_delivery_unverified_until_current_destination_settles() {
     assert!(detail.contains("@new_bot") && detail.contains("/start") && detail.contains("re-pair"));
     save("2:other");
     assert_eq!(inventory()["delivery_unverified"], true);
-    let node = listener_id("none#alice", "human", "default");
+    assert!(!s(&inventory(), "detail").contains("Service identity replaced during delivery"));
     send(&e, &node, "verify-current-bot");
     e.rpc("human_channel_poll", &json!({"plugin_id":"fixture"}), None)
         .unwrap();
     wait_for(|| inventory()["delivery_unverified"] == false);
+
+    e.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"3:outbound"},"inbound_mode":"outbound_only"}),
+        Some(&owner),
+    ).unwrap();
+    assert_eq!(inventory()["inbound_mode"], "outbound_only");
+    assert_eq!(inventory()["delivery_unverified"], true);
+    assert_eq!(
+        e.rpc(
+            "human_channels_test",
+            &json!({"plugin_id":"fixture"}),
+            Some(&owner)
+        )
+        .unwrap()["ok"],
+        true
+    );
+    assert_eq!(inventory()["delivery_unverified"], false);
+    assert_eq!(inventory()["warning"], false);
 }
 
 #[test]

@@ -9,19 +9,20 @@ private final class SettingsHubForm: SurfaceView {
         if bounds.width != oldSize.width { layoutEqualColumns() }
     }
 
-    func setError(_ message: String?, frame: NSRect) {
+    func setError(_ message: String?, frame: NSRect, maximumLines: Int = 0) {
         let id = NSUserInterfaceItemIdentifier("add_hub_error")
         let existing = subviews.first { $0.identifier == id } as? NSTextField
         guard let message else { existing?.removeFromSuperview(); return }
         let label = existing ?? textLabel(message, frame, size: 10, color: CitoPalette.dangerText)
         label.stringValue = message
         label.toolTip = message
+        label.frame = frame
+        label.maximumNumberOfLines = maximumLines
+        label.lineBreakMode = .byWordWrapping
+        label.cell?.truncatesLastVisibleLine = maximumLines > 0
         if existing == nil {
             label.identifier = id
             label.autoresizingMask = [.width]
-            label.maximumNumberOfLines = 0
-            label.lineBreakMode = .byWordWrapping
-            label.cell?.wraps = true
             addSubview(label)
         }
     }
@@ -155,7 +156,7 @@ extension Companion {
            let cancel: MenuControl = findView(in: form, id: "cancel_add_hub") {
             // Use the space beside the actions until the full layout can expand
             // without moving the clip view or detaching the field editor.
-            form.setError(hubForm.error, frame: NSRect(x: 14, y: 9, width: cancel.frame.minX - 20, height: 26))
+            form.setError(hubForm.error, frame: NSRect(x: 14, y: 9, width: cancel.frame.minX - 20, height: 26), maximumLines: 2)
         }
     }
 
@@ -170,13 +171,17 @@ extension Companion {
         let existing: NSTextField? = findView(in: card, id: "host_hub_error")
         guard let notice else { existing?.isHidden = true; return }
         let label = existing ?? textLabel(notice, NSRect(x: 14, y: toggle.frame.minY - 14, width: card.bounds.width - 28, height: 14), size: 11)
+        if existing == nil || (label.stringValue != notice &&
+            measureWrappedHeight(notice, width: label.bounds.width, font: .systemFont(ofSize: 11)) > label.bounds.height) {
+            label.maximumNumberOfLines = 1
+            label.lineBreakMode = .byTruncatingTail
+        }
         label.stringValue = notice
         label.textColor = error == nil ? CitoPalette.secondaryText : CitoPalette.dangerText
         label.toolTip = notice
         label.isHidden = false
         if existing == nil {
             label.identifier = NSUserInterfaceItemIdentifier("host_hub_error")
-            label.lineBreakMode = .byTruncatingTail
             label.autoresizingMask = [.width]
             card.addSubview(label)
         }
@@ -274,7 +279,7 @@ extension Companion {
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
         let hostNotice = hostError ?? (!hostHub.enabled && hostExpanded ? "Choose Start Sharing to accept connections" : nil)
         let noticeHeight = hostNotice.map {
-            max(18, measureWrappedHeight($0, width: fieldWidth - allowance, font: .systemFont(ofSize: 11)) + 2)
+            max(18, measureWrappedHeight($0, width: fieldWidth - allowance, font: .systemFont(ofSize: 11)))
         } ?? 0
         let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 160 : 120) + (noticeHeight == 0 ? 0 : noticeHeight + 10) : 46
         let hostCard = roundedView(NSRect(x: 16, y: 356 - hostHeight, width: cardWidth, height: hostHeight), radius: 10,
@@ -419,7 +424,7 @@ extension Companion {
 
         if hubForm.isOpen {
             let errorText = hubForm.error
-            let errorHeight = errorText.map { measureWrappedHeight($0, width: fieldWidth - allowance, font: .systemFont(ofSize: 10)) + 4 } ?? 0
+            let errorHeight = errorText.map { measureWrappedHeight($0, width: fieldWidth - allowance, font: .systemFont(ofSize: 10)) } ?? 0
             let errorSpace: CGFloat = errorText == nil ? 0 : errorHeight + 6
             let isOIDC = !editingBuiltinHub && hubForm.auth == "oidc"
             let oidcExpanded = isOIDC && hubForm.oidcExpanded
@@ -651,7 +656,7 @@ extension Companion {
                 }
                 layoutBar(in:row,y:7,height:22,trailing:orderActions)
                 let subtitleWidth = (orderActions.first.map { $0.frame.minX - CitoMetrics.gap } ?? cardWidth - 14) - 28
-                let subtitleHeight = max(14, measureWrappedHeight(subtitle, width: subtitleWidth - allowance, font: .systemFont(ofSize: 10.5)) + 2)
+                let subtitleHeight = max(14, measureWrappedHeight(subtitle, width: subtitleWidth - allowance, font: .systemFont(ofSize: 10.5)))
                 let lowerRowHeight = max(subtitleHeight, orderActions.isEmpty ? 0 : 22)
                 let rowHeight = lowerRowHeight + 42
                 rowTop -= rowHeight

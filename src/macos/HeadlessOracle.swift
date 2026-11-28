@@ -707,9 +707,16 @@ extension Companion {
             return false
         }
         func intentionallyTruncatedLabel(_ label: NSTextField) -> Bool {
+            let hasTooltip = !(label.toolTip ?? "").isEmpty
+            if label.maximumNumberOfLines > 1 {
+                return hasTooltip && label.cell?.truncatesLastVisibleLine == true
+            }
             guard !(label.toolTip ?? label.superview?.toolTip ?? "").isEmpty,
                   label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail else { return false }
-            if isDataRow(label) || name(label) == "hub_oidc_discovery_summary" { return !(label.toolTip ?? "").isEmpty }
+            let id = name(label)
+            if label.maximumNumberOfLines == 1, label.lineBreakMode == .byTruncatingTail,
+               id.hasPrefix("settings_channel_detail:") || id == "host_hub_error" { return hasTooltip }
+            if isDataRow(label) || id == "hub_oidc_discovery_summary" { return hasTooltip }
             let title = label.stringValue
             if let pill = label.superview as? MenuControl,
                let track = pill.enclosingScrollView as? SegmentedPillStrip,
@@ -806,24 +813,19 @@ extension Companion {
             if visible, let label = view as? NSTextField, label.isEditable {
                 if label.frame.width < 48 || measureTextWidth(label.placeholderString ?? "", font:label.font ?? .systemFont(ofSize:12)) > label.frame.width - 8 { truncatedLabels.append(name(label)) }
             }
-            if visible, let label = view as? NSTextField, !label.isEditable {
-                let font = label.font ?? .systemFont(ofSize:12)
-                let hasTooltip = !(label.toolTip ?? "").isEmpty
+            if visible, let label = view as? NSTextField, !label.isEditable, let cell = label.cell {
                 let truncated: Bool
-                if label.maximumNumberOfLines == 1 || label.cell?.wraps == false {
+                if label.maximumNumberOfLines == 1 || !cell.wraps {
                     // Native cell insets and attributed glyph metrics determine
                     // what AppKit can actually draw, not the outer field width.
-                    let drawingWidth = label.cell?.drawingRect(forBounds:label.bounds).width ?? label.bounds.width
-                    truncated = label.requiredSingleLineWidth > drawingWidth && !intentionallyTruncatedLabel(label)
-                } else if name(label).hasPrefix("act_msg:") && hasTooltip {
-                    // Expanded Activity messages deliberately cap the preview height.
-                    truncated = false
+                    truncated = label.requiredSingleLineWidth > cell.drawingRect(forBounds: label.bounds).width
                 } else {
-                    let drawable = label.cell?.drawingRect(forBounds: label.bounds) ?? label.bounds
-                    let height = measureWrappedHeight(label.stringValue, width: label.bounds.width, font: font)
-                    truncated = height > drawable.height
+                    let bounds = NSRect(x: 0, y: 0, width: label.bounds.width, height: .greatestFiniteMagnitude)
+                    truncated = ceil(cell.cellSize(forBounds: bounds).height) > ceil(label.bounds.height) + 0.5
                 }
-                if truncated { truncatedLabels.append((label.superview as? MenuControl).map { name($0) } ?? name(label)) }
+                if truncated && !intentionallyTruncatedLabel(label) {
+                    truncatedLabels.append((label.superview as? MenuControl).map { name($0) } ?? name(label))
+                }
             }
             func hasJargon(_ text: String) -> Bool {
                 withoutHubSpan(text, in: view).range(of:jargonPattern,options:.regularExpression) != nil
@@ -1111,7 +1113,9 @@ extension Companion {
             if let scroll = view as? NSScrollView {
                 result["scroller_style"] = scroll.scrollerStyle.rawValue
                 result["content_width"] = scroll.contentSize.width
+                result["content_height"] = scroll.contentSize.height
                 result["document_width"] = scroll.documentView?.frame.width
+                result["document_height"] = scroll.documentView?.frame.height
                 result["draws_background"] = scroll.drawsBackground
                 result["content_x"] = scroll.contentView.bounds.origin.x
                 result["content_y"] = scroll.contentView.bounds.origin.y
@@ -1137,6 +1141,7 @@ extension Companion {
                 result["editable"] = label.isEditable
                 result["wraps"] = label.cell?.wraps ?? false
                 result["truncates_tail"] = label.lineBreakMode == .byTruncatingTail
+                result["truncates_last_visible_line"] = label.cell?.truncatesLastVisibleLine
                 result["maximum_lines"] = label.maximumNumberOfLines
                 result["placeholder"] = label.placeholderString ?? ""
                 result["tooltip"] = label.toolTip ?? ""

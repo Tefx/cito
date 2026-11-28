@@ -32501,3 +32501,1790 @@ phases:
       packaging (35 passed), cargo fmt --check (exit 0), clippy -D warnings (exit
       0), cargo test --workspace --locked -- --test-threads=2 (837 passed: 482 unit
       + 355 integration, 0 failed, 5 ignored).'
+- id: v75
+  name: 'V75 Channel Warning Recovery Watermarks, Telegram Send-Pool Hardening & Canonical
+    AppKit Wrapped-Text Geometry Closure [REQUIRES_SKILL: contract-and-simplicity]'
+  status: done
+  gate: All 12 V75-* obligations (V75-ChronologicalWarningWatermarks, V75-SendTestVerificationWatermark,
+    V75-TelegramSendPoolAndTransportKind, V75-TrackATests, V75-CanonicalWrappedHeight,
+    V75-FudgeConstantDeBloat, V75-IndependentMultilineOracleAndTruncation, V75-TrackBTests,
+    V75-ReadmeLandingRestructure, V75-SingleSourceEnvTableTest, V75-StageBinaries,
+    V75-FullWorkspaceRegression) pass FULL gate.report.v2 validation; strictly English-only
+    vendor-neutral prose; all 7 arm64 binaries stripped, ad-hoc signed, path/token
+    clean (0/0/0/0/0), and reporting cito v0.23.0 with tag v0.23.0 preserved as an
+    ancestor; full sequential workspace regression green.
+  context: 'Baseline: commit 7f72ff176a3ee92526040c9f5fbee0c806ce8a74 on unreleased
+    main after Phase v74 completion. Product version remains 0.23.0 and existing tag
+    v0.23.0 (61ce9b98fae70b5624a60b1710d90acf7b46ba15) MUST remain untouched. Topology:
+    Wave 1 and Rounds 1-6 completed through v75.repair_r6_stage_clean_binaries under
+    the zero-schema Pi_down Single-Active-Warning Invariant (schema identical to 7f72ff1);
+    Round 7 executes v75.repair_r7_clock_and_alias_closure (clock-rollback MAX(delivered_ms)
+    sole-retry preservation and canonical OIDC binding watermark precedence in reserve_deliveries
+    + next_outcome_ms) -> v75.repair_r7_stage_clean_binaries -> terminal DELTA gate
+    v75.gate_final with SCOPE_BOUNDARY_CLOSE excluding unreleased intermediate 9118045c
+    while keeping shipped v0.23.0 7f72ff1/61ce9b9 and cfebf209 predecessor DBs strictly
+    in scope. All code, UI text, tests, and documentation remain strictly English-only
+    with neutral examples (personal, work, alice, bob, acme/service).'
+  depends_on:
+  - v74
+  steps:
+  - id: v75.rust_channel_recovery_and_telegram
+    name: 'Wave 1 Track A: Chronological Channel Warning Watermarks, Send-Test Verification
+      & Telegram Send-Pool Hardening'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V75-ChronologicalWarningWatermarks] crates/cito-native/src/core/hub.rs:1934
+      (channel_list): Keep hub_channel_deliveries.status = ''effect_unknown'' untouched
+      in SQLite as the per-signal duplicate-replay fence (reserve_deliveries and cases.rs:4709
+      must continue to pass). Remove `OR status=''effect_unknown''` and `ORDER BY
+      (status=''effect_unknown'') DESC`; query `WHERE plugin_id=? AND principal_id
+      IN (?,?) AND delivered_ms>=? ORDER BY delivered_ms DESC,rowid DESC LIMIT 1`
+      with `? = n(&binding, "updated_ms").max(n(&binding, "delivery_verified_ms"))`
+      so an immediate `effect_unknown` row still surfaces "Delivery outcome unknown;
+      automatic replay stopped to avoid duplicates. ..." (cases.rs:1384), while a
+      newer `delivered` message, a successful saved-binding `Send Test`, or a personal/hub
+      channel config save deterministically clears the stale warning.
+
+      - [V75-SendTestVerificationWatermark] crates/cito-native/src/core/hub.rs:1808-1837
+      (human_channels_test): When `result["ok"] == Some(true)`, `!changed` (saved
+      Hub config), and the tested `user` config matches the saved binding''s `user_config_json`
+      for `pid` / `alternate_oidc_principal(pid)` with `ready(&plugin, &user, "user")`,
+      atomically set `delivery_verified_ms = now_ms()` on `hub_human_channels` inside
+      the diagnostic transaction (verifying `service(c, id)?.0 == cfg && process.alive()`
+      and saved binding `user_config_json == user`) alongside `persist_service_label`,
+      and emit `kv` whenever either `service_label` or `delivery_verified_ms` changed.
+      Clears both stale delivery warnings and `outbound_only` `delivery_unverified_since_ms`;
+      unsaved draft `user_config` overrides MUST NOT mark the saved binding verified.
+
+      - [V75-TelegramSendPoolAndTransportKind] plugins/telegram/native.rs:124-132,
+      188-209: Configure `.max_idle_connections(if poll { 1 } else { 0 })` on `ureq::AgentBuilder`
+      so low-frequency `sendMessage` calls never reuse hours-old half-closed keep-alive
+      TLS sockets. Classify pre-write transport `ErrorKind`s (`ConnectionFailed |
+      Dns` or `ConnectionRefused | AddrNotAvailable` -> `retryable: true, effect_unknown:
+      false`; `InvalidUrl | BadUrl | UnknownScheme | InsecureRequestHttpsOnly | TooManyRedirects`
+      -> `retryable: false, effect_unknown: false`; post-connect `Io` / timeout ->
+      `retryable: method == "getUpdates", effect_unknown: method == "sendMessage"`).
+      Append secret-free lowercase parenthetical diagnostics without colons (e.g.,
+      `"Telegram {method} request failed (connection failed)"`, `"(DNS lookup failed)"`,
+      `"(invalid URL)"`, `"(network I/O or timeout)"` — no ALL-CAPS `CODE:` colons).
+
+      - [V75-TrackATests] crates/cito-native/tests/hub/cases.rs (or crates/cito-native/src/core/hub/regression_tests.rs)
+      & plugins/telegram/native.rs: Add discriminating regression tests proving chronological
+      `effect_unknown` clearing via newer `delivered`, saved `Send Test`, and personal
+      `Save` (keeping `hub_channel_deliveries.status == "effect_unknown"` and guarding
+      unsaved draft `Send Test`), `outbound_only` `delivery_unverified` clearing via
+      `Send Test`, and Telegram transport `ErrorKind` classification.
+
+
+      Implementation Notes:
+
+      - Preserve exact `reserve_deliveries` duplicate-replay fence semantics and existing
+      cases.rs:1384 and cases.rs:4709 expectations.
+
+      - Do not modify or restage committed binaries under bin/ or plugins/*/bin/;
+      binary staging runs in v75.stage_clean_binaries.
+
+
+      Boundary:
+
+      - scope.allowed_paths: ["crates/cito-native/src/core/hub.rs", "crates/cito-native/src/core/hub/regression_tests.rs",
+      "crates/cito-native/tests/hub/cases.rs", "plugins/telegram/native.rs"]
+
+      - scope.blocked_paths: ["src/macos/**", "bin/**", "plugins/*/bin/**", "Cargo.toml",
+      "Cargo.lock", "plan.yaml"]
+
+      - Owner: software-engineer; product version stays 0.23.0; tag v0.23.0 untouched;
+      rollback via git revert.
+
+
+      Admit:
+
+      - Baseline 7f72ff176a3ee92526040c9f5fbee0c806ce8a74; all four V75 Track A obligations
+      verified by discriminating tests; cargo fmt --check clean; zero warnings; diff
+      restricted to scope.allowed_paths.
+
+
+      Recovery:
+
+      - Repair failing unit/integration assertions in place; if a contract contradiction
+      is found, stop dependent edits and report a minimal counterexample without modifying
+      blocked paths.'
+    verification: 'cargo fmt --check && cargo test --locked --bin cito-plugin-telegram
+      && cargo test --locked --lib core::hub:: -- --test-threads=2'
+    evidence_template: Commit SHA, touched files, exact cargo fmt/test commands with
+      pass counts, and per-obligation evidence for V75-ChronologicalWarningWatermarks,
+      V75-SendTestVerificationWatermark, V75-TelegramSendPoolAndTransportKind, and
+      V75-TrackATests.
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/hub/regression_tests.rs
+    - crates/cito-native/tests/hub/cases.rs
+    - plugins/telegram/native.rs
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T20:19:07.638418Z'
+    done_at: '2026-11-27T20:32:09.022723+00:00'
+    evidence: 'Integrated commit 453bf7a (rebased cleanly from 8feaf4ecfd5c15d825a386e5d22efe21b6172087
+      onto main with zero conflicts; source/test files unchanged across rebase). V75-ChronologicalWarningWatermarks:
+      channel_list queries WHERE plugin_id=? AND principal_id IN (?,?) AND delivered_ms>=?
+      ORDER BY delivered_ms DESC,rowid DESC LIMIT 1 with max(updated_ms, delivery_verified_ms)
+      while keeping hub_channel_deliveries.status=''effect_unknown'' duplicate-replay
+      fence intact (cases.rs:1384, cases.rs:4709, delivery_warnings_follow_latest_outcome_and_saved_watermarks).
+      V75-SendTestVerificationWatermark: human_channels_test atomically sets delivery_verified_ms=now_ms()
+      when result.ok==true, !changed, and saved binding user_config matches, emitting
+      kv on label or watermark change and clearing both stale warnings and outbound_only
+      delivery_unverified (draft tests do not mark saved binding verified). V75-TelegramSendPoolAndTransportKind:
+      max_idle_connections(if poll { 1 } else { 0 }), pre-write transport ErrorKind
+      classification, and secret-free lowercase parenthetical diagnostics without
+      colons. Verification: cargo fmt --all -- --check (exit 0), cargo clippy --workspace
+      --all-targets --locked -- -D warnings (exit 0), cargo test --locked --bin cito-plugin-telegram
+      (10 passed), cargo test --locked --lib core::hub:: -- --test-threads=2 (102
+      passed), targeted native integration tests (22 passed).'
+  - id: v75.macos_wrapped_text_and_oracle
+    name: 'Wave 1 Track B: Canonical AppKit Wrapped-Text Measurement, Fudge-Constant
+      De-Bloat & Independent Multiline Geometry Oracle'
+    status: done
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      [REQUIRES_SKILL: contract-and-simplicity]
+
+
+      Deliver:
+
+      - [V75-CanonicalWrappedHeight] src/macos/PaletteAndMetrics.swift:141: Replace
+      `NSString.boundingRect` in `measureWrappedHeight(_ text: String, width: CGFloat,
+      font: NSFont, lineBreakMode: NSLineBreakMode = .byWordWrapping) -> CGFloat`
+      with AppKit''s canonical `NSTextField(wrappingLabelWithString: text)` cell measurement
+      (`ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: max(1, width), height:
+      .greatestFiniteMagnitude)).height)`). Pass `lineBreakMode: .byCharWrapping`
+      at `src/macos/SettingsChannelsTab.swift:603` (`hubTitle`). Ensure wrapping labels
+      measure against narrowest scroller-adjusted width where applicable (`DirectorySurface.swift:57`,
+      `SettingsChannelsTab.swift`, `SettingsHubsTab.swift`, `MenuSurface.swift`).
+
+      - [V75-FudgeConstantDeBloat] (Pi_down) src/macos/{SettingsChannelsTab,SettingsHubsTab,MenuSurface}.swift:
+      Remove obsolete `+ 2` / `+ 4` line-height guesswork constants bolted onto `measureWrappedHeight`
+      (`SettingsChannelsTab.swift:501,564,583,603`, `SettingsHubsTab.swift:277,422,654`,
+      `MenuSurface.swift:27,304,615,666`) while preserving explicit minimum container
+      heights and zero default-viewport scroll regression (`doc.frame.height <= scroll.contentSize.height
+      + 0.75`).
+
+      - [V75-IndependentMultilineOracleAndTruncation] src/macos/HeadlessOracle.swift:709-725,
+      812-826, SettingsSurface.swift:460, SettingsHubsTab.swift:18-26, 141, SettingsChannelsTab.swift:129,
+      DirectoryCell.swift:129: Replace the tautological `measureWrappedHeight` call
+      in `HeadlessOracle.swift:823` with independent native `ceil(cell.cellSize(forBounds:
+      NSRect(x: 0, y: 0, width: label.bounds.width, height: .greatestFiniteMagnitude)).height)
+      > ceil(label.bounds.height) + 0.5` for unbounded wrapping labels. Enable `cell?.truncatesLastVisibleLine
+      = true` on intentionally line-capped preview/banner labels (`act_msg:`, `settings_error_label`,
+      and inline mounted-editor `add_hub_error` capped to `2` lines when constrained
+      to `26pt`, restoring `0` on full form layout). Recognize focused-editor single-line
+      `.byTruncatingTail` status labels with non-empty `toolTip` (`settings_channel_detail:`,
+      `host_hub_error`) in `intentionallyTruncatedLabel`.
+
+      - [V75-TrackBTests] crates/cito-native/tests/support/ui/{settings_channels,render_stability,directory}.rs:
+      Add discriminating UI tests in `settings_channels.rs` verifying 2-line `"Delivery
+      outcome unknown; automatic replay stopped to avoid duplicates. Telegram sendMessage
+      request failed"` renders with `height >= 26` and `truncated_labels == []` under
+      both `.overlay` and `.legacy` scrollers, plus `render_stability.rs` and `directory.rs`
+      coverage.
+
+
+      Implementation Notes:
+
+      - Keep Swift compilation clean under `swiftc -O -warnings-as-errors -target
+      arm64-apple-macos13.0 src/macos/*.swift`.
+
+      - Debug cargo tests compile an isolated UI binary in `OUT_DIR`; never write
+      staged binaries to `bin/` or `plugins/*/bin/`.
+
+
+      Boundary:
+
+      - scope.allowed_paths: ["src/macos/PaletteAndMetrics.swift", "src/macos/HeadlessOracle.swift",
+      "src/macos/SettingsChannelsTab.swift", "src/macos/SettingsHubsTab.swift", "src/macos/SettingsSurface.swift",
+      "src/macos/MenuSurface.swift", "src/macos/DirectorySurface.swift", "src/macos/DirectoryCell.swift",
+      "crates/cito-native/tests/support/ui/settings_channels.rs", "crates/cito-native/tests/support/ui/render_stability.rs",
+      "crates/cito-native/tests/support/ui/directory.rs"]
+
+      - scope.blocked_paths: ["crates/cito-native/src/core/**", "plugins/**", "bin/**",
+      "plugins/*/bin/**", "Cargo.toml", "Cargo.lock", "plan.yaml"]
+
+      - Owner: frontend-engineer; product version stays 0.23.0; tag v0.23.0 untouched;
+      rollback via git revert.
+
+
+      Admit:
+
+      - Baseline 7f72ff176a3ee92526040c9f5fbee0c806ce8a74; swiftc -warnings-as-errors
+      clean; cargo fmt --check clean; targeted UI tests (`settings_channels`, `render_stability`,
+      `directory`) pass under both `.overlay` and `.legacy` scrollers; diff restricted
+      to scope.allowed_paths.
+
+
+      Recovery:
+
+      - Fix layout or truncation regressions inside scope.allowed_paths without weakening
+      oracle thresholds; stop and report with a counterexample if blocked.'
+    verification: swiftc -O -warnings-as-errors -target arm64-apple-macos13.0 src/macos/*.swift
+      -o /tmp/cito-ui-v75-check && rm -f /tmp/cito-ui-v75-check && cargo fmt --check
+      && cargo test --locked --test native ui::settings_channels -- --test-threads=2
+      && cargo test --locked --test native ui::render_stability -- --test-threads=2
+      && cargo test --locked --test native ui::directory -- --test-threads=2
+    evidence_template: Commit SHA, touched files, swiftc -warnings-as-errors and targeted
+      cargo test outputs, and per-obligation evidence for V75-CanonicalWrappedHeight,
+      V75-FudgeConstantDeBloat, V75-IndependentMultilineOracleAndTruncation, and V75-TrackBTests.
+    refs:
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/SettingsChannelsTab.swift
+    - src/macos/SettingsHubsTab.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/render_stability.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    agent: frontend-engineer
+    claimed_by: frontend-engineer
+    claimed_at: '2026-11-27T20:19:07.640009Z'
+    done_at: '2026-11-27T20:43:34.106235+00:00'
+    evidence: 'Integrated commit 50bc0fd (rebased cleanly from 9b3aeb2c0e5850a6ffd03917e22510de5fa6e764
+      onto main with zero conflicts; files unchanged across rebase). V75-CanonicalWrappedHeight:
+      replaced NSString.boundingRect in PaletteAndMetrics.swift:measureWrappedHeight
+      with NSTextField(wrappingLabelWithString:) native cellSize measurement supporting
+      font and lineBreakMode (.byCharWrapping on hubTitle in SettingsChannelsTab.swift;
+      scroller-adjusted wrapWidth in MenuSurface.swift and actual bounds width in
+      DirectorySurface.swift). V75-FudgeConstantDeBloat: removed obsolete +2/+4 height
+      constants across SettingsChannelsTab.swift, SettingsHubsTab.swift, and MenuSurface.swift
+      while preserving minimum heights and default-viewport fit (<=0.75pt). V75-IndependentMultilineOracleAndTruncation:
+      replaced tautological measureWrappedHeight in HeadlessOracle.swift with independent
+      cell.cellSize check (> ceil(bounds.height)+0.5), enabled truncatesLastVisibleLine
+      on act_msg:, settings_error_label, and inline add_hub_error (2 lines when mounted,
+      0 on full form), and exempted only tooltip-backed single-line .byTruncatingTail
+      settings_channel_detail: / host_hub_error. V75-TrackBTests: added discriminating
+      overlay/legacy scroller tests in settings_channels.rs, render_stability.rs,
+      and directory.rs. Verification: swiftc -O -warnings-as-errors -target arm64-apple-macos13.0
+      src/macos/*.swift (exit 0), cargo fmt --check (exit 0), cargo test --locked
+      --test native ui:: -- --test-threads=2 (174 passed, 0 failed: settings_channels
+      22, render_stability 12, directory 18, menu 19, capabilities 9).'
+  - id: v75.stage_clean_binaries
+    name: Stage Clean Darwin arm64 Release Binaries & Run Full Sequential Workspace
+      Regression
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Build and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged):\n\
+      \  `bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/pi/bin/cito-plugin-pi`,\
+      \ `plugins/codex/bin/cito-plugin-codex`, `plugins/claude/bin/cito-plugin-claude`,\
+      \ `plugins/claude/bin/cito-claude-hook`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace\
+      \ -D warnings\" cargo build --release --locked`, re-sign after `strip -S`, and\
+      \ verify across all 7 binaries:\n  1. `0/0/0/0/0` matches for (`/Users/`, `/home/`,\
+      \ `/.cargo/registry`, `Larva`, `PI_PERSONA`) across both `strings -a` and raw\
+      \ binary bytes;\n  2. `lipo -archs` == `arm64`;\n  3. `codesign -v --strict`\
+      \ exits `0`;\n  4. `./bin/cito-native-darwin-arm64 --version` == `cito v0.23.0`\
+      \ and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-FullWorkspaceRegression] Run the full sequential\
+      \ workspace regression after binary staging:\n  `swiftc -O -warnings-as-errors\
+      \ -target arm64-apple-macos13.0 src/macos/*.swift` (to a temp path, cleaned\
+      \ up), `node crates/cito-native/tests/support/pi-bridge.mjs`, `node crates/cito-native/tests/support/site-clipboard.mjs`,\
+      \ `python3 packaging/release.py check`, `python3 -m unittest discover -s packaging\
+      \ -p \"test_*.py\"`, `cargo fmt --check`, `cargo clippy --workspace --all-targets\
+      \ --locked -- -D warnings`, and `cargo test --workspace --locked -- --test-threads=2`.\n\
+      \nImplementation Notes:\n- Always run `codesign --force --sign -` after `strip\
+      \ -S` so Mach-O signatures stay valid.\n- If an additional builder/rustup path\
+      \ appears in binary scans, add its `--remap-path-prefix` flag without altering\
+      \ Cargo manifests.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"Cargo.toml\",\
+      \ \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag mutation\
+      \ or release publication; rollback via git revert of staged binaries commit.\n\
+      \nAdmit:\n- Upstream Track A, Track B, and Track C merged; all 7 Darwin arm64\
+      \ binaries pass lipo/codesign/version and 0/0/0/0/0 scan on both strings -a\
+      \ and raw bytes; full sequential workspace regression passes with zero warnings\
+      \ or failures; diff confined to scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign\
+      \ or add builder `--remap-path-prefix` if binary hygiene fails; if a source/test\
+      \ regression fails in workspace tests, do not edit source files—report the exact\
+      \ failure to unblock upstream remediation."
+    verification: for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64 plugins/pi/bin/cito-plugin-pi
+      plugins/codex/bin/cito-plugin-codex plugins/claude/bin/cito-plugin-claude plugins/claude/bin/cito-claude-hook
+      plugins/telegram/bin/cito-plugin-telegram; do [ "$(lipo -archs "$b")" = "arm64"
+      ] && codesign -v --strict "$b"; done && [ "$(./bin/cito-native-darwin-arm64
+      --version)" = "cito v0.23.0" ] && git merge-base --is-ancestor v0.23.0 HEAD
+      && node crates/cito-native/tests/support/pi-bridge.mjs && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && cargo fmt --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=2
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, and full sequential regression pass receipt (swiftc, pi-bridge.mjs, site-clipboard.mjs,
+      release.py check, packaging unittest, cargo fmt, cargo clippy, cargo test --workspace).
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.rust_channel_recovery_and_telegram
+    - v75.macos_wrapped_text_and_oracle
+    - v75.readme_refinement
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T20:43:38.232137Z'
+    done_at: '2026-11-27T20:59:14.887675+00:00'
+    evidence: 'Integrated commit 9fb6f733c165e4320e29d0f6c858e9681aa30c16 onto main.
+      Built and staged all 7 Darwin arm64 release binaries at 0.23.0 with --remap-path-prefix
+      + -D warnings + strip -S + ad-hoc codesign; verified all 7 binaries show 0/0/0/0/0
+      matches (/Users/, /home/, /.cargo/registry, Larva, PI_PERSONA) across both strings
+      -a and raw bytes, lipo -archs == arm64, codesign -v --strict exit 0, ./bin/cito-native-darwin-arm64
+      --version == cito v0.23.0, and tag v0.23.0 unchanged (61ce9b9, ancestor of HEAD).
+      Full sequential workspace regression passed: swiftc -O -warnings-as-errors (exit
+      0), pi-bridge.mjs (1 passed), site-clipboard.mjs (1 passed), release.py check
+      (0.23.0), Python packaging (35 passed), cargo fmt --check (exit 0), clippy -D
+      warnings (exit 0), cargo test --workspace --locked -- --test-threads=2 (842
+      passed, 0 failed, 5 ignored across 9 suites).'
+  - id: v75.gate_final
+    name: 'DELTA Phase Gate: V75 Round 7 Clock-Rollback & OIDC Precedence Closure,
+      SCOPE_BOUNDARY_CLOSE & 12-Obligation Acceptance'
+    status: done
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- Execute DELTA phase gate for Phase\
+      \ v75 (Round 7 clock-rollback sole-retry preservation & canonical OIDC watermark\
+      \ precedence closure under the zero-schema `Pi_down` Single-Active-Warning Invariant)\
+      \ and emit a validated `gate.report.v2` report (verified with `review_report_validator.py\
+      \ --kind gate --binding`) against all 12 V75 binding obligations:\n  - **Explicit\
+      \ `SCOPE_BOUNDARY_CLOSE` Ruling**: Unreleased intermediate `v75` branch commits\
+      \ (`9118045c`) that temporarily added `warning_cleared_seq` / `outcome_seq`\
+      \ columns are explicitly out of scope for upgrade compatibility under the zero-schema\
+      \ `Pi_down` architecture ruling. Shipped `v0.23.0` (`7f72ff1` / `61ce9b9`) and\
+      \ `cfebf209` predecessor databases remain strictly in scope.\n  - Directly audit\
+      \ Round 7 repair diffs (`v75.repair_r7_clock_and_alias_closure`, `v75.repair_r7_stage_clean_binaries`):\n\
+      \    - **`V75-R7-ClockAndAliasClosure` & `V75-R7-Tests`**: verify `hub.sqlite`\
+      \ schema parity with `7f72ff1` (zero `+1` inflation, zero `next_retry_ms` lease\
+      \ overloading); verify `reserve_deliveries` (`ON CONFLICT DO UPDATE`) uses `delivered_ms\
+      \ = MAX(hub_channel_deliveries.delivered_ms, excluded.delivered_ms)` and `delivery_result`\
+      \ (`progress == true`) uses `delivered_ms = MAX(delivered_ms, ?)` so clock rollbacks\
+      \ never hide an unretired sole retry warning; verify both `reserve_deliveries`'s\
+      \ `ON CONFLICT` stale-error retirement check and `next_outcome_ms` resolve the\
+      \ active binding watermark via canonical precedence (`ORDER BY ch.principal_id\
+      \ DESC LIMIT 1`, matching `channel_binding` and `channel_list`) instead of `MAX(...)`\
+      \ across all `principal_id IN (?8, ?9)` rows; verify both discriminating `cases.rs`\
+      \ tests (clock-rollback sole retry including `\"Outbound queue is full\"` +\
+      \ split OIDC binding with higher-timestamp disabled legacy alias) pass.\n  \
+      \  - **`V75-StageBinaries` & `V75-FullWorkspaceRegression`**: verify all 7 restaged\
+      \ `arm64` binaries stripped, ad-hoc signed, `0/0/0/0/0` across `strings -a`\
+      \ and raw bytes for `/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`,\
+      \ `./bin/cito-native-darwin-arm64 --version == cito v0.23.0`, tag `v0.23.0`\
+      \ preserved as ancestor, `git diff 196bc40d..HEAD -- src/macos/` empty, and\
+      \ scoped Round 7 regression receipts green (reusing verified `196bc40d` `846/846`\
+      \ receipt for untouched `src/macos/**`).\n  - Reuse verified prior FULL/Round-1..6\
+      \ DELTA gate evidence for untouched surfaces (`Track B` `src/macos/**`, `plugins/telegram/native.rs`,\
+      \ `README.md`, `site-clipboard.mjs`, and prior verified R5/R6 `hub.rs` paths),\
+      \ confirming via `git diff` that untouched surfaces did not drift.\n- Verify\
+      \ strictly English-only UI/code/docs/comments and zero `Larva`/`PI_PERSONA`/internal\
+      \ company names across source diffs, plus clean worktree and zero unaddressed\
+      \ Tier 1 `[CONTRACT / WIRE]` or `[SIMPLICITY / DE-BLOAT]` findings across all\
+      \ 12 obligations.\n\nImplementation Notes:\n- Strictly read-only inspection;\
+      \ do not edit repository files or create commits.\n- Reuse observed passing\
+      \ regression receipts from `v75.repair_r7_stage_clean_binaries` and untouched\
+      \ `196bc40d` `846/846` UI evidence if HEAD is unchanged, while directly verifying\
+      \ Round 7 diffs, schema parity with `7f72ff1`, and binary hygiene/version/tag\
+      \ invariants.\n\nBoundary:\n- scope.allowed_paths: []\n- scope.blocked_paths:\
+      \ [\"**\"]\n- Owner: gate-reviewer; read-only authority; no repository mutation.\n\
+      \nAdmit:\n- `review_report_validator.py --kind gate --binding` passes on `gate.report.v2`\
+      \ with verdict PASS, zero-schema `hub.sqlite` parity with `7f72ff1`, both Round\
+      \ 7 boundaries closed, `SCOPE_BOUNDARY_CLOSE` respected for unreleased `9118045c`,\
+      \ and zero unresolved blocking defects across all 12 V75-* obligations.\n\n\
+      Recovery:\n- On FAIL, emit exact blocking findings mapped to obligation IDs\
+      \ and file:line witnesses so the orchestrator can plan bounded remediation without\
+      \ altering completed steps."
+    verification: Validate gate.report.v2 (DELTA mode) with review_report_validator.py
+      --kind gate --binding; independently verify hub.sqlite schema parity with 7f72ff1,
+      Round 7 hub.rs + cases.rs diffs (clock-rollback MAX(delivered_ms) preservation,
+      canonical OIDC binding watermark precedence in reserve_deliveries + next_outcome_ms),
+      SCOPE_BOUNDARY_CLOSE exclusion of unreleased 9118045c (with shipped v0.23.0
+      7f72ff1/61ce9b9 and cfebf209 in scope), untouched Track B/Telegram/README surfaces
+      (git diff 196bc40d..HEAD -- src/macos/ empty), all 7 restaged arm64 binaries
+      (lipo, codesign, 0/0/0/0/0 strings -a + raw bytes, cito v0.23.0), tag v0.23.0
+      ancestor preservation, English-only/neutrality hygiene, and scoped + reused
+      regression receipts.
+    evidence_template: Validated gate.report.v2 verdict (review_report_validator.py
+      --kind gate --binding exit 0), obligation matrix covering all 12 V75-* IDs,
+      binary hygiene/version/tag verification receipt, English-only/neutrality check,
+      and residual defect count (0 blocking).
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - plugins/telegram/native.rs
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/SettingsChannelsTab.swift
+    - src/macos/SettingsHubsTab.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - packaging/release.py
+    - README.md
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_r7_stage_clean_binaries
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-28T01:16:31.537624Z'
+    done_at: '2026-11-28T01:20:42.237988+00:00'
+    evidence: 'Validated gate.report.v2 verdict PASS (review_report_validator.py --kind
+      gate --binding exit 0, evidence_disposition=POSITIVE_GATE_EVIDENCE, errors=[])
+      on git:d95e7081025cd833409617ddaad51a7a211145d0. All 12/12 V75-* obligations
+      PROVEN with 0 blocking defects: live clock-rollback sole-retry, split OIDC alias
+      precedence, shipped v0.23.0 / 7f72ff1 / cfebf209 upgrades (0 schema changes,
+      0 +1 inflation, 0 next_retry_ms lease overloading), Send Test verification watermark,
+      Telegram SEND pool/ErrorKind (10+6), canonical AppKit cellSize/de-bloat/HeadlessOracle
+      (174 UI tests reused from 196bc40d with empty src/macos/ diff), README + site-clipboard.mjs
+      (1/1), 7 clean signed arm64 binaries (0/0/0/0/0 strings -a and raw bytes, cito
+      v0.23.0, tag v0.23.0 untouched at 61ce9b98/d4da4dff), and scoped regression
+      suite (476 lib, 37 hub, 14 daemon::human_and_channels, 8/8 distribution, 35/35
+      Python, pi-bridge 1/1). Temporary /tmp/cito-v75-gate-* files cleaned.'
+  - id: v75.readme_refinement
+    name: 'Wave 1 Track C: Restructure README Landing Page & Decouple Single-Source
+      Env Table Test'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-ReadmeLandingRestructure] README.md\
+      \ (English-only, vendor-neutral examples `alice`, `work`, `personal`, `acme/service`):\
+      \ Restructure the root README into a concise 6-section landing page:\n  1. Header,\
+      \ Hero Screenshots & Value Proposition: preserve `<picture>` dark/light logo\
+      \ (`src=\"site/assets/brand/cito-logo-dark.svg\"`, required by `distribution.rs:792`),\
+      \ tagline (`Where your agents talk—with you, and each other.`), top nav bar\
+      \ (`Website · User Guide · Host a Hub · Plugins · Reference · Download Cito.app`),\
+      \ add a clean 2-up screenshot showcase rendering `site/assets/screenshots/menu-dark.png`\
+      \ and `site/assets/screenshots/directory-dark.png`, and lead with 3 concrete\
+      \ user-facing value bullets (Human-in-the-loop anywhere via macOS menu bar &\
+      \ Telegram inline replies; Agent-to-agent across apps & Macs connecting Pi Coding\
+      \ Agent, Codex Desktop, and Claude Code over `local://`, shared LAN/Tailscale\
+      \ Macs, or team OIDC `cito hub`; Native & zero-broker Swift + Rust app/CLI with\
+      \ SQLite WAL and automatic daemon handover) without internal schema jargon or\
+      \ pixel heights.\n  2. Quick Start (macOS Apple Silicon): `brew install --cask\
+      \ tefx/tap/cito` (`cito --version` -> `cito v0.23.0`, 1-line legacy formula\
+      \ note, direct `Cito-macos-arm64.zip` download link) and 60-Second Walkthrough\
+      \ (1. Open `Cito.app` -> `Settings...` `Cmd+,` -> `Set Up` Agent Apps; 2. Expand\
+      \ `AVAILABLE SESSIONS` in the menu bar -> `+ Listen` or `Auto-Listen`; 3. Message\
+      \ `@self` / `alice/pi#8a4f` or press `Cmd+K` for `Directory | Activity`).\n\
+      \  3. Core Concepts: concise 4-item overview covering Readable Addresses (`@self`,\
+      \ `@alice`, `alice/pi#8a4f`, `work:alice/codex#4219`), Menu Bar & `Cmd+K` Directory\
+      \ / Activity, Two-Scope Human Channels (Telegram 1-click pairing, Outbound-Only\
+      \ mode & Pause Inbox), and Flexible Networks (`local`, Share This Mac `:4291`,\
+      \ standalone `cito hub` with `Self`/`Team` visibility); omit pixel dimensions,\
+      \ password-field Copy/Cut edge cases, raw JSON/TOML injection snippets, and\
+      \ plugin-upgrade manifest diffing prose.\n  4. CLI & MCP Reference: crisp 6-row\
+      \ MCP Tools table (`cito_listen`, `cito_status`, `cito_unlisten`, `cito_find`,\
+      \ `cito_send`, `cito_inbox`) plus scannable Everyday CLI & Pi `/cito` Cheat\
+      \ Sheet (6-8 representative commands linking to `User Guide` / `cito --help`).\n\
+      \  5. Documentation & Self-Hosting: audience-segmented links to User Guide (`https://tefx.github.io/cito/docs/guide.html`),\
+      \ `deploy/hub/README.md` & Host a Hub (`https://tefx.github.io/cito/docs/hosting.html`,\
+      \ noting full environment variable reference lives there), Plugin Authoring\
+      \ (`https://tefx.github.io/cito/docs/plugins.html`), and `docs/DESIGN.md` /\
+      \ Architecture & Reference (`https://tefx.github.io/cito/docs/architecture.html`).\n\
+      \  6. Development: compact Rust + Swift build/test commands (`python3 packaging/release.py\
+      \ check`, `cargo test --workspace --locked -- --test-threads=2`, `RUSTFLAGS='-D\
+      \ warnings' cargo build --release --locked`) and link to `docs/RELEASING.md`.\n\
+      - [V75-SingleSourceEnvTableTest] (Pi_down) crates/cito-native/tests/support/site-clipboard.mjs:79-106:\
+      \ Decouple root `README.md` from duplicating the 3 environment-variable tables\
+      \ (`Hub Server`, `Client & Daemon`, `Agent & Channel Plugins`): use `deploy/hub/README.md`\
+      \ as the single Markdown source of truth compared against `site/docs/hosting.html`\
+      \ (`environmentRows(deployment, ...)` == `environmentRows(hosting, ...)`), and\
+      \ assert that root `README.md` contains valid relative references to `site/assets/brand/cito-logo-dark.svg`,\
+      \ `site/assets/screenshots/menu-dark.png`, `site/assets/screenshots/directory-dark.png`,\
+      \ `deploy/hub/README.md`, `docs/DESIGN.md`, and `docs/RELEASING.md`.\n\nImplementation\
+      \ Notes:\n- Keep README.md crisp and scannable (target ~130-165 lines) while\
+      \ ensuring `distribution.rs:792` and `packaging/release.py check` remain green.\n\
+      - Use `distribution::` (from `crates/cito-native/tests/native.rs`) when filtering\
+      \ cargo integration tests so the distribution assertions actually execute.\n\
+      \nBoundary:\n- scope.allowed_paths: [\"README.md\", \"crates/cito-native/tests/support/site-clipboard.mjs\"\
+      ]\n- scope.blocked_paths: [\"crates/cito-native/src/**\", \"src/macos/**\",\
+      \ \"plugins/**\", \"site/**\", \"deploy/**\", \"docs/**\", \"bin/**\", \"Cargo.toml\"\
+      , \"Cargo.lock\", \"plan.yaml\"]\n- Owner: executor; product version stays 0.23.0;\
+      \ tag v0.23.0 untouched; rollback via git revert.\n\nAdmit:\n- Both V75-ReadmeLandingRestructure\
+      \ and V75-SingleSourceEnvTableTest verified; `site-clipboard.mjs`, `packaging/release.py\
+      \ check`, and `distribution::` integration tests pass; diff confined to scope.allowed_paths.\n\
+      \nRecovery:\n- Fix broken relative links or assertion mismatches inside scope.allowed_paths;\
+      \ never edit site/, deploy/, or docs/ files."
+    verification: 'env -u NODE_OPTIONS node crates/cito-native/tests/support/site-clipboard.mjs
+      && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && cargo test --package cito-native --test
+      native distribution:: --locked -- --test-threads=1'
+    evidence_template: Commit SHA, touched files, README line count and section summary,
+      exact verification outputs for site-clipboard.mjs, packaging/release.py check,
+      and cargo test distribution::, and proof for V75-ReadmeLandingRestructure and
+      V75-SingleSourceEnvTableTest.
+    refs:
+    - README.md
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - deploy/hub/README.md
+    - site/assets/brand/cito-logo-dark.svg
+    - site/assets/screenshots/menu-dark.png
+    - site/assets/screenshots/directory-dark.png
+    - docs/DESIGN.md
+    - docs/RELEASING.md
+    agent: executor
+    claimed_by: executor
+    claimed_at: '2026-11-27T20:28:08.102345Z'
+    done_at: '2026-11-27T20:32:25.121309+00:00'
+    evidence: 'Integrated commit 60d30ff (rebased cleanly from 35672623ea59e099ac7661d4c31c1076462977e6
+      onto main with zero conflicts; files unchanged across rebase). V75-ReadmeLandingRestructure:
+      restructured README.md to 133 lines with preserved <picture> logo (site/assets/brand/cito-logo-dark.svg),
+      tagline, nav bar, 2-up screenshot showcase (menu-dark.png + directory-dark.png),
+      3 user-facing bullets, Homebrew/zip Quick Start + 60-second walkthrough, 4-item
+      Core Concepts, 6-row MCP table + CLI & Pi /cito cheat sheet, audience-segmented
+      docs links (deploy/hub/README.md, docs/DESIGN.md, site/docs/*.html), and compact
+      Development commands (docs/RELEASING.md). V75-SingleSourceEnvTableTest: decoupled
+      README.md env var duplication in site-clipboard.mjs so deploy/hub/README.md
+      is compared directly against site/docs/hosting.html while asserting all 6 README
+      relative asset/doc references resolve cleanly. Verification: wc -l README.md
+      (133), site-clipboard.mjs (1 passed), packaging/release.py check (0.23.0), cargo
+      test --package cito-native --test native distribution:: --locked -- --test-threads=1
+      (8 passed, 0 failed).'
+  - id: v75.repair_hub_watermarks
+    name: 'Round 1 Repair: Logical Sequence Watermarks for Hub Channel Warning Recovery
+      (V75-F1)'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-F1] crates/cito-native/src/core/hub.rs\
+      \ & crates/cito-native/tests/hub/cases.rs: Separate delivery-warning chronological\
+      \ ordering from `delivery_verified_ms` (which `health`, `save_channel_service`,\
+      \ and `replace_destination` reset to `NULL` for `delivery_unverified_since_ms`)\
+      \ AND from `reserve_deliveries` pre-Save reservation timestamps (`now_ms()`\
+      \ ties):\n  1. Add monotonic SQLite logical sequence `channel_event_seq` in\
+      \ `hub_meta`, additive column `outcome_seq INTEGER NOT NULL DEFAULT 0` on `hub_channel_deliveries`,\
+      \ and additive column `warning_cleared_seq INTEGER NOT NULL DEFAULT 0` on `hub_human_channels`\
+      \ via the `open_database` additive migration loop.\n  2. Stamp `delivered_ms\
+      \ = now_ms()` and `outcome_seq = next_channel_event_seq(c)` on EVERY delivery\
+      \ outcome/error transition in `hub.rs`: `process` exit (`hub.rs:1446`), `delivery_result`\
+      \ invalid `external_msg_id`/`external_msg_ids` (`hub.rs:2216`), `delivery_result`\
+      \ pre-send failures (`Outbound queue is full`, etc. at `hub.rs:2235`), `delivery_result`\
+      \ `delivery_transition` (`hub.rs:2245`), `save_channel_service` in-flight ->\
+      \ `effect_unknown` (`hub.rs:3176`), and `replace_destination` in-flight -> `effect_unknown`\
+      \ (`hub.rs:3263`). Keep `hub_channel_deliveries.status = 'effect_unknown'` untouched\
+      \ as the per-signal duplicate-replay fence.\n  3. Advance `warning_cleared_seq`\
+      \ ONLY on warning-clearing events: `human_channels_configure` (personal Save),\
+      \ `reconcile_bindings` (Hub Save, using the pre-service/pre-replace sequence\
+      \ so fresh `Service identity replaced` / `Destination replaced` warnings remain\
+      \ visible), saved `human_channels_test` success (alongside `delivery_verified_ms`),\
+      \ and `redeem` (pairing redemption). Before bumping `warning_cleared_seq`, normalize\
+      \ any pre-existing `outcome_seq = 0 AND status <> 'in_flight'` rows for that\
+      \ `(plugin_id, principal_id)` so even same-millisecond serialized operations\
+      \ preserve exact before/after order.\n  4. Never reset `warning_cleared_seq`\
+      \ when `health` (`hub.rs:2170`) or `save_channel_service` (`hub.rs:3169`) sets\
+      \ `delivery_verified_ms = NULL`.\n  5. Update `channel_list` (`hub.rs:1959`)\
+      \ query to `WHERE plugin_id=?1 AND principal_id IN (?2,?3) AND (outcome_seq\
+      \ > ?4 OR (outcome_seq = 0 AND delivered_ms >= ?5)) ORDER BY outcome_seq DESC,\
+      \ delivered_ms DESC, rowid DESC LIMIT 1` with `?4 = warning_cleared_seq` and\
+      \ `?5 = updated_ms`.\n  6. Add discriminating regression tests in `crates/cito-native/tests/hub/cases.rs`\
+      \ exercising real plugin transitions: (a) `reserve_deliveries` -> personal `Save`\
+      \ -> malformed `delivery_result` -> visible `effect_unknown` + replay fence\
+      \ intact; (b) saved `Send Test` clears warning -> later `health` `delivery_unverified`\
+      \ resets `delivery_verified_ms` -> `delivery_unverified: true` WITHOUT resurrecting\
+      \ old warning; and (c) same-millisecond serialized operations without `wait_for`\
+      \ clock waits.\n\nImplementation Notes:\n- Preserve exact `reserve_deliveries`\
+      \ idempotency fence and existing `cases.rs:1384` / `cases.rs:4709` invariants.\n\
+      - Do not modify `src/macos/**`, `plugins/**`, or staged binaries under `bin/`\
+      \ / `plugins/*/bin/`.\n\nBoundary:\n- scope.allowed_paths: [\"crates/cito-native/src/core/hub.rs\"\
+      , \"crates/cito-native/tests/hub/cases.rs\"]\n- scope.blocked_paths: [\"src/macos/**\"\
+      , \"plugins/**\", \"README.md\", \"bin/**\", \"Cargo.toml\", \"Cargo.lock\"\
+      , \"plan.yaml\"]\n- Owner: software-engineer; product version stays 0.23.0;\
+      \ tag v0.23.0 untouched; rollback via git revert.\n\nAdmit:\n- All six V75-F1\
+      \ sub-requirements verified with discriminating real-transition tests in `cases.rs`;\
+      \ `cargo fmt --check` clean; zero warnings; diff confined to `scope.allowed_paths`.\n\
+      \nRecovery:\n- Fix failing assertions inside `scope.allowed_paths`; if a contract\
+      \ contradiction arises, pause and report with a minimal counterexample without\
+      \ touching blocked paths."
+    verification: 'cargo fmt --check && cargo test --locked --lib core::hub:: -- --test-threads=2'
+    evidence_template: Commit SHA, touched files, exact cargo fmt/test commands with
+      pass counts, and per-item proof for V75-F1 (schema columns/meta sequence, all
+      6 outcome_seq transition sites, warning_cleared_seq advancement & non-reset,
+      channel_list query, and new real-transition regression tests).
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T21:13:00.721247Z'
+    done_at: '2026-11-27T21:38:39.251851+00:00'
+    evidence: 'Closed V75-F1 on c8b41a1 (rebased cleanly onto main from ee5bc76):
+      introduced monotonic SQLite channel_event_seq in hub_meta plus outcome_seq on
+      hub_channel_deliveries and warning_cleared_seq on hub_human_channels, stamped
+      delivered_ms and outcome_seq across all delivery transitions (process exit,
+      !allowed, malformed external_msg_id/ids, pre-send retryable failure, delivery_transition,
+      save_channel_service, replace_destination), decoupled warning_cleared_seq from
+      delivery_verified_ms so health/service resets never resurrect cleared warnings,
+      removed dead delivery_warning_since helper, and verified 247 Hub tests (1 ignored),
+      clippy -D warnings, cargo fmt --check, and 356 native tests (only distribution
+      Python 3.9 tomllib skipped there, passed 8/8 with Python 3.11+).'
+  - id: v75.repair_readme_accuracy
+    name: 'Round 1 Repair: README Two-Scope Channel & CLI Reference Accuracy (V75-F2)'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- [V75-F2] README.md:\n  1. Fix `README.md:71` (`Two-Scope Human Channels`):\
+      \ clarify that Hub administrators configure the shared Hub gateway and optional\
+      \ **Outbound-Only** mode once, while each user pairs privately in 1 click or\
+      \ uses **Pause Inbox** across all attached Macs and channels without losing\
+      \ bindings.\n  2. Fix `README.md:108` (`Everyday CLI & Pi /cito Cheat Sheet`):\
+      \ remove the broken `cito --help` reference (which exits `1`) and point to `[User\
+      \ Guide](https://tefx.github.io/cito/docs/guide.html)` and `[Architecture &\
+      \ Reference](https://tefx.github.io/cito/docs/architecture.html)` for full CLI\
+      \ commands, flags, and options.\n  3. Preserve English-only neutral prose, all\
+      \ required asset/doc relative references, and clean landing-page conciseness\
+      \ (~130-165 lines).\n\nImplementation Notes:\n- Verify `site-clipboard.mjs`,\
+      \ `packaging/release.py check`, and `distribution::` integration tests all pass\
+      \ after editing `README.md`.\n\nBoundary:\n- scope.allowed_paths: [\"README.md\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/**\", \"plugins/**\", \"site/**\"\
+      , \"deploy/**\", \"docs/**\", \"bin/**\", \"plan.yaml\"]\n- Owner: executor;\
+      \ product version stays 0.23.0; tag v0.23.0 untouched; rollback via git revert.\n\
+      \nAdmit:\n- Both V75-F2 accuracy fixes verified in `README.md`; `site-clipboard.mjs`,\
+      \ `packaging/release.py check`, and `cargo test --package cito-native --test\
+      \ native distribution::` pass; diff confined to `README.md`.\n\nRecovery:\n\
+      - Fix broken Markdown links or wording inside `README.md`; never edit blocked\
+      \ paths."
+    verification: 'env -u NODE_OPTIONS node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && cargo test --package cito-native --test
+      native distribution:: --locked -- --test-threads=1'
+    evidence_template: 'Commit SHA, README.md diff summary and line count, and exact
+      verification outputs for site-clipboard.mjs, packaging/release.py check, and
+      cargo test distribution:: closing V75-F2.'
+    refs:
+    - README.md
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.stage_clean_binaries
+    agent: executor
+    claimed_by: executor
+    claimed_at: '2026-11-27T21:13:00.721890Z'
+    done_at: '2026-11-27T21:16:42.817813+00:00'
+    evidence: 'Closed V75-F2 on cd31dcd (merged to main): README.md:71 now attributes
+      Outbound-Only mode to Hub administrators while keeping 1-click pairing and Pause
+      Inbox per-user (verified against SettingsChannelsTab.swift showInboundToggle/can_configure_hub);
+      README.md:108 removes broken `cito --help` (exits 1) and links to User Guide
+      and Architecture & Reference. Verified `site-clipboard.mjs` (1/1 passed) and
+      `cargo test -p cito-native distribution::` (8/8 passed with Python 3.11+).'
+  - id: v75.repair_stage_clean_binaries
+    name: 'Round 1 Repair: Restage Clean Darwin arm64 Binaries & Run Full Sequential
+      Workspace Regression'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ Round 1 repairs (`v75.repair_hub_watermarks` and `v75.repair_readme_accuracy`):\n\
+      \  `bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/pi/bin/cito-plugin-pi`,\
+      \ `plugins/codex/bin/cito-plugin-codex`, `plugins/claude/bin/cito-plugin-claude`,\
+      \ `plugins/claude/bin/cito-claude-hook`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace\
+      \ -D warnings\" cargo build --release --locked`, re-sign (`codesign --force\
+      \ --sign -`) after `strip -S`, and verify across all 7 binaries:\n  1. `0/0/0/0/0`\
+      \ matches for (`/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`)\
+      \ across both `strings -a` and raw binary bytes;\n  2. `lipo -archs` == `arm64`;\n\
+      \  3. `codesign -v --strict` exits `0`;\n  4. `./bin/cito-native-darwin-arm64\
+      \ --version` == `cito v0.23.0` and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-FullWorkspaceRegression] Run the full sequential\
+      \ workspace regression after binary staging:\n  `swiftc -O -warnings-as-errors\
+      \ -target arm64-apple-macos13.0 src/macos/*.swift` (to a temp path, cleaned\
+      \ up), `node crates/cito-native/tests/support/pi-bridge.mjs`, `node crates/cito-native/tests/support/site-clipboard.mjs`,\
+      \ `python3 packaging/release.py check`, `python3 -m unittest discover -s packaging\
+      \ -p \"test_*.py\"`, `cargo fmt --check`, `cargo clippy --workspace --all-targets\
+      \ --locked -- -D warnings`, and `cargo test --workspace --locked -- --test-threads=2`.\n\
+      \nImplementation Notes:\n- Always run `codesign --force --sign -` after `strip\
+      \ -S` so Mach-O signatures stay valid.\n- If an additional builder/rustup path\
+      \ appears in binary scans, add its `--remap-path-prefix` flag without altering\
+      \ Cargo manifests.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"README.md\", \"\
+      Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag\
+      \ mutation or release publication; rollback via git revert of staged binaries\
+      \ commit.\n\nAdmit:\n- Round 1 repair steps merged; all 7 Darwin arm64 binaries\
+      \ pass lipo/codesign/version and 0/0/0/0/0 scan on both strings -a and raw bytes;\
+      \ full sequential workspace regression passes with zero warnings or failures;\
+      \ diff confined to scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign or\
+      \ add builder `--remap-path-prefix` if binary hygiene fails; if a source/test\
+      \ regression fails in workspace tests, do not edit source files—report the exact\
+      \ failure to unblock upstream remediation."
+    verification: for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64 plugins/pi/bin/cito-plugin-pi
+      plugins/codex/bin/cito-plugin-codex plugins/claude/bin/cito-plugin-claude plugins/claude/bin/cito-claude-hook
+      plugins/telegram/bin/cito-plugin-telegram; do [ "$(lipo -archs "$b")" = "arm64"
+      ] && codesign -v --strict "$b"; done && [ "$(./bin/cito-native-darwin-arm64
+      --version)" = "cito v0.23.0" ] && git merge-base --is-ancestor v0.23.0 HEAD
+      && node crates/cito-native/tests/support/pi-bridge.mjs && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && cargo fmt --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=2
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, and full sequential regression pass receipt (swiftc, pi-bridge.mjs, site-clipboard.mjs,
+      release.py check, packaging unittest, cargo fmt, cargo clippy, cargo test --workspace).
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_hub_watermarks
+    - v75.repair_readme_accuracy
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T21:38:42.882195Z'
+    done_at: '2026-11-27T21:54:19.270459+00:00'
+    evidence: 'Merged 2795b87b0d6b5e3d6bdf907455d7c8df391fa539 onto main: all 7 staged
+      Darwin arm64 binaries (bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64,
+      plugins/claude/bin/cito-claude-hook, plugins/claude/bin/cito-plugin-claude,
+      plugins/codex/bin/cito-plugin-codex, plugins/pi/bin/cito-plugin-pi, plugins/telegram/bin/cito-plugin-telegram)
+      verified arm64 via lipo -info, strict codesign pass, 0-0-0-0-0 on both strings
+      -a and raw bytes (/Users/, /home/, /.cargo/registry, Larva, PI_PERSONA), `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Sequential regressions passed: Swift 0 warnings, pi-bridge 1/1, site-clipboard
+      1/1, release.py check 0.23.0, Python unittest 35/35, cargo fmt/clippy clean,
+      cargo test --workspace --locked 844 passed, 0 failed, 5 ignored, plus 8/8 distribution::
+      tests on final stripped/signed binaries. Worktree cleaned; 322Gi free.'
+  - id: v75.repair_hub_upgrade_migration
+    name: 'Round 2 Repair: One-Time Predecessor-DB Upgrade Backfill & Defensive channel_list
+      Fallback'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-UpgradeMigrationBackfill] crates/cito-native/src/core/hub.rs\
+      \ (`open_database` & `channel_list`): Implement the `Pi_down` one-time predecessor-DB\
+      \ migration backfill without adding extra runtime watermark columns:\n  1. Track\
+      \ whether `warning_cleared_seq` or `outcome_seq` was added during `open_database`'s\
+      \ additive column migration (`!columns.iter().any(...)`).\n  2. When migrating\
+      \ an existing database (only when either column was just added and pre-existing\
+      \ bindings or deliveries exist):\n     - For each binding in `hub_human_channels`,\
+      \ compute `legacy_since = max(COALESCE(updated_ms, 0), COALESCE(delivery_verified_ms,\
+      \ 0))` across `(plugin_id, principal_id IN (b.principal_id, alternate_oidc_principal(b.principal_id)))`.\n\
+      \     - Partition existing settled deliveries (`status <> 'in_flight'` AND `outcome_seq\
+      \ = 0`):\n       - Rows with a matching binding where `delivered_ms < legacy_since`\
+      \ (cleared before upgrade) receive `outcome_seq = seq_cleared` (`1`).\n    \
+      \   - Rows with `delivered_ms >= legacy_since` (uncleared) or no matching binding\
+      \ receive `outcome_seq = seq_active` (`3`).\n       - Leave `status = 'in_flight'`\
+      \ rows at `outcome_seq = 0` untouched, and never modify `status`, `last_error`,\
+      \ `delivery_verified_ms`, or `updated_ms` (preserving the `effect_unknown` replay\
+      \ fence and `delivery_unverified` state).\n     - Set `warning_cleared_seq =\
+      \ seq_watermark` (`2`) on existing `hub_human_channels` rows (`WHERE warning_cleared_seq\
+      \ = 0`) and set `hub_meta('channel_event_seq')` to `max(existing, seq_active)`.\n\
+      \  3. Defensive `channel_list` fallback (`hub.rs:1977`): in the `outcome_seq\
+      \ = 0` fallback branch, compare `delivered_ms >= max(n(&binding, \"updated_ms\"\
+      ), n(&binding, \"delivery_verified_ms\"))` (rather than `updated_ms` alone).\n\
+      - [V75-PredecessorUpgradeTests] crates/cito-native/tests/hub/cases.rs: Construct\
+      \ a pre-sequence `hub.sqlite` schema (without `warning_cleared_seq` or `outcome_seq`,\
+      \ matching the pre-v75 schema) containing: (a) an `effect_unknown` delivery\
+      \ cleared by `Send Test` (`updated_ms < delivered_ms < delivery_verified_ms`),\
+      \ (b) an uncleared `effect_unknown` delivery (including split `alternate_oidc_principal`\
+      \ coverage), and (c) an `in_flight` delivery. Reopen with `HubEngine::open`\
+      \ and assert:\n  - cleared binding has `warning == false` on first read and\
+      \ after a `health` (`delivery_unverified: true`) reset;\n  - uncleared binding\
+      \ has `warning == true` (`\"outcome unknown\"`) and can be cleared by post-upgrade\
+      \ `human_channels_test`;\n  - replay fence (`status == \"effect_unknown\"`)\
+      \ remains intact on both;\n  - reopening again (restart) preserves exact visibility.\n\
+      \nImplementation Notes:\n- Do not add new runtime watermark columns beyond `warning_cleared_seq`\
+      \ and `outcome_seq`.\n- Keep all existing `core::hub::` tests green and do not\
+      \ modify `src/macos/**`, `plugins/**`, `README.md`, or staged binaries.\n\n\
+      Boundary:\n- scope.allowed_paths: [\"crates/cito-native/src/core/hub.rs\", \"\
+      crates/cito-native/tests/hub/cases.rs\"]\n- scope.blocked_paths: [\"src/macos/**\"\
+      , \"plugins/**\", \"README.md\", \"bin/**\", \"Cargo.toml\", \"Cargo.lock\"\
+      , \"plan.yaml\"]\n- Owner: software-engineer; product version stays 0.23.0;\
+      \ tag v0.23.0 untouched; rollback via git revert.\n\nAdmit:\n- One-time predecessor-DB\
+      \ migration backfill, defensive `channel_list` fallback, and discriminating\
+      \ predecessor-DB upgrade/restart tests pass; `cargo fmt --check` clean; zero\
+      \ warnings; diff confined to `scope.allowed_paths`.\n\nRecovery:\n- Fix failing\
+      \ assertions inside `scope.allowed_paths`; if a contract contradiction arises,\
+      \ pause and report with a minimal counterexample without touching blocked paths."
+    verification: 'cargo fmt --check && cargo test --locked --lib core::hub:: -- --test-threads=2'
+    evidence_template: Commit SHA, touched files, exact cargo fmt/test commands with
+      pass counts, and per-item proof for V75-UpgradeMigrationBackfill (open_database
+      backfill + channel_list fallback) and V75-PredecessorUpgradeTests (cleared/uncleared/split-OIDC/in-flight/health-reset/restart
+      assertions).
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.repair_stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T22:03:55.924589Z'
+    done_at: '2026-11-27T22:19:46.082345+00:00'
+    evidence: 'Merged c3026f7b3e57dd6cb9f28149db931c9626b5c072 onto main: implemented
+      software-architect PIVOT_PI_DOWN arbitration in hub.rs (one-time open_database
+      backfill_channel_warning_sequences over canonical alternate_oidc_principal groups
+      with (ts, order, rowid) causal tie ordering, channel_list candidate filtering
+      + max(updated_ms, delivery_verified_ms) fallback, replay !allowed non-masking,
+      OIDC alias symmetry in reserve_deliveries/delivery_result/redeem/replace_destination,
+      clear_secret hub_saved_seq capture, and channel_warning_clear_seq attempts>0
+      handling) plus discriminating upgrade & ack-non-masking regression tests in
+      cases.rs. Verified cargo fmt, clippy -D warnings, 106 Hub tests, and 14 daemon
+      human/channel integration tests. Worktree cleaned.'
+  - id: v75.repair_r2_stage_clean_binaries
+    name: 'Round 2 Repair: Restage Clean Darwin arm64 Binaries & Run Full Sequential
+      Workspace Regression'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ Round 2 repair (`v75.repair_hub_upgrade_migration`):\n  `bin/cito-native-darwin-arm64`,\
+      \ `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,\
+      \ `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace\
+      \ -D warnings\" cargo build --release --locked`, re-sign (`codesign --force\
+      \ --sign -`) after `strip -S`, and verify across all 7 binaries:\n  1. `0/0/0/0/0`\
+      \ matches for (`/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`)\
+      \ across both `strings -a` and raw binary bytes;\n  2. `lipo -archs` == `arm64`;\n\
+      \  3. `codesign -v --strict` exits `0`;\n  4. `./bin/cito-native-darwin-arm64\
+      \ --version` == `cito v0.23.0` and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-FullWorkspaceRegression] Run the full sequential\
+      \ workspace regression (with Python 3.11+ in `PATH`):\n  `swiftc -O -warnings-as-errors\
+      \ -target arm64-apple-macos13.0 src/macos/*.swift` (to a temp path, cleaned\
+      \ up), `node crates/cito-native/tests/support/pi-bridge.mjs`, `node crates/cito-native/tests/support/site-clipboard.mjs`,\
+      \ `python3 packaging/release.py check`, `python3 -m unittest discover -s packaging\
+      \ -p \"test_*.py\"` (`35/35`), `cargo fmt --check`, `cargo clippy --workspace\
+      \ --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked\
+      \ -- --test-threads=2`.\n\nImplementation Notes:\n- Always run `codesign --force\
+      \ --sign -` after `strip -S` so Mach-O signatures stay valid.\n- Ensure Python\
+      \ 3.11+ is first in `PATH` before running `packaging/release.py`, packaging\
+      \ unittests, and `cargo test --workspace`.\n\nBoundary:\n- scope.allowed_paths:\
+      \ [\"bin/**\", \"plugins/*/bin/**\"]\n- scope.blocked_paths: [\"crates/**\"\
+      , \"src/macos/**\", \"README.md\", \"Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"\
+      ]\n- Owner: devops-engineer; no tag mutation or release publication; rollback\
+      \ via git revert of staged binaries commit.\n\nAdmit:\n- `v75.repair_hub_upgrade_migration`\
+      \ merged; all 7 Darwin arm64 binaries pass lipo/codesign/version and 0/0/0/0/0\
+      \ scan on both strings -a and raw bytes; full sequential workspace regression\
+      \ passes with zero warnings or failures; diff confined to scope.allowed_paths.\n\
+      \nRecovery:\n- Re-strip/re-sign or add builder `--remap-path-prefix` if binary\
+      \ hygiene fails; if a source/test regression fails in workspace tests, do not\
+      \ edit source files—report the exact failure to unblock upstream remediation."
+    verification: for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64 plugins/claude/bin/cito-claude-hook
+      plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex plugins/pi/bin/cito-plugin-pi
+      plugins/telegram/bin/cito-plugin-telegram; do [ "$(lipo -archs "$b")" = "arm64"
+      ] && codesign -v --strict "$b"; done && [ "$(./bin/cito-native-darwin-arm64
+      --version)" = "cito v0.23.0" ] && git merge-base --is-ancestor v0.23.0 HEAD
+      && node crates/cito-native/tests/support/pi-bridge.mjs && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && cargo fmt --check && cargo clippy --workspace --all-targets
+      --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=2
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, Python 3.11+ version used, and full sequential regression pass receipt
+      (swiftc, pi-bridge.mjs, site-clipboard.mjs, release.py check, packaging unittest
+      35/35, cargo fmt, cargo clippy, cargo test --workspace).
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_hub_upgrade_migration
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T22:19:49.748237Z'
+    done_at: '2026-11-27T22:36:42.707835+00:00'
+    evidence: 'Merged 196bc40d012e8100f53db86f52e3e0fb490a435c onto main: all 7 staged
+      Darwin arm64 binaries verified arm64 via lipo -info, strict codesign pass, 0-0-0-0-0
+      on both strings -a and raw bytes (/Users/, /home/, /.cargo/registry, Larva,
+      PI_PERSONA), `./bin/cito-native-darwin-arm64 --version` == `cito v0.23.0`, tag
+      `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`, peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`)
+      untouched and ancestor of HEAD. Sequential regressions passed with Python 3.14.10:
+      Swift 0 warnings, pi-bridge 1/1, site-clipboard 1/1, release.py check 0.23.0,
+      Python unittest 35/35, cargo fmt/clippy clean, cargo test --workspace --locked
+      846 passed, 0 failed, 5 ignored across 9 suites, plus 8/8 distribution:: tests.
+      Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r3_hub_migration_and_admin_guard
+    name: 'Round 3 Repair (Pi_down): Zero-Schema Hub Warning Retirement & Admin-Scoped
+      Clear Guard'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-R3-PiDownZeroSchemaHub] crates/cito-native/src/core/hub.rs:\
+      \ Implement the Zero-Schema, Zero-Migration `Pi_down` channel warning recovery\
+      \ contract (zero new SQLite columns or `hub_meta` keys; `hub.sqlite` schema\
+      \ identical to baseline `7f72ff1`):\n  1. Delete `warning_cleared_seq`, `outcome_seq`,\
+      \ `channel_event_seq`, `channel_warning_backfill_v1`, `backfill_channel_warning_sequences`,\
+      \ `next_channel_event_seq`, and `channel_warning_clear_seq` completely from\
+      \ `hub.rs`.\n  2. Keep `status = 'effect_unknown'` strictly as the per-signal\
+      \ replay fence (`reserve_deliveries` checks `d.status IN ('delivered','failed_permanent','effect_unknown')`\
+      \ with `d.principal_id IN (?5, ?6)` OIDC alias symmetry and never reads `last_error`).\n\
+      \  3. Retire warnings cleanly using `last_error = NULL` + monotonic existing\
+      \ timestamps (`now_ms().max(max_prior_delivered_ms + 1)`):\n     (a) `delivery_result`\
+      \ (`status == \"delivered\"`): clear `last_error = NULL` on settled prior `effect_unknown`/`failed`/`failed_permanent`\
+      \ rows (`signal_id <> ?`) for `(plugin_id, principal_id | alias)` and set `delivery_verified_ms\
+      \ = now.max(max_settled_delivered_ms + 1)`.\n     (b) Saved-binding `Send Test`\
+      \ (`human_channels_test` when `!changed && saved_user_ready` and binding matches):\
+      \ clear `last_error = NULL` on settled prior `effect_unknown`/`failed`/`failed_permanent`\
+      \ rows and set `delivery_verified_ms = now.max(max_settled_delivered_ms + 1)`.\n\
+      \     (c) Personal `edit_user`, `redeem`, or admin-gated Hub change (`changed\
+      \ || hub_patch`, where `hub_patch = reset_hub || p[\"clear_hub_config\"] ==\
+      \ true || p.get(\"hub_config\").is_some_and(|v| v.as_object().is_none_or(|m|\
+      \ !m.is_empty()))` strictly matches `admin(Some(caller))?` and NEVER triggers\
+      \ on non-admin `p[\"reset\"] == true` or empty `hub_config: {}`): clear `last_error\
+      \ = NULL` on prior settled rows BEFORE `save_channel_service`/`replace_destination`\
+      \ marks currently `in_flight` rows as `effect_unknown`, and advance `updated_ms\
+      \ = now.max(max_settled_delivered_ms + 1)`.\n     (d) Before `health`, `save_channel_service`,\
+      \ or `replace_destination` clears `delivery_verified_ms = NULL`, clear `last_error\
+      \ = NULL` on settled rows with `delivered_ms < delivery_verified_ms` (so predecessor\
+      \ DBs where `Send Test` retired an error before upgrade never resurrect `\"\
+      Response lost\"` on subsequent `health` invalidation).\n  4. Stamp `delivered_ms\
+      \ = now_ms().max(binding_watermark)` (`binding_watermark = max(updated_ms, delivery_verified_ms)`)\
+      \ on every post-clear delivery outcome/error transition (`process` exit, malformed\
+      \ `delivery_result`, pre-send retryable failure, `delivery_transition`, `save_channel_service`,\
+      \ `replace_destination`).\n  5. In `channel_list`, query `WHERE plugin_id=?1\
+      \ AND principal_id IN (?2,?3) AND delivered_ms >= ?4 AND (status = 'delivered'\
+      \ OR ((status IN ('failed','failed_permanent','effect_unknown') OR (status =\
+      \ 'in_flight' AND attempts > 0)) AND COALESCE(last_error, '') <> '')) ORDER\
+      \ BY delivered_ms DESC, rowid DESC LIMIT 1` (`?4 = max(updated_ms, delivery_verified_ms)`),\
+      \ filtering `.filter(|row| row[\"status\"] != \"delivered\")`.\n  6. Retain\
+      \ `replay` `!allowed` non-masking (`SET status='failed', reservation_id=NULL,\
+      \ next_retry_ms=0` without clearing `last_error` or overwriting `delivered_ms`).\n\
+      - [V75-R3-PiDownTests] crates/cito-native/tests/hub/cases.rs: Remove all references\
+      \ to deleted `outcome_seq` / `warning_cleared_seq` / `channel_event_seq` / `channel_warning_backfill_v1`\
+      \ schema artifacts while preserving and extending discriminating behavioral\
+      \ coverage across: fresh DBs, same-millisecond timestamp ties, predecessor `cfebf209`\
+      \ & intermediate R1/R2 DBs (verifying `hub.sqlite` schema parity with `7f72ff1`),\
+      \ `health` reset (`delivery_unverified: true` without resurrecting cleared errors),\
+      \ restart persistence, `!allowed` non-masking, and non-admin `reset: true` /\
+      \ `hub_config: {}` cross-user isolation (while `clear_hub_config: true` is rejected\
+      \ with `FORBIDDEN`).\n\nImplementation Notes:\n- Ensure `open_database` creates\
+      \ and migrates only the exact `7f72ff1` schema with zero new columns or `hub_meta`\
+      \ keys; pre-existing R1/R2 DBs containing extra unused columns remain readable\
+      \ without touching those columns.\n- Do not modify `src/macos/**`, `plugins/**`,\
+      \ `README.md`, or staged binaries under `bin/` / `plugins/*/bin/`.\n\nBoundary:\n\
+      - scope.allowed_paths: [\"crates/cito-native/src/core/hub.rs\", \"crates/cito-native/tests/hub/cases.rs\"\
+      ]\n- scope.blocked_paths: [\"src/macos/**\", \"plugins/**\", \"README.md\",\
+      \ \"bin/**\", \"Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: software-engineer;\
+      \ product version stays 0.23.0; tag v0.23.0 untouched; rollback via git revert.\n\
+      \nAdmit:\n- Zero-schema `Pi_down` design implemented with exact `7f72ff1` schema\
+      \ parity, all behavioral invariants and discriminating `cases.rs` tests passing,\
+      \ `cargo fmt --check` clean, zero warnings, diff confined to `scope.allowed_paths`.\n\
+      \nRecovery:\n- Fix failing assertions inside `scope.allowed_paths`; if a contract\
+      \ contradiction arises, pause and report with a minimal counterexample without\
+      \ touching blocked paths."
+    verification: cargo fmt --check && cargo test -p cito-native --lib --locked --
+      --test-threads=2
+    evidence_template: Commit SHA, touched files, proof of deletion of all sequence/backfill
+      symbols and exact hub.sqlite schema parity with 7f72ff1, exact cargo fmt/test
+      commands with pass counts, and per-item proof for (a)-(d) warning retirement,
+      monotonic delivered_ms stamping, channel_list query, !allowed non-masking, admin-only
+      hub_patch guard, and all cases.rs tests.
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.repair_r2_stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T22:54:49.063970Z'
+    done_at: '2026-11-27T23:11:20.198744+00:00'
+    evidence: 'Merged c84a277c30ea6347046f515f2a2538a8cd347521 onto main: applied
+      Cito Architect PIVOT_PI_DOWN zero-schema design in hub.rs (deleted warning_cleared_seq,
+      outcome_seq, channel_event_seq, channel_warning_backfill_v1, backfill_channel_warning_sequences,
+      next_channel_event_seq, channel_warning_clear_seq; schema and init SQL verified
+      identical to 7f72ff1), retired warnings via last_error=NULL + monotonic timestamps
+      (retire_channel_warnings, retire_service_warnings, next_outcome_ms, verify_delivery,
+      invalidate_delivery_verification, fence_in_flight) while keeping status=''effect_unknown''
+      replay fence intact, unified hub_patch_guard admin check with hub_saved trigger
+      (blocking non-admin reset:true and empty hub_config:{}), retained replay !allowed
+      non-masking and alternate_oidc_principal symmetry, and verified cargo fmt, clippy
+      -D warnings, 108 Hub unit tests, and 14 daemon Human & Channels integration
+      tests. Worktree cleaned.'
+  - id: v75.repair_r3_stage_clean_binaries
+    name: 'Round 3 Repair: Restage Clean Darwin arm64 Binaries & Run Scoped Regression
+      Suite'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ the zero-schema `Pi_down` Round 3 repair (`v75.repair_r3_hub_migration_and_admin_guard`):\n\
+      \  `bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`,\
+      \ `plugins/claude/bin/cito-plugin-claude`, `plugins/codex/bin/cito-plugin-codex`,\
+      \ `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace\
+      \ -D warnings\" cargo build --release --locked`, re-sign (`codesign --force\
+      \ --sign -`) after `strip -S`, and verify across all 7 binaries:\n  1. `0/0/0/0/0`\
+      \ matches for (`/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`)\
+      \ across both `strings -a` and raw binary bytes;\n  2. `lipo -archs` == `arm64`;\n\
+      \  3. `codesign -v --strict` exits `0`;\n  4. `./bin/cito-native-darwin-arm64\
+      \ --version` == `cito v0.23.0` and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-ScopedRegressionWithReuse] Run the scoped regression\
+      \ suite per verification-reuse ruling (with Python 3.11+ first in `PATH`, reusing\
+      \ the verified prior `196bc40d` `846/846` receipt for untouched `src/macos/**`):\n\
+      \  - `cargo fmt --check`\n  - `cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings`\n  - `cargo test -p cito-native --lib --locked -- --test-threads=2`\
+      \ (covers `core::hub` and `tests/hub/cases.rs`)\n  - `cargo test -p cito-native\
+      \ --bin cito-plugin-telegram --locked`\n  - `cargo test -p cito-native --test\
+      \ native distribution:: --locked -- --test-threads=1`\n  - `python3 packaging/release.py\
+      \ check`\n  - `python3 -m unittest discover -s packaging -p \"test_*.py\"` (`35/35`)\n\
+      \  - `env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \  - `node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs`\n\
+      \nImplementation Notes:\n- Always run `codesign --force --sign -` after `strip\
+      \ -S` so Mach-O signatures stay valid.\n- Confirm `git diff 196bc40d..HEAD --\
+      \ src/macos/` is empty to substantiate reuse of the `196bc40d` `846/846` UI/workspace\
+      \ regression receipt.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"README.md\", \"\
+      Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag\
+      \ mutation or release publication; rollback via git revert of staged binaries\
+      \ commit.\n\nAdmit:\n- `v75.repair_r3_hub_migration_and_admin_guard` merged;\
+      \ all 7 Darwin arm64 binaries pass lipo/codesign/version and 0/0/0/0/0 scan\
+      \ on both strings -a and raw bytes; scoped regression suite passes with zero\
+      \ warnings or failures and `src/macos/` untouched since `196bc40d`; diff confined\
+      \ to scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign or add builder `--remap-path-prefix`\
+      \ if binary hygiene fails; if a source/test regression fails, do not edit source\
+      \ files—report the exact failure to unblock upstream remediation."
+    verification: 'for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      [ "$(lipo -archs "$b")" = "arm64" ] && codesign -v --strict "$b"; done && [
+      "$(./bin/cito-native-darwin-arm64 --version)" = "cito v0.23.0" ] && git merge-base
+      --is-ancestor v0.23.0 HEAD && cargo fmt --check && cargo clippy --workspace
+      --all-targets --locked -- -D warnings && cargo test -p cito-native --lib --locked
+      -- --test-threads=2 && cargo test -p cito-native --bin cito-plugin-telegram
+      --locked && cargo test -p cito-native --test native distribution:: --locked
+      -- --test-threads=1 && python3 packaging/release.py check && python3 -m unittest
+      discover -s packaging -p "test_*.py" && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs'
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, Python 3.11+ version, git diff 196bc40d..HEAD -- src/macos/ emptiness
+      proof, and exact pass receipts for all scoped regression commands.
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_r3_hub_migration_and_admin_guard
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T23:11:27.696658Z'
+    done_at: '2026-11-27T23:19:55.175828+00:00'
+    evidence: 'Merged a35aa4cbbbd8f2583731de3790769afead78c3db onto main: all 7 staged
+      Darwin arm64 binaries verified arm64 via lipo -info, strict codesign pass, 0-0-0-0-0
+      on both strings -a and raw bytes (/Users/, /home/, /.cargo/registry, Larva,
+      PI_PERSONA), `./bin/cito-native-darwin-arm64 --version` == `cito v0.23.0`, tag
+      `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`, peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`)
+      untouched and ancestor of HEAD. Confirmed `git diff 196bc40d..HEAD -- src/macos/`
+      empty (reusing 196bc40d 174-test ui::* pass). Scoped regressions passed with
+      Python 3.14.10: cargo fmt/clippy clean, cito-native --lib 472 passed (4 ignored),
+      native hub 37/37, daemon::human_and_channels 14/14, cito-plugin-telegram bin
+      10/10, plugins::telegram 6/6, distribution:: 8/8, release.py check 0.23.0, Python
+      unittest 35/35, site-clipboard.mjs 1/1, pi-bridge.mjs 1/1. Worktree cleaned;
+      321Gi free.'
+  - id: v75.repair_r4_outcome_tie_order
+    name: 'Round 4 Repair: Strict Completion-Order Monotonicity in next_outcome_ms'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-R4-OutcomeTieOrder] crates/cito-native/src/core/hub.rs\
+      \ (`next_outcome_ms`):\n  - Update `next_outcome_ms(c, id, pid)` to include\
+      \ the maximum `delivered_ms + 1` of already-settled deliveries (`status <> 'in_flight'\
+      \ OR attempts > 0`) for `(plugin_id, principal_id | alternate_oidc_principal)`:\n\
+      \    `now_ms().max(binding_watermark).max(max_settled_delivered_ms + 1)`.\n\
+      \  - Preserve strict zero-schema parity with `7f72ff1` (zero new SQLite columns\
+      \ or `hub_meta` keys) and keep `status = 'effect_unknown'` untouched as the\
+      \ replay fence.\n- [V75-R4-OutcomeTieTest] crates/cito-native/tests/hub/cases.rs\
+      \ (`equal_timestamp_completions_order_by_completion_not_reservation`):\n  -\
+      \ Add a discriminating regression test verifying that when Signal A is reserved\
+      \ before Signal B under a clock-rollback / same-ms watermark and Signal B completes\
+      \ before Signal A, Signal A receives a strictly greater `delivered_ms` than\
+      \ Signal B and `human_channels_list` surfaces Signal A's outcome (`\"Error A\"\
+      `), not Signal B's (`\"Error B\"`).\n\nImplementation Notes:\n- Keep all existing\
+      \ `core::hub::` and `daemon::human_and_channels` tests green without modifying\
+      \ `src/macos/**`, `plugins/**`, `README.md`, or staged binaries.\n\nBoundary:\n\
+      - scope.allowed_paths: [\"crates/cito-native/src/core/hub.rs\", \"crates/cito-native/tests/hub/cases.rs\"\
+      ]\n- scope.blocked_paths: [\"src/macos/**\", \"plugins/**\", \"README.md\",\
+      \ \"bin/**\", \"Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: software-engineer;\
+      \ product version stays 0.23.0; tag v0.23.0 untouched; rollback via git revert.\n\
+      \nAdmit:\n- `next_outcome_ms` strictly orders out-of-order equal-timestamp completions\
+      \ by completion order rather than reservation `rowid`, discriminating test `equal_timestamp_completions_order_by_completion_not_reservation`\
+      \ passes, `fmt`/`clippy`/`core::hub::`/`daemon::human_and_channels` pass with\
+      \ zero warnings, and diff is confined to `scope.allowed_paths`.\n\nRecovery:\n\
+      - Fix failing assertions inside `scope.allowed_paths`; if a contract contradiction\
+      \ arises, pause and report with a minimal counterexample without touching blocked\
+      \ paths."
+    verification: 'cargo fmt --check && cargo clippy --workspace --all-targets --locked
+      -- -D warnings && cargo test --locked -p cito-native --lib core::hub:: -- --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2'
+    evidence_template: Commit SHA, touched files, proof of zero-schema parity with
+      7f72ff1, exact fmt/clippy/test commands with pass counts, and proof for next_outcome_ms
+      and equal_timestamp_completions_order_by_completion_not_reservation.
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.repair_r3_stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-27T23:27:02.076894Z'
+    done_at: '2026-11-27T23:36:14.981598+00:00'
+    evidence: 'Merged f7351898008f90713bc719af4cae393edb0bde05 onto main (+115/-15
+      in crates/cito-native/src/core/hub.rs and crates/cito-native/tests/hub/cases.rs):
+      extracted shared SETTLED_DELIVERY_SCOPE and next_settled_delivery_ms so next_outcome_ms
+      takes max(now_ms, binding_watermark, max_settled_delivered_ms + 1) across (plugin_id,
+      principal_id | alternate_oidc_principal). Verified zero-schema parity with 7f72ff1
+      (no new columns or hub_meta keys). Added equal_timestamp_completions_order_by_completion_not_reservation
+      regression test confirming Signal A reserved first and completed second under
+      a future Save watermark gets delivered_ms > Signal B and surfaces Error A without
+      replay. Verified cargo fmt --check, cargo clippy --workspace --all-targets --locked
+      -- -D warnings, core::hub:: 109 passed (0 failed), and daemon::human_and_channels
+      14 passed (0 failed). Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r4_stage_clean_binaries
+    name: 'Round 4 Repair: Restage Clean Darwin arm64 Binaries & Run Scoped Regression
+      Suite'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ Round 4 repair (`v75.repair_r4_outcome_tie_order`):\n  `bin/cito-native-darwin-arm64`,\
+      \ `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,\
+      \ `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace\
+      \ -D warnings\" cargo build --release --locked`, re-sign (`codesign --force\
+      \ --sign -`) after `strip -S`, and verify across all 7 binaries:\n  1. `0/0/0/0/0`\
+      \ matches for (`/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`)\
+      \ across both `strings -a` and raw binary bytes;\n  2. `lipo -archs` == `arm64`;\n\
+      \  3. `codesign -v --strict` exits `0`;\n  4. `./bin/cito-native-darwin-arm64\
+      \ --version` == `cito v0.23.0` and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-ScopedRegressionWithReuse] Confirm `git diff\
+      \ 196bc40d..HEAD -- src/macos/` is empty (reusing verified `196bc40d` `846/846`\
+      \ UI/workspace regression receipt) and run the scoped regression suite with\
+      \ Python 3.11+ first in `PATH`:\n  - `cargo fmt --check`\n  - `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`\n  - `cargo test --locked\
+      \ -p cito-native --lib -- --test-threads=2`\n  - `cargo test --locked -p cito-native\
+      \ --test native hub -- --test-threads=2`\n  - `cargo test --locked -p cito-native\
+      \ --test native daemon::human_and_channels -- --test-threads=2`\n  - `cargo\
+      \ test --locked -p cito-native --bin cito-plugin-telegram`\n  - `cargo test\
+      \ --locked -p cito-native --test native plugins::telegram -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1`\n\
+      \  - `python3 packaging/release.py check`\n  - `python3 -m unittest discover\
+      \ -s packaging -p \"test_*.py\"` (`35/35`)\n  - `env -u NODE_OPTIONS node --test\
+      \ crates/cito-native/tests/support/site-clipboard.mjs`\n  - `node --experimental-strip-types\
+      \ --test crates/cito-native/tests/support/pi-bridge.mjs`\n\nImplementation Notes:\n\
+      - Always run `codesign --force --sign -` after `strip -S` so Mach-O signatures\
+      \ stay valid.\n- Ensure Python 3.11+ is first in `PATH` before running packaging\
+      \ and cargo tests.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"README.md\", \"\
+      Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag\
+      \ mutation or release publication; rollback via git revert of staged binaries\
+      \ commit.\n\nAdmit:\n- `v75.repair_r4_outcome_tie_order` merged; all 7 Darwin\
+      \ arm64 binaries pass lipo/codesign/version and 0/0/0/0/0 scan on both strings\
+      \ -a and raw bytes; `git diff 196bc40d..HEAD -- src/macos/` empty; all scoped\
+      \ regression commands pass with zero warnings or failures; diff confined to\
+      \ scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign or add builder `--remap-path-prefix`\
+      \ if binary hygiene fails; if a source/test regression fails, do not edit source\
+      \ files—report the exact failure to unblock upstream remediation."
+    verification: 'for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      [ "$(lipo -archs "$b")" = "arm64" ] && codesign -v --strict "$b"; done && [
+      "$(./bin/cito-native-darwin-arm64 --version)" = "cito v0.23.0" ] && git merge-base
+      --is-ancestor v0.23.0 HEAD && [ -z "$(git diff 196bc40d..HEAD -- src/macos/)"
+      ] && cargo fmt --check && cargo clippy --workspace --all-targets --locked --
+      -D warnings && cargo test --locked -p cito-native --lib -- --test-threads=2
+      && cargo test --locked -p cito-native --test native hub -- --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2 && cargo test --locked -p cito-native --bin cito-plugin-telegram
+      && cargo test --locked -p cito-native --test native plugins::telegram -- --test-threads=2
+      && cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs'
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, Python 3.11+ version, git diff 196bc40d..HEAD -- src/macos/ emptiness
+      proof, and exact pass receipts for all scoped regression commands.
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_r4_outcome_tie_order
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-27T23:36:19.563985Z'
+    done_at: '2026-11-27T23:46:55.341069+00:00'
+    evidence: 'Merged 924441ec5352f22ef4a3e09ad393860ff4065fb2 onto main: rebuilt,
+      stripped (strip -S), and ad-hoc signed all 7 staged Darwin arm64 binaries with
+      rustc --remap-path-prefix ($HOME first so /.cargo/registry matches last); verified
+      arm64 lipo -info, strict codesign pass, and 0-0-0-0-0 (/Users/, /home/, /.cargo/registry,
+      Larva, PI_PERSONA) on both strings -a and raw bytes across all 7 binaries, `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Confirmed `git diff 196bc40d..HEAD -- src/macos/` empty (reusing 196bc40d
+      174-test ui::* receipt). Scoped regressions passed with Python 3.14.10: cargo
+      fmt/clippy clean, cito-native --lib 473 passed (4 ignored), native hub 37/37,
+      daemon::human_and_channels 14/14, cito-plugin-telegram 10/10, plugins::telegram
+      6/6, distribution:: 8/8, release.py check 0.23.0, Python unittest 35/35, site-clipboard.mjs
+      1/1, pi-bridge.mjs 1/1. Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r5_inflight_lease_separation
+    name: 'Round 5 Repair (Pi_down): Single-Active-Warning Invariant Without Timestamp
+      Inflation or Lease Overloading'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-R5-SingleActiveWarningInvariant]\
+      \ crates/cito-native/src/core/hub.rs:\n  - Preserve strict zero-schema parity\
+      \ (`hub.sqlite` schema and initialization SQL identical to `7f72ff1`).\n  -\
+      \ Delete `next_settled_delivery_ms` (`saturating_add(1)` synthetic clock inflation)\
+      \ completely; do NOT overload `next_retry_ms` with `in_flight` lease deadlines\
+      \ (`reserve_deliveries`, `progress == true`, and `worker_delay` retain plain\
+      \ wall-clock `delivered_ms = now_ms()`).\n  - `retire_channel_warnings(c, id,\
+      \ pid, exclude_signal)` clears `last_error = NULL` across `SETTLED_DELIVERY_SCOPE`\
+      \ (`plugin_id=?1 AND principal_id IN (?2,?3) AND (status<>'in_flight' OR attempts>0)\
+      \ AND (?4 IS NULL OR signal_id<>?4) AND last_error IS NOT NULL`) and returns\
+      \ plain `now_ms()` (`updated_ms = now_ms()`, `delivery_verified_ms = now_ms()`).\n\
+      \  - Call `retire_channel_warnings(c, id, pid, Some(signal_id))` on EVERY outcome\
+      \ transition in `delivery_result` (invalid external IDs, queued-retryable, `delivered`,\
+      \ `failed`, `failed_permanent`, `effect_unknown`; excluding `progress == true`),\
+      \ ensuring **at most one active `last_error` per `(plugin_id, principal_id |\
+      \ alias)`** — so an older retrying delivery's `last_error` is already `NULL`\
+      \ once a newer delivery settles (`B`), preventing retry reservation (`delivered_ms\
+      \ = now_ms()`) from ever outranking `B` while preserving a sole failing signal's\
+      \ warning during retry, and resolving equal-timestamp reverse-`rowid` completions\
+      \ cleanly without `+1` inflation.\n  - Simplify `next_outcome_ms` to clamp only\
+      \ against the binding's existing `updated_ms` / `delivery_verified_ms` watermark\
+      \ (`now_ms().max(watermark)` with zero `hub_channel_deliveries` query and zero\
+      \ `+1`), and preserve `channel_list`'s `delivered_ms >= MAX(updated_ms, delivery_verified_ms)`\
+      \ filter and `invalidate_delivery_verification` so `predecessor_delivery_warnings_survive_upgrade_and_restart`\
+      \ (`alice-cleared`, `bob-cleared`, `carol-before-success`) and `cfebf209 ->\
+      \ HEAD` upgrades stay clean.\n- [V75-R5-SingleActiveWarningTests] crates/cito-native/tests/hub/cases.rs:\n\
+      \  - Add/keep discriminating tests covering both:\n    1. Equal-timestamp reverse-`rowid`\
+      \ completions (`A.delivered_ms == B.delivered_ms`, `A` wins via cleared `B.last_error`\
+      \ without `+1` synthetic inflation);\n    2. `retry_reservation_does_not_outrank_newer_outcome_before_completion`\
+      \ (sole retry keeps warning, retry after newer `B` keeps `B` visible across\
+      \ reservation and `progress == true` until `A` completes again).\n\nImplementation\
+      \ Notes:\n- Preserve exact `status = 'effect_unknown'` per-signal replay fence\
+      \ semantics, `replay` `!allowed` non-masking, and admin-scoped `hub_patch` isolation.\n\
+      - Do not modify `src/macos/**`, `plugins/**`, `README.md`, or staged binaries\
+      \ under `bin/` / `plugins/*/bin/`.\n\nBoundary:\n- scope.allowed_paths: [\"\
+      crates/cito-native/src/core/hub.rs\", \"crates/cito-native/tests/hub/cases.rs\"\
+      ]\n- scope.blocked_paths: [\"src/macos/**\", \"plugins/**\", \"README.md\",\
+      \ \"bin/**\", \"Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: software-engineer;\
+      \ product version stays 0.23.0; tag v0.23.0 untouched; rollback via git revert.\n\
+      \nAdmit:\n- Zero-schema parity with `7f72ff1` preserved, `next_settled_delivery_ms`\
+      \ deleted, no `next_retry_ms` lease overloading, Single-Active-Warning Invariant\
+      \ enforced across all `delivery_result` outcomes (excluding `progress == true`),\
+      \ `next_outcome_ms` simplified to plain watermark clamp without `+1`, both discriminating\
+      \ `cases.rs` tests plus `predecessor_delivery_warnings_survive_upgrade_and_restart`\
+      \ pass, `fmt`/`clippy`/`core::hub::`/`daemon::human_and_channels` pass with\
+      \ zero warnings, and diff is confined to `scope.allowed_paths`.\n\nRecovery:\n\
+      - Fix failing assertions inside `scope.allowed_paths`; if a contract contradiction\
+      \ arises, pause and report with a minimal counterexample without touching blocked\
+      \ paths."
+    verification: 'cargo fmt --check && cargo clippy --workspace --all-targets --locked
+      -- -D warnings && cargo test --locked -p cito-native --lib core::hub:: -- --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2'
+    evidence_template: Commit SHA, touched files, proof of zero-schema parity with
+      7f72ff1, deletion of next_settled_delivery_ms (+1 inflation) and absence of
+      next_retry_ms lease overloading, exact fmt/clippy/test commands with pass counts,
+      and proof for retire_channel_warnings, simplified next_outcome_ms, equal-timestamp
+      reverse-rowid test, and retry_reservation_does_not_outrank_newer_outcome_before_completion.
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.repair_r4_stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-28T00:04:38.372845Z'
+    done_at: '2026-11-28T00:19:11.318251+00:00'
+    evidence: 'Merged 912e1f0e631acf7c12e3e93242905c913c8e5e4b onto main (hub.rs 146+-
+      balanced net simplification, cases.rs +216/-105): deleted next_settled_delivery_ms
+      (+1 clock inflation) and avoided overloading next_retry_ms (reserve_deliveries,
+      progress==true, worker_delay, updated_ms, delivery_verified_ms stay plain wall-clock
+      now_ms()). Implemented Single-Active-Warning Invariant via retire_channel_warnings(Some(signal_id))
+      on every settled delivery_result outcome (including invalid external IDs and
+      queued-retryable errors) and fence_in_flight, advancing rowid=(SELECT MAX(rowid)+1)
+      on settlement while keeping channel_list WITH latest_warning + NOT EXISTS(delivered
+      tie) and delivered_ms >= MAX(updated_ms, delivery_verified_ms) + invalidate_delivery_verification
+      for 7f72ff1/cfebf209 compatibility. Zero-schema parity with 7f72ff1 confirmed.
+      Added/updated equal_timestamp_completions_order_by_completion_not_reservation
+      and retry_reservation_does_not_outrank_newer_outcome_before_completion. Verified
+      cargo fmt --check, cargo clippy --workspace --all-targets --locked -- -D warnings,
+      core::hub:: 110 passed (0 failed), daemon::human_and_channels 14 passed (0 failed),
+      and hub --skip ui:: 37 passed (0 failed). Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r5_stage_clean_binaries
+    name: 'Round 5 Repair: Restage Clean Darwin arm64 Binaries & Run Scoped Regression
+      Suite'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ the Round 5 `Pi_down` Single-Active-Warning Invariant repair (`v75.repair_r5_inflight_lease_separation`):\n\
+      \  `bin/cito-native-darwin-arm64`, `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`,\
+      \ `plugins/claude/bin/cito-plugin-claude`, `plugins/codex/bin/cito-plugin-codex`,\
+      \ `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$(pwd)=/workspace\
+      \ -D warnings\" cargo build --release --locked`, re-sign (`codesign --force\
+      \ --sign -`) after `strip -S`, and verify across all 7 binaries:\n  1. `0/0/0/0/0`\
+      \ matches for (`/Users/`, `/home/`, `/.cargo/registry`, `Larva`, `PI_PERSONA`)\
+      \ across both `strings -a` and raw binary bytes;\n  2. `lipo -archs` == `arm64`;\n\
+      \  3. `codesign -v --strict` exits `0`;\n  4. `./bin/cito-native-darwin-arm64\
+      \ --version` == `cito v0.23.0` and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-ScopedRegressionWithReuse] Confirm `git diff\
+      \ 196bc40d..HEAD -- src/macos/` is empty (reusing verified `196bc40d` `846/846`\
+      \ UI/workspace regression receipt) and run the scoped regression suite with\
+      \ Python 3.11+ first in `PATH`:\n  - `cargo fmt --check`\n  - `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`\n  - `cargo test --locked\
+      \ -p cito-native --lib -- --test-threads=2`\n  - `cargo test --locked -p cito-native\
+      \ --test native hub -- --skip ui:: --test-threads=2`\n  - `cargo test --locked\
+      \ -p cito-native --test native daemon::human_and_channels -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --bin cito-plugin-telegram`\n  - `cargo\
+      \ test --locked -p cito-native --test native plugins::telegram -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1`\n\
+      \  - `python3 packaging/release.py check`\n  - `python3 -m unittest discover\
+      \ -s packaging -p \"test_*.py\"` (`35/35`)\n  - `env -u NODE_OPTIONS node --test\
+      \ crates/cito-native/tests/support/site-clipboard.mjs`\n  - `node --experimental-strip-types\
+      \ --test crates/cito-native/tests/support/pi-bridge.mjs`\n\nImplementation Notes:\n\
+      - Always run `codesign --force --sign -` after `strip -S` so Mach-O signatures\
+      \ stay valid.\n- Ensure Python 3.11+ is first in `PATH` before running packaging\
+      \ and cargo tests.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"README.md\", \"\
+      Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag\
+      \ mutation or release publication; rollback via git revert of staged binaries\
+      \ commit.\n\nAdmit:\n- `v75.repair_r5_inflight_lease_separation` merged; all\
+      \ 7 Darwin arm64 binaries pass lipo/codesign/version and 0/0/0/0/0 scan on both\
+      \ strings -a and raw bytes; `git diff 196bc40d..HEAD -- src/macos/` empty; all\
+      \ scoped regression commands pass with zero warnings or failures; diff confined\
+      \ to scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign or add builder `--remap-path-prefix`\
+      \ if binary hygiene fails; if a source/test regression fails, do not edit source\
+      \ files—report the exact failure to unblock upstream remediation."
+    verification: 'for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      [ "$(lipo -archs "$b")" = "arm64" ] && codesign -v --strict "$b"; done && [
+      "$(./bin/cito-native-darwin-arm64 --version)" = "cito v0.23.0" ] && git merge-base
+      --is-ancestor v0.23.0 HEAD && [ -z "$(git diff 196bc40d..HEAD -- src/macos/)"
+      ] && cargo fmt --check && cargo clippy --workspace --all-targets --locked --
+      -D warnings && cargo test --locked -p cito-native --lib -- --test-threads=2
+      && cargo test --locked -p cito-native --test native hub -- --skip ui:: --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2 && cargo test --locked -p cito-native --bin cito-plugin-telegram
+      && cargo test --locked -p cito-native --test native plugins::telegram -- --test-threads=2
+      && cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs'
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, Python 3.11+ version, git diff 196bc40d..HEAD -- src/macos/ emptiness
+      proof, and exact pass receipts for all scoped regression commands.
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_r5_inflight_lease_separation
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-28T00:19:15.541449Z'
+    done_at: '2026-11-28T00:28:32.031637+00:00'
+    evidence: 'Merged 6d3967a477560a64a291d95bda5c3ca02c790bb3 onto main: rebuilt,
+      stripped (strip -S), and ad-hoc signed all 7 staged Darwin arm64 binaries with
+      rustc --remap-path-prefix ($HOME first, most specific last); verified arm64
+      lipo -info, strict codesign pass, and 0-0-0-0-0 (/Users/, /home/, /.cargo/registry,
+      Larva, PI_PERSONA) on both strings -a and raw bytes across all 7 binaries, `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Confirmed `git diff 196bc40d..HEAD -- src/macos/` empty (reusing 196bc40d
+      174-test ui::* receipt). Scoped regressions passed with Python 3.14.10: cargo
+      fmt/clippy clean, cito-native --lib 474 passed (4 ignored), native hub --skip
+      ui:: 37/37, daemon::human_and_channels 14/14, cito-plugin-telegram 10/10, plugins::telegram
+      6/6, distribution:: 8/8, release.py check 0.23.0, Python unittest 35/35, site-clipboard.mjs
+      1/1, pi-bridge.mjs 1/1. Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r6_upgrade_and_zero_attempt_closure
+    name: 'Round 6 Repair: Legacy Strictly-Newer Masking, Zero-Attempt Retry Visibility
+      & Upgrade Retry Non-Resurrection'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-R6-UpgradeAndZeroAttemptClosure]\
+      \ crates/cito-native/src/core/hub.rs (zero schema changes — `hub.sqlite` identical\
+      \ to `7f72ff1`, zero `+1` clock inflation, zero `next_retry_ms` lease overloading):\n\
+      \  1. **Legacy strictly-newer success masking (`channel_list`)**: In `latest_warning`\
+      \ `NOT EXISTS`, change `d.delivered_ms=w.delivered_ms AND d.rowid>w.rowid` to\
+      \ `(d.delivered_ms>w.delivered_ms OR (d.delivered_ms=w.delivered_ms AND d.rowid>w.rowid))`\
+      \ so a strictly newer legacy `delivered` row (e.g., `cfebf209` `delivered` 31\
+      \ ms after `effect_unknown`, even after `health(delivery_unverified)` clears\
+      \ `delivery_verified_ms`) still masks the older warning.\n  2. **Zero-attempt\
+      \ retry visibility (`channel_list`)**: Change `(status IN ('failed','failed_permanent','effect_unknown')\
+      \ OR (status = 'in_flight' AND attempts > 0))` to `status IN ('failed','failed_permanent','effect_unknown','in_flight')`\
+      \ (paired with `COALESCE(last_error, '') <> ''`) so a sole zero-attempt retryable\
+      \ failure such as `\"Outbound queue is full\"` (`attempts = 0`) keeps its warning\
+      \ visible during `in_flight` reservation and `progress == true` heartbeats.\n\
+      \  3. **Supported upgrade retry non-resurrection (`reserve_deliveries`)**: In\
+      \ `reserve_deliveries` `ON CONFLICT(plugin_id, principal_id, signal_id) DO UPDATE`,\
+      \ clear `last_error = NULL` when the existing row was already superseded on\
+      \ disk by either (a) `hub_human_channels` `MAX(updated_ms, COALESCE(delivery_verified_ms,\
+      \ 0)) > hub_channel_deliveries.delivered_ms` (including OIDC alias bindings),\
+      \ OR (b) a newer `hub_channel_deliveries` row for `(plugin_id, principal_id\
+      \ | alias)` (`newer.delivered_ms > old.delivered_ms OR (newer.delivered_ms =\
+      \ old.delivered_ms AND newer.rowid > old.rowid)`) that is `'delivered'` or carries\
+      \ non-empty `last_error` — otherwise preserve `hub_channel_deliveries.last_error`.\n\
+      - [V75-R6-Tests] crates/cito-native/tests/hub/cases.rs:\n  Cover all 3 findings\
+      \ with discriminating regression tests:\n  1. `cfebf209`-style predecessor DB\
+      \ with older retryable failure A + newer `effect_unknown` B (and/or prior `Save`/`Send\
+      \ Test`): re-reserving A on current engine clears A's stale `last_error` and\
+      \ keeps B visible (or hidden after `Save`/`Send Test`).\n  2. Predecessor DB\
+      \ with `effect_unknown` followed by strictly newer `delivered` (+31 ms), invalidated\
+      \ via `health(delivery_unverified: true)`: `warning` remains false for the older\
+      \ unknown outcome (while `delivery_unverified` guidance is shown without resurrecting\
+      \ `\"Response lost\"`).\n  3. Extend `retry_reservation_does_not_outrank_newer_outcome_before_completion`\
+      \ (for `signal-c` `\"Outbound queue is full\"`, `attempts = 0`): assert `detail()`\
+      \ remains `\"Outbound queue is full\"` after `reserve_deliveries` AND after\
+      \ `progress: true` until `Save` clears it.\n\nImplementation Notes:\n- Preserve\
+      \ exact `status = 'effect_unknown'` per-signal replay fence semantics, Single-Active-Warning\
+      \ Invariant, and zero-schema parity with `7f72ff1`.\n- Do not modify `src/macos/**`,\
+      \ `plugins/**`, `README.md`, or staged binaries under `bin/` / `plugins/*/bin/`.\n\
+      \nBoundary:\n- scope.allowed_paths: [\"crates/cito-native/src/core/hub.rs\"\
+      , \"crates/cito-native/tests/hub/cases.rs\"]\n- scope.blocked_paths: [\"src/macos/**\"\
+      , \"plugins/**\", \"README.md\", \"bin/**\", \"Cargo.toml\", \"Cargo.lock\"\
+      , \"plan.yaml\"]\n- Owner: software-engineer; product version stays 0.23.0;\
+      \ tag v0.23.0 untouched; rollback via git revert.\n\nAdmit:\n- All 3 Round 6\
+      \ fixes and discriminating tests pass under zero-schema parity with `7f72ff1`\
+      \ (zero `+1` drift, zero `next_retry_ms` overloading), `fmt`/`clippy`/`core::hub::`/`daemon::human_and_channels`/`native\
+      \ -- hub --skip ui::` pass with zero warnings, and diff is confined to `scope.allowed_paths`.\n\
+      \nRecovery:\n- Fix failing assertions inside `scope.allowed_paths`; if a contract\
+      \ contradiction arises, pause and report with a minimal counterexample without\
+      \ touching blocked paths."
+    verification: 'cargo fmt --check && cargo clippy --workspace --all-targets --locked
+      -- -D warnings && cargo test --locked -p cito-native --lib core::hub:: -- --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2 && cargo test --locked -p cito-native --test native -- hub
+      --skip ui:: --test-threads=2'
+    evidence_template: Commit SHA, touched files, proof of zero-schema parity with
+      7f72ff1 (no +1 inflation, no next_retry_ms lease overloading), exact fmt/clippy/test
+      commands with pass counts, and per-item proof for legacy strictly-newer success
+      masking, zero-attempt retry visibility, reserve_deliveries upgrade retry non-resurrection,
+      and all 3 cases.rs tests.
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.repair_r5_stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-28T00:35:02.938871Z'
+    done_at: '2026-11-28T00:45:42.116136+00:00'
+    evidence: 'Merged ecf1807d3e138e23b93fb57f0a652ee4703a9400 onto main (+95/-12
+      in crates/cito-native/src/core/hub.rs and crates/cito-native/tests/hub/cases.rs):
+      (1) updated channel_list latest_warning NOT EXISTS to check (d.delivered_ms>w.delivered_ms
+      OR (d.delivered_ms=w.delivered_ms AND d.rowid>w.rowid)) so strictly newer legacy
+      successes mask older warnings after verification invalidation; (2) included
+      zero-attempt in_flight retries with non-empty last_error in channel_list (status
+      IN (''failed'',''failed_permanent'',''effect_unknown'',''in_flight'') AND COALESCE(last_error,'''')<>'''');
+      (3) updated reserve_deliveries ON CONFLICT DO UPDATE to retire stale last_error=NULL
+      when superseded by hub_human_channels watermarks or newer hub_channel_deliveries
+      outcomes (including OIDC alias bindings). Confirmed zero-schema parity with
+      7f72ff1 (no +1 inflation, no next_retry_ms overloading). Extended cases.rs with
+      erin-unknown/erin-success(+31ms), alice-retry/frank-retry+frank-unknown, and
+      signal-c zero-attempt progress tests. Verified cargo fmt --check, cargo clippy
+      --workspace --all-targets --locked -- -D warnings, core::hub:: 110 passed, daemon::human_and_channels
+      14 passed, and hub --skip ui:: 37 passed. Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r6_stage_clean_binaries
+    name: 'Round 6 Repair: Restage Clean Darwin arm64 Binaries & Run Scoped Regression
+      Suite'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ Round 6 repair (`v75.repair_r6_upgrade_and_zero_attempt_closure`):\n  `bin/cito-native-darwin-arm64`,\
+      \ `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,\
+      \ `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=$HOME=/build-home --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$(pwd)=/workspace -D warnings\" cargo build --release\
+      \ --locked` (`$HOME` first so more-specific `${CARGO_HOME}` and workspace overrides\
+      \ apply cleanly), re-sign (`codesign --force --sign -`) after `strip -S`, and\
+      \ verify across all 7 binaries:\n  1. `0/0/0/0/0` matches for (`/Users/`, `/home/`,\
+      \ `/.cargo/registry`, `Larva`, `PI_PERSONA`) across both `strings -a` and raw\
+      \ binary bytes;\n  2. `lipo -archs` == `arm64`;\n  3. `codesign -v --strict`\
+      \ exits `0`;\n  4. `./bin/cito-native-darwin-arm64 --version` == `cito v0.23.0`\
+      \ and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-ScopedRegressionWithReuse] Confirm `git diff\
+      \ 196bc40d..HEAD -- src/macos/` is empty (reusing verified `196bc40d` `846/846`\
+      \ UI/workspace regression receipt) and run the scoped regression suite with\
+      \ Python 3.11+ first in `PATH`:\n  - `cargo fmt --check`\n  - `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`\n  - `cargo test --locked\
+      \ -p cito-native --lib -- --test-threads=2`\n  - `cargo test --locked -p cito-native\
+      \ --test native -- hub --skip ui:: --test-threads=2`\n  - `cargo test --locked\
+      \ -p cito-native --test native daemon::human_and_channels -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --bin cito-plugin-telegram`\n  - `cargo\
+      \ test --locked -p cito-native --test native plugins::telegram -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1`\n\
+      \  - `python3 packaging/release.py check`\n  - `python3 -m unittest discover\
+      \ -s packaging -p \"test_*.py\"` (`35/35`)\n  - `env -u NODE_OPTIONS node --test\
+      \ crates/cito-native/tests/support/site-clipboard.mjs`\n  - `node --experimental-strip-types\
+      \ --test crates/cito-native/tests/support/pi-bridge.mjs`\n\nImplementation Notes:\n\
+      - Always run `codesign --force --sign -` after `strip -S` so Mach-O signatures\
+      \ stay valid.\n- Ensure Python 3.11+ is first in `PATH` before running packaging\
+      \ and cargo tests.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"README.md\", \"\
+      Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag\
+      \ mutation or release publication; rollback via git revert of staged binaries\
+      \ commit.\n\nAdmit:\n- `v75.repair_r6_upgrade_and_zero_attempt_closure` merged;\
+      \ all 7 Darwin arm64 binaries pass lipo/codesign/version and 0/0/0/0/0 scan\
+      \ on both strings -a and raw bytes; `git diff 196bc40d..HEAD -- src/macos/`\
+      \ empty; all scoped regression commands pass with zero warnings or failures;\
+      \ diff confined to scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign or\
+      \ add builder `--remap-path-prefix` if binary hygiene fails; if a source/test\
+      \ regression fails, do not edit source files—report the exact failure to unblock\
+      \ upstream remediation."
+    verification: 'for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      [ "$(lipo -archs "$b")" = "arm64" ] && codesign -v --strict "$b"; done && [
+      "$(./bin/cito-native-darwin-arm64 --version)" = "cito v0.23.0" ] && git merge-base
+      --is-ancestor v0.23.0 HEAD && [ -z "$(git diff 196bc40d..HEAD -- src/macos/)"
+      ] && cargo fmt --check && cargo clippy --workspace --all-targets --locked --
+      -D warnings && cargo test --locked -p cito-native --lib -- --test-threads=2
+      && cargo test --locked -p cito-native --test native -- hub --skip ui:: --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2 && cargo test --locked -p cito-native --bin cito-plugin-telegram
+      && cargo test --locked -p cito-native --test native plugins::telegram -- --test-threads=2
+      && cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs'
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, Python 3.11+ version, git diff 196bc40d..HEAD -- src/macos/ emptiness
+      proof, and exact pass receipts for all scoped regression commands.
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_r6_upgrade_and_zero_attempt_closure
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-28T00:45:46.741085Z'
+    done_at: '2026-11-28T00:53:26.837408+00:00'
+    evidence: 'Merged 9105fe89a6b332741bf962d2abaca91c6a134dfd onto main: rebuilt,
+      stripped (strip -S), and ad-hoc signed all 7 staged Darwin arm64 binaries with
+      rustc --remap-path-prefix ($HOME first, most specific last); verified arm64
+      lipo -info, strict codesign pass, and 0-0-0-0-0 (/Users/, /home/, /.cargo/registry,
+      Larva, PI_PERSONA) on both strings -a and raw bytes across all 7 binaries, `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Confirmed `git diff 196bc40d..HEAD -- src/macos/` empty (reusing 196bc40d
+      174-test ui::* receipt). Scoped regressions passed with Python 3.14.10: cargo
+      fmt/clippy clean, cito-native --lib 474 passed (4 ignored), native hub --skip
+      ui:: 37/37, daemon::human_and_channels 14/14, cito-plugin-telegram 10/10, plugins::telegram
+      6/6, distribution:: 8/8, release.py check 0.23.0, Python unittest 35/35, site-clipboard.mjs
+      1/1, pi-bridge.mjs 1/1. Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r7_clock_and_alias_closure
+    name: 'Round 7 Repair: Sole-Retry Clock-Rollback Preservation & Canonical OIDC
+      Watermark Precedence'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-R7-ClockAndAliasClosure] crates/cito-native/src/core/hub.rs\
+      \ (zero schema changes — `hub.sqlite` identical to `7f72ff1`, zero `+1` clock\
+      \ inflation, zero `next_retry_ms` lease overloading):\n  1. **Preserve sole-retry\
+      \ warning under clock rollback**:\n     - In `reserve_deliveries` (`ON CONFLICT(plugin_id,\
+      \ principal_id, signal_id) DO UPDATE`), use `delivered_ms = MAX(hub_channel_deliveries.delivered_ms,\
+      \ excluded.delivered_ms)` (instead of shrinking `delivered_ms` below the binding\
+      \ watermark when wall clock rolled back).\n     - In `delivery_result` (`progress\
+      \ == true`), use `delivered_ms = MAX(delivered_ms, ?)` so neither retry reservation\
+      \ nor progress heartbeats push an unretired sole warning below `warning_since`\
+      \ (`updated_ms.max(delivery_verified_ms)`).\n  2. **Split OIDC binding watermark\
+      \ precedence**:\n     - In `reserve_deliveries`'s `ON CONFLICT` stale-error\
+      \ retirement check AND in `next_outcome_ms`, resolve the active binding watermark\
+      \ via the canonical-precedence binding (`ORDER BY ch.principal_id DESC LIMIT\
+      \ 1`, matching `channel_binding` and `channel_list`) instead of `MAX(...)` across\
+      \ all `principal_id IN (?8, ?9)` rows — so a disabled legacy alias's higher\
+      \ timestamp never erases an active canonical binding's sole retry warning or\
+      \ inflates canonical `next_outcome_ms`.\n- [V75-R7-Tests] crates/cito-native/tests/hub/cases.rs:\n\
+      \  1. Test sole retry warning (including zero-attempt `\"Outbound queue is full\"\
+      `) under **clock rollback** (`updated_ms = now_ms() + 60_000`, warning settled\
+      \ at `updated_ms`): across `reserve_deliveries` and `progress: true`, `delivered_ms`\
+      \ stays `>= updated_ms` and `human_channels_list` keeps the warning visible\
+      \ until cleared or settled.\n  2. Test **split OIDC binding**: canonical `oidc:...`\
+      \ binding (`enabled=1`, lower `updated_ms`) + disabled legacy alias (`enabled=0`,\
+      \ higher `updated_ms` above a sole retry warning on the canonical binding):\
+      \ across `reserve_deliveries` (and `progress: true`), the sole retry warning\
+      \ on the canonical binding is NOT erased and remains visible in `human_channels_list`.\n\
+      \nImplementation Notes:\n- Preserve exact `status = 'effect_unknown'` per-signal\
+      \ replay fence semantics, Single-Active-Warning Invariant, and zero-schema parity\
+      \ with `7f72ff1`.\n- Do not modify `src/macos/**`, `plugins/**`, `README.md`,\
+      \ or staged binaries under `bin/` / `plugins/*/bin/`.\n\nBoundary:\n- scope.allowed_paths:\
+      \ [\"crates/cito-native/src/core/hub.rs\", \"crates/cito-native/tests/hub/cases.rs\"\
+      ]\n- scope.blocked_paths: [\"src/macos/**\", \"plugins/**\", \"README.md\",\
+      \ \"bin/**\", \"Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: software-engineer;\
+      \ product version stays 0.23.0; tag v0.23.0 untouched; rollback via git revert.\n\
+      \nAdmit:\n- Both Round 7 sole-retry boundaries and discriminating tests pass\
+      \ under zero-schema parity with `7f72ff1` (zero `+1` drift, zero `next_retry_ms`\
+      \ overloading), `fmt`/`clippy`/`core::hub::`/`daemon::human_and_channels`/`native\
+      \ -- hub --skip ui::` pass with zero warnings, and diff is confined to `scope.allowed_paths`.\n\
+      \nRecovery:\n- Fix failing assertions inside `scope.allowed_paths`; if a contract\
+      \ contradiction arises, pause and report with a minimal counterexample without\
+      \ touching blocked paths."
+    verification: 'cargo fmt --check && cargo clippy --workspace --all-targets --locked
+      -- -D warnings && cargo test --locked -p cito-native --lib core::hub:: -- --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2 && cargo test --locked -p cito-native --test native -- hub
+      --skip ui:: --test-threads=2'
+    evidence_template: Commit SHA, touched files, proof of zero-schema parity with
+      7f72ff1 (no +1 inflation, no next_retry_ms lease overloading), exact fmt/clippy/test
+      commands with pass counts, and per-item proof for clock-rollback MAX(delivered_ms)
+      preservation, canonical-precedence OIDC binding watermark in reserve_deliveries
+      + next_outcome_ms, and both cases.rs tests.
+    refs:
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v75.repair_r6_stage_clean_binaries
+    agent: software-engineer
+    claimed_by: software-engineer
+    claimed_at: '2026-11-28T00:59:53.850563Z'
+    done_at: '2026-11-28T01:08:24.828245+00:00'
+    evidence: 'Merged 3dc3f1c9ea2fc476f0018565c870c7b82b017f5f onto main (hub.rs +9/-9,
+      cases.rs +158): (1) reserve_deliveries ON CONFLICT DO UPDATE and delivery_result(progress==true)
+      now preserve MAX(delivered_ms, ...) so clock rollbacks never demote a sole retry
+      warning below warning_since; (2) reserve_deliveries stale-error retirement and
+      next_outcome_ms both use canonical-precedence binding watermark (ORDER BY principal_id
+      DESC LIMIT 1 / channel_binding) so a disabled legacy alias cannot erase canonical
+      sole-retry warnings or inflate canonical outcomes. Confirmed zero-schema parity
+      with 7f72ff1 (no +1 inflation, no next_retry_ms overloading). Added sole_retry_warning_survives_clock_rollback_until_save
+      and sole_retry_warning_uses_canonical_oidc_binding_watermark in cases.rs. Verified
+      cargo fmt --check, cargo clippy --workspace --all-targets --locked -- -D warnings,
+      core::hub:: 112 passed, daemon::human_and_channels 14 passed, and hub --skip
+      ui:: 37 passed. Worktree cleaned; 321Gi free.'
+  - id: v75.repair_r7_stage_clean_binaries
+    name: 'Round 7 Repair: Restage Clean Darwin arm64 Binaries & Run Scoped Regression
+      Suite'
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n[REQUIRES_SKILL:\
+      \ contract-and-simplicity]\n\nDeliver:\n- [V75-StageBinaries] Rebuild and stage\
+      \ all 7 path-clean, debuginfo-stripped (`strip -S` on the 6 Rust binaries; `build.rs`\
+      \ runs `strip -x` on `bin/cito-ui-darwin-arm64`), ad-hoc signed Darwin `arm64`\
+      \ release binaries at product version `0.23.0` (tag `v0.23.0` unchanged) incorporating\
+      \ Round 7 repair (`v75.repair_r7_clock_and_alias_closure`):\n  `bin/cito-native-darwin-arm64`,\
+      \ `bin/cito-ui-darwin-arm64`, `plugins/claude/bin/cito-claude-hook`, `plugins/claude/bin/cito-plugin-claude`,\
+      \ `plugins/codex/bin/cito-plugin-codex`, `plugins/pi/bin/cito-plugin-pi`, `plugins/telegram/bin/cito-plugin-telegram`.\n\
+      \  Build with `RUSTFLAGS=\"--remap-path-prefix=$HOME=/build-home --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\
+      \ --remap-path-prefix=$(pwd)=/workspace -D warnings\" cargo build --release\
+      \ --locked` (`$HOME` first so more-specific `${CARGO_HOME}` and workspace overrides\
+      \ apply cleanly), re-sign (`codesign --force --sign -`) after `strip -S`, and\
+      \ verify across all 7 binaries:\n  1. `0/0/0/0/0` matches for (`/Users/`, `/home/`,\
+      \ `/.cargo/registry`, `Larva`, `PI_PERSONA`) across both `strings -a` and raw\
+      \ binary bytes;\n  2. `lipo -archs` == `arm64`;\n  3. `codesign -v --strict`\
+      \ exits `0`;\n  4. `./bin/cito-native-darwin-arm64 --version` == `cito v0.23.0`\
+      \ and tag `v0.23.0` remains unchanged (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,\
+      \ ancestor of `HEAD`).\n- [V75-ScopedRegressionWithReuse] Confirm `git diff\
+      \ 196bc40d..HEAD -- src/macos/` is empty (reusing verified `196bc40d` `846/846`\
+      \ UI/workspace regression receipt) and run the scoped regression suite with\
+      \ Python 3.11+ first in `PATH`:\n  - `cargo fmt --check`\n  - `cargo clippy\
+      \ --workspace --all-targets --locked -- -D warnings`\n  - `cargo test --locked\
+      \ -p cito-native --lib -- --test-threads=2`\n  - `cargo test --locked -p cito-native\
+      \ --test native -- hub --skip ui:: --test-threads=2`\n  - `cargo test --locked\
+      \ -p cito-native --test native daemon::human_and_channels -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --bin cito-plugin-telegram`\n  - `cargo\
+      \ test --locked -p cito-native --test native plugins::telegram -- --test-threads=2`\n\
+      \  - `cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1`\n\
+      \  - `python3 packaging/release.py check`\n  - `python3 -m unittest discover\
+      \ -s packaging -p \"test_*.py\"` (`35/35`)\n  - `env -u NODE_OPTIONS node --test\
+      \ crates/cito-native/tests/support/site-clipboard.mjs`\n  - `node --experimental-strip-types\
+      \ --test crates/cito-native/tests/support/pi-bridge.mjs`\n\nImplementation Notes:\n\
+      - Always run `codesign --force --sign -` after `strip -S` so Mach-O signatures\
+      \ stay valid.\n- Ensure Python 3.11+ is first in `PATH` before running packaging\
+      \ and cargo tests.\n\nBoundary:\n- scope.allowed_paths: [\"bin/**\", \"plugins/*/bin/**\"\
+      ]\n- scope.blocked_paths: [\"crates/**\", \"src/macos/**\", \"README.md\", \"\
+      Cargo.toml\", \"Cargo.lock\", \"plan.yaml\"]\n- Owner: devops-engineer; no tag\
+      \ mutation or release publication; rollback via git revert of staged binaries\
+      \ commit.\n\nAdmit:\n- `v75.repair_r7_clock_and_alias_closure` merged; all 7\
+      \ Darwin arm64 binaries pass lipo/codesign/version and 0/0/0/0/0 scan on both\
+      \ strings -a and raw bytes; `git diff 196bc40d..HEAD -- src/macos/` empty; all\
+      \ scoped regression commands pass with zero warnings or failures; diff confined\
+      \ to scope.allowed_paths.\n\nRecovery:\n- Re-strip/re-sign or add builder `--remap-path-prefix`\
+      \ if binary hygiene fails; if a source/test regression fails, do not edit source\
+      \ files—report the exact failure to unblock upstream remediation."
+    verification: 'for b in bin/cito-native-darwin-arm64 bin/cito-ui-darwin-arm64
+      plugins/claude/bin/cito-claude-hook plugins/claude/bin/cito-plugin-claude plugins/codex/bin/cito-plugin-codex
+      plugins/pi/bin/cito-plugin-pi plugins/telegram/bin/cito-plugin-telegram; do
+      [ "$(lipo -archs "$b")" = "arm64" ] && codesign -v --strict "$b"; done && [
+      "$(./bin/cito-native-darwin-arm64 --version)" = "cito v0.23.0" ] && git merge-base
+      --is-ancestor v0.23.0 HEAD && [ -z "$(git diff 196bc40d..HEAD -- src/macos/)"
+      ] && cargo fmt --check && cargo clippy --workspace --all-targets --locked --
+      -D warnings && cargo test --locked -p cito-native --lib -- --test-threads=2
+      && cargo test --locked -p cito-native --test native -- hub --skip ui:: --test-threads=2
+      && cargo test --locked -p cito-native --test native daemon::human_and_channels
+      -- --test-threads=2 && cargo test --locked -p cito-native --bin cito-plugin-telegram
+      && cargo test --locked -p cito-native --test native plugins::telegram -- --test-threads=2
+      && cargo test --locked -p cito-native --test native distribution:: -- --test-threads=1
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+      -p "test_*.py" && env -u NODE_OPTIONS node --test crates/cito-native/tests/support/site-clipboard.mjs
+      && node --experimental-strip-types --test crates/cito-native/tests/support/pi-bridge.mjs'
+    evidence_template: Commit SHA, all 7 binary lipo/codesign/0-0-0-0-0 (strings -a
+      + raw bytes) table, ./bin/cito-native-darwin-arm64 --version, git tag v0.23.0
+      check, Python 3.11+ version, git diff 196bc40d..HEAD -- src/macos/ emptiness
+      proof, and exact pass receipts for all scoped regression commands.
+    refs:
+    - crates/cito-native/build.rs
+    - bin/cito-linker
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/support/pi-bridge.mjs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v75.repair_r7_clock_and_alias_closure
+    agent: devops-engineer
+    claimed_by: devops-engineer
+    claimed_at: '2026-11-28T01:08:31.675286Z'
+    done_at: '2026-11-28T01:16:27.258390+00:00'
+    evidence: 'Merged 673cb6327773a20a7c0d7b13955568ccc2c0930f onto main: rebuilt,
+      stripped (strip -S), and ad-hoc signed all 7 staged Darwin arm64 binaries with
+      rustc --remap-path-prefix ($HOME first, most specific last); verified arm64
+      lipo -info, strict codesign pass, and 0-0-0-0-0 (/Users/, /home/, /.cargo/registry,
+      Larva, PI_PERSONA) on both strings -a and raw bytes across all 7 binaries, `./bin/cito-native-darwin-arm64
+      --version` == `cito v0.23.0`, tag `v0.23.0` (`61ce9b98fae70b5624a60b1710d90acf7b46ba15`,
+      peeled `d4da4dff3655685c219b6aec4d4a471edf6adb88`) untouched and ancestor of
+      HEAD. Confirmed `git diff 196bc40d..HEAD -- src/macos/` empty (reusing 196bc40d
+      174-test ui::* receipt). Scoped regressions passed with Python 3.14.10: cargo
+      fmt/clippy clean, cito-native --lib 476 passed (4 ignored), native hub --skip
+      ui:: 37/37, daemon::human_and_channels 14/14, cito-plugin-telegram 10/10, plugins::telegram
+      6/6, distribution:: 8/8, release.py check 0.23.0, Python unittest 35/35, site-clipboard.mjs
+      1/1, pi-bridge.mjs 1/1. Worktree cleaned; 321Gi free.'

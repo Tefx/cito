@@ -1032,6 +1032,83 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
 }
 
 #[test]
+fn delivery_uncertainty_wraps_at_the_default_channel_width() {
+    let _lock = serial();
+    let detail = "Delivery outcome unknown; automatic replay stopped to avoid duplicates. Telegram sendMessage request failed";
+    let id = "settings_channel_detail:channel";
+    for (style, raw_style) in [("overlay", 1), ("legacy", 0)] {
+        let (f, p) = ui_fixture();
+        let mut cfg = settings();
+        send_companion(&f, p, state_with_settings(cfg.clone()));
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:channels");
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let tab = "settings_channels_tab";
+        let viewport = inspect(&f, p).settings(tab);
+        assert_eq!(viewport["scroller_style"], raw_style);
+        assert!(
+            viewport["document_height"].as_f64().unwrap()
+                <= viewport["content_height"].as_f64().unwrap() + 0.75
+        );
+
+        cfg["channels"][0]["warning"] = json!(true);
+        cfg["channels"][0]["detail"] = json!(detail);
+        send_companion(&f, p, json!({"op":"settings","settings":cfg}));
+        let s = inspect(&f, p);
+        assert_eq!(s.settings(tab)["scroller_style"], raw_style);
+        let label = s.settings(id);
+        assert_eq!(label["text"], detail);
+        assert_eq!(label["tooltip"], detail);
+        assert_eq!(label["maximum_lines"], 0);
+        assert!(
+            label["height"].as_f64().unwrap() >= 26.0,
+            "{style}: {label}"
+        );
+        assert_eq!(s["truncated_labels"], json!([]));
+
+        // A growing status while editing keeps the card geometry and exposes
+        // the complete diagnostic in its tooltip until the editor can reflow.
+        let field = "channel_field:channel:account";
+        f.send(p, json!({"op":"test_focus_field","id":field}));
+        let before = inspect(&f, p);
+        assert_eq!(before["field_editors"][0]["id"], field);
+        let longer = format!("{detail}. {detail}. {detail}.");
+        cfg["channels"][0]["detail"] = json!(longer);
+        send_companion(&f, p, json!({"op":"settings","settings":cfg}));
+        let mounted = inspect(&f, p);
+        let preview = mounted.settings(id);
+        assert_eq!(preview["instance"], label["instance"]);
+        assert_eq!(preview["maximum_lines"], 1);
+        assert_eq!(preview["truncates_tail"], true);
+        assert_eq!(preview["tooltip"], longer);
+        assert_eq!(
+            mounted["field_editors"][0]["instance"],
+            before["field_editors"][0]["instance"]
+        );
+        f.send(p, json!({"op":"test_end_editing"}));
+        let label = inspect(&f, p).settings(id);
+        assert_eq!(label["maximum_lines"], 0);
+
+        // Retile the mounted label without rebuilding its height. A tooltip
+        // alone must not exempt an unbounded label that now needs another line.
+        f.send(p, json!({"op":"test_resize_settings_scroll","width":400}));
+        let narrow = inspect_unchecked(&f, p, None);
+        let resized = narrow.settings(id);
+        assert_eq!(resized["instance"], label["instance"]);
+        assert_eq!(resized["height"], label["height"]);
+        assert!(resized["width"].as_f64().unwrap() < label["width"].as_f64().unwrap());
+        assert!(
+            narrow["truncated_labels"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(id)),
+            "{style}: {}",
+            narrow["truncated_labels"]
+        );
+    }
+}
+
+#[test]
 fn overlapping_channel_receipts_acknowledge_only_the_matching_scope_and_draft() {
     let _lock = serial();
     let (f, p) = ui_fixture();

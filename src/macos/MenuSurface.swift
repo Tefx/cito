@@ -24,7 +24,7 @@ extension Companion: NSMenuDelegate {
             cardMenu.removeItem(item)
         }
         guard let message = menuBannerError else { return }
-        let labelHeight = max(30, measureWrappedHeight(message, width: 320, font: .systemFont(ofSize: 10)) + 2)
+        let labelHeight = max(30, measureWrappedHeight(message, width: 320, font: .systemFont(ofSize: 10)))
         let row = NSView(frame:NSRect(x:0,y:0,width:380,height:labelHeight+6))
         row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
         row.appearance = testAppearance
@@ -301,7 +301,7 @@ extension Companion: NSMenuDelegate {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
-                let height = measureWrappedHeight(statusText, width: width, font: detail.font ?? .systemFont(ofSize: 11)) + 4
+                let height = measureWrappedHeight(statusText, width: width, font: detail.font ?? .systemFont(ofSize: 11))
                 detail.frame = NSRect(x: 12, y: 32, width: width, height: height)
                 drawer.frame.size.height = height + 40
                 layoutBar(in: drawer, y: 5, height: 22, spacing: 4, trailing: drawerControls)
@@ -612,7 +612,7 @@ extension Companion: NSMenuDelegate {
                 let text = item.status == "scanning" ? "\(visual.name) · Scanning sessions…" : "\(visual.name) · " + (item.error ?? "Session discovery failed. Try refreshing.")
                 let label = textLabel(text,NSRect(x:46,y:4,width:322,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
                 label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = text
-                label.frame.size.height = max(26, measureWrappedHeight(text, width: 322, font: label.font!) + 4)
+                label.frame.size.height = max(26, measureWrappedHeight(text, width: label.bounds.width, font: label.font!))
                 let row = NSView(frame:NSRect(x:0,y:0,width:CitoMetrics.menuWidth,height:label.frame.height + 8))
                 row.addSubview(label); _ = host(row,id:"discovery:\(item.harness)")
             }
@@ -663,7 +663,7 @@ extension Companion: NSMenuDelegate {
                 return candidate.reload_hint ?? "Run /reload in \(harnessName) to enable 1-click listen"
             }
             func reloadHintHeight(_ hint: String?, textWidth: CGFloat) -> CGFloat {
-                hint.map { max(14, measureWrappedHeight($0, width: textWidth, font: reloadFont) + 2) } ?? 0
+                hint.map { max(14, measureWrappedHeight($0, width: textWidth, font: reloadFont)) } ?? 0
             }
             // Measure the inline stack first. Only an overflowing stack reserves room for a scroller.
             var inlineHeight = CGFloat(groups.count) * groupHeight
@@ -677,6 +677,7 @@ extension Companion: NSMenuDelegate {
             let candidateWidth = scroll?.contentSize.width ?? CitoMetrics.menuWidth
             let actionRight = candidateWidth - CitoMetrics.menuInset
             let textWidth = candidateWidth - textInset
+            let wrapWidth = textWidth - (scroll.map(settingsScrollerAllowance) ?? 0)
             var availableRows: [(id: String, view: NSView)] = []
             for (harness, items, groupKey, isCollapsed, visual) in groups {
                 let openCount = items.filter { candidateIsOpen($0) }.count
@@ -714,7 +715,7 @@ extension Companion: NSMenuDelegate {
                 if !isCollapsed {
                     for c in items {
                         let hintText = candidateHint(c, harnessName: visual.name)
-                        let hintHeight = reloadHintHeight(hintText, textWidth: textWidth)
+                        let hintHeight = reloadHintHeight(hintText, textWidth: wrapWidth)
                         let rowHeight = candidateBaseHeight + hintHeight
                         let row = NSView(frame: NSRect(x: 0, y: 0, width: candidateWidth, height: rowHeight))
                         let shortCwd = compactHomePath(c.cwd)

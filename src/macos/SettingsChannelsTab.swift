@@ -124,12 +124,16 @@ final class ChannelsSettingsView: NSView, NSTextFieldDelegate {
             let existing: NSTextField? = companion.findView(in: card, id: labelID)
             guard let detail, !detail.isEmpty else { existing?.removeFromSuperview(); continue }
             let label = existing ?? textLabel(detail, NSRect(x: 44, y: card.bounds.height - 46, width: card.bounds.width - 58, height: 14), size: 10.5)
+            if existing == nil || (label.stringValue != detail &&
+                measureWrappedHeight(detail, width: label.bounds.width, font: .systemFont(ofSize: 10.5)) > label.bounds.height) {
+                label.maximumNumberOfLines = 1
+                label.lineBreakMode = .byTruncatingTail
+            }
             label.stringValue = detail
             label.toolTip = detail
             label.textColor = error != nil || result?.ok == false ? CitoPalette.dangerText : (current.warning == true ? CitoPalette.warningText : CitoPalette.secondaryText)
             if existing == nil {
                 label.identifier = NSUserInterfaceItemIdentifier(labelID)
-                label.lineBreakMode = .byTruncatingTail
                 label.autoresizingMask = [.width]
                 card.addSubview(label)
             }
@@ -498,7 +502,7 @@ extension Companion {
         inboxActions.append(inboxToggle)
         layoutBar(in:inboxBar,y:13,height:22,trailing:inboxActions)
         let textWidth = max(0,(inboxActions.map { $0.frame.minX }.min() ?? cardWidth - 12) - 10 - 12)
-        let summaryHeight = max(12, measureWrappedHeight(inboxSummary, width: max(1, textWidth - allowance), font: .systemFont(ofSize: 10)) + 2)
+        let summaryHeight = max(12, measureWrappedHeight(inboxSummary, width: textWidth - allowance, font: .systemFont(ofSize: 10)))
         let titleHeight: CGFloat = summaryHeight > 14 ? 12 : 14
         let stackGap: CGFloat = summaryHeight > 14 ? 0 : 1
         let inboxBarHeight = max(48, 20 + titleHeight + stackGap + summaryHeight)
@@ -548,11 +552,13 @@ extension Companion {
             cursorY -= height + 12
         }
         if !resolvedChannels.isEmpty && visibleChannels.isEmpty && inbox.error == nil {
-            let notice = textLabel("External channels are managed by your '\(renderedHub)' Hub administrator. None are enabled yet.", NSRect(x:16,y:cursorY-42,width:cardWidth,height:36),size:11,color:CitoPalette.secondaryText)
+            let message = "External channels are managed by your '\(renderedHub)' Hub administrator. None are enabled yet."
+            let height = max(36, measureWrappedHeight(message, width: cardWidth - allowance, font: .systemFont(ofSize: 11)))
+            let notice = textLabel(message, NSRect(x:16,y:cursorY-height-6,width:cardWidth,height:height),size:11,color:CitoPalette.secondaryText)
             notice.autoresizingMask = [.width]
             notice.identifier = NSUserInterfaceItemIdentifier("channels_managed_notice")
             notice.maximumNumberOfLines = 0; notice.lineBreakMode = .byWordWrapping
-            channelsView.addSubview(notice); cursorY -= 48
+            channelsView.addSubview(notice); cursorY -= height + 12
         }
         var chCursorY: CGFloat = cursorY
         for ch in visibleChannels {
@@ -561,7 +567,7 @@ extension Companion {
             let channelUi = inbox.editors[channelKey] ?? ChannelUiState()
             let instruction = channelUi.pairingInstruction
             let instructionFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-            let instructionHeight = instruction.isEmpty ? 0 : max(16, measureWrappedHeight(instruction, width: stratumTextWidth - allowance, font: instructionFont) + 4)
+            let instructionHeight = instruction.isEmpty ? 0 : max(16, measureWrappedHeight(instruction, width: stratumTextWidth - allowance, font: instructionFont))
             let guide = (ch.setup_guide ?? []).joined(separator:"\n")
             let hubFields = visibleFields.filter { $0.scope == "hub" && ch.can_configure_hub == true }
             let disclosure = ch.can_edit_personal == true && ch.pairing_supported && ch.can_pair == true && ch.pairing_manual_disclosure == true
@@ -580,7 +586,7 @@ extension Companion {
             let showInboundToggle = ch.supports_outbound_only == true && ch.can_configure_hub == true && gatewayActive && !hubGatewayExpanded
             let personalCollapsed = isPersonalChannelCollapsed(ch, ui: channelUi)
             let reusableBinding = !personalCollapsed && gatewayActive && instruction.isEmpty && !manualExpanded ? ch.reusable_binding : nil
-            let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13, measureWrappedHeight(guide, width: stratumTextWidth - allowance, font: .systemFont(ofSize: 10)) + 2) : 0
+            let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13, measureWrappedHeight(guide, width: stratumTextWidth - allowance, font: .systemFont(ofSize: 10))) : 0
             let currentUser = inbox.user
             let gatewayRole = !hubFields.isEmpty ? (guideH > 0 ? "" : "Configured once by the Hub owner. Shared by everyone on this Hub.") :
                 (hasHubScopeFields ? (ch.hub_provided ? "Provided by '\(renderedHub)' Hub administrator — no gateway setup needed on your Mac." : "Not yet configured by the '\(renderedHub)' Hub administrator.") : "No shared gateway credentials required for this channel.")
@@ -600,7 +606,7 @@ extension Companion {
             let titleFont = NSFont.systemFont(ofSize:9.5,weight:.bold)
             let titleSpace = titleWidth - allowance - (gatewayStatusVisible ? gatewayStatus.frame.width + CitoMetrics.gap : 0)
             let separateTitle = showHubStratum && !serviceSuffix.isEmpty && measureTextWidth(hubTitleText, font:titleFont) > titleSpace
-            let titleHeight = separateTitle ? max(14, measureWrappedHeight(hubTitleText, width:titleWidth - allowance, font:titleFont) + 2) : 14
+            let titleHeight = separateTitle ? max(14, measureWrappedHeight(hubTitleText, width: titleWidth - allowance, font: titleFont, lineBreakMode: .byCharWrapping)) : 14
             let extraTitleH = separateTitle ? titleHeight + CitoMetrics.gap : 0
             let twoRowGatewayTop = !hubGatewayExpanded && (showInboundToggle || (!serviceSuffix.isEmpty && (!hubFields.isEmpty || gatewayHasClear)))
             let hubStratumH: CGFloat = !showHubStratum ? 0 : (hubGatewayExpanded ? 36 + gatewayRoleH + guideH + hubFieldsH + (!hubFields.isEmpty || gatewayHasClear ? 32 : 0) : (twoRowGatewayTop ? 64 : 36))
@@ -710,7 +716,10 @@ extension Companion {
             userTitle.autoresizingMask = [.width]
             userTitle.identifier=NSUserInterfaceItemIdentifier("stratum_user_title:\(ch.id)")
             if !personalCollapsed { userStratum.addSubview(userTitle) }
-            for (container, fields, top) in [(hubStratum,hubGatewayExpanded ? hubFields : [],hubStratumH-34-gatewayRoleH-guideH),(userStratum,gatewayActive && !personalCollapsed ? formFields : [],userStratumH-40)] {
+            // Keep manual fields near Save even when the pairing instructions exceed the viewport.
+            let manualBelowInstruction = disclosure && manualExpanded && !instruction.isEmpty && !formFields.isEmpty
+            let personalFieldsTop = userStratumH - 40 - (manualBelowInstruction ? instructionHeight + 4 : 0)
+            for (container, fields, top) in [(hubStratum,hubGatewayExpanded ? hubFields : [],hubStratumH-34-gatewayRoleH-guideH),(userStratum,gatewayActive && !personalCollapsed ? formFields : [],personalFieldsTop)] {
                 let labelW = max(56, min(110, (fields.map { ceil(measureTextWidth($0.label, font: .systemFont(ofSize: 11, weight: .medium))) }.max() ?? 56) + 6))
                 let inputX = 12 + labelW + 10
                 let inputW = container.bounds.width - 12 - inputX
@@ -741,7 +750,8 @@ extension Companion {
             if showHubStratum { chCard.addSubview(hubStratum) }
             if showUserStratum { chCard.addSubview(userStratum) }
             if !instruction.isEmpty {
-                let instrLabel = textLabel(instruction, NSRect(x: 12, y: userStratumH - 40 - CGFloat(formFields.count) * 26 - instructionHeight, width: stratumTextWidth, height: instructionHeight), size: 10.5, weight: .semibold, color: CitoPalette.infoText)
+                let instructionTop = userStratumH - 40 - (manualBelowInstruction ? 0 : CGFloat(formFields.count) * 26)
+                let instrLabel = textLabel(instruction, NSRect(x: 12, y: instructionTop - instructionHeight, width: stratumTextWidth, height: instructionHeight), size: 10.5, weight: .semibold, color: CitoPalette.infoText)
                 instrLabel.autoresizingMask = [.width]
                 instrLabel.maximumNumberOfLines = 0
                 instrLabel.lineBreakMode = .byWordWrapping

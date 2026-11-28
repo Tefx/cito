@@ -712,7 +712,8 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     let mut frame = state();
     let activity = json!([{"hub":"personal","signal_id":"personal:sig_unread","listener_id":"c_human","from_user":"bob","from_host_name":"laptop","from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Approve?","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true},{"hub":"personal","signal_id":"personal:sig_read","listener_id":"c_other","from_user":"alice","from_host_name":"desktop","from_harness":"fixture","from_title":"Other","from_scoped_id":"personal:two","target_harness":"fixture","target_title":"Other","target_scoped_id":"personal:other","message":"Done","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
     let mut activity = activity;
-    activity[1]["message"] = json!("First line\nSecond line\nThird line");
+    activity[1]["message"] =
+        json!("First line\nSecond line\nThird line\nFourth line\nFifth line\nSixth line");
     frame["activity"] = activity.clone();
     frame["unread_count"] = json!(1);
     f.send(p, frame.clone());
@@ -812,6 +813,21 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     );
     assert_eq!(s.directory(long_message)["maximum_lines"], 4);
     assert_eq!(s.directory(long_message)["text"], activity[1]["message"]);
+    for (style, raw_style) in [("overlay", 1), ("legacy", 0)] {
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let tiled = inspect(&f, p);
+        let scroll = tiled.directory("directory_scroll");
+        assert_eq!(scroll["scroller_style"], raw_style);
+        let preview = tiled.directory(long_message);
+        assert_eq!(
+            preview["width"].as_f64().unwrap(),
+            scroll["content_width"].as_f64().unwrap() - 68.0
+        );
+        assert_eq!(tiled.directory(long_row)["row_height"], 108);
+        assert_eq!(preview["maximum_lines"], 4);
+        assert_eq!(preview["truncates_last_visible_line"], true);
+        assert_eq!(preview["tooltip"], activity[1]["message"]);
+    }
     // Directory has not replied yet. Updating the seed peers must not change Activity selection.
     frame["listeners"] = json!([]);
     f.send(p, frame);

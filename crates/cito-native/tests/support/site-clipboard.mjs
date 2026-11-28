@@ -98,10 +98,20 @@ function environmentRows(text, section, label, html = false) {
   return entries;
 }
 for (const section of ['Hub Server', 'Client & Daemon', 'Agent & Channel Plugins']) {
-  const expected = environmentRows(readme, section, 'README.md');
+  const expected = environmentRows(deployment, section, 'deploy/hub/README.md');
   if (section === 'Hub Server') assert.ok(expected.has('CITO_OIDC_REDIRECT_PORT'), 'Hub Server redirect port missing');
-  assert.deepEqual(environmentRows(deployment, section, 'deploy/hub/README.md'), expected, `Deploy reference: ${section} differs from README.md`);
-  assert.deepEqual(environmentRows(hosting, section, 'hosting.html', true), expected, `Hosting reference: ${section} differs from README.md`);
+  assert.deepEqual(environmentRows(hosting, section, 'hosting.html', true), expected, `Hosting reference: ${section} differs from deploy/hub/README.md`);
+}
+for (const ref of [
+  'site/assets/brand/cito-logo-dark.svg',
+  'site/assets/screenshots/menu-dark.png',
+  'site/assets/screenshots/directory-dark.png',
+  'deploy/hub/README.md',
+  'docs/DESIGN.md',
+  'docs/RELEASING.md'
+]) {
+  assert.ok(readme.includes(ref), `README.md missing reference: ${ref}`);
+  assert.ok(existsSync(new URL(`../${ref}`, site)), `README.md broken reference: ${ref}`);
 }
 assert.match(hosting, /Linux, use kernel 5\.3 or newer with <code>pidfd_open<\/code>/);
 assert.match(hosting, /<code>libsqlite3-dev<\/code> and <code>pkg-config<\/code> for source builds and <code>libsqlite3-0<\/code> on the runtime host/);

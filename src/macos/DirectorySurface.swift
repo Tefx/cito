@@ -54,7 +54,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         var warningHeight: CGFloat = 0
         if hasWarning {
             layoutBar(in: warning, insetLeft: 16, insetRight: 16, y: 0, height: 28, flexible: label, trailing: [retry])
-            label.frame.size.height = measureWrappedHeight(label.stringValue, width: label.frame.width, font: label.font ?? .systemFont(ofSize: 11))
+            // The warning sits outside the scroll view; use the width left by Retry.
+            label.frame.size.height = measureWrappedHeight(label.stringValue, width: label.bounds.width,
+                font: label.font ?? .systemFont(ofSize: 11), lineBreakMode: label.lineBreakMode)
             warningHeight = max(retry.isHidden ? 20 : retry.frame.height, label.frame.height) + 8
             layoutBar(in: warning, insetLeft: 16, insetRight: 16, y: 0, height: warningHeight, flexible: label, trailing: [retry])
         }

@@ -128,6 +128,7 @@ final class DirectoryPeerCellView: NSTableCellView {
             let messageHeight = expanded ? height - 42 : 18
             line2MetaLabel.maximumNumberOfLines = expanded ? 4 : 1
             line2MetaLabel.lineBreakMode = expanded ? .byWordWrapping : .byTruncatingTail
+            line2MetaLabel.cell?.truncatesLastVisibleLine = true
             line2MetaLabel.stringValue = expanded ? item.message : item.message.replacingOccurrences(of:"\\s*\\n+\\s*",with:"  ",options:.regularExpression)
             line2MetaLabel.frame = NSRect(x:52,y:height - 34 - messageHeight,width:Self.activityMessageWidth(bounds.width),height:messageHeight)
             rowDivider.frame.size.width = bounds.width
@@ -167,6 +168,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.style = .neutral; copyControl.style = .neutral
         line2MetaLabel.maximumNumberOfLines = 1
         line2MetaLabel.lineBreakMode = .byTruncatingTail
+        line2MetaLabel.cell?.truncatesLastVisibleLine = false
         inspectionId = "dir_peer:\(peer.scoped_id)"
         let visual = resolveHarnessVisual(peer.harness, harnesses: harnesses)
         configureBadge(badgeView,icon:badgeIcon,id:peer.harness,symbol:visual.symbol,title:visual.name,tint:visual.tint,inset:6)

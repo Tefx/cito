@@ -138,9 +138,13 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
     return prefix + leaf + branchSuffix
 }
 
-func measureWrappedHeight(_ text: String, width: CGFloat, font: NSFont) -> CGFloat {
-    ceil((text as NSString).boundingRect(with: NSSize(width: max(1, width - 4), height: .greatestFiniteMagnitude),
-        options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font]).height)
+func measureWrappedHeight(_ text: String, width: CGFloat, font: NSFont,
+                          lineBreakMode: NSLineBreakMode = .byWordWrapping) -> CGFloat {
+    let label = NSTextField(wrappingLabelWithString: text)
+    label.font = font
+    label.lineBreakMode = lineBreakMode
+    let bounds = NSRect(x: 0, y: 0, width: max(1, width), height: .greatestFiniteMagnitude)
+    return ceil(label.cell!.cellSize(forBounds: bounds).height)
 }
 
 func cleanHostDisplay(_ raw: String) -> String {

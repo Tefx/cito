@@ -131,10 +131,42 @@ fn agent(poll: bool) -> &'static ureq::Agent {
     (if poll { &POLL } else { &SEND }).get_or_init(|| {
         ureq::AgentBuilder::new()
             .redirects(0)
+            .max_idle_connections(if poll { 1 } else { 0 })
             .timeout_connect(Duration::from_secs(3))
             .timeout_read(Duration::from_secs(if poll { 35 } else { 25 }))
             .build()
     })
+}
+fn transport_failure(
+    method: &str,
+    kind: ureq::ErrorKind,
+    io_kind: Option<std::io::ErrorKind>,
+) -> ApiFailure {
+    use std::io::ErrorKind::{AddrNotAvailable, ConnectionRefused};
+    use ureq::ErrorKind::*;
+    // Never include the underlying error or URL: Telegram puts the token in the path.
+    let (reason, retryable, effect_unknown) = match kind {
+        Dns => ("dns lookup failed", true, false),
+        ConnectionFailed => ("connection failed", true, false),
+        InvalidUrl | UnknownScheme | InsecureRequestHttpsOnly => ("invalid URL", false, false),
+        TooManyRedirects => ("too many redirects", false, false),
+        Io if matches!(io_kind, Some(ConnectionRefused | AddrNotAvailable)) => {
+            ("connection failed", true, false)
+        }
+        // The request may have reached the server. Polling can retry, but sends cannot.
+        _ => (
+            "network I/O or timeout",
+            method == "getUpdates",
+            method == "sendMessage",
+        ),
+    };
+    ApiFailure {
+        message: format!("Telegram {method} request failed ({reason})"),
+        status: None,
+        retryable,
+        effect_unknown,
+        retry_after: None,
+    }
 }
 fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, ApiFailure> {
     api_with_timeout(
@@ -185,27 +217,10 @@ fn api_with_timeout(
             });
         }
         Err(ureq::Error::Transport(e)) => {
-            // ureq reports ConnectionFailed/Dns before writing the request. Other transport
-            // errors cannot prove that sendMessage was rejected, so never retry them blindly.
-            let before_send = matches!(
-                e.kind(),
-                ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns
-            ) || std::error::Error::source(&e)
+            let io_kind = std::error::Error::source(&e)
                 .and_then(|e| e.downcast_ref::<std::io::Error>())
-                .is_some_and(|e| {
-                    matches!(
-                        e.kind(),
-                        std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::AddrNotAvailable
-                    )
-                });
-            return Err(ApiFailure {
-                message: format!("Telegram {method} request failed"),
-                status: None,
-                retryable: before_send,
-                effect_unknown: !before_send && method == "sendMessage",
-                retry_after: None,
-            });
+                .map(std::io::Error::kind);
+            return Err(transport_failure(method, e.kind(), io_kind));
         }
     };
     let status = Some(response.status());
@@ -216,7 +231,9 @@ fn api_with_timeout(
         .read_to_end(&mut bytes);
     if read.is_err() && bytes.len() <= 1_048_576 {
         return Err(ApiFailure {
-            message: format!("Telegram {method} transport read was incomplete"),
+            message: format!(
+                "Telegram {method} transport read was incomplete (network I/O or timeout)"
+            ),
             status,
             retryable: method == "getUpdates",
             effect_unknown: method == "sendMessage",
@@ -1163,6 +1180,139 @@ pub fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_failures_distinguish_rejection_from_unknown_effect() {
+        use std::io::ErrorKind::{AddrNotAvailable, ConnectionRefused, TimedOut};
+        use ureq::ErrorKind::*;
+        for method in ["sendMessage", "getUpdates", "getMe"] {
+            for (kind, io_kind, reason, retryable, effect_unknown) in [
+                (ConnectionFailed, None, "connection failed", true, false),
+                (Dns, None, "dns lookup failed", true, false),
+                (
+                    Io,
+                    Some(ConnectionRefused),
+                    "connection failed",
+                    true,
+                    false,
+                ),
+                (Io, Some(AddrNotAvailable), "connection failed", true, false),
+                (InvalidUrl, None, "invalid URL", false, false),
+                (UnknownScheme, None, "invalid URL", false, false),
+                (InsecureRequestHttpsOnly, None, "invalid URL", false, false),
+                (TooManyRedirects, None, "too many redirects", false, false),
+                (
+                    Io,
+                    Some(TimedOut),
+                    "network I/O or timeout",
+                    method == "getUpdates",
+                    method == "sendMessage",
+                ),
+                (
+                    BadStatus,
+                    None,
+                    "network I/O or timeout",
+                    method == "getUpdates",
+                    method == "sendMessage",
+                ),
+            ] {
+                let failure = transport_failure(method, kind, io_kind);
+                assert_eq!(
+                    failure.message,
+                    format!("Telegram {method} request failed ({reason})")
+                );
+                assert_eq!(failure.retryable, retryable, "{method} {kind:?}");
+                assert_eq!(failure.effect_unknown, effect_unknown, "{method} {kind:?}");
+            }
+        }
+        let bad_config = json!({"botToken":"123:private","apiBaseUrl":"http://["});
+        let failure = api(&bad_config, "sendMessage", json!({})).unwrap_err();
+        assert_eq!(
+            failure.message,
+            "Telegram sendMessage request failed (invalid URL)"
+        );
+        assert!(!failure.effect_unknown && !failure.retryable);
+    }
+
+    #[test]
+    fn sends_close_keep_alive_connections_but_polls_reuse_them() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::os::fd::AsRawFd;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = json!({"botToken":"test-token","apiBaseUrl":format!("http://{}",listener.local_addr().unwrap())});
+        let client = std::thread::spawn(move || {
+            for (method, expected) in [
+                ("sendMessage", json!({"message_id":42})),
+                ("getUpdates", json!([])),
+            ] {
+                for _ in 0..2 {
+                    assert_eq!(
+                        api_with_timeout(&config, method, json!({}), Duration::from_secs(2))
+                            .unwrap(),
+                        expected
+                    );
+                }
+            }
+        });
+        let accept = || {
+            assert!(crate::support::poll_until(
+                &mut [libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0
+                }],
+                Some(Instant::now() + Duration::from_secs(2)),
+            )
+            .unwrap());
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            BufReader::new(stream)
+        };
+        let reply = |stream: &mut BufReader<std::net::TcpStream>, method: &str, result| {
+            let mut line = String::new();
+            assert!(stream.read_line(&mut line).unwrap() > 0);
+            assert!(line.starts_with(&format!("POST /bottest-token/{method} ")));
+            let mut length = 0;
+            loop {
+                line.clear();
+                assert!(stream.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            let body = json!({"ok":true,"result":result}).to_string();
+            write!(
+                stream.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        };
+        for _ in 0..2 {
+            let mut stream = accept();
+            reply(&mut stream, "sendMessage", json!({"message_id":42}));
+            assert_eq!(
+                stream.read(&mut [0]).unwrap(),
+                0,
+                "send must close its socket"
+            );
+        }
+        let mut stream = accept();
+        for _ in 0..2 {
+            reply(&mut stream, "getUpdates", json!([]));
+        }
+        client.join().unwrap();
+    }
+
     #[test]
     fn poll_success_requires_an_updates_array() {
         for reply in [

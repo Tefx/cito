@@ -457,7 +457,8 @@ extension Companion {
             let banner=roundedView(NSRect(x:CitoMetrics.settingsInset,y:368,width:480,height:40),radius:6,color:CitoPalette.dangerText.withAppearanceAlpha(0.10))
             banner.identifier=NSUserInterfaceItemIdentifier("settings_error_banner")
             let label=textLabel(message,NSRect(x:10,y:7,width:432,height:26),size:10,color:CitoPalette.dangerText)
-            label.maximumNumberOfLines = 2; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = label.stringValue
+            label.maximumNumberOfLines = 2; label.lineBreakMode = .byWordWrapping
+            label.cell?.truncatesLastVisibleLine = true; label.toolTip = label.stringValue
             label.identifier=NSUserInterfaceItemIdentifier("settings_error_label"); banner.addSubview(label)
             let dismiss=MenuControl("Dismiss",frame:NSRect(x:450,y:10,width:22,height:20),symbol:"xmark")
             dismiss.identifier=NSUserInterfaceItemIdentifier("dismiss_settings_error")

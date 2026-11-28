@@ -283,6 +283,80 @@ fn v45_settings_dedup_scroll_editor_and_inventory_diagnostics() {
 }
 
 #[test]
+fn settings_errors_cap_previews_without_truncating_the_full_form() {
+    let _lock = serial();
+    let message =
+        "The destination did not respond. Check the connection before trying again. ".repeat(8);
+    let message = message.trim_end();
+    for (style, raw_style) in [("overlay", 1), ("legacy", 0)] {
+        let (f, p) = ui_fixture();
+        let mut cfg = settings();
+        cfg["host_hub"]["enabled"] = json!(true);
+        send_companion(&f, p, state_with_settings(cfg.clone()));
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:hubs");
+        control(&f, p, "toggle_host_hub");
+        let toggle = latest(&f, p, "set_host_hub");
+        f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":toggle["request_id"],"error":message}));
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let banner_state = inspect(&f, p);
+        assert_eq!(
+            banner_state.settings("settings_hubs_tab")["scroller_style"],
+            raw_style
+        );
+        let banner = banner_state.settings("settings_error_label");
+        assert_eq!(banner["maximum_lines"], 2);
+        assert_eq!(banner["truncates_last_visible_line"], true);
+        assert_eq!(banner["tooltip"], message);
+        control(&f, p, "dismiss_settings_error");
+
+        control(&f, p, "open_add_hub");
+        f.send(p, json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
+        control(&f, p, "submit_add_hub");
+        let request = latest(&f, p, "setup_save_hub");
+        f.send(p, json!({"op":"test_focus_field","id":"settings_hub_url"}));
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let before = inspect(&f, p);
+        f.send(p, json!({"op":"settings","source_op":"setup_save_hub","request_id":request["request_id"],"ok":false,"error":message}));
+        let mounted = inspect(&f, p);
+        assert_eq!(
+            mounted.settings("settings_hubs_tab")["scroller_style"],
+            raw_style
+        );
+        assert_eq!(mounted["field_editors"][0]["id"], "settings_hub_url");
+        assert_eq!(
+            mounted["field_editors"][0]["instance"],
+            before["field_editors"][0]["instance"]
+        );
+        let preview = mounted.settings("add_hub_error");
+        assert_eq!(preview["height"], 26);
+        assert_eq!(preview["maximum_lines"], 2);
+        assert_eq!(preview["truncates_last_visible_line"], true);
+        assert_eq!(preview["tooltip"], message);
+
+        cfg["host_hub"]["error"] = json!(message);
+        send_companion(&f, p, json!({"op":"settings","settings":cfg}));
+        let host = inspect(&f, p).settings("host_hub_error");
+        assert_eq!(host["maximum_lines"], 1);
+        assert_eq!(host["truncates_tail"], true);
+        assert_eq!(host["tooltip"], message);
+
+        f.send(p, json!({"op":"test_end_editing"}));
+        f.send(p, json!({"op":"test_tile_scroll_views","style":style}));
+        let full_state = inspect(&f, p);
+        assert_eq!(
+            full_state.settings("settings_hubs_tab")["scroller_style"],
+            raw_style
+        );
+        let full = full_state.settings("add_hub_error");
+        assert_eq!(full["maximum_lines"], 0);
+        assert_eq!(full["truncates_last_visible_line"], false);
+        assert_eq!(full["text"], message);
+        assert!(full["height"].as_f64().unwrap() > 26.0);
+    }
+}
+
+#[test]
 fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
     let _lock = serial();
     let (f, p) = ui_fixture();
